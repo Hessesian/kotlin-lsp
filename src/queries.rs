@@ -91,6 +91,11 @@ pub const KOTLIN_DEFINITIONS: &str = r#"
   (multi_variable_declaration
     (variable_declaration
       (simple_identifier) @name))) @def
+
+; 13 — enum entry  (DETAIL, LIST, etc. inside enum class bodies)
+(enum_class_body
+  (enum_entry
+    (simple_identifier) @name) @def)
 "#;
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -203,6 +208,7 @@ pub fn def_pattern_meta(pattern_index: usize) -> (SymbolKind, Option<&'static st
         10 => (SymbolKind::VARIABLE,        None),              // var
         11 => (SymbolKind::CONSTANT,        Some("val (destructure)")),
         12 => (SymbolKind::VARIABLE,        Some("var (destructure)")),
+        13 => (SymbolKind::ENUM_MEMBER,     None),              // enum entry
         _  => (SymbolKind::NULL,            None),
     }
 }

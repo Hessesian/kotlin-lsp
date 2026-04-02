@@ -96,7 +96,7 @@ fn kind_sort_rank(kind: Option<CompletionItemKind>) -> u8 {
     match kind {
         Some(CompletionItemKind::FUNCTION) | Some(CompletionItemKind::METHOD) => 0,
         Some(CompletionItemKind::FIELD)    | Some(CompletionItemKind::VARIABLE)
-        | Some(CompletionItemKind::CONSTANT) => 1,
+        | Some(CompletionItemKind::CONSTANT) | Some(CompletionItemKind::ENUM_MEMBER) => 1,
         Some(CompletionItemKind::CLASS)    | Some(CompletionItemKind::INTERFACE)
         | Some(CompletionItemKind::ENUM)   | Some(CompletionItemKind::MODULE) => 3,
         _ => 2,
@@ -248,6 +248,7 @@ fn symbol_kind_to_completion(kind: SymbolKind) -> CompletionItemKind {
         SymbolKind::CLASS                          => CompletionItemKind::CLASS,
         SymbolKind::INTERFACE                      => CompletionItemKind::INTERFACE,
         SymbolKind::ENUM                           => CompletionItemKind::ENUM,
+        SymbolKind::ENUM_MEMBER                    => CompletionItemKind::ENUM_MEMBER,
         SymbolKind::CONSTANT                       => CompletionItemKind::CONSTANT,
         SymbolKind::VARIABLE                       => CompletionItemKind::VARIABLE,
         SymbolKind::OBJECT | SymbolKind::MODULE    => CompletionItemKind::MODULE,

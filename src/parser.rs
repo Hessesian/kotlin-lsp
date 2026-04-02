@@ -363,6 +363,12 @@ mod tests {
     #[test] fn object_decl()  { assert_eq!(sym(&parse_kotlin("object Obj"),        "Obj").unwrap().kind, SymbolKind::OBJECT); }
     #[test] fn data_class()   { assert_eq!(sym(&parse_kotlin("data class D(val x: Int)"), "D").unwrap().kind, SymbolKind::CLASS); }
     #[test] fn enum_class()   { assert_eq!(sym(&parse_kotlin("enum class Color { RED }"), "Color").unwrap().kind, SymbolKind::ENUM); }
+    #[test] fn enum_entries() {
+        let data = parse_kotlin("enum class Screen { DETAIL, LIST, SETTINGS }");
+        assert_eq!(sym(&data, "DETAIL").unwrap().kind,   SymbolKind::ENUM_MEMBER);
+        assert_eq!(sym(&data, "LIST").unwrap().kind,     SymbolKind::ENUM_MEMBER);
+        assert_eq!(sym(&data, "SETTINGS").unwrap().kind, SymbolKind::ENUM_MEMBER);
+    }
     #[test] fn typealias()    { assert_eq!(sym(&parse_kotlin("typealias Alias = String"), "Alias").unwrap().kind, SymbolKind::TYPE_PARAMETER); }
     #[test] fn top_fun()      { assert_eq!(sym(&parse_kotlin("fun foo() {}"), "foo").unwrap().kind, SymbolKind::FUNCTION); }
     #[test] fn val_prop()     { assert_eq!(sym(&parse_kotlin("val x: Int = 0"), "x").unwrap().kind, SymbolKind::CONSTANT); }
