@@ -23,7 +23,7 @@ use std::process::Command;
 use std::sync::Arc;
 
 use tower_lsp::lsp_types::{
-    CompletionItem, CompletionItemKind, Location, Position, Range, SymbolKind, Url,
+    CompletionItem, CompletionItemKind, InsertTextFormat, Location, Position, Range, SymbolKind, Url,
 };
 
 use crate::indexer::{parse_rg_line, rg_find_definition, Indexer};
@@ -125,9 +125,12 @@ fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url) -> Vec<CompletionI
             return;
         }
         if name.to_lowercase().starts_with(&prefix_lower) && seen.insert(name.to_string()) {
+            let is_fn = matches!(kind, CompletionItemKind::FUNCTION | CompletionItemKind::METHOD);
             items.push(CompletionItem {
-                label: name.to_string(),
-                kind: Some(kind),
+                label:              name.to_string(),
+                kind:               Some(kind),
+                insert_text:        if is_fn { Some(format!("{}($1)", name)) } else { None },
+                insert_text_format: if is_fn { Some(InsertTextFormat::SNIPPET) } else { None },
                 ..Default::default()
             });
         }
@@ -195,23 +198,14 @@ fn build_completion_items(idx: &Indexer, file_uri: &str) -> Vec<CompletionItem> 
     // From index if available.
     if let Some(f) = idx.files.get(file_uri) {
         for sym in &f.symbols {
-            let ck = symbol_kind_to_completion(sym.kind);
-            let vis_tag = vis_tag(sym.visibility);
-            items.push(CompletionItem {
-                label:     sym.name.clone(),
-                kind:      Some(ck),
-                sort_text: Some(format!("{vis_tag}{}{}", kind_sort_rank(Some(ck)), sym.name)),
-                ..Default::default()
-            });
+            let ck       = symbol_kind_to_completion(sym.kind);
+            let vis_tag  = vis_tag(sym.visibility);
+            let sort_txt = format!("{vis_tag}{}{}", kind_sort_rank(Some(ck)), sym.name);
+            items.push(make_completion_item(&sym.name, ck, sort_txt));
         }
         for name in &f.declared_names {
             if !items.iter().any(|i: &CompletionItem| i.label == *name) {
-                items.push(CompletionItem {
-                    label:     name.clone(),
-                    kind:      Some(CompletionItemKind::FIELD),
-                    sort_text: Some(format!("1{name}")),
-                    ..Default::default()
-                });
+                items.push(make_completion_item(name, CompletionItemKind::FIELD, format!("1{name}")));
             }
         }
         return items;
@@ -223,23 +217,14 @@ fn build_completion_items(idx: &Indexer, file_uri: &str) -> Vec<CompletionItem> 
             if let Ok(content) = std::fs::read_to_string(&path) {
                 let file_data = crate::parser::parse_kotlin(&content);
                 for sym in &file_data.symbols {
-                    let ck = symbol_kind_to_completion(sym.kind);
-                    let vis_tag = vis_tag(sym.visibility);
-                    items.push(CompletionItem {
-                        label:     sym.name.clone(),
-                        kind:      Some(ck),
-                        sort_text: Some(format!("{vis_tag}{}{}", kind_sort_rank(Some(ck)), sym.name)),
-                        ..Default::default()
-                    });
+                    let ck       = symbol_kind_to_completion(sym.kind);
+                    let vis_tag  = vis_tag(sym.visibility);
+                    let sort_txt = format!("{vis_tag}{}{}", kind_sort_rank(Some(ck)), sym.name);
+                    items.push(make_completion_item(&sym.name, ck, sort_txt));
                 }
                 for name in &file_data.declared_names {
                     if !items.iter().any(|i: &CompletionItem| i.label == *name) {
-                        items.push(CompletionItem {
-                            label:     name.clone(),
-                            kind:      Some(CompletionItemKind::FIELD),
-                            sort_text: Some(format!("1{name}")),
-                            ..Default::default()
-                        });
+                        items.push(make_completion_item(name, CompletionItemKind::FIELD, format!("1{name}")));
                     }
                 }
             }
@@ -258,6 +243,23 @@ fn symbol_kind_to_completion(kind: SymbolKind) -> CompletionItemKind {
         SymbolKind::VARIABLE                       => CompletionItemKind::VARIABLE,
         SymbolKind::OBJECT | SymbolKind::MODULE    => CompletionItemKind::MODULE,
         _                                          => CompletionItemKind::VALUE,
+    }
+}
+
+/// Build a single `CompletionItem` for a named symbol.
+///
+/// Functions and methods get a snippet `name($1)` so the cursor lands inside
+/// the parentheses after accepting the completion.  All other kinds are plain
+/// text insertions.
+fn make_completion_item(name: &str, ck: CompletionItemKind, sort_text: String) -> CompletionItem {
+    let is_fn = matches!(ck, CompletionItemKind::FUNCTION | CompletionItemKind::METHOD);
+    CompletionItem {
+        label:              name.to_string(),
+        kind:               Some(ck),
+        sort_text:          Some(sort_text),
+        insert_text:        if is_fn { Some(format!("{}($1)", name)) } else { None },
+        insert_text_format: if is_fn { Some(InsertTextFormat::SNIPPET) } else { None },
+        ..Default::default()
     }
 }
 
