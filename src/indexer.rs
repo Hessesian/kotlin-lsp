@@ -421,7 +421,7 @@ impl Indexer {
     ///
     /// Uses `live_lines` (updated synchronously on every keystroke) for the
     /// current file's line text, falling back to indexed lines or disk.
-    pub fn completions(&self, uri: &Url, position: Position) -> Vec<CompletionItem> {
+    pub fn completions(&self, uri: &Url, position: Position, snippets: bool) -> Vec<CompletionItem> {
         // Ensure the file is indexed — on first open, did_open's spawn_blocking
         // may not have finished by the time the first completion request arrives.
         if !self.files.contains_key(uri.as_str()) {
@@ -488,6 +488,7 @@ impl Indexer {
             &prefix,
             dot_receiver.as_deref(),
             uri,
+            snippets,
         )
     }
 
@@ -914,7 +915,7 @@ mod tests {
         // Position after the dot on line 4
         let line = "  fun load() { return repo. }";
         let dot_col = (line.find("repo.").unwrap() + "repo.".len()) as u32;
-        let items = idx.completions(&vm_uri, Position::new(4, dot_col));
+        let items = idx.completions(&vm_uri, Position::new(4, dot_col), true);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(labels.contains(&"findById"), "findById missing; got: {labels:?}");
         assert!(labels.contains(&"save"),     "save missing; got: {labels:?}");
@@ -932,7 +933,7 @@ mod tests {
 
         let line = "  fun run() { repo.fin }";
         let col = (line.find("repo.fin").unwrap() + "repo.fin".len()) as u32;
-        let items = idx.completions(&vm_uri, Position::new(4, col));
+        let items = idx.completions(&vm_uri, Position::new(4, col), true);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(labels.contains(&"findAll"), "findAll missing; got: {labels:?}");
     }

@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use dashmap::DashMap;
 use tokio::task::AbortHandle;
@@ -15,11 +16,19 @@ pub struct Backend {
     /// When a new change arrives we abort the previous pending task so only
     /// the latest content is ever parsed.
     pending_reindex: DashMap<String, AbortHandle>,
+    /// True if the client advertised `snippetSupport: true` during initialize.
+    /// Used to decide whether to send `InsertTextFormat::SNIPPET` in completions.
+    snippet_support: Arc<AtomicBool>,
 }
 
 impl Backend {
     pub fn new(client: Client) -> Self {
-        Self { client, indexer: Arc::new(Indexer::new()), pending_reindex: DashMap::new() }
+        Self {
+            client,
+            indexer: Arc::new(Indexer::new()),
+            pending_reindex: DashMap::new(),
+            snippet_support: Arc::new(AtomicBool::new(false)),
+        }
     }
 }
 
@@ -28,6 +37,16 @@ impl LanguageServer for Backend {
     // ── lifecycle ────────────────────────────────────────────────────────────
 
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
+        // Detect snippet support from client capabilities.
+        let supports_snippets = params.capabilities
+            .text_document.as_ref()
+            .and_then(|td| td.completion.as_ref())
+            .and_then(|c| c.completion_item.as_ref())
+            .and_then(|ci| ci.snippet_support)
+            .unwrap_or(false);
+        self.snippet_support.store(supports_snippets, Ordering::Relaxed);
+        log::info!("client snippet support: {supports_snippets}");
+
         // Accept either rootUri or the first workspaceFolder.
         let root_uri = params.root_uri.or_else(|| {
             params
@@ -163,8 +182,9 @@ impl LanguageServer for Backend {
         let pp       = params.text_document_position;
         let uri      = &pp.text_document.uri;
         let position = pp.position;
+        let snippets = self.snippet_support.load(Ordering::Relaxed);
 
-        let items = self.indexer.completions(uri, position);
+        let items = self.indexer.completions(uri, position, snippets);
         if items.is_empty() {
             return Ok(None);
         }

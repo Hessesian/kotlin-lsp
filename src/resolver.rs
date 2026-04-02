@@ -44,16 +44,17 @@ pub fn complete_symbol(
     prefix: &str,
     dot_receiver: Option<&str>,
     from_uri: &Url,
+    snippets: bool,
 ) -> Vec<CompletionItem> {
     if let Some(receiver) = dot_receiver {
-        return complete_dot(idx, receiver, from_uri);
+        return complete_dot(idx, receiver, from_uri, snippets);
     }
-    complete_bare(idx, prefix, from_uri)
+    complete_bare(idx, prefix, from_uri, snippets)
 }
 
 /// Dot-completion: return all members of the receiver's inferred type,
 /// sorted: methods first, then fields/vars, then class-level names last.
-fn complete_dot(idx: &Indexer, receiver: &str, from_uri: &Url) -> Vec<CompletionItem> {
+fn complete_dot(idx: &Indexer, receiver: &str, from_uri: &Url, snippets: bool) -> Vec<CompletionItem> {
     // Infer type from variable annotation.
     let type_name = match infer_variable_type(idx, receiver, from_uri) {
         Some(t) => t,
@@ -75,9 +76,15 @@ fn complete_dot(idx: &Indexer, receiver: &str, from_uri: &Url) -> Vec<Completion
     let mut items = symbols_from_uri_as_completions(idx, &file_uri);
 
     // Filter out private members — they are inaccessible from outside the class.
-    // The cache stores all members; we filter here so bare-word completion
-    // (same file) still sees private symbols.
     items.retain(|i| i.sort_text.as_deref().map(|s| !s.starts_with("prv:")).unwrap_or(true));
+
+    // Strip snippet fields if client doesn't support them.
+    if !snippets {
+        for item in &mut items {
+            item.insert_text        = None;
+            item.insert_text_format = None;
+        }
+    }
 
     // Sort: functions/methods first, then fields/vars, then everything else.
     items.sort_by_key(|i| kind_sort_rank(i.kind));
@@ -113,7 +120,7 @@ fn vis_tag(vis: Visibility) -> &'static str {
 ///   lowercase letter (local vars, params, fields, fun names).  Class names are
 ///   excluded because they are rarely what the user wants when typing `acc…`.
 /// - **Uppercase prefix or empty** → return everything (class names + members).
-fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url) -> Vec<CompletionItem> {
+fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippets: bool) -> Vec<CompletionItem> {
     let prefix_lower = prefix.to_lowercase();
     let lowercase_mode = prefix.chars().next().map(|c| c.is_lowercase()).unwrap_or(false);
     let mut seen = std::collections::HashSet::new();
@@ -125,7 +132,7 @@ fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url) -> Vec<CompletionI
             return;
         }
         if name.to_lowercase().starts_with(&prefix_lower) && seen.insert(name.to_string()) {
-            let is_fn = matches!(kind, CompletionItemKind::FUNCTION | CompletionItemKind::METHOD);
+            let is_fn = snippets && matches!(kind, CompletionItemKind::FUNCTION | CompletionItemKind::METHOD);
             items.push(CompletionItem {
                 label:              name.to_string(),
                 kind:               Some(kind),
@@ -192,6 +199,8 @@ fn symbols_from_uri_as_completions(idx: &Indexer, file_uri: &str) -> Vec<Complet
 }
 
 /// Build completion items for a file, from index or on-demand disk parse.
+/// Always builds with snippet fields set; callers strip them if the client
+/// doesn't support snippets.
 fn build_completion_items(idx: &Indexer, file_uri: &str) -> Vec<CompletionItem> {
     let mut items = Vec::new();
 
@@ -201,11 +210,11 @@ fn build_completion_items(idx: &Indexer, file_uri: &str) -> Vec<CompletionItem> 
             let ck       = symbol_kind_to_completion(sym.kind);
             let vis_tag  = vis_tag(sym.visibility);
             let sort_txt = format!("{vis_tag}{}{}", kind_sort_rank(Some(ck)), sym.name);
-            items.push(make_completion_item(&sym.name, ck, sort_txt));
+            items.push(make_completion_item(&sym.name, ck, sort_txt, true));
         }
         for name in &f.declared_names {
             if !items.iter().any(|i: &CompletionItem| i.label == *name) {
-                items.push(make_completion_item(name, CompletionItemKind::FIELD, format!("1{name}")));
+                items.push(make_completion_item(name, CompletionItemKind::FIELD, format!("1{name}"), true));
             }
         }
         return items;
@@ -220,11 +229,11 @@ fn build_completion_items(idx: &Indexer, file_uri: &str) -> Vec<CompletionItem> 
                     let ck       = symbol_kind_to_completion(sym.kind);
                     let vis_tag  = vis_tag(sym.visibility);
                     let sort_txt = format!("{vis_tag}{}{}", kind_sort_rank(Some(ck)), sym.name);
-                    items.push(make_completion_item(&sym.name, ck, sort_txt));
+                    items.push(make_completion_item(&sym.name, ck, sort_txt, true));
                 }
                 for name in &file_data.declared_names {
                     if !items.iter().any(|i: &CompletionItem| i.label == *name) {
-                        items.push(make_completion_item(name, CompletionItemKind::FIELD, format!("1{name}")));
+                        items.push(make_completion_item(name, CompletionItemKind::FIELD, format!("1{name}"), true));
                     }
                 }
             }
@@ -251,8 +260,8 @@ fn symbol_kind_to_completion(kind: SymbolKind) -> CompletionItemKind {
 /// Functions and methods get a snippet `name($1)` so the cursor lands inside
 /// the parentheses after accepting the completion.  All other kinds are plain
 /// text insertions.
-fn make_completion_item(name: &str, ck: CompletionItemKind, sort_text: String) -> CompletionItem {
-    let is_fn = matches!(ck, CompletionItemKind::FUNCTION | CompletionItemKind::METHOD);
+fn make_completion_item(name: &str, ck: CompletionItemKind, sort_text: String, snippets: bool) -> CompletionItem {
+    let is_fn = snippets && matches!(ck, CompletionItemKind::FUNCTION | CompletionItemKind::METHOD);
     CompletionItem {
         label:              name.to_string(),
         kind:               Some(ck),
