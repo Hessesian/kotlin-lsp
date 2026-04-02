@@ -3,6 +3,18 @@
 A fast, low-memory LSP server for **Kotlin** and **Java**, written in Rust.  
 Built with [tower-lsp](https://github.com/ebkalderon/tower-lsp) and [tree-sitter](https://tree-sitter.github.io/), designed for large Android/JVM codebases where heavier LSP servers feel sluggish.
 
+## Install
+
+```bash
+cargo install kotlin-lsp
+```
+
+The binary is placed at `~/.cargo/bin/kotlin-lsp`. Use that path in your editor config below.
+
+> **Runtime dependencies** — `fd` and `rg` (ripgrep) must be on your `PATH`:  
+> macOS: `brew install fd ripgrep`  
+> Debian/Ubuntu: `apt install fd-find ripgrep`
+
 ---
 
 ## Features
@@ -52,7 +64,9 @@ Built with [tower-lsp](https://github.com/ebkalderon/tower-lsp) and [tree-sitter
 
 ---
 
-## Build
+## Build from source
+
+If you want to build from source instead of `cargo install`:
 
 **Requirements:** Rust 1.76+, a C compiler (for tree-sitter grammars), `fd`, `rg`
 
@@ -82,7 +96,7 @@ Install on Debian/Ubuntu: `apt install fd-find ripgrep` (binary may be `fdfind`)
 
 ## Editor setup
 
-Replace `/path/to/kotlin-lsp` with the actual path to the compiled binary, e.g. `~/.local/bin/kotlin-lsp` or `~/projects/kotlin-lsp/target/release/kotlin-lsp`.
+Replace `/path/to/kotlin-lsp` with `~/.cargo/bin/kotlin-lsp` (or wherever `cargo install` placed it — run `which kotlin-lsp` to confirm).
 
 ### Helix
 
