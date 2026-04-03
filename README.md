@@ -3,6 +3,8 @@
 A fast, low-memory LSP server for **Kotlin** and **Java**, written in Rust.  
 Built with [tower-lsp](https://github.com/ebkalderon/tower-lsp) and [tree-sitter](https://tree-sitter.github.io/), designed for large Android/JVM codebases where heavier LSP servers feel sluggish.
 
+![kotlin-lsp demo](demo/kotlin-lsp-demo.gif)
+
 ## Install
 
 ```bash
