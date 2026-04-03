@@ -17,25 +17,68 @@ The binary is placed at `~/.cargo/bin/kotlin-lsp`. Use that path in your editor 
 
 ---
 
+## vs. Official Kotlin Language Server
+
+There are two Kotlin LSP implementations. Here is how they differ:
+
+| | **kotlin-lsp** (this project) | **[kotlin-language-server](https://github.com/fwcd/kotlin-language-server)** |
+|---|---|---|
+| **Runtime** | Native Rust binary, no JVM | Requires JVM 11+ |
+| **Startup** | Instant | 3–10 seconds (JVM boot) |
+| **Memory** | < 200 MB for 10k+ files | 500 MB–2 GB for large projects |
+| **Type checking / diagnostics** | ✗ — structural only | ✓ full compiler diagnostics |
+| **Semantic accuracy** | Syntactic (tree-sitter) | Full type resolution |
+| **Rename / refactor** | ✗ | ✓ |
+| **Go-to-definition** | Fast (index + rg fallback) | Accurate (type-safe) |
+| **Superclass hierarchy** | ✓ | ✓ |
+| **Kotlin stdlib hover** | ✓ built-in signatures | ✓ |
+| **Java support** | ✓ (lighter) | ✓ |
+| **Best for** | Fast navigation in large Android repos, editors without JVM support | Full IDE-grade experience |
+
+**Choose kotlin-lsp** when you want instant startup and low memory overhead and can live without compiler diagnostics — typical for developers who run Gradle / CI for errors and just want fast jump-to-definition and completion.
+
+**Choose kotlin-language-server** when you need error squiggles and semantic-accurate rename/refactor.
+
+They can coexist: configure one for `filetypes = ["kotlin"]` and the other for a different set of capabilities.
+
+---
+
 ## Features
 
 | LSP capability | Notes |
 |---|---|
-| `textDocument/definition` | Jump to declaration — index lookup, then `rg` fallback |
-| `textDocument/hover` | Shows declaration kind and source line |
+| `textDocument/definition` | Index lookup → superclass hierarchy → `rg` fallback |
+| `textDocument/hover` | Declaration kind, source line, Kotlin stdlib signatures |
 | `textDocument/documentSymbol` | All symbols in the current file (outline view) |
-| `textDocument/completion` | Dot-completion and bare-word completion |
-| `$/progress` | Spinner in the status bar while the workspace is indexed |
+| `textDocument/completion` | Dot-completion and bare-word completion with stdlib entries |
+| `textDocument/references` | Project-wide `rg --word-regexp` usages |
+| `$/progress` | Spinner while workspace is indexed; non-blocking |
 
 ### What gets indexed
 
 **Kotlin:** `class`, `interface`, `object`, `fun`, `val`, `var`, `typealias`, constructor parameters, enum entries  
-**Java:** `class`, `interface`, `enum`, `method`, `field`
+**Java:** `class`, `interface`, `enum`, `method`, `field`, `enum_constant`
+
+### Resolution chain
+
+Go-to-definition resolves symbols in this order:
+
+1. **Local file** — indexed symbols in the same file
+2. **Local variables / parameters** — line-scanned, catches un-annotated `fun` params
+3. **Explicit imports** — exact FQN lookup, then package-filtered index, then `fd` on-demand
+4. **Same package** — symbols in files sharing the same `package` declaration
+5. **Star imports** — `import com.example.*` checked in the package dir
+6. **Superclass hierarchy** — inherited methods from `extends`/`implements`/Kotlin delegation specifiers, up to 4 levels deep, cycle-safe
+7. **Project-wide `rg`** — last resort; always finds symbols not yet indexed
+
+`this.member` searches the current class + its supers.  
+`super.member` skips the current class and walks the hierarchy directly.
 
 ### Completion details
 
 - **Dot-completion** (`repo.`) — resolves the variable's declared type, finds the matching file, returns its public members. Private members are hidden.
 - **Bare-word completion** — matches symbols from the current file and the workspace index by prefix (case-aware: lowercase prefix → lowercase suggestions first).
+- **Kotlin stdlib** — scope functions (`run`, `apply`, `let`, `also`, `with`), collection extensions (`map`, `filter`, `find`, …), string extensions, and nullable helpers all appear in completion with proper signatures. They sort after project symbols.
 - **Lazy loading** — files beyond the initial index limit are parsed on-demand the first time you trigger completion on one of their types.
 - **Pre-warming** — when you open a file, its injected/constructor types are pre-warmed in the background so the first Ctrl+X is instant.
 - **Live line scanning** — dot-detection uses the current document text (not the debounced index) so typing `.`, deleting it, and re-typing it always works correctly.
@@ -46,18 +89,20 @@ The binary is placed at `~/.cargo/bin/kotlin-lsp`. Use that path in your editor 
 - Single-hop: `ClassName`, `functionName`, `CONSTANT`
 - Multi-hop field chains: `account.profile.email`
 - Constructor parameter declarations (without `val`/`var`)
+- Lambda parameters: `{ account -> account.name }` jumps to the `account ->` binding
+- `this.method()` and `super.method()` qualifier handling
+- Precise `fd --full-path` search uses the full package path from the import, not just the filename — dramatically faster in multi-module projects
 - Cross-file fallback via `rg` for symbols not yet in the index
 
 ---
 
 ## Limitations
 
-- **No type inference for lambda parameters** — `list.map { item -> item.field }` cannot resolve `item`'s type without full generic unwrapping. Use explicit type annotations (`list.map { item: MyType -> … }`) as a workaround.
+- **No type inference for generic lambda parameters** — `list.map { item -> item.field }` cannot resolve `item`'s type from generic parameters without full type inference. Untyped lambda parameters that appear in the same file are found; cross-file inference is not. Use explicit type annotations (`list.map { item: MyType -> … }`) as a workaround.
 - **No incremental re-index** — each `did_change` re-parses the whole file after a 120 ms debounce. Very large files (5000+ lines) may feel slightly delayed.
-- **No rename / find-all-references** — not implemented.
 - **No diagnostics / type checking** — kotlin-lsp is purely structural; it doesn't compile or type-check your code.
 - **Visibility is line-scanned** — visibility is detected from the declaration line. Multi-line modifier blocks (modifier on a separate line) default to `public`.
-- **`protected` not filtered** — protected members appear in dot-completion from outside the class hierarchy (class hierarchy tracking is not implemented).
+- **`protected` not filtered** — protected members appear in dot-completion from outside the class hierarchy.
 - **Nested lambda scope** — variables introduced by nested lambdas (e.g. inner `.map {}` inside outer `.mapSuccess {}`) are not resolved.
 - **Java support is lighter** — definition and hover work; completion is present but less refined than Kotlin.
 - **Index cap** — by default only the 2 000 shallowest files are indexed eagerly (configurable; see below). Deeper files are resolved on-demand.
@@ -200,10 +245,11 @@ environment = { KOTLIN_LSP_MAX_FILES = "4000" }
 
 ```
 main.rs      – tokio entry point, wires stdin/stdout to tower-lsp
-backend.rs   – LanguageServer trait: initialize / hover / definition / completion / documentSymbol
+backend.rs   – LanguageServer trait: initialize / hover / definition / completion / documentSymbol / references
 indexer.rs   – file discovery (fd), in-memory index, rg fallback, progress reporting
 parser.rs    – tree-sitter-kotlin + tree-sitter-java symbol & visibility extraction
-resolver.rs  – definition resolution, multi-hop field chains, completion logic
+resolver.rs  – definition resolution, multi-hop field chains, class hierarchy, completion logic
+stdlib.rs    – built-in Kotlin stdlib signatures for hover and completion
 types.rs     – SymbolEntry, FileData, Visibility
 ```
 
@@ -220,3 +266,10 @@ At ~50 chars/line × 300 lines/file ≈ 15 KB/file. At 2 000 files that is ~30 M
 - **CPU** — a 120 ms debounce prevents re-parsing on every keystroke. A semaphore caps concurrent parse workers at 8 during workspace scan.
 - **Content dedup** — files are only re-parsed when their content actually changes (FNV-1a hash check).
 - **Completion cache** — dot-completion results are cached per type-file; cleared only when that file changes.
+- **fd `--full-path` search** — when resolving an import like `cz.moneta.data.compat.EProductScreen`, the fd command searches for `*/cz/moneta/data/compat/EProductScreen.(kt|java)$` — a single O(1) traversal that skips unrelated modules entirely.
+
+---
+
+## Acknowledgements
+
+The superclass hierarchy resolution, `this`/`super` qualifier handling, lambda parameter recognition, and `textDocument/references` implementation were inspired by ideas in [**code-compass.nvim**](https://github.com/emmanueltouzery/code-compass.nvim) by Emmanuel Touzery — a Neovim plugin that uses similar structural (non-compiler) techniques to provide navigation in Java/Kotlin projects.
