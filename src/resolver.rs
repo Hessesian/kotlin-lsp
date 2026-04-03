@@ -311,6 +311,14 @@ pub fn resolve_symbol(idx: &Indexer, name: &str, qualifier: Option<&str>, from_u
         // fall through to the normal chain.
     }
 
+    resolve_symbol_inner(idx, name, from_uri, true)
+}
+
+/// Internal resolver.  When `with_hierarchy` is false step 4.5 is skipped to
+/// avoid infinite recursion inside `resolve_from_class_hierarchy` (which calls
+/// this function to locate each superclass, and those files would in turn call
+/// the hierarchy walk again with a fresh visited-set, looping forever).
+fn resolve_symbol_inner(idx: &Indexer, name: &str, from_uri: &Url, with_hierarchy: bool) -> Vec<Location> {
     // 1 ── local (indexed symbols) ────────────────────────────────────────────
     let local = resolve_local(idx, name, from_uri);
     if !local.is_empty() { return local; }
@@ -337,9 +345,11 @@ pub fn resolve_symbol(idx: &Indexer, name: &str, qualifier: Option<&str>, from_u
     // 4.5 ── superclass / interface hierarchy ─────────────────────────────────
     // For inherited methods that carry no explicit import (e.g. `collectEffects()`
     // defined in a base class that is itself imported, but the method is not).
-    let mut visited: Vec<String> = Vec::new();
-    let inherited = resolve_from_class_hierarchy(idx, name, from_uri, 0, &mut visited);
-    if !inherited.is_empty() { return inherited; }
+    if with_hierarchy {
+        let mut visited: Vec<String> = Vec::new();
+        let inherited = resolve_from_class_hierarchy(idx, name, from_uri, 0, &mut visited);
+        if !inherited.is_empty() { return inherited; }
+    }
 
     // 5 ── project-wide rg ───────────────────────────────────────────────────
     rg_find_definition(name, idx.workspace_root.get().map(PathBuf::as_path))
@@ -745,8 +755,10 @@ fn resolve_from_class_hierarchy(
     };
 
     for super_name in extract_supers_from_lines(&lines) {
-        // Resolve the supertype itself (goes through steps 1-4, not 4.5).
-        let super_locs = resolve_symbol(idx, &super_name, None, from_uri);
+        // Locate the supertype's file via steps 1-4+5 only — NOT step 4.5.
+        // Using the full resolve_symbol here would re-enter this function with
+        // a fresh visited-set, causing infinite recursion.
+        let super_locs = resolve_symbol_inner(idx, &super_name, from_uri, false);
         for super_loc in &super_locs {
             let locs = find_name_in_uri(idx, name, super_loc.uri.as_str());
             if !locs.is_empty() { return locs; }
