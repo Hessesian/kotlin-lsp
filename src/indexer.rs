@@ -686,7 +686,79 @@ pub(crate) fn rg_find_definition(name: &str, root: Option<&Path>) -> Vec<Locatio
         .collect()
 }
 
-/// Parse one line of `rg --no-heading --with-filename --line-number --column`.
+/// Run `rg` to find all *usages* of `name` in the project.
+///
+/// Uses `--word-regexp` so only whole-word matches are returned.
+/// If `include_decl` is false, declaration lines are filtered out by
+/// excluding lines that contain declaration keywords before `name`.
+/// If `from_uri` is provided, the source file is excluded when
+/// `include_decl` is false (the definition is already known).
+pub fn rg_find_references(
+    name:         &str,
+    root:         Option<&Path>,
+    include_decl: bool,
+    from_uri:     &Url,
+) -> Vec<Location> {
+    let search_root: std::borrow::Cow<Path> = match root {
+        Some(r) => std::borrow::Cow::Borrowed(r),
+        None    => std::borrow::Cow::Owned(std::env::current_dir().unwrap_or_default()),
+    };
+
+    // Escape name for use as a literal rg pattern.
+    let safe: String = name.chars().flat_map(|c| {
+        if c.is_alphanumeric() || c == '_' { vec![c] } else { vec!['\\', c] }
+    }).collect();
+
+    let mut cmd = Command::new("rg");
+    cmd.args([
+        "--no-heading",
+        "--with-filename",
+        "--line-number",
+        "--column",
+        "--word-regexp",
+        "--glob", "*.kt",
+        "--glob", "*.java",
+        "-e", &safe,
+    ]);
+    cmd.arg(search_root.as_ref());
+
+    let out = match cmd.output() {
+        Ok(o) if !o.stdout.is_empty() => o,
+        _ => return vec![],
+    };
+
+    let decl_kws = ["class ", "interface ", "object ", "fun ", "val ", "var ",
+                    "typealias ", "enum class ", "enum "];
+
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(parse_rg_line_with_content)
+        .filter(|(loc, content)| {
+            // Optionally skip declaration lines.
+            if include_decl { return true; }
+            let is_decl = decl_kws.iter().any(|kw| content.contains(kw))
+                && loc.uri.as_str() == from_uri.as_str();
+            !is_decl
+        })
+        .map(|(loc, _)| loc)
+        .collect()
+}
+
+/// Like `parse_rg_line` but also returns the matched line content.
+fn parse_rg_line_with_content(line: &str) -> Option<(Location, String)> {
+    let mut parts = line.splitn(4, ':');
+    let file     = parts.next()?;
+    let line_num: u32 = parts.next()?.trim().parse().ok()?;
+    let col:      u32 = parts.next()?.trim().parse().ok()?;
+    let content  = parts.next().unwrap_or("").to_string();
+
+    let path = std::path::Path::new(file);
+    if !path.is_absolute() { return None; }
+
+    let uri = Url::from_file_path(path).ok()?;
+    let pos = Position::new(line_num.saturating_sub(1), col.saturating_sub(1));
+    Some((Location { uri, range: Range::new(pos, pos) }, content))
+}
 pub(crate) fn parse_rg_line(line: &str) -> Option<Location> {
     // format: /abs/path/to/File.kt:line:col:content
     let mut parts = line.splitn(4, ':');

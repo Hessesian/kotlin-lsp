@@ -365,6 +365,20 @@ fn resolve_qualified(idx: &Indexer, name: &str, qualifier: &str, from_uri: &Url)
     let segments: Vec<&str> = qualifier.split('.').collect();
     let root = segments[0];
 
+    // ── `this.member` — search current file and its superclass hierarchy ──────
+    if root == "this" {
+        let locs = find_name_in_uri(idx, name, from_uri.as_str());
+        if !locs.is_empty() { return locs; }
+        let mut visited = vec![];
+        return resolve_from_class_hierarchy(idx, name, from_uri, 0, &mut visited);
+    }
+
+    // ── `super.member` — search superclass hierarchy only ────────────────────
+    if root == "super" {
+        let mut visited = vec![from_uri.as_str().to_owned()]; // skip current file
+        return resolve_from_class_hierarchy(idx, name, from_uri, 0, &mut visited);
+    }
+
     if root.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
         // ── Uppercase chain: find the root's file and search it for `name` ──
         let qual_locs = resolve_symbol(idx, root, None, from_uri);
@@ -1010,30 +1024,62 @@ fn infer_type_in_lines(lines: &[String], var_name: &str) -> Option<String> {
 /// Used to locate function parameters and other declarations that are not in
 /// the tree-sitter symbol index (e.g. `fun foo(account: AccountModel)`).
 fn find_declaration_range_in_lines(lines: &[String], name: &str) -> Option<Range> {
-    let pattern = format!("{name}:");
+    // Pattern 1: `name: Type` — typed parameter, val/var declaration, constructor param
+    let typed_pattern = format!("{name}:");
+
+    // Pattern 2: `{ name ->` or `name ->` — untyped lambda / trailing-lambda parameter
+    let lambda_arrow = format!("{name} ->");
+    let lambda_brace = format!("{{ {name} ->");  // with brace prefix
 
     for (line_num, line) in lines.iter().enumerate() {
-        if !line.contains(&pattern) { continue; }
-
         let trimmed = line.trim_start();
         if trimmed.starts_with("//") || trimmed.starts_with('*') || trimmed.starts_with("/*") {
             continue;
         }
 
-        if let Some(pos) = line.find(&pattern) {
-            let before = line[..pos].chars().last();
-            if before.map(|c| c.is_alphanumeric() || c == '_').unwrap_or(false) {
-                continue;
+        // ── typed parameter / val / var ─────────────────────────────────────
+        if line.contains(&typed_pattern) {
+            if let Some(pos) = line.find(&typed_pattern) {
+                let before = line[..pos].chars().last();
+                if !before.map(|c| c.is_alphanumeric() || c == '_').unwrap_or(false)
+                    && !line[..pos].trim_end().ends_with('"')
+                {
+                    let col = pos as u32;
+                    return Some(Range {
+                        start: Position { line: line_num as u32, character: col },
+                        end:   Position { line: line_num as u32, character: col + name.len() as u32 },
+                    });
+                }
             }
-            // Skip JSON / map literal keys: `"key": value`
-            if line[..pos].trim_end().ends_with('"') {
-                continue;
+        }
+
+        // ── untyped lambda parameter: `{ name ->` or leading `name ->` ─────
+        if line.contains(&lambda_arrow) {
+            // Must be `{ name ->` (with brace) or the name at the start of the
+            // lambda params after trimming whitespace/opening brace.
+            let is_lambda = line.contains(&lambda_brace)
+                || trimmed.starts_with(&lambda_arrow)
+                || trimmed.starts_with(&format!("{name},"))  // multi-param `a, b ->`
+                || (trimmed.contains(&lambda_arrow)
+                    && line[..line.find(&lambda_arrow).unwrap_or(0)]
+                        .chars()
+                        .all(|c| c.is_whitespace() || c == '{' || c == '(' || c == ',' || c.is_alphanumeric() || c == '_'));
+            if is_lambda {
+                if let Some(pos) = line.find(name) {
+                    // Make sure we matched the right token (word boundary check)
+                    let before = pos.checked_sub(1).and_then(|i| line.as_bytes().get(i)).copied();
+                    let after  = line.as_bytes().get(pos + name.len()).copied();
+                    let boundary = before.map(|b| !b.is_ascii_alphanumeric() && b != b'_').unwrap_or(true)
+                        && after.map(|b| !b.is_ascii_alphanumeric() && b != b'_').unwrap_or(true);
+                    if boundary {
+                        let col = pos as u32;
+                        return Some(Range {
+                            start: Position { line: line_num as u32, character: col },
+                            end:   Position { line: line_num as u32, character: col + name.len() as u32 },
+                        });
+                    }
+                }
             }
-            let col = pos as u32;
-            return Some(Range {
-                start: Position { line: line_num as u32, character: col },
-                end:   Position { line: line_num as u32, character: col + name.len() as u32 },
-            });
         }
     }
     None
@@ -1525,5 +1571,61 @@ mod tests {
         let locs = resolve_symbol(&idx, "doStuff", None, &child_uri);
         assert!(!locs.is_empty(), "inherited method not found via import");
         assert_eq!(locs[0].uri, base_uri);
+    }
+
+    // ── this / super resolution ───────────────────────────────────────────────
+
+    #[test]
+    fn resolve_this_dot_method() {
+        let u = uri("/Foo.kt");
+        let idx = Indexer::new();
+        idx.index_content(&u, "package com.example\nclass Foo {\n  fun doThing() {}\n  fun other() { this.doThing() }\n}");
+        let locs = resolve_symbol(&idx, "doThing", Some("this"), &u);
+        assert!(!locs.is_empty(), "this.doThing() not resolved");
+        assert_eq!(locs[0].uri, u);
+    }
+
+    #[test]
+    fn resolve_super_dot_method() {
+        let base_uri  = uri("/Base.kt");
+        let child_uri = uri("/Child.kt");
+        let idx = Indexer::new();
+        idx.index_content(&base_uri,  "package com.example\nopen class Base { fun init() {} }");
+        idx.index_content(&child_uri, "package com.example\nclass Child : Base() { fun x() { super.init() } }");
+        let locs = resolve_symbol(&idx, "init", Some("super"), &child_uri);
+        assert!(!locs.is_empty(), "super.init() not resolved");
+        assert_eq!(locs[0].uri, base_uri);
+    }
+
+    // ── lambda parameter recognition ─────────────────────────────────────────
+
+    #[test]
+    fn local_decl_lambda_untyped() {
+        let lines: Vec<String> = vec![
+            "list.forEach { account ->".to_string(),
+            "  println(account)".to_string(),
+        ];
+        let range = find_declaration_range_in_lines(&lines, "account");
+        assert!(range.is_some(), "untyped lambda param not found");
+        assert_eq!(range.unwrap().start.line, 0);
+    }
+
+    #[test]
+    fn local_decl_lambda_typed() {
+        let lines: Vec<String> = vec![
+            "items.map { item: DetailItem ->".to_string(),
+        ];
+        let range = find_declaration_range_in_lines(&lines, "item");
+        assert!(range.is_some(), "typed lambda param not found");
+    }
+
+    #[test]
+    fn local_decl_no_false_positive_usage() {
+        // A usage of `account` on a non-declaration line must not be returned
+        let lines: Vec<String> = vec![
+            "val result = account.name".to_string(),
+        ];
+        let range = find_declaration_range_in_lines(&lines, "account");
+        assert!(range.is_none(), "false positive on usage line");
     }
 }

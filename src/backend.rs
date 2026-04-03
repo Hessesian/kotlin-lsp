@@ -87,6 +87,7 @@ impl LanguageServer for Backend {
                 }),
                 hover_provider:          Some(HoverProviderCapability::Simple(true)),
                 definition_provider:     Some(OneOf::Left(true)),
+                references_provider:     Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 ..Default::default()
             },
@@ -221,6 +222,22 @@ impl LanguageServer for Backend {
     }
 
     // ── textDocument/documentSymbol ──────────────────────────────────────────
+
+
+    async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
+        let uri  = &params.text_document_position.text_document.uri;
+        let pos  = params.text_document_position.position;
+        let include_decl = params.context.include_declaration;
+
+        let name = match self.indexer.word_at(uri, pos) {
+            Some(w) => w,
+            None    => return Ok(None),
+        };
+
+        let root = self.indexer.workspace_root.get().map(std::path::PathBuf::as_path);
+        let locs = crate::indexer::rg_find_references(&name, root, include_decl, uri);
+        Ok(if locs.is_empty() { None } else { Some(locs) })
+    }
 
     async fn document_symbol(
         &self,
