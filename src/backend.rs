@@ -101,6 +101,9 @@ impl LanguageServer for Backend {
     }
 
     async fn shutdown(&self) -> Result<()> {
+        // Persist the index cache so the next startup can skip unchanged files.
+        let idx = Arc::clone(&self.indexer);
+        tokio::task::spawn_blocking(move || idx.save_cache_to_disk());
         Ok(())
     }
 

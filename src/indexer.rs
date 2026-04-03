@@ -1,9 +1,11 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use dashmap::DashMap;
+use serde::{Deserialize, Serialize};
 use tower_lsp::lsp_types::*;
 
 // ─── LSP progress notification helper ────────────────────────────────────────
@@ -26,6 +28,71 @@ use crate::types::{FileData, SymbolEntry};
 /// Files beyond this limit are resolved on-demand via `rg` when first needed.
 /// Override by setting the `KOTLIN_LSP_MAX_FILES` environment variable.
 const DEFAULT_MAX_INDEX_FILES: usize = 2000;
+
+// ─── Disk cache ──────────────────────────────────────────────────────────────
+
+/// Bump when the serialized format changes; invalidates any older cache files.
+const CACHE_VERSION: u32 = 1;
+
+/// Per-file entry stored in the on-disk index cache.
+#[derive(Serialize, Deserialize)]
+struct FileCacheEntry {
+    /// File mtime (seconds since Unix epoch) — cheap cache validity check.
+    mtime_secs: u64,
+    /// FNV-1a content hash — secondary guard for mtime collisions / FAT FS.
+    content_hash: u64,
+    /// Parsed symbol data for this file.
+    file_data: FileData,
+}
+
+/// Complete serialized index, written to `~/.cache/kotlin-lsp/<root-hash>/index.bin`.
+#[derive(Serialize, Deserialize)]
+struct IndexCache {
+    version: u32,
+    /// Absolute path string → per-file cached data.
+    entries: HashMap<String, FileCacheEntry>,
+}
+
+/// Returns the cache file path for the given workspace root.
+fn workspace_cache_path(root: &Path) -> PathBuf {
+    let root_hash = hash_str(&root.to_string_lossy());
+    let cache_base = std::env::var("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+            PathBuf::from(home).join(".cache")
+        });
+    cache_base
+        .join("kotlin-lsp")
+        .join(format!("{root_hash:016x}"))
+        .join("index.bin")
+}
+
+/// Returns file mtime as seconds since Unix epoch, or `None` on error.
+fn file_mtime(path: &Path) -> Option<u64> {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+}
+
+/// Load and validate the on-disk cache.  Returns `None` if absent / stale / corrupt.
+fn try_load_cache(root: &Path) -> Option<IndexCache> {
+    let path = workspace_cache_path(root);
+    let bytes = std::fs::read(&path).ok()?;
+    let cache: IndexCache = bincode::deserialize(&bytes).ok()?;
+    if cache.version != CACHE_VERSION {
+        log::info!("Cache version mismatch — will re-index");
+        return None;
+    }
+    log::info!(
+        "Loaded index cache ({} files) from {}",
+        cache.entries.len(),
+        path.display()
+    );
+    Some(cache)
+}
 
 
 
@@ -87,6 +154,8 @@ impl Indexer {
 
     /// Discover and index *.kt / *.java files under `root`, bounded by MAX_INDEX_FILES.
     /// Sends LSP `$/progress` notifications so the editor shows a status bar spinner.
+    /// On subsequent startups the on-disk cache is used for unchanged files so only
+    /// modified or new files need to be re-parsed by tree-sitter.
     pub async fn index_workspace(self: Arc<Self>, root: &Path, client: tower_lsp::Client) {
         // Record workspace root so rg/fd always search within the project.
         let _ = self.workspace_root.set(root.to_path_buf());
@@ -115,6 +184,37 @@ impl Indexer {
             log::info!("Indexing {total} source files under {}", root.display());
         }
 
+        // ── Try disk cache ────────────────────────────────────────────────────
+        // Restore unchanged files from the on-disk cache (mtime check, no parse).
+        // Only files whose mtime has changed (or are new) go through tree-sitter.
+        let cache = try_load_cache(root);
+        let mut need_parse: Vec<PathBuf> = Vec::new();
+        let mut cache_hits: usize = 0;
+
+        for path in &paths {
+            let path_str = path.to_string_lossy().to_string();
+            let mtime = file_mtime(path).unwrap_or(0);
+
+            if let Some(ref c) = cache {
+                if let Some(entry) = c.entries.get(&path_str) {
+                    if entry.mtime_secs == mtime {
+                        // Cache hit: restore into all index maps without tree-sitter.
+                        if let Ok(uri) = Url::from_file_path(path) {
+                            self.restore_from_cache_entry(&uri, entry);
+                        }
+                        cache_hits += 1;
+                        continue;
+                    }
+                }
+            }
+            need_parse.push(path.clone());
+        }
+
+        let parse_count = need_parse.len();
+        log::info!(
+            "Cache: {cache_hits} hits, {parse_count} files need (re-)parsing"
+        );
+
         // ── LSP progress: begin ──────────────────────────────────────────────
         let token = NumberOrString::String("kotlin-lsp/indexing".into());
         // Ask the client to create a progress token. Use a short timeout — some
@@ -126,7 +226,9 @@ impl Indexer {
             )
         ).await;
 
-        let begin_msg = if truncated {
+        let begin_msg = if cache_hits > 0 {
+            format!("Indexing {parse_count}/{indexed_count} files ({cache_hits} cached)…")
+        } else if truncated {
             format!("Indexing {indexed_count}/{total} Kotlin files (shallowest first)…")
         } else {
             format!("Indexing {total} Kotlin files…")
@@ -144,15 +246,15 @@ impl Indexer {
         // ── concurrent parse (up to 8 workers) ──────────────────────────────
         let sem          = Arc::new(tokio::sync::Semaphore::new(8));
         let done_count   = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let mut handles: Vec<tokio::task::JoinHandle<()>> = Vec::with_capacity(indexed_count);
+        let mut handles: Vec<tokio::task::JoinHandle<()>> = Vec::with_capacity(parse_count);
 
-        for path in paths {
+        for path in need_parse {
             let sem        = Arc::clone(&sem);
             let idx        = Arc::clone(&self);
             let done       = Arc::clone(&done_count);
             let client2    = client.clone();
             let token2     = token.clone();
-            let total_cnt  = indexed_count;
+            let total_cnt  = parse_count.max(1);
 
             handles.push(tokio::spawn(async move {
                 let _permit = sem.acquire_owned().await;
@@ -191,25 +293,123 @@ impl Indexer {
 
         for h in handles { h.await.ok(); }
 
+        // ── Persist updated index to disk ────────────────────────────────────
+        // Spawn as a blocking task so we don't hold up the progress End notification.
+        let idx_for_save = Arc::clone(&self);
+        tokio::task::spawn_blocking(move || idx_for_save.save_cache_to_disk());
+
         // ── LSP progress: end ────────────────────────────────────────────────
         let sym_count = self.definitions.len();
+        let cache_note = if cache_hits > 0 {
+            format!(", {cache_hits} from cache")
+        } else {
+            String::new()
+        };
         client.send_notification::<progress::KotlinProgress>(ProgressParams {
             token,
             value: ProgressParamsValue::WorkDone(WorkDoneProgress::End(WorkDoneProgressEnd {
                 message: Some(format!(
-                    "Indexed {} files, {} symbols{}",
-                    self.files.len(), sym_count,
+                    "Indexed {} files, {} symbols{}{}",
+                    self.files.len(), sym_count, cache_note,
                     if truncated { format!(" (+{} lazy)", total - indexed_count) } else { String::new() }
                 )),
             })),
         }).await;
 
         log::info!(
-            "Done — {} files indexed, {} distinct symbols, {} packages",
+            "Done — {} files indexed ({} cached), {} distinct symbols, {} packages",
             self.files.len(),
+            cache_hits,
             self.definitions.len(),
             self.packages.len(),
         );
+    }
+
+    /// Restore a single file from the on-disk cache into all index maps.
+    /// This is the cache-hit path: no tree-sitter, no disk read.
+    fn restore_from_cache_entry(&self, uri: &Url, entry: &FileCacheEntry) {
+        let uri_str = uri.to_string();
+        let data = &entry.file_data;
+
+        // Mark as already-hashed so index_content skips it if called again.
+        self.content_hashes.insert(uri_str.clone(), entry.content_hash);
+
+        let file_stem: Option<String> = uri.to_file_path().ok()
+            .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()));
+
+        for sym in &data.symbols {
+            let loc = Location { uri: uri.clone(), range: sym.selection_range };
+
+            let mut locs = self.definitions.entry(sym.name.clone()).or_default();
+            if !locs.iter().any(|l| l.uri == loc.uri && l.range == loc.range) {
+                locs.push(loc.clone());
+            }
+            drop(locs);
+
+            if let Some(ref pkg) = data.package {
+                self.qualified.insert(format!("{pkg}.{}", sym.name), loc.clone());
+                if let Some(ref stem) = file_stem {
+                    if *stem != sym.name {
+                        self.qualified.insert(format!("{pkg}.{stem}.{}", sym.name), loc);
+                    }
+                }
+            }
+        }
+
+        if let Some(ref pkg) = data.package {
+            let mut uris = self.packages.entry(pkg.clone()).or_default();
+            if !uris.contains(&uri_str) {
+                uris.push(uri_str.clone());
+            }
+        }
+
+        self.files.insert(uri_str, Arc::new(data.clone()));
+    }
+
+    /// Serialize the current index to `~/.cache/kotlin-lsp/<root-hash>/index.bin`.
+    /// Safe to call from a background thread.  Logs warnings on error; never panics.
+    pub fn save_cache_to_disk(&self) {
+        let root = match self.workspace_root.get() {
+            Some(r) => r,
+            None    => return,
+        };
+        let cache_path = workspace_cache_path(root);
+        if let Some(parent) = cache_path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                log::warn!("Cache: could not create directory: {e}");
+                return;
+            }
+        }
+
+        let mut entries: HashMap<String, FileCacheEntry> = HashMap::new();
+        for file_ref in &self.files {
+            let uri_str = file_ref.key();
+            let data    = file_ref.value();
+            let hash    = self.content_hashes.get(uri_str).map(|h| *h).unwrap_or(0);
+            if let Ok(url) = uri_str.parse::<Url>() {
+                if let Ok(path) = url.to_file_path() {
+                    let mtime = file_mtime(&path).unwrap_or(0);
+                    entries.insert(
+                        path.to_string_lossy().to_string(),
+                        FileCacheEntry { mtime_secs: mtime, content_hash: hash, file_data: (**data).clone() },
+                    );
+                }
+            }
+        }
+
+        let cache = IndexCache { version: CACHE_VERSION, entries };
+        match bincode::serialize(&cache) {
+            Ok(bytes) => {
+                match std::fs::write(&cache_path, &bytes) {
+                    Ok(()) => log::info!(
+                        "Cache saved ({} files, {} KB) → {}",
+                        cache.entries.len(), bytes.len() / 1024, cache_path.display()
+                    ),
+                    Err(e) => log::warn!("Cache write failed: {e}"),
+                }
+            }
+            Err(e) => log::warn!("Cache serialize failed: {e}"),
+        }
     }
 
     /// (Re-)parse and index a single file's content in-place.

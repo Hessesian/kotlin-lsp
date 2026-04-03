@@ -1,7 +1,8 @@
+use serde::{Deserialize, Serialize};
 use tower_lsp::lsp_types::{Range, SymbolKind};
 
 /// Kotlin/Java visibility of a declared symbol.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Visibility {
     #[default]
     Public,
@@ -11,7 +12,7 @@ pub enum Visibility {
 }
 
 /// Single symbol definition entry stored in the index.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SymbolEntry {
     pub name:             String,
     pub kind:             SymbolKind,
@@ -23,7 +24,7 @@ pub struct SymbolEntry {
 }
 
 /// One import statement parsed from a Kotlin file.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImportEntry {
     /// Fully-qualified path without the trailing `.*`.
     /// e.g. `"com.example.Foo"` or `"com.example"` for star imports.
@@ -35,7 +36,7 @@ pub struct ImportEntry {
 }
 
 /// All data we keep in memory for one source file.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FileData {
     pub symbols: Vec<SymbolEntry>,
     pub imports: Vec<ImportEntry>,
