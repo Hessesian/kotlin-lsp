@@ -234,8 +234,25 @@ impl LanguageServer for Backend {
             None    => return Ok(None),
         };
 
+        // If the symbol is a class-like name (Uppercase), attempt to find its
+        // enclosing class so we can scope the search and avoid matching
+        // identically-named symbols in other sealed hierarchies.
+        let parent_class: Option<String> = if name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+            self.indexer.enclosing_class_at(uri, pos.line)
+        } else {
+            None
+        };
+        let same_pkg = self.indexer.package_of(uri);
+
         let root = self.indexer.workspace_root.get().map(std::path::PathBuf::as_path);
-        let locs = crate::indexer::rg_find_references(&name, root, include_decl, uri);
+        let locs = crate::indexer::rg_find_references(
+            &name,
+            parent_class.as_deref(),
+            same_pkg.as_deref(),
+            root,
+            include_decl,
+            uri,
+        );
         Ok(if locs.is_empty() { None } else { Some(locs) })
     }
 

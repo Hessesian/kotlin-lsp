@@ -564,6 +564,76 @@ impl Indexer {
             .map(|d| d.symbols.clone())
             .unwrap_or_default()
     }
+
+    /// Find the name of the innermost enclosing class/interface/object
+    /// that contains `row` in the given file.
+    ///
+    /// Used by `references` to scope a short symbol name (e.g. `Loading`) to
+    /// its parent sealed class so we can filter out unrelated `Loading` classes
+    /// in other sealed hierarchies.
+    pub fn enclosing_class_at(&self, uri: &Url, row: u32) -> Option<String> {
+        let file = self.files.get(uri.as_str())?;
+        let row = row as usize;
+
+        // Walk backward from the cursor line looking for the nearest class-like
+        // declaration that is lexically at a lower indentation level than `row`.
+        // We stop at the first matching line rather than tracking brace depth
+        // (brace counting is unreliable with Kotlin multi-line lambdas).
+        let target_indent = file.lines.get(row).map(|l| leading_spaces(l)).unwrap_or(0);
+
+        for i in (0..row).rev() {
+            let line = match file.lines.get(i) { Some(l) => l, None => continue };
+            let indent = leading_spaces(line);
+            // Only consider lines at strictly lower indent — they could be the enclosure.
+            if indent >= target_indent { continue; }
+
+            let t = line.trim();
+            if t.is_empty() || t.starts_with("//") || t.starts_with('*') { continue; }
+
+            if let Some(name) = extract_class_decl_name(t) {
+                return Some(name);
+            }
+        }
+        None
+    }
+
+    /// Return the package declared in the given file, if any.
+    pub fn package_of(&self, uri: &Url) -> Option<String> {
+        self.files.get(uri.as_str())?.package.clone()
+    }
+}
+
+/// Count leading ASCII spaces (used for indentation-based enclosing-class detection).
+fn leading_spaces(line: &str) -> usize {
+    line.chars().take_while(|c| *c == ' ' || *c == '\t').count()
+}
+
+/// If `line` is a class/interface/object/sealed declaration, return the type name.
+fn extract_class_decl_name(line: &str) -> Option<String> {
+    // Strip common modifiers: abstract sealed data open inner enum @Annotation etc.
+    let mut rest = line;
+    let modifiers = [
+        "abstract ", "sealed ", "data ", "open ", "inner ", "private ",
+        "protected ", "public ", "internal ", "inline ", "value ", "enum ",
+        "companion ", "override ", "final ",
+    ];
+    loop {
+        let before = rest;
+        for m in &modifiers { rest = rest.strip_prefix(m).unwrap_or(rest).trim_start(); }
+        if rest == before { break; }
+    }
+    // Now rest should start with "class", "interface", or "object"
+    let rest = if let Some(r) = rest.strip_prefix("class ").or_else(|| rest.strip_prefix("interface ")).or_else(|| rest.strip_prefix("object ")) {
+        r
+    } else {
+        return None;
+    };
+    // Extract the identifier
+    let name: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+    if name.is_empty() || !name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+        return None;
+    }
+    Some(name)
 }
 
 // ─── file discovery ──────────────────────────────────────────────────────────
@@ -695,6 +765,8 @@ pub(crate) fn rg_find_definition(name: &str, root: Option<&Path>) -> Vec<Locatio
 /// `include_decl` is false (the definition is already known).
 pub fn rg_find_references(
     name:         &str,
+    parent_class: Option<&str>,
+    same_pkg:     Option<&str>,
     root:         Option<&Path>,
     include_decl: bool,
     from_uri:     &Url,
@@ -704,43 +776,147 @@ pub fn rg_find_references(
         None    => std::borrow::Cow::Owned(std::env::current_dir().unwrap_or_default()),
     };
 
-    // Escape name for use as a literal rg pattern.
-    let safe: String = name.chars().flat_map(|c| {
-        if c.is_alphanumeric() || c == '_' { vec![c] } else { vec!['\\', c] }
-    }).collect();
-
-    let mut cmd = Command::new("rg");
-    cmd.args([
-        "--no-heading",
-        "--with-filename",
-        "--line-number",
-        "--column",
-        "--word-regexp",
-        "--glob", "*.kt",
-        "--glob", "*.java",
-        "-e", &safe,
-    ]);
-    cmd.arg(search_root.as_ref());
-
-    let out = match cmd.output() {
-        Ok(o) if !o.stdout.is_empty() => o,
-        _ => return vec![],
-    };
-
+    let safe_name: String = regex_escape(name);
     let decl_kws = ["class ", "interface ", "object ", "fun ", "val ", "var ",
                     "typealias ", "enum class ", "enum "];
 
+    let filter = |(loc, content): (Location, String)| -> Option<Location> {
+        if !include_decl {
+            let is_decl = decl_kws.iter().any(|kw| content.contains(kw))
+                && loc.uri.as_str() == from_uri.as_str();
+            if is_decl { return None; }
+        }
+        Some(loc)
+    };
+
+    if let Some(parent) = parent_class {
+        // ── Scoped references: parent class is known ──────────────────────────
+        //
+        // Pass A: qualified form `ParentClass.Name` — works in any file.
+        let safe_parent = regex_escape(parent);
+        let qualified_pat = format!(r"\b{}\.\b{}\b", safe_parent, safe_name);
+        let mut locs: Vec<Location> = rg_raw(&qualified_pat, &search_root)
+            .into_iter()
+            .filter_map(filter)
+            .collect();
+
+        // Pass B: bare `Name` restricted to files that either…
+        //   (a) import the parent directly:  import .*.ParentClass
+        //   (b) import Name directly:        import .*.ParentClass.Name  or  .ParentClass.*
+        //   (c) are in the same package as the declaration (no import needed)
+        //
+        // Step B1 — find candidate files via a fast rg file-list pass.
+        let import_pat = format!(r"import.*\b{}\b", safe_parent);
+        let candidate_files = rg_files_with_matches(&import_pat, &search_root);
+
+        // Step B2 — also add files in the same package (package-private visibility).
+        let same_pkg_prefix = same_pkg.unwrap_or("__no_package__");
+        // (same-package files will have the same package declaration; gather via a
+        // second file-list search rather than scanning the index — this function
+        // does not have access to the Indexer.)
+        let pkg_pat = format!(r"^\s*package\s+{}\s*$", regex_escape(same_pkg_prefix));
+        let pkg_files = if same_pkg.is_some() {
+            rg_files_with_matches(&pkg_pat, &search_root)
+        } else {
+            vec![]
+        };
+
+        // Merge candidate file sets.
+        let mut all_files: Vec<String> = candidate_files;
+        for f in pkg_files {
+            if !all_files.contains(&f) { all_files.push(f); }
+        }
+
+        if !all_files.is_empty() {
+            let bare_hits = rg_word_in_files(&safe_name, &all_files);
+            for (loc, content) in bare_hits {
+                if let Some(loc) = filter((loc, content)) {
+                    // Deduplicate against the qualified hits.
+                    if !locs.iter().any(|l: &Location| l.uri == loc.uri && l.range.start == loc.range.start) {
+                        locs.push(loc);
+                    }
+                }
+            }
+        }
+
+        locs
+    } else {
+        // ── Unscoped: fall back to the original word-boundary search ──────────
+        let mut cmd = Command::new("rg");
+        cmd.args([
+            "--no-heading", "--with-filename", "--line-number", "--column",
+            "--word-regexp", "--glob", "*.kt", "--glob", "*.java",
+            "-e", &safe_name,
+        ]);
+        cmd.arg(search_root.as_ref());
+
+        let out = match cmd.output() {
+            Ok(o) if !o.stdout.is_empty() => o,
+            _ => return vec![],
+        };
+
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(parse_rg_line_with_content)
+            .filter_map(filter)
+            .collect()
+    }
+}
+
+fn regex_escape(s: &str) -> String {
+    s.chars().flat_map(|c| {
+        if c.is_alphanumeric() || c == '_' { vec![c] } else { vec!['\\', c] }
+    }).collect()
+}
+
+/// Run rg with a regex pattern; return `(Location, line_content)` pairs.
+fn rg_raw(pattern: &str, root: &Path) -> Vec<(Location, String)> {
+    let out = match Command::new("rg")
+        .args(["--no-heading", "--with-filename", "--line-number", "--column",
+               "--glob", "*.kt", "--glob", "*.java", "-e", pattern])
+        .arg(root)
+        .output()
+    {
+        Ok(o) if !o.stdout.is_empty() => o,
+        _ => return vec![],
+    };
     String::from_utf8_lossy(&out.stdout)
         .lines()
         .filter_map(parse_rg_line_with_content)
-        .filter(|(loc, content)| {
-            // Optionally skip declaration lines.
-            if include_decl { return true; }
-            let is_decl = decl_kws.iter().any(|kw| content.contains(kw))
-                && loc.uri.as_str() == from_uri.as_str();
-            !is_decl
-        })
-        .map(|(loc, _)| loc)
+        .collect()
+}
+
+/// Run `rg -l` to get the list of files matching a pattern.
+fn rg_files_with_matches(pattern: &str, root: &Path) -> Vec<String> {
+    let out = match Command::new("rg")
+        .args(["-l", "--glob", "*.kt", "--glob", "*.java", "-e", pattern])
+        .arg(root)
+        .output()
+    {
+        Ok(o) if !o.stdout.is_empty() => o,
+        _ => return vec![],
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Run `rg --word-regexp NAME` restricted to specific files.
+fn rg_word_in_files(safe_name: &str, files: &[String]) -> Vec<(Location, String)> {
+    if files.is_empty() { return vec![]; }
+    let out = match Command::new("rg")
+        .args(["--no-heading", "--with-filename", "--line-number", "--column",
+               "--word-regexp", "-e", safe_name, "--"])
+        .args(files)
+        .output()
+    {
+        Ok(o) if !o.stdout.is_empty() => o,
+        _ => return vec![],
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(parse_rg_line_with_content)
         .collect()
 }
 
@@ -1060,5 +1236,60 @@ mod tests {
             "nested qualified key missing");
         assert!(idx.qualified.contains_key("com.example.AccountContract.Event"),
             "nested Event qualified key missing");
+    }
+
+    // ── enclosing_class_at ───────────────────────────────────────────────────
+
+    #[test]
+    fn enclosing_class_simple() {
+        let src = "\
+sealed interface NewsFeedUiState {
+    data object Loading : NewsFeedUiState
+    data class Success(val items: List<String>) : NewsFeedUiState
+}";
+        let (u, idx) = indexed("/NewsFeed.kt", src);
+        // Line 1 = "    data object Loading ..."  → enclosing = NewsFeedUiState
+        assert_eq!(
+            idx.enclosing_class_at(&u, 1),
+            Some("NewsFeedUiState".into()),
+        );
+    }
+
+    #[test]
+    fn enclosing_class_top_level_returns_none() {
+        let src = "sealed interface NewsFeedUiState {\n    data object Loading : NewsFeedUiState\n}";
+        let (u, idx) = indexed("/NewsFeed.kt", src);
+        // Line 0 = the sealed interface itself — no enclosure
+        assert_eq!(idx.enclosing_class_at(&u, 0), None);
+    }
+
+    #[test]
+    fn enclosing_class_nested_two_levels() {
+        let src = "\
+class Outer {
+    sealed class Inner {
+        data object Loading : Inner
+    }
+}";
+        let (u, idx) = indexed("/Outer.kt", src);
+        // Line 2 = "        data object Loading..." → enclosing = Inner (closer one)
+        assert_eq!(idx.enclosing_class_at(&u, 2), Some("Inner".into()));
+    }
+
+    #[test]
+    fn extract_class_decl_name_variants() {
+        assert_eq!(extract_class_decl_name("sealed interface Foo {"), Some("Foo".into()));
+        assert_eq!(extract_class_decl_name("data class Bar(val x: Int)"), Some("Bar".into()));
+        assert_eq!(extract_class_decl_name("object Baz"), Some("Baz".into()));
+        assert_eq!(extract_class_decl_name("fun doSomething() {}"), None);
+        assert_eq!(extract_class_decl_name("val x: Int = 0"), None);
+        assert_eq!(extract_class_decl_name("// class NotReal"), None);
+    }
+
+    #[test]
+    fn regex_escape_dots_and_special() {
+        assert_eq!(regex_escape("Foo.Bar"), "Foo\\.Bar".to_string());
+        assert_eq!(regex_escape("Loading"), "Loading".to_string());
+        assert_eq!(regex_escape("get()"), "get\\(\\)".to_string());
     }
 }
