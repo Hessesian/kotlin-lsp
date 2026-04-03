@@ -465,47 +465,92 @@ fn package_prefix(import_path: &str) -> String {
         .join(".")
 }
 
-/// Candidate .kt filenames for a given import path, in priority order.
+/// Uppercase segment stems in priority order — outer class first.
+///
+/// `com.example.OuterClass.InnerClass` → `["OuterClass", "InnerClass"]`
+/// `com.example.Foo`                   → `["Foo"]`
+fn import_file_stems(import_path: &str) -> Vec<String> {
+    let upper: Vec<&str> = import_path
+        .split('.')
+        .filter(|s| s.chars().next().map(|c| c.is_uppercase()).unwrap_or(false))
+        .collect();
+    match upper.as_slice() {
+        []             => vec![],
+        [only]         => vec![only.to_string()],
+        [.., par, lst] => vec![par.to_string(), lst.to_string()],
+    }
+}
+
+/// Candidate .kt/.java filenames for a given import path, in priority order.
 ///
 /// Kotlin convention: uppercase segments = class names; the first uppercase
 /// segment is always the top-level class (= the file).  Any further uppercase
 /// segment is a nested class defined *inside* that file.
 ///
 /// `…accountpicker.AccountPickerContract.Event`
-///   → `["AccountPickerContract.kt", "Event.kt"]`
-///                    ↑ try this first — Event is nested inside it
+///   → `["AccountPickerContract.kt", "AccountPickerContract.java",
+///       "Event.kt", "Event.java"]`  (outer-class file tried first)
 ///
 /// `…example.Foo`
 ///   → `["Foo.kt", "Foo.java"]`
 fn import_file_candidates(import_path: &str) -> Vec<String> {
-    let upper: Vec<&str> = import_path
-        .split('.')
-        .filter(|s| s.chars().next().map(|c| c.is_uppercase()).unwrap_or(false))
-        .collect();
-
-    match upper.as_slice() {
-        [] => vec![],
-        [only] => vec![format!("{only}.kt"), format!("{only}.java")],
-        // For nested: outer class file first, then the symbol name as fallback.
-        // Try both .kt and .java for each candidate.
-        [.., parent, last] => vec![
-            format!("{parent}.kt"),
-            format!("{parent}.java"),
-            format!("{last}.kt"),
-            format!("{last}.java"),
-        ],
-    }
+    import_file_stems(import_path)
+        .into_iter()
+        .flat_map(|stem| [format!("{stem}.kt"), format!("{stem}.java")])
+        .collect()
 }
 
 /// Find and synchronously parse the file most likely to contain `symbol_name`.
+///
+/// Search strategy (fastest-first):
+///   1. fd `--full-path` regex derived from the import's package dir + filename —
+///      extremely precise; handles multi-module projects where files live in
+///      subdirs like `app/src/main/java/cz/moneta/…/EProductScreen.java`
+///   2. Fallback: global fd by filename only (handles non-standard layouts)
 fn fd_find_and_parse(symbol_name: &str, full_import_path: &str, root: Option<&Path>) -> Vec<Location> {
     let pkg = package_prefix(full_import_path);
     let expected_pkg = if pkg.is_empty() { None } else { Some(pkg.as_str()) };
-    for file_name in import_file_candidates(full_import_path) {
-        let locs = fd_search_file(&file_name, symbol_name, expected_pkg, root);
-        if !locs.is_empty() { return locs; }
+    let pkg_dir = pkg.replace('.', "/");
+
+    for stem in import_file_stems(full_import_path) {
+        // Strategy 1: precise full-path regex including the package directory.
+        // e.g. ".*/cz/moneta/data/compat/enums/product/EProductScreen\.(kt|java)$"
+        if let Some(root) = root {
+            let pat = if pkg_dir.is_empty() {
+                format!(r"{stem}\.(kt|java)$")
+            } else {
+                format!(r".*/{pkg_dir}/{stem}\.(kt|java)$")
+            };
+            let locs = fd_search_by_full_path_pattern(&pat, symbol_name, expected_pkg, root);
+            if !locs.is_empty() { return locs; }
+        }
+
+        // Strategy 2: global filename-only search (fallback for flat / non-standard layouts).
+        for ext in ["kt", "java"] {
+            let locs = fd_search_file(&format!("{stem}.{ext}"), symbol_name, expected_pkg, root);
+            if !locs.is_empty() { return locs; }
+        }
     }
     vec![]
+}
+
+/// fd `--full-path <regex>` — searches `root` for files whose absolute path
+/// matches `pattern`.  Parses each hit and returns locations for `symbol_name`.
+fn fd_search_by_full_path_pattern(
+    pattern:      &str,
+    symbol_name:  &str,
+    expected_pkg: Option<&str>,
+    root:         &Path,
+) -> Vec<Location> {
+    let Some(root_str) = root.to_str() else { return vec![] };
+    let out = match std::process::Command::new("fd")
+        .args(["--type", "f", "--absolute-path", "--full-path", pattern, root_str])
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return vec![],
+    };
+    parse_fd_hits(&out.stdout, symbol_name, expected_pkg)
 }
 
 fn fd_search_file(file_name: &str, symbol_name: &str, expected_pkg: Option<&str>, root: Option<&Path>) -> Vec<Location> {
@@ -513,21 +558,27 @@ fn fd_search_file(file_name: &str, symbol_name: &str, expected_pkg: Option<&str>
     cmd.args([
         "--type", "f",
         "--absolute-path",
-        "--max-results", "10",  // fetch more so we can filter by package
+        "--max-results", "10",
         file_name,
     ]);
-    if let Some(r) = root {
-        cmd.arg(r);
-    }
+    if let Some(r) = root { cmd.arg(r); }
 
     let out = match cmd.output() {
         Ok(o) if o.status.success() => o,
         _ => return vec![],
     };
+    parse_fd_hits(&out.stdout, symbol_name, expected_pkg)
+}
 
+/// Parse a list of newline-separated absolute file paths from fd output,
+/// parse each file with the appropriate parser, and return locations for
+/// `symbol_name`.  When `expected_pkg` is given the package-exact match is
+/// returned immediately; otherwise the first match wins.  A non-exact match
+/// is kept as a fallback and returned only if no exact match is found.
+fn parse_fd_hits(stdout: &[u8], symbol_name: &str, expected_pkg: Option<&str>) -> Vec<Location> {
     let mut fallback: Option<tower_lsp::lsp_types::Location> = None;
 
-    for path_str in String::from_utf8_lossy(&out.stdout).lines() {
+    for path_str in String::from_utf8_lossy(stdout).lines() {
         let path_str = path_str.trim();
         if path_str.is_empty() { continue; }
 
@@ -544,12 +595,10 @@ fn fd_search_file(file_name: &str, symbol_name: &str, expected_pkg: Option<&str>
 
         let loc = tower_lsp::lsp_types::Location { uri, range: sym.selection_range };
 
-        // If we know the expected package, prefer the file whose package declaration matches.
         if let Some(pkg) = expected_pkg {
-            if file_data.package.as_deref().map(|p| p == pkg).unwrap_or(false) {
+            if file_data.package.as_deref() == Some(pkg) {
                 return vec![loc];
             }
-            // Keep as fallback in case no exact match is found.
             if fallback.is_none() { fallback = Some(loc); }
         } else {
             return vec![loc];
@@ -631,12 +680,14 @@ fn resolve_star_imports(idx: &Indexer, name: &str, uri: &Url) -> Vec<Location> {
 
 /// `rg` scoped to the directory that would contain `package` sources.
 ///
-/// Package `com.example.ui` → glob `**/com/example/ui/*.kt`.
+/// Package `com.example.ui` → globs `**/com/example/ui/*.kt` and `…/*.java`.
 /// This handles the common case where the package structure mirrors the
 /// directory tree (standard Kotlin / Maven / Gradle convention).
 fn rg_in_package_dir(name: &str, package: &str, root: Option<&Path>) -> Vec<Location> {
-    let dir_glob = format!("**/{}/{}", package.replace('.', "/"), "*.kt");
-    let pattern  = build_rg_pattern(name);
+    let pkg_path = package.replace('.', "/");
+    let kt_glob   = format!("**/{pkg_path}/*.kt");
+    let java_glob = format!("**/{pkg_path}/*.java");
+    let pattern   = build_rg_pattern(name);
 
     let search_root: std::borrow::Cow<Path> = match root {
         Some(r) => std::borrow::Cow::Borrowed(r),
@@ -646,7 +697,8 @@ fn rg_in_package_dir(name: &str, package: &str, root: Option<&Path>) -> Vec<Loca
     let mut cmd = Command::new("rg");
     cmd.args([
         "--no-heading", "--with-filename", "--line-number", "--column",
-        "--glob", &dir_glob,
+        "--glob", &kt_glob,
+        "--glob", &java_glob,
         "-e", &pattern,
     ]);
     cmd.arg(search_root.as_ref());
@@ -824,16 +876,21 @@ fn find_local_declaration(idx: &Indexer, name: &str, uri: &Url) -> Vec<Location>
 
 /// Build the regex pattern used by `rg` for declaration sites.
 ///
-/// Matches Kotlin and Java keywords followed by `NAME` at a word boundary.
-/// Also matches extension functions: `fun ReceiverType.name(`.
+/// Matches both Kotlin and Java declaration keywords followed by `NAME`.
+///
+/// Kotlin: `fun`, `class`, `object`, `val`, `var`, `typealias`, `enum class`,
+///         extension functions `fun ReceiverType.name`
+/// Java:   `class`, `interface`, `enum` (standalone, no `class` suffix),
+///         with any leading access/modifier keywords ignored
 pub(crate) fn build_rg_pattern(name: &str) -> String {
     let safe: String = name.chars().flat_map(|c| {
         if c.is_alphanumeric() || c == '_' { vec![c] } else { vec!['\\', c] }
     }).collect();
+    // Kotlin: standard keywords + `enum class` + extension function receiver
+    // Java:   `enum NAME` (Java enums have no `class` after `enum`)
+    //         `class NAME` / `interface NAME` already covered by the Kotlin arm
     format!(
-        // Plain declaration: `fun name`, `class name`, `val name`, …
-        // Extension function: `fun SomeType.name`
-        r"(?:(?:class|interface|object|fun|val|var|typealias|enum\s+class)\s+|fun\s+\w[\w.]*\.){safe}\b"
+        r"(?:(?:class|interface|object|fun|val|var|typealias|enum\s+class)\s+|fun\s+\w[\w.]*\.|(?:public|private|protected|static|abstract|final|\s)+enum\s+){safe}\b"
     )
 }
 
@@ -1100,5 +1157,71 @@ mod tests {
         let locs = resolve_symbol(&idx, "loadDataFlow", Some("interactor"), &vm_uri);
         assert!(!locs.is_empty(), "loadDataFlow not found via constructor param type inference");
         assert_eq!(locs[0].uri, int_uri);
+    }
+
+    // ── build_rg_pattern ─────────────────────────────────────────────────────
+    // Use rg itself to validate patterns (it's always available in the dev env).
+
+    fn rg_matches(pattern: &str, text: &str) -> bool {
+        std::process::Command::new("rg")
+            .args(["--quiet", "-e", pattern, "--"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .ok()
+            .and_then(|mut c| {
+                use std::io::Write;
+                c.stdin.as_mut()?.write_all(text.as_bytes()).ok()?;
+                Some(c.wait().ok()?.success())
+            })
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn rg_pattern_matches_kotlin_class() {
+        let pat = build_rg_pattern("Foo");
+        assert!(rg_matches(&pat, "class Foo {"));
+        assert!(rg_matches(&pat, "sealed class Foo"));
+    }
+
+    #[test]
+    fn rg_pattern_matches_kotlin_enum() {
+        let pat = build_rg_pattern("EScreen");
+        assert!(rg_matches(&pat, "enum class EScreen {"));
+    }
+
+    #[test]
+    fn rg_pattern_matches_java_enum() {
+        let pat = build_rg_pattern("EProductScreen");
+        assert!(rg_matches(&pat, "public enum EProductScreen {"));
+        assert!(rg_matches(&pat, "  enum EProductScreen {"));
+        assert!(rg_matches(&pat, "private static enum EProductScreen {"));
+    }
+
+    #[test]
+    fn rg_pattern_no_false_positive_on_usage() {
+        let pat = build_rg_pattern("EProductScreen");
+        // Should NOT match a plain usage (not a declaration)
+        assert!(!rg_matches(&pat, "EProductScreen.SOMETHING"));
+        assert!(!rg_matches(&pat, "val x: EProductScreen = "));
+    }
+
+    #[test]
+    fn rg_pattern_matches_java_class() {
+        let pat = build_rg_pattern("FlexiEntryVM");
+        assert!(rg_matches(&pat, "public class FlexiEntryVM extends Base {"));
+    }
+
+    // ── import_file_stems ────────────────────────────────────────────────────
+
+    #[test]
+    fn file_stems_top_level() {
+        assert_eq!(import_file_stems("cz.moneta.data.EProductScreen"), vec!["EProductScreen"]);
+    }
+
+    #[test]
+    fn file_stems_nested() {
+        let s = import_file_stems("com.example.OuterClass.InnerClass");
+        assert_eq!(s, vec!["OuterClass", "InnerClass"]);
     }
 }
