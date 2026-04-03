@@ -536,24 +536,15 @@ impl Indexer {
         let data = self.files.get(loc.uri.as_str())?;
         let sym  = data.symbols.iter().find(|s| s.name == name)?;
 
-        // Try to show the actual source line as context.
-        let line_txt = data
-            .lines
-            .get(sym.selection_range.start.line as usize)
-            .map(|l| l.trim().to_owned())
-            .unwrap_or_default();
+        let start_line = sym.selection_range.start.line as usize;
+        let sig = collect_signature(&data.lines, start_line);
 
         let lang = if loc.uri.path().ends_with(".kt") { "kotlin" } else { "java" };
 
-        if line_txt.is_empty() {
-            Some(format!(
-                "```{}\n{} {}\n```",
-                lang,
-                symbol_kw(sym.kind),
-                name
-            ))
+        if sig.is_empty() {
+            Some(format!("```{}\n{} {}\n```", lang, symbol_kw(sym.kind), name))
         } else {
-            Some(format!("```{}\n{}\n```", lang, line_txt))
+            Some(format!("```{}\n{}\n```", lang, sig))
         }
     }
 
@@ -973,6 +964,47 @@ fn symbol_kw(kind: SymbolKind) -> &'static str {
     }
 }
 
+/// Collect the declaration signature starting at `start_line`, spanning
+/// multiple lines if the declaration continues (e.g. multiline constructor).
+///
+/// Rules:
+/// - Track `(` / `)` depth.
+/// - Once depth is back to 0, the signature ends at the current line.
+/// - A line ending with `{` signals the start of the body — strip the `{`
+///   and stop (we don't want the body in the hover).
+/// - Lines ending with `,` inside balanced parens always continue.
+/// - Cap at 15 lines to avoid runaway on pathological files.
+fn collect_signature(lines: &[String], start_line: usize) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut depth: i32 = 0;
+
+    for i in start_line..(start_line + 15).min(lines.len()) {
+        let raw   = lines[i].trim();
+
+        // Count parens in this line.
+        for ch in raw.chars() {
+            match ch { '(' => depth += 1, ')' => depth -= 1, _ => {} }
+        }
+
+        if raw.ends_with('{') {
+            // Body starts — include the line without the brace (shows inheritance).
+            let trimmed = raw.trim_end_matches('{').trim_end();
+            if !trimmed.is_empty() { parts.push(trimmed.to_owned()); }
+            break;
+        }
+
+        parts.push(raw.to_owned());
+
+        // Signature ends when parens are balanced and the line doesn't
+        // look like a continuation (trailing comma means more params follow).
+        if depth <= 0 && !raw.ends_with(',') {
+            break;
+        }
+    }
+
+    parts.join("\n")
+}
+
 // ─── tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1291,5 +1323,49 @@ class Outer {
         assert_eq!(regex_escape("Foo.Bar"), "Foo\\.Bar".to_string());
         assert_eq!(regex_escape("Loading"), "Loading".to_string());
         assert_eq!(regex_escape("get()"), "get\\(\\)".to_string());
+    }
+
+    // ── collect_signature ────────────────────────────────────────────────────
+
+    #[test]
+    fn signature_single_line_with_brace() {
+        let lines = vec!["sealed interface NewsFeedUiState {".to_owned()];
+        // The `{` should be stripped; result is just the declaration.
+        assert_eq!(
+            collect_signature(&lines, 0),
+            "sealed interface NewsFeedUiState"
+        );
+    }
+
+    #[test]
+    fn signature_multiline_constructor() {
+        let lines = vec![
+            "class DetailViewModel @Inject constructor(".to_owned(),
+            "  private val mapper: DetailMapper,".to_owned(),
+            "  private val loadUseCase: LoadDataUseCase,".to_owned(),
+            ") : MviViewModel<Event, State, Effect>() {".to_owned(),
+        ];
+        let sig = collect_signature(&lines, 0);
+        assert!(sig.contains("DetailViewModel"), "should contain class name");
+        assert!(sig.contains("MviViewModel"),    "should contain superclass");
+        assert!(!sig.contains('{'),              "should not include body brace");
+    }
+
+    #[test]
+    fn signature_fun_single_line() {
+        let lines = vec!["fun doSomething(x: Int): Boolean".to_owned()];
+        assert_eq!(collect_signature(&lines, 0), "fun doSomething(x: Int): Boolean");
+    }
+
+    #[test]
+    fn signature_stops_at_open_brace_on_own_line() {
+        // `{` on its own line — body opener, must not appear in output.
+        let lines = vec![
+            "class Foo(val x: Int)".to_owned(),
+            "    : Bar() {".to_owned(),
+        ];
+        let sig = collect_signature(&lines, 0);
+        assert!(!sig.contains('{'), "brace should be stripped");
+        assert!(sig.contains("Foo"), "class name must be present");
     }
 }
