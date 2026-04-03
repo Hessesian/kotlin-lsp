@@ -112,10 +112,43 @@ pub fn parse_java(content: &str) -> FileData {
 
 fn extract_java(node: &Node, bytes: &[u8], data: &mut FileData) {
     match node.kind() {
+        "package_declaration" => {
+            // (package_declaration "package" (scoped_identifier | identifier) ";")
+            let mut cur = node.walk();
+            for child in node.children(&mut cur) {
+                if matches!(child.kind(), "scoped_identifier" | "identifier") {
+                    if let Ok(txt) = child.utf8_text(bytes) {
+                        data.package = Some(txt.to_owned());
+                    }
+                    break;
+                }
+            }
+        }
         "class_declaration"     => push_named(node, bytes, SymbolKind::CLASS,     data),
         "interface_declaration" => push_named(node, bytes, SymbolKind::INTERFACE, data),
         "enum_declaration"      => push_named(node, bytes, SymbolKind::ENUM,      data),
         "method_declaration"    => push_named(node, bytes, SymbolKind::METHOD,    data),
+        "enum_constant" => {
+            // Direct child of enum_body — the first identifier child is the constant name.
+            let nr = ts_to_lsp(node.range());
+            let line_no = node.range().start_point.row;
+            let vis = visibility_at_line(&data.lines, line_no);
+            let mut cur = node.walk();
+            for child in node.children(&mut cur) {
+                if child.kind() == "identifier" {
+                    if let Ok(txt) = child.utf8_text(bytes) {
+                        data.symbols.push(SymbolEntry {
+                            name: txt.to_owned(),
+                            kind: SymbolKind::ENUM_MEMBER,
+                            visibility: vis,
+                            range: nr,
+                            selection_range: ts_to_lsp(child.range()),
+                        });
+                    }
+                    break;
+                }
+            }
+        }
         "field_declaration"     => {
             let nr = ts_to_lsp(node.range());
             let line_no = node.range().start_point.row;
@@ -546,4 +579,28 @@ mod tests {
         assert!(labels.contains(&"findAll"), "findAll missing: {labels:?}");
         assert!(!labels.contains(&"secret"),  "private 'secret' should be hidden: {labels:?}");
     }
+
+    #[test]
+    fn java_package_extracted() {
+        let data = parse_java("package cz.moneta.example;\npublic class Foo {}");
+        assert_eq!(data.package.as_deref(), Some("cz.moneta.example"));
+    }
+
+    #[test]
+    fn java_enum_constants_indexed() {
+        let data = parse_java("package cz.moneta.example;\npublic enum EProductScreen { FLEXIKREDIT, SAVINGS }");
+        assert_eq!(data.package.as_deref(), Some("cz.moneta.example"));
+        assert_eq!(sym(&data, "EProductScreen").unwrap().kind, SymbolKind::ENUM);
+        assert_eq!(sym(&data, "FLEXIKREDIT").unwrap().kind, SymbolKind::ENUM_MEMBER);
+        assert_eq!(sym(&data, "SAVINGS").unwrap().kind,     SymbolKind::ENUM_MEMBER);
+    }
+
+    #[test]
+    fn java_import_parsed() {
+        let data = parse_java("import cz.moneta.data.compat.enums.product.EProductScreen;\nclass Foo {}");
+        assert_eq!(data.imports.len(), 1);
+        assert_eq!(data.imports[0].local_name, "EProductScreen");
+        assert_eq!(data.imports[0].full_path,  "cz.moneta.data.compat.enums.product.EProductScreen");
+    }
 }
+

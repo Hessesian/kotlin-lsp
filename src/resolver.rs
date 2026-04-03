@@ -493,19 +493,21 @@ fn import_file_candidates(import_path: &str) -> Vec<String> {
 
 /// Find and synchronously parse the file most likely to contain `symbol_name`.
 fn fd_find_and_parse(symbol_name: &str, full_import_path: &str, root: Option<&Path>) -> Vec<Location> {
+    let pkg = package_prefix(full_import_path);
+    let expected_pkg = if pkg.is_empty() { None } else { Some(pkg.as_str()) };
     for file_name in import_file_candidates(full_import_path) {
-        let locs = fd_search_file(&file_name, symbol_name, root);
+        let locs = fd_search_file(&file_name, symbol_name, expected_pkg, root);
         if !locs.is_empty() { return locs; }
     }
     vec![]
 }
 
-fn fd_search_file(file_name: &str, symbol_name: &str, root: Option<&Path>) -> Vec<Location> {
+fn fd_search_file(file_name: &str, symbol_name: &str, expected_pkg: Option<&str>, root: Option<&Path>) -> Vec<Location> {
     let mut cmd = std::process::Command::new("fd");
     cmd.args([
         "--type", "f",
         "--absolute-path",
-        "--max-results", "5",
+        "--max-results", "10",  // fetch more so we can filter by package
         file_name,
     ]);
     if let Some(r) = root {
@@ -517,6 +519,8 @@ fn fd_search_file(file_name: &str, symbol_name: &str, root: Option<&Path>) -> Ve
         _ => return vec![],
     };
 
+    let mut fallback: Option<tower_lsp::lsp_types::Location> = None;
+
     for path_str in String::from_utf8_lossy(&out.stdout).lines() {
         let path_str = path_str.trim();
         if path_str.is_empty() { continue; }
@@ -526,11 +530,23 @@ fn fd_search_file(file_name: &str, symbol_name: &str, root: Option<&Path>) -> Ve
         let Ok(content) = std::fs::read_to_string(path) else { continue };
 
         let file_data = crate::parser::parse_kotlin(&content);
-        if let Some(sym) = file_data.symbols.iter().find(|s| s.name == symbol_name) {
-            return vec![tower_lsp::lsp_types::Location { uri, range: sym.selection_range }];
+        let Some(sym) = file_data.symbols.iter().find(|s| s.name == symbol_name) else { continue };
+
+        let loc = tower_lsp::lsp_types::Location { uri, range: sym.selection_range };
+
+        // If we know the expected package, prefer the file whose package declaration matches.
+        if let Some(pkg) = expected_pkg {
+            if file_data.package.as_deref().map(|p| p == pkg).unwrap_or(false) {
+                return vec![loc];
+            }
+            // Keep as fallback in case no exact match is found.
+            if fallback.is_none() { fallback = Some(loc); }
+        } else {
+            return vec![loc];
         }
     }
-    vec![]
+
+    fallback.map(|l| vec![l]).unwrap_or_default()
 }
 
 /// Step 3 — same-package visibility (no import needed in Kotlin).

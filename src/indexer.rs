@@ -165,9 +165,12 @@ impl Indexer {
 
                 let n = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                 // Report progress every ~5% (but at least every 50 files).
+                // Never send percentage=100 here — some editors (Helix) treat that
+                // as "done" and clear the spinner before the End notification fires.
+                // The End notification below carries the final summary.
                 let report_every = (total_cnt / 20).max(50);
-                if n % report_every == 0 || n == total_cnt {
-                    let pct = (n * 100 / total_cnt) as u32;
+                if n % report_every == 0 && n < total_cnt {
+                    let pct = ((n * 100) / total_cnt).min(99) as u32;
                     client2.send_notification::<progress::KotlinProgress>(ProgressParams {
                         token: token2,
                         value: ProgressParamsValue::WorkDone(WorkDoneProgress::Report(
@@ -245,6 +248,12 @@ impl Indexer {
         }
 
         // ── Register fresh definitions ────────────────────────────────────────
+        // Derive the file stem (e.g. "AccountContract" from "AccountContract.kt")
+        // so we can also store nested-class qualified keys like
+        // "com.example.AccountContract.State" in addition to "com.example.State".
+        let file_stem: Option<String> = uri.to_file_path().ok()
+            .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()));
+
         for sym in &data.symbols {
             let loc = Location { uri: uri.clone(), range: sym.selection_range };
 
@@ -257,7 +266,18 @@ impl Indexer {
 
             // qualified index: "com.example.Foo" → Location
             if let Some(ref pkg) = data.package {
-                self.qualified.insert(format!("{pkg}.{}", sym.name), loc);
+                // Primary key: pkg.SymbolName
+                self.qualified.insert(format!("{pkg}.{}", sym.name), loc.clone());
+
+                // Secondary key: pkg.FileStem.SymbolName — covers nested/inner classes
+                // whose import path includes the outer class name, e.g.
+                // `import com.example.AccountContract.State` where State is nested
+                // inside AccountContract.kt.
+                if let Some(ref stem) = file_stem {
+                    if *stem != sym.name {
+                        self.qualified.insert(format!("{pkg}.{stem}.{}", sym.name), loc);
+                    }
+                }
             }
         }
 
@@ -499,7 +519,12 @@ impl Indexer {
             let r = self.definitions.get(name)?;
             r.first()?.clone()
         };
+        self.hover_info_at_location(&loc, name)
+    }
 
+    /// Build hover markdown for `name` at a specific resolved `Location`.
+    /// Used by the hover handler so it shows the same symbol as go-to-definition.
+    pub fn hover_info_at_location(&self, loc: &Location, name: &str) -> Option<String> {
         let data = self.files.get(loc.uri.as_str())?;
         let sym  = data.symbols.iter().find(|s| s.name == name)?;
 
@@ -936,5 +961,24 @@ mod tests {
         let items = idx.completions(&vm_uri, Position::new(4, col), true);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(labels.contains(&"findAll"), "findAll missing; got: {labels:?}");
+    }
+
+    #[test]
+    fn nested_class_qualified_key() {
+        // AccountContract.kt defines a sealed class State nested inside it.
+        // The qualified index should store BOTH:
+        //   "com.example.State"                    (primary)
+        //   "com.example.AccountContract.State"    (nested — matches import path)
+        let uri = uri("/AccountContract.kt");
+        let idx = Indexer::new();
+        idx.index_content(&uri,
+            "package com.example\nclass AccountContract {\n  sealed class State\n  sealed class Event\n}");
+
+        assert!(idx.qualified.contains_key("com.example.State"),
+            "primary qualified key missing");
+        assert!(idx.qualified.contains_key("com.example.AccountContract.State"),
+            "nested qualified key missing");
+        assert!(idx.qualified.contains_key("com.example.AccountContract.Event"),
+            "nested Event qualified key missing");
     }
 }

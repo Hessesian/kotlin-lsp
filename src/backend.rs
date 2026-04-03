@@ -198,11 +198,20 @@ impl LanguageServer for Backend {
         let uri      = &pp.text_document.uri;
         let position = pp.position;
 
-        let Some(word) = self.indexer.word_at(uri, position) else {
+        let Some((word, qualifier)) = self.indexer.word_and_qualifier_at(uri, position) else {
             return Ok(None);
         };
 
-        Ok(self.indexer.hover_info(&word).map(|md| Hover {
+        // Use the same resolution chain as go-to-definition so hover always
+        // points at the same symbol (import-aware, not just first index match).
+        let locs = self.indexer.find_definition_qualified(&word, qualifier.as_deref(), uri);
+        let hover_md = if let Some(loc) = locs.first() {
+            self.indexer.hover_info_at_location(loc, &word)
+        } else {
+            self.indexer.hover_info(&word)
+        };
+
+        Ok(hover_md.map(|md| Hover {
             contents: HoverContents::Markup(MarkupContent {
                 kind:  MarkupKind::Markdown,
                 value: md,
