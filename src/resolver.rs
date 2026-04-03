@@ -317,6 +317,13 @@ pub fn resolve_symbol(idx: &Indexer, name: &str, qualifier: Option<&str>, from_u
     let star = resolve_star_imports(idx, name, from_uri);
     if !star.is_empty() { return star; }
 
+    // 4.5 ── superclass / interface hierarchy ─────────────────────────────────
+    // For inherited methods that carry no explicit import (e.g. `collectEffects()`
+    // defined in a base class that is itself imported, but the method is not).
+    let mut visited: Vec<String> = Vec::new();
+    let inherited = resolve_from_class_hierarchy(idx, name, from_uri, 0, &mut visited);
+    if !inherited.is_empty() { return inherited; }
+
     // 5 ── project-wide rg ───────────────────────────────────────────────────
     rg_find_definition(name, idx.workspace_root.get().map(PathBuf::as_path))
 }
@@ -676,7 +683,195 @@ fn resolve_star_imports(idx: &Indexer, name: &str, uri: &Url) -> Vec<Location> {
     vec![]
 }
 
-// ─── rg helpers ──────────────────────────────────────────────────────────────
+// ─── step 4.5: superclass / interface hierarchy ───────────────────────────────
+
+/// Walk the superclass / interface hierarchy of the class(es) declared in
+/// `from_uri` looking for a symbol named `name`.
+///
+/// Algorithm
+/// ---------
+/// 1. Extract direct supertype names from `from_uri`'s lines.
+/// 2. Resolve each supertype through the normal chain (imports, same-package…).
+/// 3. Search the resolved file's symbol table for `name`.
+/// 4. Recurse into that file's own supertypes (depth-limited, cycle-safe).
+fn resolve_from_class_hierarchy(
+    idx:      &Indexer,
+    name:     &str,
+    from_uri: &Url,
+    depth:    u8,
+    visited:  &mut Vec<String>,
+) -> Vec<Location> {
+    const MAX_DEPTH: u8 = 4;
+    if depth >= MAX_DEPTH { return vec![]; }
+
+    let key = from_uri.as_str().to_owned();
+    if visited.contains(&key) { return vec![]; }
+    visited.push(key);
+
+    let lines: Vec<String> = match idx.files.get(from_uri.as_str()) {
+        Some(f) => f.lines.clone(),
+        None    => return vec![],
+    };
+
+    for super_name in extract_supers_from_lines(&lines) {
+        // Resolve the supertype itself (goes through steps 1-4, not 4.5).
+        let super_locs = resolve_symbol(idx, &super_name, None, from_uri);
+        for super_loc in &super_locs {
+            let locs = find_name_in_uri(idx, name, super_loc.uri.as_str());
+            if !locs.is_empty() { return locs; }
+
+            // Recurse into the supertype's own hierarchy.
+            let locs = resolve_from_class_hierarchy(
+                idx, name, &super_loc.uri, depth + 1, visited,
+            );
+            if !locs.is_empty() { return locs; }
+        }
+    }
+    vec![]
+}
+
+/// Extract direct supertype names from source lines.
+///
+/// Handles:
+/// - Kotlin single-line: `class Foo : Bar(), Baz<X> {`
+/// - Kotlin multi-line constructor: last line of primary ctor is `) : Bar()` or
+///   a standalone `) : Bar()` after the constructor parameter block
+/// - Java: `class Foo extends Bar implements Baz, Qux {`
+pub(crate) fn extract_supers_from_lines(lines: &[String]) -> Vec<String> {
+    let mut result = Vec::new();
+    for line in lines {
+        let t = line.trim();
+        if t.is_empty()
+            || t.starts_with("//")
+            || t.starts_with('*')
+            || t.starts_with("import ")
+            || t.starts_with("package ")
+            || t.starts_with('@')
+        {
+            continue;
+        }
+
+        // Java: extends SuperClass
+        if let Some(pos) = word_boundary_pos(t, "extends") {
+            let rest = t[pos + 7..].trim_start();
+            let nm = leading_type_ident(rest);
+            if !nm.is_empty() { result.push(nm.to_owned()); }
+        }
+
+        // Java: implements I1, I2
+        if let Some(pos) = word_boundary_pos(t, "implements") {
+            let rest  = t[pos + 10..].trim_start();
+            let chunk = rest.split('{').next().unwrap_or(rest);
+            for part in split_top_level_commas(chunk) {
+                let nm = leading_type_ident(part.trim());
+                if !nm.is_empty() { result.push(nm.to_owned()); }
+            }
+        }
+
+        // Kotlin delegation specifiers: `: TypeA(...), TypeB<X>`
+        if let Some(colon) = kotlin_delegation_colon(t) {
+            let after = t[colon + 1..].trim_start();
+            let chunk = after.split('{').next().unwrap_or(after);
+            for part in split_top_level_commas(chunk) {
+                let nm = leading_type_ident(part.trim());
+                if !nm.is_empty()
+                    && nm.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+                {
+                    result.push(nm.to_owned());
+                }
+            }
+        }
+    }
+    result.dedup();
+    result
+}
+
+/// Find the byte offset of `word` in `text` at a word boundary.
+fn word_boundary_pos(text: &str, word: &str) -> Option<usize> {
+    let wlen = word.len();
+    let b    = text.as_bytes();
+    let wb   = word.as_bytes();
+    let mut i = 0;
+    while i + wlen <= b.len() {
+        if b[i..i + wlen] == *wb {
+            let before_ok = i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_');
+            let after_ok  = i + wlen >= b.len()
+                || !(b[i + wlen].is_ascii_alphanumeric() || b[i + wlen] == b'_');
+            if before_ok && after_ok { return Some(i); }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Extract the leading identifier / type name, stopping before `<(;{ ,\t\n`.
+fn leading_type_ident(s: &str) -> &str {
+    let end = s
+        .find(|c: char| matches!(c, '<' | '(' | '{' | ';' | ',' | ' ' | '\t' | '\n'))
+        .unwrap_or(s.len());
+    &s[..end]
+}
+
+/// Find the `:` that introduces Kotlin delegation specifiers (not type
+/// annotations on `val`/`var`/`fun` return types).
+///
+/// Valid:   `class Foo : Bar`  `) : Bar`  `class Foo(val x: Int) : Bar`
+/// Invalid: `val x: Int`  `fun f(): Int`  (return-type annotations)
+fn kotlin_delegation_colon(line: &str) -> Option<usize> {
+    let b = line.as_bytes();
+    let mut depth: i32 = 0;
+    let mut found: Option<usize> = None;
+
+    for (i, &ch) in b.iter().enumerate() {
+        match ch {
+            b'<' | b'(' => depth += 1,
+            b'>' | b')' => { if depth > 0 { depth -= 1; } }
+            b':' if depth == 0 => {
+                // Must be followed (after spaces) by an uppercase letter.
+                let after = line[i + 1..].trim_start();
+                if !after.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                    continue;
+                }
+                let before     = line[..i].trim_end();
+                let class_kw   = before.contains("class ")
+                    || before.contains("interface ")
+                    || before.contains("object ");
+                let after_paren = before.ends_with(')');
+
+                if class_kw {
+                    // Inside a class/interface/object declaration line — always valid.
+                    found = Some(i);
+                } else if after_paren {
+                    // Could be `fun f(): Int` (return type) or `): Bar` (continuation).
+                    // Accept only if the line itself starts with `)` (a pure continuation
+                    // line from a multi-line primary constructor).
+                    if line.trim_start().starts_with(')') {
+                        found = Some(i);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    found
+}
+
+/// Split `text` at commas that are not inside `<>` or `()`.
+fn split_top_level_commas(text: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth: i32 = 0;
+    let mut start = 0;
+    for (i, ch) in text.char_indices() {
+        match ch {
+            '<' | '(' => depth += 1,
+            '>' | ')' => { if depth > 0 { depth -= 1; } }
+            ',' if depth == 0 => { parts.push(&text[start..i]); start = i + 1; }
+            _ => {}
+        }
+    }
+    if start <= text.len() { parts.push(&text[start..]); }
+    parts
+}
 
 /// `rg` scoped to the directory that would contain `package` sources.
 ///
@@ -846,10 +1041,14 @@ fn find_name_in_uri(idx: &Indexer, name: &str, file_uri: &str) -> Vec<Location> 
         return vec![];
     }
 
-    // c) File not yet indexed — parse on demand
+    // c) File not yet indexed — parse on demand using the correct parser
     if let Ok(path) = uri.to_file_path() {
         if let Ok(content) = std::fs::read_to_string(&path) {
-            let file_data = crate::parser::parse_kotlin(&content);
+            let file_data = if file_uri.ends_with(".java") {
+                crate::parser::parse_java(&content)
+            } else {
+                crate::parser::parse_kotlin(&content)
+            };
             if let Some(sym) = file_data.symbols.iter().find(|s| s.name == name) {
                 return vec![Location { uri, range: sym.selection_range }];
             }
@@ -1223,5 +1422,91 @@ mod tests {
     fn file_stems_nested() {
         let s = import_file_stems("com.example.OuterClass.InnerClass");
         assert_eq!(s, vec!["OuterClass", "InnerClass"]);
+    }
+
+    // ── extract_supers_from_lines ─────────────────────────────────────────────
+
+    #[test]
+    fn supers_kotlin_single_line() {
+        let lines = vec!["class DetailViewModel : MviViewModel<Event, State, Effect>() {".to_string()];
+        assert_eq!(extract_supers_from_lines(&lines), vec!["MviViewModel"]);
+    }
+
+    #[test]
+    fn supers_kotlin_multi_line_ctor() {
+        // Primary constructor spans multiple lines; super is on the closing ) line
+        let lines = vec![
+            "class DetailViewModel @Inject constructor(".to_string(),
+            "  private val useCase: UseCase,".to_string(),
+            ") : MviViewModel<Event, State, Effect>() {".to_string(),
+        ];
+        assert_eq!(extract_supers_from_lines(&lines), vec!["MviViewModel"]);
+    }
+
+    #[test]
+    fn supers_kotlin_multiple() {
+        let lines = vec!["class Foo : BaseClass(), SomeInterface, AnotherInterface {".to_string()];
+        let s = extract_supers_from_lines(&lines);
+        assert!(s.contains(&"BaseClass".to_string()));
+        assert!(s.contains(&"SomeInterface".to_string()));
+        assert!(s.contains(&"AnotherInterface".to_string()));
+    }
+
+    #[test]
+    fn supers_java_extends() {
+        let lines = vec!["public class FlexiEntryVM extends BaseFlexikreditVM {".to_string()];
+        assert_eq!(extract_supers_from_lines(&lines), vec!["BaseFlexikreditVM"]);
+    }
+
+    #[test]
+    fn supers_java_implements() {
+        let lines = vec![
+            "public class Foo extends Base implements Runnable, Serializable {".to_string()
+        ];
+        let s = extract_supers_from_lines(&lines);
+        assert!(s.contains(&"Base".to_string()));
+        assert!(s.contains(&"Runnable".to_string()));
+        assert!(s.contains(&"Serializable".to_string()));
+    }
+
+    #[test]
+    fn supers_does_not_pick_up_type_annotations() {
+        // val x: Int — the ':' here must NOT be treated as delegation
+        let lines = vec![
+            "class Foo {".to_string(),
+            "  val x: Int = 0".to_string(),
+            "  fun f(): String = \"\"".to_string(),
+        ];
+        assert!(extract_supers_from_lines(&lines).is_empty());
+    }
+
+    // ── resolve_from_class_hierarchy ─────────────────────────────────────────
+
+    #[test]
+    fn resolve_inherited_method() {
+        let base_uri = uri("/Base.kt");
+        let child_uri = uri("/Child.kt");
+        let idx = Indexer::new();
+        idx.index_content(&base_uri,  "package com.example\nopen class Base {\n  fun baseMethod() {}\n}");
+        idx.index_content(&child_uri, "package com.example\nclass Child : Base() {}\n");
+
+        // `baseMethod` is not declared in Child — must be found via hierarchy
+        let locs = resolve_symbol(&idx, "baseMethod", None, &child_uri);
+        assert!(!locs.is_empty(), "inherited method not found");
+        assert_eq!(locs[0].uri, base_uri);
+    }
+
+    #[test]
+    fn resolve_inherited_method_via_import() {
+        let base_uri  = uri("/lib/Base.kt");
+        let child_uri = uri("/app/Child.kt");
+        let idx = Indexer::new();
+        idx.index_content(&base_uri,  "package com.lib\nopen class Base {\n  fun doStuff() {}\n}");
+        idx.index_content(&child_uri,
+            "package com.app\nimport com.lib.Base\nclass Child : Base() {}\n");
+
+        let locs = resolve_symbol(&idx, "doStuff", None, &child_uri);
+        assert!(!locs.is_empty(), "inherited method not found via import");
+        assert_eq!(locs[0].uri, base_uri);
     }
 }
