@@ -117,9 +117,13 @@ impl Indexer {
 
         // ── LSP progress: begin ──────────────────────────────────────────────
         let token = NumberOrString::String("kotlin-lsp/indexing".into());
-        // Ask the client to create a progress token (some editors require this).
-        let _ = client.send_request::<tower_lsp::lsp_types::request::WorkDoneProgressCreate>(
-            WorkDoneProgressCreateParams { token: token.clone() }
+        // Ask the client to create a progress token. Use a short timeout — some
+        // editors (older Helix versions) never reply, which would stall indexing.
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            client.send_request::<tower_lsp::lsp_types::request::WorkDoneProgressCreate>(
+                WorkDoneProgressCreateParams { token: token.clone() }
+            )
         ).await;
 
         let begin_msg = if truncated {

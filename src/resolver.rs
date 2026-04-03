@@ -476,7 +476,7 @@ fn package_prefix(import_path: &str) -> String {
 ///                    ↑ try this first — Event is nested inside it
 ///
 /// `…example.Foo`
-///   → `["Foo.kt"]`
+///   → `["Foo.kt", "Foo.java"]`
 fn import_file_candidates(import_path: &str) -> Vec<String> {
     let upper: Vec<&str> = import_path
         .split('.')
@@ -484,10 +484,16 @@ fn import_file_candidates(import_path: &str) -> Vec<String> {
         .collect();
 
     match upper.as_slice() {
-        []        => vec![],
-        [only]    => vec![format!("{only}.kt")],
-        // For nested: outer class file first, then the symbol name as fallback
-        [.., parent, last] => vec![format!("{parent}.kt"), format!("{last}.kt")],
+        [] => vec![],
+        [only] => vec![format!("{only}.kt"), format!("{only}.java")],
+        // For nested: outer class file first, then the symbol name as fallback.
+        // Try both .kt and .java for each candidate.
+        [.., parent, last] => vec![
+            format!("{parent}.kt"),
+            format!("{parent}.java"),
+            format!("{last}.kt"),
+            format!("{last}.java"),
+        ],
     }
 }
 
@@ -529,7 +535,11 @@ fn fd_search_file(file_name: &str, symbol_name: &str, expected_pkg: Option<&str>
         let Ok(uri) = tower_lsp::lsp_types::Url::from_file_path(path) else { continue };
         let Ok(content) = std::fs::read_to_string(path) else { continue };
 
-        let file_data = crate::parser::parse_kotlin(&content);
+        let file_data = if path_str.ends_with(".java") {
+            crate::parser::parse_java(&content)
+        } else {
+            crate::parser::parse_kotlin(&content)
+        };
         let Some(sym) = file_data.symbols.iter().find(|s| s.name == symbol_name) else { continue };
 
         let loc = tower_lsp::lsp_types::Location { uri, range: sym.selection_range };
@@ -866,21 +876,27 @@ mod tests {
 
     #[test]
     fn import_candidates_top_level() {
-        assert_eq!(import_file_candidates("com.example.Foo"), vec!["Foo.kt"]);
+        let c = import_file_candidates("com.example.Foo");
+        assert_eq!(c[0], "Foo.kt");
+        assert_eq!(c[1], "Foo.java");
     }
 
     #[test]
     fn import_candidates_nested() {
         let c = import_file_candidates("com.example.OuterClass.InnerClass");
-        assert_eq!(c[0], "OuterClass.kt"); // outer class file tried first
-        assert_eq!(c[1], "InnerClass.kt");
+        assert_eq!(c[0], "OuterClass.kt");   // outer class file tried first
+        assert_eq!(c[1], "OuterClass.java");
+        assert_eq!(c[2], "InnerClass.kt");
+        assert_eq!(c[3], "InnerClass.java");
     }
 
     #[test]
     fn import_candidates_deeply_nested() {
         let c = import_file_candidates("a.b.Outer.Middle.Inner");
         assert_eq!(c[0], "Middle.kt");
-        assert_eq!(c[1], "Inner.kt");
+        assert_eq!(c[1], "Middle.java");
+        assert_eq!(c[2], "Inner.kt");
+        assert_eq!(c[3], "Inner.java");
     }
 
     #[test]
