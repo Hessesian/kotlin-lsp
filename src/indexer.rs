@@ -518,6 +518,10 @@ impl Indexer {
 
     /// Build a Markdown hover snippet for a symbol name.
     pub fn hover_info(&self, name: &str) -> Option<String> {
+        // Check stdlib first so well-known symbols (run, apply, map, …) get
+        // proper signatures even when no project source contains them.
+        if let Some(md) = crate::stdlib::hover(name) { return Some(md); }
+
         // Drop the dashmap ref before taking the second one.
         let loc: Location = {
             let r = self.definitions.get(name)?;

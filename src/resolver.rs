@@ -88,6 +88,10 @@ fn complete_dot(idx: &Indexer, receiver: &str, from_uri: &Url, snippets: bool) -
 
     // Sort: functions/methods first, then fields/vars, then everything else.
     items.sort_by_key(|i| kind_sort_rank(i.kind));
+
+    // Append stdlib extension functions (scope fns, collection, string helpers).
+    // They sort after project symbols via the "z:" prefix set in stdlib.rs.
+    items.extend(crate::stdlib::dot_completions(snippets));
     items
 }
 
@@ -177,6 +181,19 @@ fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippets: bool) ->
     if !lowercase_mode {
         for entry in idx.definitions.iter() {
             add(entry.key(), CompletionItemKind::CLASS);
+        }
+    }
+
+    // 4. Stdlib top-level / scope functions (listOf, println, run, with, …)
+    for mut item in crate::stdlib::bare_completions(snippets) {
+        if lowercase_mode && item.label.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+            continue;
+        }
+        if item.label.starts_with(&prefix_lower) && seen.insert(item.label.clone()) {
+            // Re-apply prefix filter (bare_completions returns all of them).
+            if item.label.to_lowercase().starts_with(&prefix_lower) {
+                items.push(item);
+            }
         }
     }
 
