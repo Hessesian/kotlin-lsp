@@ -225,7 +225,7 @@ pub fn hover(name: &str) -> Option<String> {
 
 /// Completion items for dot-trigger (extension functions on any receiver).
 pub fn dot_completions(snippets: bool) -> Vec<tower_lsp::lsp_types::CompletionItem> {
-    use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, InsertTextFormat};
+    use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind};
     all()
         .filter(|e| e.is_extension)
         // Deduplicate by name (same name in multiple tables → single item)

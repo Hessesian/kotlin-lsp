@@ -185,7 +185,7 @@ fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippets: bool) ->
     }
 
     // 4. Stdlib top-level / scope functions (listOf, println, run, with, …)
-    for mut item in crate::stdlib::bare_completions(snippets) {
+    for item in crate::stdlib::bare_completions(snippets) {
         if lowercase_mode && item.label.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
             continue;
         }
