@@ -454,6 +454,29 @@ mod tests {
     }
 
     #[test]
+    fn primary_ctor_val_param_indexed() {
+        let data = parse_kotlin("data class User(val name: String, val age: Int)");
+        assert_eq!(sym(&data, "name").unwrap().kind, SymbolKind::PROPERTY,
+            "val ctor param should be PROPERTY");
+        assert_eq!(sym(&data, "age").unwrap().kind, SymbolKind::PROPERTY);
+    }
+
+    #[test]
+    fn primary_ctor_var_param_indexed() {
+        let data = parse_kotlin("class Counter(var count: Int = 0)");
+        assert_eq!(sym(&data, "count").unwrap().kind, SymbolKind::VARIABLE,
+            "var ctor param should be VARIABLE");
+    }
+
+    #[test]
+    fn primary_ctor_plain_param_not_indexed() {
+        // A plain parameter WITHOUT val/var is NOT a property — should not be indexed.
+        let data = parse_kotlin("class Foo(name: String)");
+        assert!(sym(&data, "name").is_none(),
+            "plain ctor param (no val/var) should not be in symbol index");
+    }
+
+    #[test]
     fn val_destructure() {
         let data = parse_kotlin("val (a, b) = pair");
         assert!(sym(&data, "a").is_some());

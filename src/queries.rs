@@ -123,6 +123,17 @@ pub const KOTLIN_DEFINITIONS: &str = r#"
 (enum_class_body
   (enum_entry
     (simple_identifier) @name) @def)
+
+; 18 — primary constructor val parameter  (creates a property / backing field).
+;     Uses binding_pattern_kind like property_declaration but inside class_parameter.
+(class_parameter
+  (binding_pattern_kind "val")
+  (simple_identifier) @name) @def
+
+; 19 — primary constructor var parameter
+(class_parameter
+  (binding_pattern_kind "var")
+  (simple_identifier) @name) @def
 "#;
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -240,6 +251,8 @@ pub fn def_pattern_meta(pattern_index: usize) -> (SymbolKind, Option<&'static st
         15 => (SymbolKind::PROPERTY,        Some("val (destructure)")),
         16 => (SymbolKind::VARIABLE,        Some("var (destructure)")),
         17 => (SymbolKind::ENUM_MEMBER,     None),              // enum entry
+        18 => (SymbolKind::PROPERTY,        Some("val param")), // primary ctor val param
+        19 => (SymbolKind::VARIABLE,        Some("var param")), // primary ctor var param
         _  => (SymbolKind::NULL,            None),
     }
 }

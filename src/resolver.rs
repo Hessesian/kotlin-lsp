@@ -1640,4 +1640,35 @@ mod tests {
         let range = find_declaration_range_in_lines(&lines, "account");
         assert!(range.is_none(), "false positive on usage line");
     }
+
+    // ── primary constructor val/var parameter resolution ─────────────────────
+
+    #[test]
+    fn resolve_data_class_field_via_dot_access() {
+        // user.name should resolve to `val name: String` in User's primary ctor
+        let user_uri = uri("/User.kt");
+        let caller_uri = uri("/Caller.kt");
+        let idx = Indexer::new();
+        idx.index_content(&user_uri,
+            "package com.example\ndata class User(val name: String, val age: Int)");
+        idx.index_content(&caller_uri,
+            "package com.example\nfun greet(user: User) { println(user.name) }");
+
+        let locs = resolve_symbol(&idx, "name", Some("user"), &caller_uri);
+        assert!(!locs.is_empty(), "name not found via user.name");
+        assert_eq!(locs[0].uri, user_uri, "should point to User.kt");
+    }
+
+    #[test]
+    fn resolve_ctor_param_no_qualifier() {
+        // Inside the class itself, `name` should resolve to the ctor param.
+        let uri = uri("/User.kt");
+        let idx = Indexer::new();
+        idx.index_content(&uri,
+            "package com.example\ndata class User(val name: String) {\n  fun display() = name\n}");
+
+        let locs = resolve_symbol(&idx, "name", None, &uri);
+        assert!(!locs.is_empty(), "ctor param not found locally");
+        assert_eq!(locs[0].uri, uri, "should stay in same file");
+    }
 }
