@@ -1671,4 +1671,22 @@ mod tests {
         assert!(!locs.is_empty(), "ctor param not found locally");
         assert_eq!(locs[0].uri, uri, "should stay in same file");
     }
+
+    #[test]
+    fn resolve_named_arg_to_ctor_param() {
+        // User(name = "Alice") — qualifier is "User" (detected by word_and_qualifier_at).
+        // resolve_symbol with qualifier="User" must find `val name` in User's primary ctor.
+        let user_uri   = uri("/User.kt");
+        let caller_uri = uri("/Caller.kt");
+        let idx = Indexer::new();
+        idx.index_content(&user_uri,
+            "package com.example\ndata class User(val name: String, val age: Int)");
+        idx.index_content(&caller_uri,
+            "package com.example\nfun test() { val u = User(name = \"Alice\", age = 30) }");
+
+        // Simulate what the backend does after word_and_qualifier_at returns ("name", "User")
+        let locs = resolve_symbol(&idx, "name", Some("User"), &caller_uri);
+        assert!(!locs.is_empty(), "named arg 'name' not resolved to User ctor param");
+        assert_eq!(locs[0].uri, user_uri, "should point to User.kt, not caller");
+    }
 }

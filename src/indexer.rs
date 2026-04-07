@@ -621,7 +621,20 @@ impl Indexer {
             let q: String = chars[scan..start - 1].iter().collect();
             let q = q.trim_start_matches('.').to_string();
             if !q.is_empty() && q != "_" { Some(q) } else { None }
-        } else { None };
+        } else {
+            // No dot-qualifier. Check if this looks like a named argument: `word = value`
+            // (but NOT `word ==`). If so, scan backward for the enclosing call's name
+            // and use that as the qualifier so we search the constructor/function's params.
+            let after: String = chars[end..].iter().collect();
+            let after_trimmed = after.trim_start();
+            let is_named_arg = after_trimmed.starts_with('=')
+                && !after_trimmed.starts_with("==");
+            if is_named_arg {
+                find_enclosing_call_name(&data.lines, position.line as usize, start)
+            } else {
+                None
+            }
+        };
 
         Some((word, qualifier))
     }
@@ -1155,6 +1168,59 @@ fn is_id_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
+/// Scan backward from `(line_no, col)` — where `col` is the START of the cursor
+/// word — to find the name of the enclosing function/constructor call.
+///
+/// Used to resolve named arguments: `User(name = "Alice")` with cursor on `name`
+/// → scan back past the `(` → return `"User"`.
+///
+/// Only returns identifiers that start with an uppercase letter (constructor calls).
+/// Lowercase callees (e.g. `copy(name = …)`) are too ambiguous without type
+/// information and are left for the fallback resolver.
+///
+/// Scans at most 20 lines backward to avoid runaway on deeply nested expressions.
+fn find_enclosing_call_name(lines: &[String], line_no: usize, col: usize) -> Option<String> {
+    let mut depth: i32 = 0;
+    let max_scan = 20usize;
+
+    // Scan the current line leftward from `col`, then previous lines rightward→left.
+    let scan_range_start = line_no.saturating_sub(max_scan);
+
+    for ln in (scan_range_start..=line_no).rev() {
+        let line_chars: Vec<char> = lines[ln].chars().collect();
+        // On the first (current) line only scan up to `col`; on earlier lines scan all.
+        let scan_to = if ln == line_no { col } else { line_chars.len() };
+
+        for i in (0..scan_to).rev() {
+            match line_chars[i] {
+                ')' | ']' => depth += 1,
+                '(' | '[' => {
+                    depth -= 1;
+                    if depth < 0 {
+                        // This `(` opened the call we're inside. Extract the word just before it.
+                        if i == 0 { return None; }
+                        let mut end = i;
+                        while end > 0 && (is_id_char(line_chars[end - 1]) || line_chars[end - 1] == '.') {
+                            end -= 1;
+                        }
+                        if end >= i { return None; }
+                        // Take only the last identifier segment (strip package prefix).
+                        let name: String = line_chars[end..i].iter().collect();
+                        let name = name.rsplit('.').next().unwrap_or(&name).to_string();
+                        // Only handle uppercase (constructor) calls for now.
+                        if name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                            return Some(name);
+                        }
+                        return None;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
 fn symbol_kw(kind: SymbolKind) -> &'static str {
     match kind {
         SymbolKind::CLASS          => "class",
@@ -1618,7 +1684,51 @@ mod tests {
         );
     }
 
-    // ── index_content ────────────────────────────────────────────────────────
+    // ── named argument detection ──────────────────────────────────────────────
+
+    #[test]
+    fn named_arg_simple_constructor() {
+        // `User(name = "Alice")` cursor on `name` → qualifier should be "User"
+        let (u, idx) = indexed("/t.kt", "User(name = \"Alice\")");
+        assert_eq!(
+            idx.word_and_qualifier_at(&u, Position::new(0, 5)),
+            Some(("name".into(), Some("User".into())))
+        );
+    }
+
+    #[test]
+    fn named_arg_not_equality() {
+        // `if (x == foo)` — `==` is NOT a named arg
+        let (u, idx) = indexed("/t.kt", "val r = x == foo");
+        assert_eq!(
+            idx.word_and_qualifier_at(&u, Position::new(0, 9)),
+            Some(("x".into(), None))  // plain word, no qualifier
+        );
+    }
+
+    #[test]
+    fn named_arg_assignment_not_arg() {
+        // `val x = y` — `=` after a `val` binding is NOT a named arg (not inside a call)
+        let (u, idx) = indexed("/t.kt", "val x = someValue");
+        assert_eq!(
+            idx.word_and_qualifier_at(&u, Position::new(0, 4)),
+            Some(("x".into(), None))  // no enclosing `(` → no qualifier
+        );
+    }
+
+    #[test]
+    fn named_arg_multiline_ctor() {
+        // Constructor split across lines:
+        //   User(
+        //       name = "Alice",  ← cursor on name (col 8)
+        //   )
+        let src = "User(\n    name = \"Alice\",\n)";
+        let (u, idx) = indexed("/t.kt", src);
+        assert_eq!(
+            idx.word_and_qualifier_at(&u, Position::new(1, 4)),
+            Some(("name".into(), Some("User".into())))
+        );
+    }
 
     #[test]
     fn symbol_found_after_indexing() {
