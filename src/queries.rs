@@ -57,42 +57,69 @@ pub const KOTLIN_DEFINITIONS: &str = r#"
 (type_alias
   (type_identifier) @name) @def
 
-; 7 — top-level fun only  (direct child of source_file)
+; 7 — operator fun, top-level  MUST be before plain fun patterns.
+(source_file
+  (function_declaration
+    (modifiers (function_modifier "operator"))
+    (simple_identifier) @name) @def)
+
+; 8 — operator fun, method / nested  MUST be before plain fun patterns.
+(function_declaration
+  (modifiers (function_modifier "operator"))
+  (simple_identifier) @name) @def
+
+; 9 — top-level fun only  (direct child of source_file)
 (source_file
   (function_declaration
     (simple_identifier) @name) @def)
 
-; 8 — method / nested fun  (any function_declaration NOT direct child of source_file)
+; 10 — method / nested fun  (any function_declaration NOT direct child of source_file)
 (function_declaration
   (simple_identifier) @name) @def
 
-; 9 — val (single variable)
+; 11 — const val (single variable)  MUST be before plain val patterns.
+;     property_modifier is a named leaf whose kind IS "const" (no anonymous child).
+(property_declaration
+  (modifiers (property_modifier))
+  (binding_pattern_kind "val")
+  (variable_declaration
+    (simple_identifier) @name)) @def
+
+; 12 — val (single variable)
 (property_declaration
   (binding_pattern_kind "val")
   (variable_declaration
     (simple_identifier) @name)) @def
 
-; 10 — var (single variable)
+; 13 — var (single variable)
 (property_declaration
   (binding_pattern_kind "var")
   (variable_declaration
     (simple_identifier) @name)) @def
 
-; 11 — val (destructuring)
+; 14 — const val (destructuring)
+(property_declaration
+  (modifiers (property_modifier))
+  (binding_pattern_kind "val")
+  (multi_variable_declaration
+    (variable_declaration
+      (simple_identifier) @name))) @def
+
+; 15 — val (destructuring)
 (property_declaration
   (binding_pattern_kind "val")
   (multi_variable_declaration
     (variable_declaration
       (simple_identifier) @name))) @def
 
-; 12 — var (destructuring)
+; 16 — var (destructuring)
 (property_declaration
   (binding_pattern_kind "var")
   (multi_variable_declaration
     (variable_declaration
       (simple_identifier) @name))) @def
 
-; 13 — enum entry  (DETAIL, LIST, etc. inside enum class bodies)
+; 17 — enum entry  (DETAIL, LIST, etc. inside enum class bodies)
 (enum_class_body
   (enum_entry
     (simple_identifier) @name) @def)
@@ -196,19 +223,23 @@ use tower_lsp::lsp_types::SymbolKind;
 pub fn def_pattern_meta(pattern_index: usize) -> (SymbolKind, Option<&'static str>) {
     match pattern_index {
         0  => (SymbolKind::ENUM,            None),              // enum class
-        1  => (SymbolKind::CLASS,           Some("data class")),// data class
-        2  => (SymbolKind::CLASS,           None),              // plain class
+        1  => (SymbolKind::STRUCT,          Some("data class")),// data class
+        2  => (SymbolKind::CLASS,           None),              // plain class (sealed/abstract/…)
         3  => (SymbolKind::INTERFACE,       None),              // interface
         4  => (SymbolKind::OBJECT,          None),              // object
         5  => (SymbolKind::OBJECT,          Some("companion object")),
-        6  => (SymbolKind::TYPE_PARAMETER,  Some("typealias")),
-        7  => (SymbolKind::FUNCTION,        None),              // top-level fun
-        8  => (SymbolKind::METHOD,          None),              // method / nested fun
-        9  => (SymbolKind::CONSTANT,        None),              // val
-        10 => (SymbolKind::VARIABLE,        None),              // var
-        11 => (SymbolKind::CONSTANT,        Some("val (destructure)")),
-        12 => (SymbolKind::VARIABLE,        Some("var (destructure)")),
-        13 => (SymbolKind::ENUM_MEMBER,     None),              // enum entry
+        6  => (SymbolKind::CLASS,           Some("typealias")), // typealias
+        7  => (SymbolKind::OPERATOR,        None),              // operator fun (top-level)
+        8  => (SymbolKind::OPERATOR,        None),              // operator fun (method)
+        9  => (SymbolKind::FUNCTION,        None),              // top-level fun
+        10 => (SymbolKind::METHOD,          None),              // method / nested fun
+        11 => (SymbolKind::CONSTANT,        Some("const val")), // const val
+        12 => (SymbolKind::PROPERTY,        None),              // val property
+        13 => (SymbolKind::VARIABLE,        None),              // var
+        14 => (SymbolKind::CONSTANT,        Some("const val (destructure)")),
+        15 => (SymbolKind::PROPERTY,        Some("val (destructure)")),
+        16 => (SymbolKind::VARIABLE,        Some("var (destructure)")),
+        17 => (SymbolKind::ENUM_MEMBER,     None),              // enum entry
         _  => (SymbolKind::NULL,            None),
     }
 }

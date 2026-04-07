@@ -125,9 +125,12 @@ fn extract_java(node: &Node, bytes: &[u8], data: &mut FileData) {
             }
         }
         "class_declaration"     => push_named(node, bytes, SymbolKind::CLASS,     data),
+        "record_declaration"    => push_named(node, bytes, SymbolKind::STRUCT,    data),
         "interface_declaration" => push_named(node, bytes, SymbolKind::INTERFACE, data),
+        "annotation_type_declaration" => push_named(node, bytes, SymbolKind::INTERFACE, data),
         "enum_declaration"      => push_named(node, bytes, SymbolKind::ENUM,      data),
         "method_declaration"    => push_named(node, bytes, SymbolKind::METHOD,    data),
+        "constructor_declaration" => push_named(node, bytes, SymbolKind::CONSTRUCTOR, data),
         "enum_constant" => {
             // Direct child of enum_body — the first identifier child is the constant name.
             let nr = ts_to_lsp(node.range());
@@ -153,11 +156,17 @@ fn extract_java(node: &Node, bytes: &[u8], data: &mut FileData) {
             let nr = ts_to_lsp(node.range());
             let line_no = node.range().start_point.row;
             let vis = visibility_at_line(&data.lines, line_no);
+            // Detect `static final` → CONSTANT, anything else → FIELD.
+            let kind = if java_node_has_modifiers(node, &["static", "final"]) {
+                SymbolKind::CONSTANT
+            } else {
+                SymbolKind::FIELD
+            };
             let mut cur = node.walk();
             for child in node.children(&mut cur) {
                 if child.kind() == "variable_declarator" {
                     if let Some((name, sel)) = first_identifier(&child, bytes) {
-                        data.symbols.push(SymbolEntry { name, kind: SymbolKind::FIELD, visibility: vis, range: nr, selection_range: sel });
+                        data.symbols.push(SymbolEntry { name, kind, visibility: vis, range: nr, selection_range: sel });
                     }
                 }
             }
@@ -177,6 +186,20 @@ fn extract_java(node: &Node, bytes: &[u8], data: &mut FileData) {
         }
         _ => {}
     }
+}
+
+/// Returns true if the Java node's modifiers child contains ALL of `required` keywords.
+fn java_node_has_modifiers(node: &Node, required: &[&str]) -> bool {
+    let mut cur = node.walk();
+    for child in node.children(&mut cur) {
+        if child.kind() == "modifiers" {
+            // Collect modifier keyword kinds into a Vec first to avoid walker lifetime issues.
+            let mut mc = child.walk();
+            let found_kinds: Vec<&str> = child.children(&mut mc).map(|k| k.kind()).collect();
+            return required.iter().all(|&req| found_kinds.contains(&req));
+        }
+    }
+    false
 }
 
 fn push_named(node: &Node, bytes: &[u8], kind: SymbolKind, data: &mut FileData) {
@@ -391,10 +414,21 @@ mod tests {
 
     // ── symbol extraction ────────────────────────────────────────────────────
 
+    // ── query sanity check ───────────────────────────────────────────────────
+
+    #[test]
+    fn kotlin_definitions_query_compiles() {
+        let lang = tree_sitter_kotlin::language();
+        let result = tree_sitter::Query::new(&lang, crate::queries::KOTLIN_DEFINITIONS);
+        if let Err(e) = &result {
+            panic!("KOTLIN_DEFINITIONS query failed to compile: {e}");
+        }
+    }
+
     #[test] fn class()        { assert_eq!(sym(&parse_kotlin("class Foo"),        "Foo").unwrap().kind, SymbolKind::CLASS); }
     #[test] fn interface()    { assert_eq!(sym(&parse_kotlin("interface Bar"),     "Bar").unwrap().kind, SymbolKind::INTERFACE); }
     #[test] fn object_decl()  { assert_eq!(sym(&parse_kotlin("object Obj"),        "Obj").unwrap().kind, SymbolKind::OBJECT); }
-    #[test] fn data_class()   { assert_eq!(sym(&parse_kotlin("data class D(val x: Int)"), "D").unwrap().kind, SymbolKind::CLASS); }
+    #[test] fn data_class()   { assert_eq!(sym(&parse_kotlin("data class D(val x: Int)"), "D").unwrap().kind, SymbolKind::STRUCT); }
     #[test] fn enum_class()   { assert_eq!(sym(&parse_kotlin("enum class Color { RED }"), "Color").unwrap().kind, SymbolKind::ENUM); }
     #[test] fn enum_entries() {
         let data = parse_kotlin("enum class Screen { DETAIL, LIST, SETTINGS }");
@@ -402,10 +436,22 @@ mod tests {
         assert_eq!(sym(&data, "LIST").unwrap().kind,     SymbolKind::ENUM_MEMBER);
         assert_eq!(sym(&data, "SETTINGS").unwrap().kind, SymbolKind::ENUM_MEMBER);
     }
-    #[test] fn typealias()    { assert_eq!(sym(&parse_kotlin("typealias Alias = String"), "Alias").unwrap().kind, SymbolKind::TYPE_PARAMETER); }
+    #[test] fn typealias()    { assert_eq!(sym(&parse_kotlin("typealias Alias = String"), "Alias").unwrap().kind, SymbolKind::CLASS); }
     #[test] fn top_fun()      { assert_eq!(sym(&parse_kotlin("fun foo() {}"), "foo").unwrap().kind, SymbolKind::FUNCTION); }
-    #[test] fn val_prop()     { assert_eq!(sym(&parse_kotlin("val x: Int = 0"), "x").unwrap().kind, SymbolKind::CONSTANT); }
+    #[test] fn val_prop()     { assert_eq!(sym(&parse_kotlin("val x: Int = 0"), "x").unwrap().kind, SymbolKind::PROPERTY); }
     #[test] fn var_prop()     { assert_eq!(sym(&parse_kotlin("var y = 0"),      "y").unwrap().kind, SymbolKind::VARIABLE); }
+    #[test] fn const_val()    {
+        let data = parse_kotlin("const val MAX: Int = 100");
+        assert_eq!(sym(&data, "MAX").unwrap().kind, SymbolKind::CONSTANT);
+    }
+    #[test] fn operator_fun() {
+        let data = parse_kotlin("operator fun plus(other: Vec): Vec = Vec()");
+        assert_eq!(sym(&data, "plus").unwrap().kind, SymbolKind::OPERATOR);
+    }
+    #[test] fn operator_fun_in_class() {
+        let data = parse_kotlin("class Vec {\n  operator fun plus(other: Vec): Vec = Vec()\n}");
+        assert_eq!(sym(&data, "plus").unwrap().kind, SymbolKind::OPERATOR);
+    }
 
     #[test]
     fn val_destructure() {
@@ -601,6 +647,32 @@ mod tests {
         assert_eq!(data.imports.len(), 1);
         assert_eq!(data.imports[0].local_name, "EProductScreen");
         assert_eq!(data.imports[0].full_path,  "cz.moneta.data.compat.enums.product.EProductScreen");
+    }
+
+    #[test]
+    fn java_constructor_indexed() {
+        let data = parse_java("public class Foo {\n  public Foo(int x) {}\n}");
+        let ctor = sym(&data, "Foo");
+        // class Foo AND constructor Foo both parsed; at least one must be CONSTRUCTOR
+        let has_ctor = data.symbols.iter().any(|s| s.name == "Foo" && s.kind == SymbolKind::CONSTRUCTOR);
+        assert!(has_ctor, "constructor not found: {:?}", data.symbols.iter().map(|s| (&s.name, s.kind)).collect::<Vec<_>>());
+        let _ = ctor;
+    }
+
+    #[test]
+    fn java_static_final_field_is_constant() {
+        let data = parse_java("public class Cfg {\n  public static final int MAX = 100;\n}");
+        let sym = data.symbols.iter().find(|s| s.name == "MAX");
+        assert!(sym.is_some(), "MAX not indexed");
+        assert_eq!(sym.unwrap().kind, SymbolKind::CONSTANT, "expected CONSTANT for static final field");
+    }
+
+    #[test]
+    fn java_instance_field_is_field() {
+        let data = parse_java("public class Cfg {\n  private int count;\n}");
+        let sym = data.symbols.iter().find(|s| s.name == "count");
+        assert!(sym.is_some(), "count not indexed");
+        assert_eq!(sym.unwrap().kind, SymbolKind::FIELD);
     }
 }
 
