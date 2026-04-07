@@ -1,4 +1,5 @@
 mod backend;
+mod inlay_hints;
 mod indexer;
 mod parser;
 mod queries;

@@ -68,14 +68,19 @@ fn complete_dot(idx: &Indexer, receiver: &str, from_uri: &Url, snippets: bool) -
         }
     };
 
-    // Resolve type to its source file.
-    // IMPORTANT: never run rg here — completion is called on every keystroke
-    // and spawning an external rg process would block and spike CPU.
-    let locs = resolve_symbol_no_rg(idx, &type_name, from_uri);
-    let Some(type_loc) = locs.first() else { return vec![]; };
-    let file_uri = type_loc.uri.to_string();
+    // Resolve type to its source file, handling dotted types like `Outer.Inner`.
+    let Some(file_uri) = resolve_type_to_file(idx, &type_name, from_uri) else {
+        return vec![];
+    };
 
-    let mut items = symbols_from_uri_as_completions(idx, &file_uri);
+    // When the type is `Outer.Inner`, show only the inner type's members;
+    // otherwise show all symbols in the file (which includes nested types).
+    let mut items = if let Some(dot) = type_name.find('.') {
+        let inner_name = &type_name[dot + 1..];
+        symbols_from_nested_type(idx, &file_uri, inner_name)
+    } else {
+        symbols_from_uri_as_completions(idx, &file_uri)
+    };
 
     // Filter out private members — they are inaccessible from outside the class.
     items.retain(|i| i.sort_text.as_deref().map(|s| !s.starts_with("prv:")).unwrap_or(true));
@@ -92,9 +97,75 @@ fn complete_dot(idx: &Indexer, receiver: &str, from_uri: &Url, snippets: bool) -
     items.sort_by_key(|i| kind_sort_rank(i.kind));
 
     // Append stdlib extension functions (scope fns, collection, string helpers).
-    // They sort after project symbols via the "z:" prefix set in stdlib.rs.
     items.extend(crate::stdlib::dot_completions(snippets));
     items
+}
+
+/// Resolve a (possibly dotted) type name to the URI of its containing file.
+/// `"DashboardProductsReducer.Factory"` → file where `DashboardProductsReducer` lives.
+fn resolve_type_to_file(idx: &Indexer, type_name: &str, from_uri: &Url) -> Option<String> {
+    // For dotted types, resolve the outer class only.
+    let outer = type_name.split('.').next().unwrap_or(type_name);
+    let locs = resolve_symbol_no_rg(idx, outer, from_uri);
+    Some(locs.first()?.uri.to_string())
+}
+
+/// Return completions for symbols declared INSIDE a nested type `inner_name`
+/// within the given file.  Scans the file's symbol table for lines between
+/// the inner type's start and the next same-indent symbol.
+fn symbols_from_nested_type(
+    idx:        &Indexer,
+    file_uri:   &str,
+    inner_name: &str,
+) -> Vec<CompletionItem> {
+    let data = match idx.files.get(file_uri) {
+        Some(d) => d,
+        None    => return vec![],
+    };
+
+    // Find the inner type's start line.
+    let inner_sym = data.symbols.iter()
+        .find(|s| s.name == inner_name);
+    let inner_start = match inner_sym {
+        Some(s) => s.range.start.line,
+        None    => return symbols_from_uri_as_completions(idx, file_uri), // fallback
+    };
+
+    // Find the next symbol at the SAME OR LOWER indentation level that comes
+    // after the inner type — that's where the inner body ends.
+    let inner_indent = data.lines.get(inner_start as usize)
+        .map(|l| l.chars().take_while(|c| c.is_whitespace()).count())
+        .unwrap_or(0);
+
+    let inner_end = data.symbols.iter()
+        .filter(|s| s.range.start.line > inner_start)
+        .find(|s| {
+            let indent = data.lines.get(s.range.start.line as usize)
+                .map(|l| l.chars().take_while(|c| c.is_whitespace()).count())
+                .unwrap_or(0);
+            indent <= inner_indent
+        })
+        .map(|s| s.range.start.line)
+        .unwrap_or(u32::MAX);
+
+    // Collect symbols that fall within [inner_start, inner_end).
+    use crate::types::Visibility;
+    data.symbols.iter()
+        .filter(|s| s.range.start.line > inner_start && s.range.start.line < inner_end)
+        .filter(|s| s.visibility != Visibility::Private)
+        .map(|s| {
+            let kind = symbol_kind_to_completion(s.kind);
+            let is_fn = matches!(kind, CompletionItemKind::FUNCTION | CompletionItemKind::METHOD);
+            CompletionItem {
+                label:              s.name.clone(),
+                kind:               Some(kind),
+                insert_text:        if is_fn { Some(format!("{}($1)", s.name)) } else { None },
+                insert_text_format: if is_fn { Some(InsertTextFormat::SNIPPET) } else { None },
+                sort_text:          Some(format!("{:02}:{}", kind_sort_rank(Some(kind)), s.name)),
+                ..Default::default()
+            }
+        })
+        .collect()
 }
 
 /// Sort rank for completion item kinds: lower = appears earlier.
@@ -158,33 +229,6 @@ fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippets: bool) ->
         if lowercase_mode {
             for name in &f.declared_names {
                 add(name, CompletionItemKind::VARIABLE);
-            }
-        }
-    }
-
-    // 1.5. Lambda parameters visible at the cursor (e.g. `{ item -> item`)
-    // These are ephemeral — not in the symbol index or declared_names.
-    if lowercase_mode {
-        // We don't have cursor position here, scan the whole file for arrow params.
-        let lines_opt = idx.live_lines.get(from_uri.as_str())
-            .map(|ll| ll.clone())
-            .or_else(|| idx.files.get(from_uri.as_str()).map(|f| f.lines.clone()));
-        if let Some(lines) = lines_opt {
-            for line in &lines {
-                for pat in &["{ ", "("] {
-                    if let Some(brace) = line.find(pat) {
-                        let rest = line[brace + pat.len()..].trim_start();
-                        let name: String = rest.chars()
-                            .take_while(|&c| c.is_alphanumeric() || c == '_')
-                            .collect();
-                        if !name.is_empty() && name != "it" && name.chars().next().map(|c| c.is_lowercase()).unwrap_or(false) {
-                            let after = rest[name.len()..].trim_start();
-                            if after.starts_with("->") || after.starts_with(',') {
-                                add(&name, CompletionItemKind::VARIABLE);
-                            }
-                        }
-                    }
-                }
             }
         }
     }
@@ -340,6 +384,20 @@ pub fn resolve_symbol(idx: &Indexer, name: &str, qualifier: Option<&str>, from_u
         // fall through to the normal chain.
     }
 
+    // Handle dotted type names like `DashboardProductsReducer.Factory` passed
+    // directly as `name` (e.g. from hover/goto-def of a variable's declared type).
+    if let Some(dot) = name.find('.') {
+        let outer = &name[..dot];
+        let inner = &name[dot + 1..];
+        // Resolve the outer type to find its file.
+        let outer_locs = resolve_symbol_inner(idx, outer, from_uri, true);
+        if let Some(outer_loc) = outer_locs.first() {
+            let file_uri = outer_loc.uri.as_str();
+            let locs = find_name_in_uri(idx, inner, file_uri);
+            if !locs.is_empty() { return locs; }
+        }
+    }
+
     resolve_symbol_inner(idx, name, from_uri, true)
 }
 
@@ -393,7 +451,7 @@ fn resolve_symbol_inner(idx: &Indexer, name: &str, from_uri: &Url, with_hierarch
 ///
 /// Completion is triggered on every keystroke; spawning external `rg`/`fd`
 /// processes on each request would block the LSP thread and spike CPU.
-fn resolve_symbol_no_rg(idx: &Indexer, name: &str, from_uri: &Url) -> Vec<Location> {
+pub(crate) fn resolve_symbol_no_rg(idx: &Indexer, name: &str, from_uri: &Url) -> Vec<Location> {
     let local = resolve_local(idx, name, from_uri);
     if !local.is_empty() { return local; }
 
@@ -488,12 +546,25 @@ fn resolve_qualified(idx: &Indexer, name: &str, qualifier: &str, from_uri: &Url)
         return vec![];
     };
 
+    // `start_type` may be a dotted nested type like `Outer.Inner`.
+    // Split into outer (for file resolution) and optional inner (nested class).
+    let (outer_type, inner_type) = match start_type.find('.') {
+        Some(dot) => (&start_type[..dot], Some(&start_type[dot + 1..])),
+        None      => (start_type.as_str(), None),
+    };
+
     // Resolve the variable's type to its source file.
-    let type_locs = resolve_symbol(idx, &start_type, None, from_uri);
+    let type_locs = resolve_symbol(idx, outer_type, None, from_uri);
     let mut current_file: Option<String> = type_locs.first().map(|l| l.uri.to_string());
 
-    // Traverse remaining qualifier segments.
-    for &seg in &segments[1..] {
+    // If there's a nested type component (e.g. `Factory` in `Outer.Factory`),
+    // the members we want to search are inside that nested type.
+    // We don't need to change `current_file` because nested types live in the
+    // same file; instead we record it as a trailing qualifier segment to process.
+    let extra_segments: Vec<&str> = inner_type.map(|t| vec![t]).unwrap_or_default();
+
+    // Traverse remaining qualifier segments (plus any from the nested type).
+    for &seg in extra_segments.iter().chain(segments[1..].iter()) {
         let Some(ref uri) = current_file else { return vec![]; };
         if seg.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
             // Nested class / companion object — likely in the same file.
@@ -1177,9 +1248,13 @@ fn infer_type_in_lines(lines: &[String], var_name: &str) -> Option<String> {
             }
             let after = &line[pos + var_name.len()..];
             let after = after.trim_start_matches(':').trim_start();
+            // Allow dotted type names like `DashboardProductsReducer.Factory`
+            // Stop at generic params (`<`), nullability (`?`), spaces, assignment.
             let type_name: String = after.chars()
-                .take_while(|&c| c.is_alphanumeric() || c == '_')
+                .take_while(|&c| c.is_alphanumeric() || c == '_' || c == '.')
                 .collect();
+            // Trim any trailing dots.
+            let type_name = type_name.trim_end_matches('.').to_owned();
             if !type_name.is_empty()
                 && type_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
             {
@@ -1627,6 +1702,43 @@ mod tests {
         let locs = resolve_symbol(&idx, "Deep", Some("Root.Mid"), &host_uri);
         assert!(!locs.is_empty(), "Deep not found via full qualifier chain");
         assert_eq!(locs[0].uri, root_uri);
+    }
+
+    #[test]
+    fn resolve_nested_type_via_variable_annotation() {
+        // `val factory: DashboardProductsReducer.Factory` — goto-def of `factory.create(...)`
+        // should navigate to the `create` fun inside the `Factory` interface.
+        let host_uri = uri("/Host.kt");
+        let reducer_uri = uri("/DashboardProductsReducer.kt");
+        let idx = Indexer::new();
+        idx.index_content(&reducer_uri, concat!(
+            "package com.pkg\n",
+            "class DashboardProductsReducer {\n",
+            "  interface Factory {\n",
+            "    fun create(scope: Any): DashboardProductsReducer\n",
+            "  }\n",
+            "}\n",
+        ));
+        idx.index_content(&host_uri, concat!(
+            "package com.pkg\n",
+            "val factory: DashboardProductsReducer.Factory = TODO()\n",
+            "fun foo() { factory.create(this) }\n",
+        ));
+
+        // Qualifier = "factory" (lowercase), word = "create"
+        let locs = resolve_symbol(&idx, "create", Some("factory"), &host_uri);
+        assert!(!locs.is_empty(), "create not found via nested type Factory");
+        assert_eq!(locs[0].uri, reducer_uri);
+    }
+
+    #[test]
+    fn infer_type_in_lines_dotted() {
+        // Ensure infer_type_in_lines handles `Outer.Inner` dotted types.
+        let lines: Vec<String> = vec![
+            "  private val factory: DashboardProductsReducer.Factory,".to_owned()
+        ];
+        let t = super::infer_type_in_lines(&lines, "factory");
+        assert_eq!(t.as_deref(), Some("DashboardProductsReducer.Factory"));
     }
 
     // ── infer_variable_type + method resolution ──────────────────────────────

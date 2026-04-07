@@ -89,6 +89,19 @@ impl LanguageServer for Backend {
                 definition_provider:     Some(OneOf::Left(true)),
                 references_provider:     Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
+                inlay_hint_provider: Some(OneOf::Left(true)),
+                workspace: Some(WorkspaceServerCapabilities {
+                    workspace_folders: None,
+                    file_operations: None,
+                }),
+                workspace_symbol_provider: Some(OneOf::Left(true)),
+                rename_provider: Some(OneOf::Left(true)),
+                folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
+                signature_help_provider: Some(SignatureHelpOptions {
+                    trigger_characters: Some(vec!["(".into(), ",".into()]),
+                    retrigger_characters: None,
+                    work_done_progress_options: Default::default(),
+                }),
                 ..Default::default()
             },
         })
@@ -98,6 +111,31 @@ impl LanguageServer for Backend {
         self.client
             .log_message(MessageType::INFO, "kotlin-lsp ready")
             .await;
+
+        // Register a file-system watcher so we get notified when *.kt / *.java
+        // files change on disk (e.g. after a workspace/rename edit is applied to
+        // closed files that never send didChange).
+        let _ = self.client.register_capability(vec![
+            Registration {
+                id:     "watched-kotlin-files".into(),
+                method: "workspace/didChangeWatchedFiles".into(),
+                register_options: Some(
+                    serde_json::to_value(DidChangeWatchedFilesRegistrationOptions {
+                        watchers: vec![
+                            FileSystemWatcher {
+                                glob_pattern: GlobPattern::String("**/*.kt".into()),
+                                kind: None,
+                            },
+                            FileSystemWatcher {
+                                glob_pattern: GlobPattern::String("**/*.java".into()),
+                                kind: None,
+                            },
+                        ],
+                    })
+                    .unwrap_or_default(),
+                ),
+            },
+        ]).await;
     }
 
     async fn shutdown(&self) -> Result<()> {
@@ -158,6 +196,30 @@ impl LanguageServer for Backend {
         // Nothing to do — we keep the index entry so cross-file lookup still works.
     }
 
+    async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
+        // Re-index any *.kt / *.java file that changed on disk.
+        // This fires after workspace/rename edits are applied to closed files,
+        // keeping the in-memory symbol index consistent.
+        for change in params.changes {
+            if change.typ == FileChangeType::DELETED {
+                // Remove from index; definition map cleanup is handled lazily.
+                self.indexer.files.remove(change.uri.as_str());
+                continue;
+            }
+            let uri = change.uri;
+            let idx = Arc::clone(&self.indexer);
+            let sem = idx.parse_sem();
+            tokio::task::spawn_blocking(move || {
+                if let Ok(path) = uri.to_file_path() {
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        let _permit = sem.try_acquire_owned();
+                        idx.index_content(&uri, &content);
+                    }
+                }
+            });
+        }
+    }
+
     // ── textDocument/definition ──────────────────────────────────────────────
 
     async fn goto_definition(
@@ -176,13 +238,25 @@ impl LanguageServer for Backend {
         // inferred element/receiver type class instead of trying a text search.
         if qualifier.is_none() && (word == "it" || word.chars().next().map(|c| c.is_lowercase()).unwrap_or(true)) {
             if let Some(type_name) = self.indexer.infer_lambda_param_type_at(&word, uri, position) {
-                let locs = self.indexer.find_definition_qualified(&type_name, None, uri);
+                // For qualified names (e.g. `Outer.Inner`) try the full name first,
+                // then fall back to the last segment which is what the index stores.
+                let lookup = type_name.rsplit('.').next().unwrap_or(&type_name);
+                let locs = self.indexer.find_definition_qualified(lookup, None, uri);
                 if !locs.is_empty() {
                     return Ok(match locs.len() {
                         1 => Some(GotoDefinitionResponse::Scalar(locs.into_iter().next().unwrap())),
                         _ => Some(GotoDefinitionResponse::Array(locs)),
                     });
                 }
+            }
+            // If the word is a lambda parameter (type resolution failed), jump to
+            // the `{ name ->` declaration line in the current file.
+            let lambda_params = self.indexer.lambda_params_at_col(uri, position.line as usize, position.character as usize);
+            if lambda_params.contains(&word) {
+                if let Some(loc) = self.indexer.find_lambda_param_decl(uri, &word, position.line as usize) {
+                    return Ok(Some(GotoDefinitionResponse::Scalar(loc)));
+                }
+                return Ok(None);
             }
         }
 
@@ -226,8 +300,11 @@ impl LanguageServer for Backend {
                 let lang = if uri.path().ends_with(".kt") { "kotlin" } else { "java" };
                 // Show the inferred binding: `val it: Product` or `val item: Product`
                 let sig_md = format!("```{lang}\nval {word}: {type_name}\n```");
-                // Also show the type's own hover (KDoc + signature) if available.
-                let type_hover = self.indexer.hover_info(&type_name);
+                // For symbol lookup use the last segment of a qualified name
+                // (symbols are indexed by short name, e.g. `CardProduct` not
+                // `CreditCardDashboardInteractor.CardProduct`).
+                let lookup_name = type_name.rsplit('.').next().unwrap_or(&type_name);
+                let type_hover = self.indexer.hover_info(lookup_name);
                 let full = if let Some(th) = type_hover {
                     format!("{sig_md}\n\n---\n\n{th}")
                 } else {
@@ -240,6 +317,13 @@ impl LanguageServer for Backend {
                     }),
                     range: None,
                 }));
+            }
+            // If the word is a lambda parameter (type resolution failed), don't
+            // fall through to rg-based definition lookup — it would find unrelated
+            // symbols with the same name and show confusing hover text.
+            let lambda_params = self.indexer.lambda_params_at_col(uri, position.line as usize, position.character as usize);
+            if lambda_params.contains(&word) {
+                return Ok(None);
             }
         }
 
@@ -285,7 +369,7 @@ impl LanguageServer for Backend {
         let same_pkg = self.indexer.package_of(uri);
 
         let root = self.indexer.workspace_root.get().map(std::path::PathBuf::as_path);
-        let locs = crate::indexer::rg_find_references(
+        let mut locs = crate::indexer::rg_find_references(
             &name,
             parent_class.as_deref(),
             same_pkg.as_deref(),
@@ -293,6 +377,34 @@ impl LanguageServer for Backend {
             include_decl,
             uri,
         );
+
+        // Supplement with in-memory scan of all open/indexed files.
+        // This catches unsaved buffers (e.g. right after a rename where the file
+        // has the new name in the editor but hasn't been written to disk yet).
+        let mem_locs = self.indexer.in_memory_references(&name);
+        for loc in mem_locs {
+            // Skip if rg already found a match at the same file+line.
+            let dup = locs.iter().any(|l: &Location| {
+                l.uri == loc.uri && l.range.start.line == loc.range.start.line
+            });
+            if dup { continue; }
+            if !include_decl {
+                // Exclude declaration lines (any line containing a def keyword + name).
+                // Use a simple heuristic: skip if the source line looks like a declaration.
+                if let Some(data) = self.indexer.files.get(loc.uri.as_str()) {
+                    let line_idx = loc.range.start.line as usize;
+                    if let Some(line) = data.lines.get(line_idx) {
+                        let decl_kws = ["class ", "interface ", "object ", "fun ", "val ", "var ",
+                                        "typealias ", "enum class "];
+                        if decl_kws.iter().any(|kw| line.contains(kw)) {
+                            continue;
+                        }
+                    }
+                }
+            }
+            locs.push(loc);
+        }
+
         Ok(if locs.is_empty() { None } else { Some(locs) })
     }
 
@@ -322,4 +434,325 @@ impl LanguageServer for Backend {
 
         Ok(Some(DocumentSymbolResponse::Nested(doc_symbols)))
     }
+
+    async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
+        let uri   = &params.text_document.uri;
+        let range = params.range;
+        let hints = crate::inlay_hints::compute_inlay_hints(&self.indexer, uri, range);
+        Ok(if hints.is_empty() { None } else { Some(hints) })
+    }
+
+    // ── workspace/symbol ────────────────────────────────────────────────────
+
+    async fn symbol(
+        &self,
+        params: WorkspaceSymbolParams,
+    ) -> Result<Option<Vec<SymbolInformation>>> {
+        let query = params.query.to_lowercase();
+        let mut results: Vec<SymbolInformation> = Vec::new();
+
+        for entry in self.indexer.files.iter() {
+            let uri_str = entry.key();
+            let file_data = entry.value();
+            let uri = match Url::parse(uri_str) {
+                Ok(u) => u,
+                Err(_) => match Url::from_file_path(uri_str) {
+                    Ok(u) => u,
+                    Err(_) => continue,
+                },
+            };
+            for sym in &file_data.symbols {
+                let matches = query.is_empty()
+                    || sym.name.to_lowercase().contains(&query);
+                if !matches {
+                    continue;
+                }
+                #[allow(deprecated)]
+                results.push(SymbolInformation {
+                    name:           sym.name.clone(),
+                    kind:           sym.kind,
+                    tags:           None,
+                    deprecated:     None,
+                    location:       Location {
+                        uri:   uri.clone(),
+                        range: sym.selection_range,
+                    },
+                    container_name: None,
+                });
+                if results.len() >= 512 {
+                    break;
+                }
+            }
+            if results.len() >= 512 {
+                break;
+            }
+        }
+
+        results.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(if results.is_empty() { None } else { Some(results) })
+    }
+
+    // ── textDocument/signatureHelp ───────────────────────────────────────────
+
+    async fn signature_help(
+        &self,
+        params: SignatureHelpParams,
+    ) -> Result<Option<SignatureHelp>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let pos = params.text_document_position_params.position;
+
+        // Use live_lines for the current line (updated synchronously on every
+        // keystroke) so signatureHelp fires immediately when `(` is typed,
+        // without waiting for the 120ms debounce that updates `files`.
+        let lines_owned: Vec<String>;
+        let lines: &[String] = if let Some(ll) = self.indexer.live_lines.get(uri.as_str()) {
+            lines_owned = ll.clone();
+            &lines_owned
+        } else if let Some(data) = self.indexer.files.get(uri.as_str()) {
+            lines_owned = data.lines.clone();
+            &lines_owned
+        } else {
+            return Ok(None);
+        };
+
+        let line_idx = pos.line as usize;
+        if line_idx >= lines.len() {
+            return Ok(None);
+        }
+        let line_text = &lines[line_idx];
+        let col = (pos.character as usize).min(line_text.len());
+        let before = &line_text[..col];
+
+        // Count commas at the current paren depth to find active param.
+        let mut depth: i32 = 0;
+        let mut active_param: u32 = 0;
+        let mut call_name: Option<String> = None;
+        let chars: Vec<char> = before.chars().collect();
+        let mut i = chars.len();
+        while i > 0 {
+            i -= 1;
+            match chars[i] {
+                ')' | ']' => { depth += 1; }
+                '{' | '}' => {
+                    // Brace means we've exited the current lambda/block scope —
+                    // stop scanning to avoid finding an outer function's paren.
+                    break;
+                }
+                '(' => {
+                    if depth == 0 {
+                        let mut j = i;
+                        while j > 0 && (chars[j - 1].is_alphanumeric() || chars[j - 1] == '_') {
+                            j -= 1;
+                        }
+                        let candidate: String = chars[j..i].iter().collect();
+                        if !candidate.is_empty() && !is_non_call_keyword(&candidate) {
+                            call_name = Some(candidate);
+                        }
+                        break;
+                    }
+                    depth -= 1;
+                }
+                ',' if depth == 0 => { active_param += 1; }
+                _ => {}
+            }
+        }
+
+        // If not found on this line, try multiline scan (up to 10 lines up).
+        // Only cross into a previous line if the current line doesn't contain a
+        // closing brace (which would mean we're inside a block body, not an arg list).
+        let in_block_body = before.contains('{') || before.contains('}')
+            || lines[line_idx].trim_start().starts_with('}');
+        if call_name.is_none() && line_idx > 0 && !in_block_body {
+            let scan_start = line_idx.saturating_sub(10);
+            'outer: for scan_line in (scan_start..line_idx).rev() {
+                let l = &lines[scan_line];
+                // Stop if we cross a closing brace — that means we entered a block body.
+                if l.contains('{') || l.contains('}') {
+                    break;
+                }
+                // Find the last `(` on this line.
+                for (p, _) in l.char_indices().filter(|&(_, c)| c == '(').collect::<Vec<_>>().into_iter().rev() {
+                    let before_paren = &l[..p];
+                    let name: String = before_paren.chars()
+                        .rev()
+                        .take_while(|&c| c.is_alphanumeric() || c == '_')
+                        .collect::<String>()
+                        .chars().rev().collect();
+                    if !name.is_empty() && !is_non_call_keyword(&name) {
+                        // Make sure this `(` is unmatched (not closed on the same line).
+                        let after_paren = &l[p..];
+                        let net: i32 = after_paren.chars().map(|c| match c {
+                            '(' => 1, ')' => -1, _ => 0,
+                        }).sum();
+                        if net > 0 {
+                            call_name = Some(name);
+                            for mid in (scan_line + 1)..=line_idx {
+                                let mid_text = if mid == line_idx { before } else { lines[mid].as_str() };
+                                active_param += mid_text.chars().filter(|&c| c == ',').count() as u32;
+                            }
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+        }
+
+        let name = match call_name {
+            Some(n) if !n.is_empty() => n,
+            _ => return Ok(None),
+        };
+
+        let params_text = self.indexer.collect_fun_params_text(uri, &name);
+        if params_text.is_empty() {
+            return Ok(None);
+        }
+
+        let raw = params_text.trim_matches(|c| c == '(' || c == ')');
+        let param_parts: Vec<&str> = raw.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+
+        let parameters: Vec<ParameterInformation> = param_parts.iter().map(|p| {
+            ParameterInformation {
+                label: ParameterLabel::Simple(p.to_string()),
+                documentation: None,
+            }
+        }).collect();
+
+        let label = format!("{}({})", name, param_parts.join(", "));
+        let active_param = active_param.min(parameters.len().saturating_sub(1) as u32);
+
+        Ok(Some(SignatureHelp {
+            signatures: vec![SignatureInformation {
+                label,
+                documentation: None,
+                parameters: Some(parameters),
+                active_parameter: Some(active_param),
+            }],
+            active_signature: Some(0),
+            active_parameter: Some(active_param),
+        }))
+    }
+
+    // ── textDocument/rename ──────────────────────────────────────────────────
+
+    async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
+        let uri = &params.text_document_position.text_document.uri;
+        let pos = params.text_document_position.position;
+        let new_name = &params.new_name;
+
+        let name = match self.indexer.word_at(uri, pos) {
+            Some(w) => w,
+            None    => return Ok(None),
+        };
+
+        let root = self.indexer.workspace_root.get().map(std::path::PathBuf::as_path);
+        let locs = crate::indexer::rg_find_references(
+            &name,
+            None,
+            None,
+            root,
+            true, // include declaration
+            uri,
+        );
+
+        if locs.is_empty() {
+            return Ok(None);
+        }
+
+        let name_len = name.chars().count() as u32;
+        let mut changes: std::collections::HashMap<Url, Vec<TextEdit>> = std::collections::HashMap::new();
+        for loc in locs {
+            // rg gives point ranges (start==end); expand to cover the full word.
+            let start = loc.range.start;
+            let end   = Position::new(start.line, start.character + name_len);
+            let edit  = TextEdit {
+                range:    Range::new(start, end),
+                new_text: new_name.clone(),
+            };
+            changes.entry(loc.uri).or_default().push(edit);
+        }
+
+        Ok(Some(WorkspaceEdit {
+            changes: Some(changes),
+            document_changes: None,
+            change_annotations: None,
+        }))
+    }
+
+    // ── textDocument/foldingRange ────────────────────────────────────────────
+
+    async fn folding_range(
+        &self,
+        params: FoldingRangeParams,
+    ) -> Result<Option<Vec<FoldingRange>>> {
+        let uri = &params.text_document.uri;
+        let data = match self.indexer.files.get(uri.as_str()) {
+            Some(d) => d,
+            None    => return Ok(None),
+        };
+
+        let mut ranges: Vec<FoldingRange> = Vec::new();
+        let lines = &data.lines;
+        let mut stack: Vec<u32> = Vec::new();
+
+        for (i, line) in lines.iter().enumerate() {
+            let trimmed = line.trim();
+            let opens  = trimmed.chars().filter(|&c| c == '{').count() as i32;
+            let closes = trimmed.chars().filter(|&c| c == '}').count() as i32;
+            let net = opens - closes;
+
+            if net > 0 {
+                for _ in 0..net {
+                    stack.push(i as u32);
+                }
+            } else if net < 0 {
+                for _ in 0..(-net) {
+                    if let Some(start_line) = stack.pop() {
+                        if i as u32 > start_line + 1 {
+                            ranges.push(FoldingRange {
+                                start_line,
+                                end_line: i as u32,
+                                start_character: None,
+                                end_character:   None,
+                                kind:            Some(FoldingRangeKind::Region),
+                                collapsed_text:  None,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fold consecutive comment blocks (// lines).
+        let mut comment_start: Option<u32> = None;
+        for (i, line) in lines.iter().enumerate() {
+            if line.trim().starts_with("//") {
+                if comment_start.is_none() {
+                    comment_start = Some(i as u32);
+                }
+            } else if let Some(cs) = comment_start.take() {
+                if i as u32 > cs + 1 {
+                    ranges.push(FoldingRange {
+                        start_line: cs,
+                        end_line:   (i as u32) - 1,
+                        start_character: None,
+                        end_character:   None,
+                        kind:        Some(FoldingRangeKind::Comment),
+                        collapsed_text: None,
+                    });
+                }
+            }
+        }
+
+        Ok(if ranges.is_empty() { None } else { Some(ranges) })
+    }
+}
+
+/// Returns true if `name` is a Kotlin/Java keyword that uses `()` but is NOT
+/// a function call — i.e. we should NOT show signature help for it.
+fn is_non_call_keyword(name: &str) -> bool {
+    matches!(name,
+        "fun" | "if" | "while" | "for" | "when" | "catch" | "constructor"
+        | "override" | "else" | "return" | "throw" | "try" | "finally"
+        | "object" | "class" | "interface" | "enum" | "init"
+    )
 }

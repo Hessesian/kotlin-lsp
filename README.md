@@ -19,29 +19,34 @@ The binary is placed at `~/.cargo/bin/kotlin-lsp`. Use that path in your editor 
 
 ---
 
-## vs. Official Kotlin Language Server
+## vs. Official Kotlin LSP
 
 There are two Kotlin LSP implementations. Here is how they differ:
 
-| | **kotlin-lsp** (this project) | **[kotlin-language-server](https://github.com/fwcd/kotlin-language-server)** |
+| | **kotlin-lsp** (this project) | **[Kotlin/kotlin-lsp](https://github.com/Kotlin/kotlin-lsp)** (JetBrains, pre-alpha) |
 |---|---|---|
-| **Runtime** | Native Rust binary, no JVM | Requires JVM 11+ |
-| **Startup** | Instant | 3–10 seconds (JVM boot) |
-| **Memory** | < 200 MB for 10k+ files | 500 MB–2 GB for large projects |
-| **Type checking / diagnostics** | ✗ — structural only | ✓ full compiler diagnostics |
-| **Semantic accuracy** | Syntactic (tree-sitter) | Full type resolution |
-| **Rename / refactor** | ✗ | ✓ |
-| **Go-to-definition** | Fast (index + rg fallback) | Accurate (type-safe) |
-| **Superclass hierarchy** | ✓ | ✓ |
-| **Kotlin stdlib hover** | ✓ built-in signatures | ✓ |
-| **Java support** | ✓ (lighter) | ✓ |
-| **Best for** | Fast navigation in large Android repos, editors without JVM support | Full IDE-grade experience |
+| **Status** | Stable, usable today | Experimental / pre-alpha, no stability guarantees |
+| **Runtime** | Native Rust binary, no JVM | Requires JVM 17+, ~500 MB download |
+| **Startup** | Instant | Gradle project import required (slow on large projects) |
+| **Memory** | < 200 MB for 10k+ files | IntelliJ engine — typically 1+ GB |
+| **Build system** | Any (no build required) | JVM-only Gradle projects officially supported |
+| **Type checking / diagnostics** | ✗ — structural only | ✓ on-the-fly Kotlin diagnostics |
+| **Semantic accuracy** | Syntactic (tree-sitter) | Full IntelliJ Analysis API |
+| **Rename / refactor** | ✓ project-wide text search | ✓ semantic (+ Move, Change signature) |
+| **Go-to-definition** | Fast (index + rg fallback) | Accurate (binary + source, builtins) |
+| **Completion** | Fast, type-aware for lambdas | Analysis-API based, full type inference |
+| **Signature help** | ✓ | ✓ |
+| **KDoc hover** | ✓ stdlib built-in | ✓ in-project + dependency source jars |
+| **Java support** | ✓ (structural) | ✓ (semantic) |
+| **Editor support** | Any LSP editor | VS Code (official), others experimental |
+| **Source available** | ✓ fully open source | Partially closed-source (temporary) |
+| **Best for** | Fast navigation in large Android repos, any LSP editor, no build setup | Full IDE-grade experience in VS Code once stable |
 
-**Choose kotlin-lsp** when you want instant startup and low memory overhead and can live without compiler diagnostics — typical for developers who run Gradle / CI for errors and just want fast jump-to-definition and completion.
+**Choose kotlin-lsp** when you want instant startup, zero build-system configuration, low memory, and broad editor support (Helix, Neovim, Emacs, etc.) — and can rely on Gradle/CI for error reporting.
 
-**Choose kotlin-language-server** when you need error squiggles and semantic-accurate rename/refactor.
+**Choose Kotlin/kotlin-lsp** when you need full compiler diagnostics, semantic refactoring, and are working in VS Code with a Gradle JVM project.
 
-They can coexist: configure one for `filetypes = ["kotlin"]` and the other for a different set of capabilities.
+They can coexist: configure kotlin-lsp for fast navigation and use the official one for diagnostics when it stabilises.
 
 ---
 
@@ -52,8 +57,12 @@ They can coexist: configure one for `filetypes = ["kotlin"]` and the other for a
 | `textDocument/definition` | Index lookup → superclass hierarchy → `rg` fallback |
 | `textDocument/hover` | Declaration kind, source line, Kotlin stdlib signatures |
 | `textDocument/documentSymbol` | All symbols in the current file (outline view) |
-| `textDocument/completion` | Dot-completion and bare-word completion with stdlib entries |
-| `textDocument/references` | Project-wide `rg --word-regexp` usages |
+| `textDocument/completion` | Dot-completion (`it.`, `this.`, named params), bare-word, stdlib entries |
+| `textDocument/references` | Project-wide `rg --word-regexp` + in-memory scan of open buffers |
+| `textDocument/signatureHelp` | Active function signature + highlighted parameter as you type |
+| `textDocument/rename` | Renames symbol across all files via `WorkspaceEdit`; index updated via file watcher |
+| `textDocument/foldingRange` | Brace-based region folds + consecutive comment block folds |
+| `workspace/symbol` | Fuzzy substring search across all indexed symbols |
 | `$/progress` | Spinner while workspace is indexed; non-blocking |
 
 ### What gets indexed
@@ -247,7 +256,7 @@ environment = { KOTLIN_LSP_MAX_FILES = "4000" }
 
 ```
 main.rs      – tokio entry point, wires stdin/stdout to tower-lsp
-backend.rs   – LanguageServer trait: initialize / hover / definition / completion / documentSymbol / references
+backend.rs   – LanguageServer trait: initialize / hover / definition / completion / documentSymbol / references / signatureHelp / rename / foldingRange / symbol
 indexer.rs   – file discovery (fd), in-memory index, rg fallback, progress reporting
 parser.rs    – tree-sitter-kotlin + tree-sitter-java symbol & visibility extraction
 resolver.rs  – definition resolution, multi-hop field chains, class hierarchy, completion logic

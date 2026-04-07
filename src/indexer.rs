@@ -655,10 +655,67 @@ impl Indexer {
         crate::resolver::resolve_symbol(self, name, qualifier, from_uri)
     }
 
+    /// Return the params text `(a: T, b: U)` for `name` in `uri`'s file context.
+    pub fn collect_fun_params_text(&self, uri: &Url, name: &str) -> String {
+        collect_fun_params_text(name, uri.as_str(), self)
+            .unwrap_or_default()
+    }
+
+    /// Scan all in-memory indexed files for whole-word occurrences of `name`.
+    ///
+    /// Used to supplement rg results when the buffer has unsaved changes (e.g.
+    /// immediately after a rename before the file is written to disk).
+    /// Returns `(uri_string, line_number_0based, col_0based)` triples.
+    pub fn in_memory_references(&self, name: &str) -> Vec<Location> {
+        let mut results = Vec::new();
+        for entry in self.files.iter() {
+            let uri_str = entry.key();
+            let data    = entry.value();
+            let uri = match Url::parse(uri_str) {
+                Ok(u) => u,
+                Err(_) => match Url::from_file_path(uri_str) {
+                    Ok(u) => u,
+                    Err(_) => continue,
+                },
+            };
+            for (line_idx, line) in data.lines.iter().enumerate() {
+                let mut search = line.as_str();
+                let mut offset = 0usize;
+                while let Some(pos) = search.find(name) {
+                    let abs = offset + pos;
+                    // Whole-word check
+                    let before_ok = abs == 0 || {
+                        let ch = line[..abs].chars().next_back().unwrap_or(' ');
+                        !ch.is_alphanumeric() && ch != '_'
+                    };
+                    let after_ok = {
+                        let end = abs + name.len();
+                        end >= line.len() || {
+                            let ch = line[end..].chars().next().unwrap_or(' ');
+                            !ch.is_alphanumeric() && ch != '_'
+                        }
+                    };
+                    if before_ok && after_ok {
+                        let col = line[..abs].chars().count() as u32;
+                        let start = Position::new(line_idx as u32, col);
+                        let end   = Position::new(line_idx as u32, col + name.chars().count() as u32);
+                        results.push(Location { uri: uri.clone(), range: Range::new(start, end) });
+                    }
+                    // Advance past this occurrence.
+                    offset += pos + name.len().max(1);
+                    search = &line[offset.min(line.len())..];
+                }
+            }
+        }
+        results
+    }
+
     /// If `name` at `position` is `it` or a named lambda parameter, return the
     /// inferred element/receiver type name (e.g. `"Product"`, `"User"`).
     ///
     /// Used by hover and go-to-definition to provide useful info for lambda params.
+    /// Handles both same-line and multi-line lambda declarations by scanning
+    /// backward through file lines (not just the text before the cursor).
     pub fn infer_lambda_param_type_at(
         &self,
         name:     &str,
@@ -667,56 +724,143 @@ impl Indexer {
     ) -> Option<String> {
         let line_no = position.line as usize;
 
-        // Get the text of the current line up to the cursor position.
-        let before: String = {
-            let src = self.live_lines.get(uri.as_str())
-                .and_then(|ll| ll.get(line_no).cloned())
-                .or_else(|| self.files.get(uri.as_str())
-                    .and_then(|f| f.lines.get(line_no).cloned()))?;
-            let col = position.character as usize;
-            let mut utf16 = 0usize;
-            let mut byte_end = src.len();
-            for (bi, ch) in src.char_indices() {
-                if utf16 >= col { byte_end = bi; break; }
-                utf16 += ch.len_utf16();
-            }
-            src[..byte_end].to_string()
-        };
+        // Use indexed lines (same source as word_and_qualifier_at) so line
+        // numbers are consistent, regardless of live_lines state.
+        let lines: Vec<String> = self.files.get(uri.as_str())
+            .map(|f| f.lines.clone())
+            .or_else(|| {
+                // Fallback: live_lines if the file isn't indexed yet.
+                self.live_lines.get(uri.as_str()).map(|ll| ll.clone())
+            })?;
 
-        if name == "it" {
-            find_it_element_type(&before, self, uri)
+        if name == "it" || name == "this" {
+            let col = position.character as usize;
+            let lambda_type = find_it_element_type_in_lines(&lines, line_no, col, self, uri);
+            if lambda_type.is_some() { return lambda_type; }
+            // Fallback for `this` in a regular class method body (not a lambda):
+            // scan backward for the enclosing class/object declaration.
+            if name == "this" {
+                return self.enclosing_class_at(uri, position.line);
+            }
+            None
         } else {
-            find_named_lambda_param_type(&before, name, self, uri, line_no)
+            // For named params: scan backward for `{ name ->` pattern.
+            // Also check the CURRENT line (needed when cursor is ON the param
+            // at its declaration line, before `->` — before_cursor wouldn't
+            // contain the arrow).
+            find_named_lambda_param_type_in_lines(&lines, name, line_no, self, uri)
         }
     }
 
-    /// Lambda parameter names visible at `cursor_line` in `uri`.
+    /// Lambda parameter names that are **in scope** at `(cursor_line, cursor_col)`.
     ///
-    /// Scans live_lines backward from the cursor to collect all `{ name ->`
-    /// params that are in scope (up to 50 lines back).
+    /// Uses the same brace-depth backward-scan algorithm as
+    /// `find_it_element_type_in_lines`: `}` increments depth, `{` decrements;
+    /// when depth < 0 we've found an *enclosing* `{` lambda.  Sibling/inner lambdas
+    /// whose closing `}` appears before their `{` in the backward scan self-balance
+    /// and never trigger depth < 0, so they are correctly excluded.
+    ///
+    /// Example — cursor inside `{ resultState -> … }`:
+    ///   `reloadableProduct(…, { isRefresh -> … }) { resultState -> │ }`
+    ///   → returns `["resultState"]`,  NOT `["isRefresh", "resultState"]`
     pub fn lambda_params_at(&self, uri: &Url, cursor_line: usize) -> Vec<String> {
+        self.lambda_params_at_col(uri, cursor_line, usize::MAX)
+    }
+
+    /// Like `lambda_params_at` but also respects `cursor_col` when scanning the
+    /// cursor line.  Passing `usize::MAX` is equivalent to `lambda_params_at`.
+    ///
+    /// The column limit prevents the closing `}` of an inline lambda from being
+    /// seen when the cursor is inside that lambda on the same line:
+    ///   `loan = { loanId, isWustenrot -> setEvent(...) },`
+    ///                                                  ^ cursor here
+    /// Without the limit, the scan hits `}` first (depth→1), then `{` resets to 0
+    /// (not <0), so the lambda params are never collected.
+    pub fn lambda_params_at_col(&self, uri: &Url, cursor_line: usize, cursor_col: usize) -> Vec<String> {
         let lines = self.live_lines.get(uri.as_str())
             .map(|ll| ll.clone())
             .or_else(|| self.files.get(uri.as_str()).map(|f| f.lines.clone()))
             .unwrap_or_default();
 
-        let mut params = Vec::new();
+        let mut params: Vec<String> = Vec::new();
+        let mut depth: i32 = 0;
         let scan_start = cursor_line.saturating_sub(50);
-        for line in &lines[scan_start..=cursor_line.min(lines.len().saturating_sub(1))] {
-            // Match `{ name ->` or `(name ->` — capture the param name.
-            if let Some(brace) = line.find("{ ").or_else(|| line.find("(")) {
-                let rest = &line[brace + 1..].trim_start();
-                // Extract identifier before ` ->`
-                let name: String = rest.chars().take_while(|&c| c.is_alphanumeric() || c == '_').collect();
-                if !name.is_empty() && name != "it" {
-                    let after_name = &rest[name.len()..].trim_start();
-                    if after_name.starts_with("->") || after_name.starts_with(",") {
-                        if !params.contains(&name) { params.push(name); }
+
+        for ln in (scan_start..=cursor_line).rev() {
+            let line = match lines.get(ln) { Some(l) => l, None => continue };
+            // On the cursor line only consider chars up to the cursor column so
+            // that the closing `}` of an inline lambda (which comes AFTER the
+            // cursor) does not inflate the depth counter.
+            let scan_line: &str = if ln == cursor_line && cursor_col < line.len() {
+                // cursor_col is a UTF-16 character offset; find the byte boundary.
+                let mut utf16 = 0usize;
+                let mut byte_end = line.len();
+                for (bi, ch) in line.char_indices() {
+                    if utf16 >= cursor_col { byte_end = bi; break; }
+                    utf16 += ch.len_utf16();
+                }
+                &line[..byte_end]
+            } else {
+                line
+            };
+            for (bi, ch) in scan_line.char_indices().rev() {
+                match ch {
+                    '}' => depth += 1,
+                    '{' => {
+                        depth -= 1;
+                        if depth < 0 {
+                            // Skip string interpolation.
+                            if line[..bi].ends_with('$') { depth = 0; continue; }
+                            // Check for named params `{ a, b -> }`.
+                            let after = line[bi + 1..].trim_start();
+                            if let Some(arrow_pos) = after.find("->") {
+                                let names_str = &after[..arrow_pos];
+                                for tok in names_str.split(',') {
+                                    let name: String = tok.trim()
+                                        .chars().take_while(|&c| c.is_alphanumeric() || c == '_')
+                                        .collect();
+                                    if !name.is_empty() && name != "it" && name != "_"
+                                        && name.chars().next().map(|c| c.is_lowercase()).unwrap_or(false)
+                                    {
+                                        if !params.contains(&name) { params.push(name.clone()); }
+                                    }
+                                }
+                            }
+                            // Reset so outer lambdas can also be found.
+                            depth = 0;
+                        }
                     }
+                    _ => {}
                 }
             }
         }
         params
+    }
+
+    /// Find the `{ name ->` declaration line for a lambda parameter in scope at
+    /// `cursor_line`.  Returns a `Location` pointing to the opening `{` of the
+    /// enclosing lambda (the parameter's declaration site).
+    pub fn find_lambda_param_decl(&self, uri: &Url, param_name: &str, cursor_line: usize) -> Option<Location> {
+        let lines = self.live_lines.get(uri.as_str())
+            .map(|ll| ll.clone())
+            .or_else(|| self.files.get(uri.as_str()).map(|f| f.lines.clone()))?;
+
+        let scan_start = cursor_line.saturating_sub(50);
+        for ln in (scan_start..=cursor_line).rev() {
+            let line = match lines.get(ln) { Some(l) => l, None => continue };
+            if !line_has_lambda_param(line, param_name) { continue; }
+            if let Some(brace_pos) = lambda_brace_pos_for_param(line, param_name) {
+                let char_col = line[..brace_pos].chars().count() as u32;
+                return Some(Location {
+                    uri: uri.clone(),
+                    range: tower_lsp::lsp_types::Range {
+                        start: tower_lsp::lsp_types::Position { line: ln as u32, character: char_col },
+                        end:   tower_lsp::lsp_types::Position { line: ln as u32, character: char_col + 1 },
+                    },
+                });
+            }
+        }
+        None
     }
 
     ///
@@ -784,33 +928,79 @@ impl Indexer {
             None
         };
 
-        // Lambda implicit/explicit parameter completion:
-        //  - `it.`           → implicit single param
-        //  - `item -> item.` → explicitly named param
-        // In both cases, scan backward to find the enclosing collection/receiver
-        // and infer the element type.
+        // `this.` / `it.` / named-param dot-completion.
+        // `this` can mean: (a) scope-function receiver, (b) enclosing class.
+        // `it` means: implicit lambda param.
+        // Named lambda params are detected via `is_lambda_param`.
         if let Some(ref recv) = dot_receiver {
-            if recv == "it" || is_lambda_param(recv, before, self, uri, position.line as usize) {
-                let elem_type = if recv == "it" {
-                    find_it_element_type(before, self, uri)
+            if recv == "it" || recv == "this"
+                || is_lambda_param(recv, before, self, uri, position.line as usize)
+            {
+                let cursor_line = position.line as usize;
+                let cursor_col  = before.chars().count();
+                let elem_type = if recv == "it" || recv == "this" {
+                    // Try single-line first (fast path: `obj.run { this. }` on same line).
+                    let t = find_it_element_type(before, self, uri);
+                    if t.is_some() {
+                        t
+                    } else {
+                        // Multi-line fallback: lambda opened on a previous line.
+                        let lines = self.live_lines.get(uri.as_str())
+                            .map(|ll| ll.clone())
+                            .or_else(|| self.files.get(uri.as_str()).map(|f| f.lines.clone()));
+                        let ml = lines.and_then(|ls| {
+                            find_it_element_type_in_lines(&ls, cursor_line, cursor_col, self, uri)
+                        });
+                        if ml.is_some() {
+                            ml
+                        } else if recv == "this" {
+                            self.enclosing_class_at(uri, position.line)
+                        } else {
+                            None
+                        }
+                    }
                 } else {
                     find_named_lambda_param_type(before, recv, self, uri, position.line as usize)
                 };
                 if let Some(elem_type) = elem_type {
                     return crate::resolver::complete_symbol(self, &prefix, Some(&elem_type), uri, snippets);
                 }
-                // Known lambda param but type unresolvable → return empty (avoid rg)
-                if recv == "it" { return vec![]; }
+                // Recognised lambda param but type unresolvable — return empty to
+                // avoid showing members of a completely unrelated type.
+                // For `this` we also return empty (don't fall through to unrelated symbols).
+                return vec![];
             }
         }
 
-        crate::resolver::complete_symbol(
+        let mut items = crate::resolver::complete_symbol(
             self,
             &prefix,
             dot_receiver.as_deref(),
             uri,
             snippets,
-        )
+        );
+
+        // Add scope-aware lambda parameter names (bare-word completion only).
+        // Uses brace-depth backward scan so only in-scope params appear —
+        // a closed sibling lambda's params are never included.
+        if dot_receiver.is_none() {
+            let prefix_lower = prefix.to_lowercase();
+            for param in self.lambda_params_at(uri, position.line as usize) {
+                if param.to_lowercase().starts_with(&prefix_lower) {
+                    use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind};
+                    if !items.iter().any(|i| i.label == param) {
+                        items.push(CompletionItem {
+                            label:     param.clone(),
+                            kind:      Some(CompletionItemKind::VARIABLE),
+                            sort_text: Some(format!("1.5:{param}")),
+                            ..Default::default()
+                        });
+                    }
+                }
+            }
+        }
+
+        items
     }
 
     /// Build a Markdown hover snippet for a symbol name.
@@ -830,6 +1020,14 @@ impl Indexer {
     /// Build hover markdown for `name` at a specific resolved `Location`.
     /// Used by the hover handler so it shows the same symbol as go-to-definition.
     pub fn hover_info_at_location(&self, loc: &Location, name: &str) -> Option<String> {
+        // On-demand index: the file may have been found by rg but not yet indexed.
+        if !self.files.contains_key(loc.uri.as_str()) {
+            if let Ok(path) = loc.uri.to_file_path() {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    self.index_content(&loc.uri, &content);
+                }
+            }
+        }
         let data = self.files.get(loc.uri.as_str())?;
         let sym  = data.symbols.iter().find(|s| s.name == name)?;
 
@@ -1265,6 +1463,146 @@ fn find_it_element_type(before_cursor: &str, idx: &Indexer, uri: &Url) -> Option
     lambda_receiver_type_from_context(before_brace, idx, uri)
 }
 
+/// Multi-line version of `find_it_element_type` for hover/goto-def contexts.
+///
+/// When hovering over `it`, the cursor is ON `it` in the lambda body — which
+/// may be on a DIFFERENT line than the opening `{`.  The simple `rfind('{')` on
+/// `before_cursor` would miss it.
+///
+/// Algorithm: scan backward from `cursor_line` tracking `{}` depth to find
+/// the opening `{` of the immediately enclosing lambda.  Then inspect that
+/// line for a receiver expression before the brace.
+fn find_it_element_type_in_lines(
+    lines:       &[String],
+    cursor_line: usize,
+    cursor_col:  usize,
+    idx:         &Indexer,
+    uri:         &Url,
+) -> Option<String> {
+    // Scan right-to-left tracking brace depth.
+    // Convention: depth starts at 0. `}` increments, `{` decrements.
+    // When depth goes < 0, we've found the `{` that opens our enclosing lambda.
+    //
+    // IMPORTANT: On cursor_line, only scan characters *before* cursor_col.
+    // Characters to the right of the cursor (e.g., closing `}`) must not affect
+    // the depth; otherwise a balanced `{ it.name }` would never trigger depth < 0.
+    let mut depth: i32 = 0;
+    let scan_start = cursor_line.saturating_sub(40);
+
+    for ln in (scan_start..=cursor_line).rev() {
+        let line = match lines.get(ln) { Some(l) => l, None => continue };
+        // On cursor_line restrict to chars at byte positions < cursor_col.
+        let scan_slice: &str = if ln == cursor_line {
+            let byte_bound = line.char_indices()
+                .nth(cursor_col)
+                .map(|(b, _)| b)
+                .unwrap_or(line.len());
+            &line[..byte_bound]
+        } else {
+            line.as_str()
+        };
+
+        for (bi, ch) in scan_slice.char_indices().rev() {
+            match ch {
+                '}' => depth += 1,
+                '{' => {
+                    depth -= 1;
+                    if depth < 0 {
+                        let before_brace = &scan_slice[..bi];
+                        // Skip string interpolation `${`.
+                        if before_brace.ends_with('$') { depth = 0; continue; }
+                        // Skip named-param lambdas `{ name -> }` or `{ a, b -> }` — that's not `it`.
+                        // Use depth-aware `->` detection to handle multi-param lambdas where
+                        // `rest` starts with `,` not `->` (e.g. `{ loanId, isWustenrot ->`).
+                        let after_brace = scan_slice[bi + 1..].trim_start();
+                        if has_named_params_not_it(after_brace) {
+                            depth = 0; continue;
+                        }
+                        let result = lambda_receiver_type_from_context(before_brace, idx, uri)
+                            .or_else(|| lambda_receiver_type_named_arg_ml(
+                                before_brace, 0, lines, ln, idx, uri,
+                            ));
+                        return result;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+
+/// Returns true if `line` contains a lambda declaration that names `param_name`
+/// as one of its parameters (handles single and multi-param patterns):
+///   `{ param -> ... }`, `{ a, param, b -> ... }`
+fn line_has_lambda_param(line: &str, param_name: &str) -> bool {
+    // There may be multiple `->` on one line (e.g. inline + trailing lambda).
+    // Iterate every `->` and check whether param_name is in the names before it.
+    let mut search_from = 0;
+    while let Some(rel) = line[search_from..].find("->") {
+        let arrow_pos = search_from + rel;
+        if let Some(brace_pos) = line[..arrow_pos].rfind('{') {
+            let names_str = &line[brace_pos + 1..arrow_pos];
+            for tok in names_str.split(',') {
+                let tok = tok.trim();
+                let n: String = tok.chars().take_while(|&c| c.is_alphanumeric() || c == '_').collect();
+                if n == param_name { return true; }
+            }
+        }
+        search_from = arrow_pos + 2;
+    }
+    false
+}
+
+/// Find the `{` byte position in `line` for the lambda that declares `param_name`.
+/// Scans all `->` occurrences (a line may have multiple lambdas).
+fn lambda_brace_pos_for_param(line: &str, param_name: &str) -> Option<usize> {
+    let mut search_from = 0;
+    while let Some(rel) = line[search_from..].find("->") {
+        let arrow_pos = search_from + rel;
+        if let Some(brace_pos) = line[..arrow_pos].rfind('{') {
+            let names_str = &line[brace_pos + 1..arrow_pos];
+            for tok in names_str.split(',') {
+                let tok = tok.trim();
+                let n: String = tok.chars().take_while(|&c| c.is_alphanumeric() || c == '_').collect();
+                if n == param_name { return Some(brace_pos); }
+            }
+        }
+        search_from = arrow_pos + 2;
+    }
+    None
+}
+
+/// Multi-line version of `find_named_lambda_param_type` for hover/goto-def.
+///
+/// Scans the whole file (not just `before_cursor`) for `{ param_name ->`,
+/// including the CURRENT line (needed when cursor is on the param name before
+/// the `->` is written, or when scanning the declaration line itself).
+///
+/// Also handles multi-param lambdas `{ id, scan -> }`.
+fn find_named_lambda_param_type_in_lines(
+    lines:       &[String],
+    param_name:  &str,
+    cursor_line: usize,
+    idx:         &Indexer,
+    uri:         &Url,
+) -> Option<String> {
+    let scan_start = cursor_line.saturating_sub(40);
+    // Include cursor_line itself (different from completion path which is exclusive).
+    for ln in (scan_start..=cursor_line).rev() {
+        let line = match lines.get(ln) { Some(l) => l, None => continue };
+        if !line_has_lambda_param(line, param_name) { continue; }
+        let brace_pos = lambda_brace_pos_for_param(line, param_name).unwrap_or(0);
+        let before_brace = &line[..brace_pos];
+        let pos = lambda_param_position_on_line(line, param_name);
+        let result = lambda_receiver_type_from_context(before_brace, idx, uri)
+            .or_else(|| lambda_receiver_type_named_arg_ml(before_brace, pos, lines, ln, idx, uri));
+        if result.is_some() { return result; }
+    }
+    None
+}
+
 /// Resolve the element/receiver type for an EXPLICITLY NAMED lambda parameter.
 ///
 /// Handles both same-line and multi-line lambda declarations:
@@ -1281,33 +1619,36 @@ fn find_named_lambda_param_type(
     uri:          &Url,
     cursor_line:  usize,
 ) -> Option<String> {
-    let arrow_pat   = format!("{{ {} ->", param_name);     // `{ item ->`
-    let arrow_pat2  = format!("({} ->",   param_name);     // `(item ->`
+    let lines = idx.live_lines.get(uri.as_str())
+        .map(|ll| ll.clone())
+        .or_else(|| idx.files.get(uri.as_str()).map(|f| f.lines.clone()));
 
     // 1. Check same line first — covers `items.forEach { item -> item.`
-    for pat in &[&arrow_pat, &arrow_pat2] {
-        if let Some(brace_pos) = before_cursor.find(pat.as_str()) {
+    //    Also handles multi-param: `items.map { a, b -> a.`
+    if line_has_lambda_param(before_cursor, param_name) {
+        if let Some(brace_pos) = lambda_brace_pos_for_param(before_cursor, param_name) {
             let before_brace = &before_cursor[..brace_pos];
-            if let Some(t) = lambda_receiver_type_from_context(before_brace, idx, uri) {
-                return Some(t);
-            }
+            let pos = lambda_param_position_on_line(before_cursor, param_name);
+            let result = lambda_receiver_type_from_context(before_brace, idx, uri)
+                .or_else(|| lines.as_deref().and_then(|ls|
+                    lambda_receiver_type_named_arg_ml(before_brace, pos, ls, cursor_line, idx, uri)
+                ));
+            if result.is_some() { return result; }
         }
     }
 
     // 2. Scan backward through previous lines.
-    let lines = idx.live_lines.get(uri.as_str())
-        .map(|ll| ll.clone())
-        .or_else(|| idx.files.get(uri.as_str()).map(|f| f.lines.clone()))?;
-
+    let lines = lines?;
     let scan_start = cursor_line.saturating_sub(20);
     for ln in (scan_start..cursor_line).rev() {
-        let line = lines.get(ln)?;
-        if !line.contains(&arrow_pat) && !line.contains(&arrow_pat2) { continue; }
-        // Find the `{` on this line.
-        let brace_pos = line.find('{').unwrap_or(0);
-        let before_brace = &line[..brace_pos];
-        if let Some(t) = lambda_receiver_type_from_context(before_brace, idx, uri) {
-            return Some(t);
+        let line = match lines.get(ln) { Some(l) => l, None => continue };
+        if !line_has_lambda_param(line, param_name) { continue; }
+        if let Some(brace_pos) = lambda_brace_pos_for_param(line, param_name) {
+            let before_brace = &line[..brace_pos];
+            let pos = lambda_param_position_on_line(line, param_name);
+            let result = lambda_receiver_type_from_context(before_brace, idx, uri)
+                .or_else(|| lambda_receiver_type_named_arg_ml(before_brace, pos, &lines, ln, idx, uri));
+            if result.is_some() { return result; }
         }
     }
     None
@@ -1317,7 +1658,7 @@ fn find_named_lambda_param_type(
 /// in the current editing context (same line or recent lines).
 ///
 /// Used to avoid triggering lambda inference for ordinary local variables
-/// that just happen to be lowercase.
+/// that just happen to be lowercase.  Handles single and multi-param lambdas.
 fn is_lambda_param(
     recv:        &str,
     before_cur:  &str,
@@ -1325,12 +1666,7 @@ fn is_lambda_param(
     uri:         &Url,
     cursor_line: usize,
 ) -> bool {
-    let arrow_pat  = format!("{{ {} ->", recv);
-    let arrow_pat2 = format!("({} ->",   recv);
-
-    if before_cur.contains(&arrow_pat) || before_cur.contains(&arrow_pat2) {
-        return true;
-    }
+    if line_has_lambda_param(before_cur, recv) { return true; }
 
     let lines_opt = idx.live_lines.get(uri.as_str())
         .map(|ll| ll.clone())
@@ -1340,9 +1676,7 @@ fn is_lambda_param(
         let scan_start = cursor_line.saturating_sub(20);
         for ln in (scan_start..cursor_line).rev() {
             if let Some(line) = lines.get(ln) {
-                if line.contains(&arrow_pat) || line.contains(&arrow_pat2) {
-                    return true;
-                }
+                if line_has_lambda_param(line, recv) { return true; }
             }
         }
     }
@@ -1352,44 +1686,611 @@ fn is_lambda_param(
 /// Shared core: given the text BEFORE the `{` that opens a lambda, infer
 /// the element type that `it` / the named param will have.
 ///
-/// `"items.forEach"` → receiver `items` → `List<Product>` → `Product`
-/// `"user.let"`      → receiver `user`  → `User` (scope fn, no generic)
+/// Three cases:
+///   A) `receiver.method { it }`          — infer element type from receiver
+///   B) `plainFun(args) { it }`           — look up fun's last param type
+///   C) `fn(arg1, { namedParam -> ... })` — look up fun's N-th param type
+///   D) multi-line named-arg `name = {\n  it }` — resolved by callers via `_ml` variant
 pub(crate) fn lambda_receiver_type_from_context(
     before_brace: &str,
     idx:          &Indexer,
     uri:          &Url,
 ) -> Option<String> {
-    let callee_str      = strip_trailing_call_args(before_brace.trim_end());
-    let callee_norm     = callee_str.replace("?.", ".");
-    let callee_trimmed  = callee_norm.trim_end();
+    let trimmed = before_brace.trim_end();
 
-    let dot_pos      = callee_trimmed.rfind('.')?;
-    let receiver_expr = callee_trimmed[..dot_pos].trim_end();
+    // Strip a trailing balanced `(args)` to expose the callee expression.
+    let callee_raw = strip_trailing_call_args(trimmed).replace("?.", ".");
+    let callee = callee_raw.trim(); // trim both ends — leading spaces from indentation matter
 
-    let receiver_var: String = receiver_expr
+    // ── Case A: `receiver.method` ────────────────────────────────────────────
+    // Use a depth-aware dot search so dots INSIDE argument lists are ignored
+    // (e.g., `fn(Enum.VALUE, {` must not match the dot inside `Enum.VALUE`).
+    if let Some(dot_pos) = find_last_dot_at_depth_zero(callee) {
+        let receiver_expr = callee[..dot_pos].trim_end();
+        let receiver_var: String = receiver_expr
+            .chars().rev()
+            .take_while(|&c| is_id_char(c))
+            .collect::<String>()
+            .chars().rev()
+            .collect();
+
+        if !receiver_var.is_empty() {
+            if let Some(raw) = crate::resolver::infer_variable_type_raw(idx, &receiver_var, uri) {
+                if let Some(elem) = crate::resolver::extract_collection_element_type(&raw) {
+                    return Some(elem);
+                }
+                let base: String = raw.chars().take_while(|&c| is_id_char(c)).collect();
+                if !base.is_empty() && base.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                    return Some(base);
+                }
+            }
+            if receiver_var.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                return Some(receiver_var);
+            }
+        }
+    }
+
+    // ── Case B: plain trailing lambda — `fnName(args) { it/this }` ─────────
+    // After stripping args, `callee` is just the bare function identifier.
+    if !callee.is_empty() && callee.chars().all(|c| is_id_char(c)) {
+        // Known stdlib scope function `with(receiver) { this }` — extract the
+        // first argument as the receiver and infer its type directly.
+        if callee == "with" {
+            if let Some(recv_name) = extract_first_arg(trimmed) {
+                if let Some(raw) = crate::resolver::infer_variable_type_raw(idx, recv_name, uri) {
+                    let base: String = raw.chars().take_while(|&c| is_id_char(c)).collect();
+                    if !base.is_empty() { return Some(base); }
+                }
+                // If recv_name starts uppercase it IS the type (companion / object ref).
+                let base: String = recv_name.chars().take_while(|&c| is_id_char(c)).collect();
+                if base.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                    return Some(base);
+                }
+            }
+        }
+        if let Some(ty) = fun_trailing_lambda_it_type(callee, idx, uri) {
+            return Some(ty);
+        }
+    }
+
+    // ── Case C: inline lambda arg — `fn(arg, { param -> ... }, ...)` ─────────
+    // `before_brace` ends inside an unclosed `(`, so scan backward to find
+    // the function name and the positional index of this lambda argument.
+    inline_lambda_param_type(trimmed, idx, uri)
+}
+
+/// Try to resolve the lambda receiver type when `before_brace` is a named-arg
+/// opener like `  buildingSavings = ` or `  loan = ` spread across multiple
+/// lines (the enclosing `(` is on a previous line).
+///
+/// Returns `Some(type_name)` for the Nth input type of the parameter's functional
+/// type, where N = `lambda_param_pos` (0-based position of the named param in the
+/// multi-param lambda, e.g. `{ loanId, isWustenrot -> }` → loanId=0, isWustenrot=1).
+fn lambda_receiver_type_named_arg_ml(
+    before_brace:      &str,
+    lambda_param_pos:  usize,
+    lines:             &[String],
+    line_no:           usize,
+    idx:               &Indexer,
+    uri:               &Url,
+) -> Option<String> {
+    let named_arg = extract_named_arg_name(before_brace)?;
+
+    // Find the enclosing function/constructor call by scanning backward.
+    let callee_full = find_enclosing_call_name(lines, line_no, before_brace.len())?;
+
+    // Use the LAST segment of a dotted callee as the function name to look up.
+    // `DashboardProductsReducer.SheetReloadActions` → `SheetReloadActions`
+    let fn_name = callee_full.split('.').last()?;
+
+    // If callee is qualified (e.g. `DashboardProductsReducer.SheetReloadActions`),
+    // resolve the outer class to its file and search only there.  This prevents
+    // picking a same-named class from a different file when multiple classes share
+    // the same short name (e.g. two `SheetReloadActions` in the same project).
+    let sig = if let Some(dot) = callee_full.rfind('.') {
+        let outer = &callee_full[..dot];
+        // Find outer class file; try indexed files first (no rg), then rg fallback.
+        let outer_file: Option<String> = {
+            let locs = crate::resolver::resolve_symbol_no_rg(idx, outer, uri);
+            locs.first().map(|l| l.uri.to_string())
+                .or_else(|| {
+                    // On-demand: use rg to find and index the outer class.
+                    let rg_locs = rg_find_definition(
+                        outer, idx.workspace_root.get().map(PathBuf::as_path)
+                    );
+                    for loc in &rg_locs {
+                        if !idx.files.contains_key(loc.uri.as_str()) {
+                            if let Ok(path) = loc.uri.to_file_path() {
+                                if let Ok(content) = std::fs::read_to_string(&path) {
+                                    idx.index_content(&loc.uri, &content);
+                                }
+                            }
+                        }
+                    }
+                    rg_locs.first().map(|l| l.uri.to_string())
+                })
+        };
+        if let Some(file_uri) = outer_file {
+            // Try ALL symbols named `fn_name` in the outer-class file — the file
+            // may have multiple same-named nested classes (e.g. two `SheetReloadActions`
+            // in different reducers).  Pick the first one whose params contain `named_arg`.
+            let sigs = collect_all_fun_params_texts(fn_name, &file_uri, idx);
+            let found = sigs.into_iter()
+                .find_map(|s| find_named_param_type_in_sig(&s, named_arg).map(|ty| (s, ty)));
+            if let Some((_sig, param_type)) = found {
+                return lambda_type_nth_input(&param_type, lambda_param_pos);
+            }
+            find_fun_signature(fn_name, idx, uri)
+        } else {
+            find_fun_signature(fn_name, idx, uri)
+        }
+    } else {
+        find_fun_signature(fn_name, idx, uri)
+    }?;
+
+    let param_type = find_named_param_type_in_sig(&sig, named_arg)?;
+    lambda_type_nth_input(&param_type, lambda_param_pos)
+}
+
+/// Detect the `IDENT =` named-arg pattern at the end of `before_brace`.
+/// Returns the identifier if found (must be lowercase-first, not `!=`, `<=`, `>=`).
+///
+/// Also requires that the text BEFORE the identifier is only whitespace (or
+/// comma + whitespace for same-line multi-arg calls), so that patterns like
+/// `(isRefresh = { resultState ->` are NOT falsely matched as named args
+/// (the `(` before `isRefresh` disqualifies it).
+fn extract_named_arg_name(before_brace: &str) -> Option<&str> {
+    let s = before_brace.trim_end();
+    let s = s.strip_suffix('=')?;
+    // Guard against `!=`, `<=`, `>=`, `==`
+    if s.ends_with(|c: char| "!<>=".contains(c)) { return None; }
+    let s = s.trim_end();
+    // Extract trailing identifier
+    let ident_start = s.rfind(|c: char| !c.is_alphanumeric() && c != '_')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let ident = &s[ident_start..];
+    if ident.is_empty() { return None; }
+    // Named args start with a lowercase letter
+    if ident.chars().next().map(|c| c.is_uppercase()).unwrap_or(true) { return None; }
+    // Require the prefix to be only whitespace (optionally preceded by a comma).
+    // This prevents `(isRefresh = {` from matching — the `(` before `isRefresh`
+    // makes the prefix non-empty after stripping commas and whitespace.
+    let prefix = s[..ident_start].trim_start().trim_start_matches(',').trim_start();
+    if !prefix.is_empty() { return None; }
+    Some(ident)
+}
+
+/// Find the type string of a named parameter `param_name` inside a
+/// comma-separated parameter list text (output of `collect_fun_params_text`).
+///
+/// Handles `val`/`var` prefixes, strips them. Returns the full type string
+/// (may be a functional type like `(String, Boolean) -> Unit`).
+fn find_named_param_type_in_sig(sig: &str, param_name: &str) -> Option<String> {
+    // Split by comma at depth 0 (respecting `()` only — NOT `<>` because `->` contains `>`
+    // which would falsely decrement a `<>` depth counter).
+    let mut parts: Vec<&str> = Vec::new();
+    let mut depth: i32 = 0;
+    let mut start = 0;
+    for (i, ch) in sig.char_indices() {
+        match ch {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            ',' if depth == 0 => { parts.push(&sig[start..i]); start = i + 1; }
+            _ => {}
+        }
+    }
+    if start < sig.len() { parts.push(&sig[start..]); }
+
+    let colon_pat = format!("{param_name}:");
+    for part in parts {
+        let part = part.trim().trim_start_matches("val ").trim_start_matches("var ");
+        // Exact param_name match (no suffix)
+        let Some(col_pos) = part.find(&colon_pat) else { continue };
+        let before = &part[..col_pos];
+        if before.chars().last().map(|c| c.is_alphanumeric() || c == '_').unwrap_or(false) {
+            continue; // suffix match like `otherParam:`
+        }
+        let after = part[col_pos + colon_pat.len()..].trim();
+        if !after.is_empty() { return Some(after.to_owned()); }
+    }
+    None
+}
+
+/// Return the Nth (0-based) input type from a functional type expression.
+///
+/// `lambda_type_nth_input("(String, Boolean) -> Unit", 0)` → `Some("String")`
+/// `lambda_type_nth_input("(String, Boolean) -> Unit", 1)` → `Some("Boolean")`
+/// `lambda_type_nth_input("() -> Unit", 0)` → `None`
+fn lambda_type_nth_input(ty: &str, n: usize) -> Option<String> {
+    let ty = ty.trim();
+    if !ty.starts_with('(') { return None; }
+    // Find matching `)`.
+    let mut depth: i32 = 0;
+    let mut close = None;
+    for (i, ch) in ty.char_indices() {
+        match ch {
+            '(' | '<' => depth += 1,
+            ')' | '>' => { depth -= 1; if depth == 0 { close = Some(i); break; } }
+            _ => {}
+        }
+    }
+    let close = close?;
+    let inner = ty[1..close].trim();
+    if inner.is_empty() { return None; }
+
+    // Split inner by comma at depth 0.
+    let mut args: Vec<&str> = Vec::new();
+    let mut start = 0;
+    let mut d: i32 = 0;
+    for (i, ch) in inner.char_indices() {
+        match ch {
+            '(' | '<' | '[' => d += 1,
+            ')' | '>' | ']' => d -= 1,
+            ',' if d == 0 => { args.push(&inner[start..i]); start = i + 1; }
+            _ => {}
+        }
+    }
+    args.push(&inner[start..]);
+
+    let arg = args.get(n).map(|s| s.trim())?;
+    // Strip named-param prefix `name:`.
+    let arg = if let Some(c) = arg.find(':') { arg[c + 1..].trim() } else { arg };
+    // Allow dots for qualified types like `CreditCardDashboardInteractor.CardProduct`.
+    let base: String = arg.chars().take_while(|&c| is_id_char(c) || c == '.').collect();
+    // Trim any trailing dots.
+    let base = base.trim_end_matches('.');
+    if base.is_empty() || !base.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+        return None;
+    }
+    Some(base.to_owned())
+}
+
+/// 0-based index of `param_name` in a multi-param lambda opening `{ a, b, c ->`.
+/// Returns 0 for single-param lambdas.
+fn lambda_param_position_on_line(line: &str, param_name: &str) -> usize {
+    let mut search_from = 0;
+    while let Some(rel) = line[search_from..].find("->") {
+        let arrow_pos = search_from + rel;
+        if let Some(brace_pos) = line[..arrow_pos].rfind('{') {
+            let names_str = &line[brace_pos + 1..arrow_pos];
+            for (i, tok) in names_str.split(',').enumerate() {
+                let tok = tok.trim();
+                let n: String = tok.chars().take_while(|&c| c.is_alphanumeric() || c == '_').collect();
+                if n == param_name { return i; }
+            }
+        }
+        search_from = arrow_pos + 2;
+    }
+    0
+}
+
+/// Returns true if `after_open_brace` looks like the opening of an explicitly
+/// named parameter lambda — single-param `{ name ->` or multi-param `{ a, b ->`.
+///
+/// Handles multi-param correctly by finding `->` via a depth-aware scan
+/// (not just checking whether the text after the first word starts with `->`).
+///
+/// Returns false for:
+///   - `{ it }`               — implicit single param
+///   - `{ }` / `{`            — empty / block
+///   - `{ setEvent(...)` }    — starts with a function call
+fn has_named_params_not_it(after_open_brace: &str) -> bool {
+    let s = after_open_brace.trim_start();
+    // Find the first `->` at brace-depth 0 (ignoring `->` inside nested lambdas).
+    let mut depth: i32 = 0;
+    let bytes = s.as_bytes();
+    let mut arrow_pos: Option<usize> = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' => { depth += 1; i += 1; }
+            b'}' => { depth -= 1; i += 1; }
+            b'-' if depth == 0 && i + 1 < bytes.len() && bytes[i + 1] == b'>' => {
+                arrow_pos = Some(i); break;
+            }
+            _ => { i += 1; }
+        }
+    }
+    let Some(ap) = arrow_pos else { return false; };
+    let before_arrow = s[..ap].trim_end();
+    // All tokens before `->` must be valid identifiers.
+    // If any non-`it`, non-`_` identifier is present, it's a named-param lambda.
+    for tok in before_arrow.split(',') {
+        let tok = tok.trim();
+        let name: String = tok.chars()
+            .take_while(|&c| c.is_alphanumeric() || c == '_')
+            .collect();
+        if !name.is_empty() && name != "it" && name != "_" {
+            return true;
+        }
+    }
+    false
+}
+
+fn extract_first_arg(call_expr: &str) -> Option<&str> {
+    let paren = call_expr.find('(')?;
+    let rest = &call_expr[paren + 1..];
+    let mut depth: i32 = 0;
+    let mut end = rest.len();
+    for (i, ch) in rest.char_indices() {
+        match ch {
+            '(' | '<' | '[' => depth += 1,
+            ')' | ']' => { if depth == 0 { end = i; break; } depth -= 1; }
+            '>' => depth -= 1,
+            ',' if depth == 0 => { end = i; break; }
+            _ => {}
+        }
+    }
+    let arg = rest[..end].trim();
+    if arg.is_empty() { None } else { Some(arg) }
+}
+
+/// Find the position of the last `.` that is at parenthesis/bracket depth 0
+/// (scanning left-to-right so that `fn(Enum.VALUE,` returns None — the dot
+/// is at depth 1 inside the argument list).
+fn find_last_dot_at_depth_zero(s: &str) -> Option<usize> {
+    let mut depth: i32 = 0;
+    let mut last_dot: Option<usize> = None;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            '.' if depth == 0 => last_dot = Some(i),
+            _ => {}
+        }
+    }
+    last_dot
+}
+
+/// For an INLINE lambda argument `fn(a, b, { param -> ... })`:
+/// find the enclosing function name and the 0-based position of this lambda,
+/// then look up that function parameter's type.
+fn inline_lambda_param_type(before_brace: &str, idx: &Indexer, uri: &Url) -> Option<String> {
+    // Scan right-to-left to find the nearest unclosed `(`.
+    // Convention: `)` increments depth, `(` decrements.  depth < 0 → found it.
+    let mut depth: i32 = 0;
+    let mut open_paren_byte = None;
+    let mut comma_count: usize = 0;
+
+    for (bi, ch) in before_brace.char_indices().rev() {
+        match ch {
+            ')' => depth += 1,
+            '(' => {
+                depth -= 1;
+                if depth < 0 { open_paren_byte = Some(bi); break; }
+            }
+            ',' if depth == 0 => comma_count += 1,
+            _ => {}
+        }
+    }
+
+    let open_pos = open_paren_byte?;
+    let fn_name: String = before_brace[..open_pos]
+        .trim_end()
         .chars().rev()
         .take_while(|&c| is_id_char(c))
         .collect::<String>()
         .chars().rev()
         .collect();
 
-    if receiver_var.is_empty() { return None; }
+    if fn_name.is_empty() { return None; }
 
-    if let Some(raw) = crate::resolver::infer_variable_type_raw(idx, &receiver_var, uri) {
-        if let Some(elem) = crate::resolver::extract_collection_element_type(&raw) {
-            return Some(elem);
-        }
-        let base: String = raw.chars().take_while(|&c| is_id_char(c)).collect();
-        if !base.is_empty() && base.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
-            return Some(base);
+    let sig = find_fun_signature(&fn_name, idx, uri)?;
+    let param_type = nth_fun_param_type_str(&sig, comma_count)?;
+    lambda_type_first_input(&param_type)
+}
+
+/// Look up a function by name, find its last parameter's type, and return the
+/// first input type if that parameter is a lambda/function type.
+///
+/// Example: `fun loadProduct(key: K, flow: Flow<T>, map: (ResultState<T>) -> Model)`
+/// returns `Some("ResultState")` so that `it` in `loadProduct(...) { it }` resolves.
+fn fun_trailing_lambda_it_type(fn_name: &str, idx: &Indexer, uri: &Url) -> Option<String> {
+    let sig = find_fun_signature(fn_name, idx, uri)?;
+    let last_type = last_fun_param_type_str(&sig)?;
+    lambda_type_first_input(&last_type)
+}
+
+/// Collect the full parameter-list text for a function named `fn_name`.
+/// Searches the current file first, then all indexed files.
+fn find_fun_signature(fn_name: &str, idx: &Indexer, uri: &Url) -> Option<String> {
+    if let Some(sig) = collect_fun_params_text(fn_name, uri.as_str(), idx) {
+        return Some(sig);
+    }
+    for entry in idx.files.iter() {
+        if entry.key() == uri.as_str() { continue; }
+        if let Some(sig) = collect_fun_params_text(fn_name, entry.key(), idx) {
+            return Some(sig);
         }
     }
-
-    if receiver_var.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
-        return Some(receiver_var);
+    // Not found in any indexed file — try rg to locate it and index on-demand.
+    let locs = rg_find_definition(fn_name, idx.workspace_root.get().map(PathBuf::as_path));
+    for loc in &locs {
+        let file_uri_str = loc.uri.as_str();
+        if !idx.files.contains_key(file_uri_str) {
+            if let Ok(path) = loc.uri.to_file_path() {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    idx.index_content(&loc.uri, &content);
+                }
+            }
+        }
+        if let Some(sig) = collect_fun_params_text(fn_name, file_uri_str, idx) {
+            return Some(sig);
+        }
     }
-
     None
+}
+
+/// Collect everything between the outer `(…)` of a function's parameter list.
+/// Scans the symbol's start line and up to 20 following lines.
+/// Matches both top-level `fun` (FUNCTION) and class methods (METHOD).
+fn collect_fun_params_text(fn_name: &str, uri_str: &str, idx: &Indexer) -> Option<String> {
+    collect_all_fun_params_texts(fn_name, uri_str, idx).into_iter().next()
+}
+
+/// Like `collect_fun_params_text` but returns ALL params texts for every symbol
+/// named `fn_name` in the file (a file may have multiple same-named nested classes).
+fn collect_all_fun_params_texts(fn_name: &str, uri_str: &str, idx: &Indexer) -> Vec<String> {
+    let data = match idx.files.get(uri_str) { Some(d) => d, None => return vec![] };
+    let start_lines: Vec<usize> = data.symbols.iter()
+        .filter(|s| s.name == fn_name
+               && (s.kind == SymbolKind::FUNCTION
+                   || s.kind == SymbolKind::METHOD
+                   || s.kind == SymbolKind::CLASS
+                   || s.kind == SymbolKind::STRUCT))  // data class → STRUCT
+        .map(|s| s.range.start.line as usize)
+        .collect();
+
+    start_lines.into_iter().filter_map(|start_line| collect_params_from_line(&data.lines, start_line)).collect()
+}
+
+fn collect_params_from_line(lines: &[String], start_line: usize) -> Option<String> {
+    // Walk forward from the `fun` line accumulating chars until the outermost
+    // `)` closes — that ends the parameter list.
+    // We only track `()` depth (NOT `<>`) to avoid false-triggers on `->` arrows.
+    let mut paren_depth: i32 = 0;
+    let mut found_open = false;
+    let mut params = String::new();
+
+    'outer: for ln in start_line..start_line + 20 {
+        let line = match lines.get(ln) { Some(l) => l, None => break };
+        let mut chars = line.char_indices().peekable();
+        while let Some((_, ch)) = chars.next() {
+            match ch {
+                '(' => {
+                    paren_depth += 1;
+                    if paren_depth == 1 { found_open = true; continue; }
+                    if found_open { params.push(ch); }
+                }
+                ')' => {
+                    paren_depth -= 1;
+                    if found_open && paren_depth == 0 { break 'outer; }
+                    if found_open { params.push(ch); }
+                }
+                _ if found_open => params.push(ch),
+                _ => {}
+            }
+        }
+        if found_open { params.push('\n'); }
+    }
+
+    if params.is_empty() { None } else { Some(params) }
+}
+
+/// Split the flattened parameter list by `,` at depth-0 (respecting `()`, `<>`).
+/// Returns the type string of the parameter at position `n` (0-based).
+/// Falls back to the last parameter if `n` is out of range.
+///
+/// NOTE: `->` in Kotlin functional types (e.g. `(Boolean) -> Flow<T>`) contains
+/// `>` which would falsely decrement `<>` depth.  We skip the `>` of any `->` by
+/// tracking the previous character.
+fn nth_fun_param_type_str(params_text: &str, n: usize) -> Option<String> {
+    let mut parts: Vec<&str> = Vec::new();
+    let mut depth: i32 = 0;
+    let mut start = 0;
+    let mut prev = '\0';
+    for (i, ch) in params_text.char_indices() {
+        match ch {
+            '(' | '<' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            // Skip `>` of `->` so lambda return arrows don't upset `<>` depth.
+            '>' if prev != '-' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(&params_text[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+        prev = ch;
+    }
+    parts.push(&params_text[start..]);
+    // Drop trailing-comma empty parts (Kotlin allows `fun f(a: A, b: B,) {}`).
+    parts.retain(|p| !p.trim().is_empty());
+    if parts.is_empty() { return None; }
+
+    let param = parts.get(n).unwrap_or_else(|| parts.last().unwrap()).trim();
+    // Strip leading modifiers (`vararg`, `crossinline`, `noinline`).
+    let param = param.trim_start_matches(|c: char| !c.is_alphanumeric() && c != '_');
+    let colon = param.find(':')?;
+    Some(param[colon + 1..].trim().to_owned())
+}
+
+fn last_fun_param_type_str(params_text: &str) -> Option<String> {
+    // Count top-level parameters (same `->` skip logic as nth_fun_param_type_str).
+    let count = {
+        let mut n = 1usize;
+        let mut depth: i32 = 0;
+        let mut prev = '\0';
+        for ch in params_text.chars() {
+            match ch {
+                '(' | '<' | '[' => depth += 1,
+                ')' | ']' => depth -= 1,
+                '>' if prev != '-' => depth -= 1,
+                ',' if depth == 0 => n += 1,
+                _ => {}
+            }
+            prev = ch;
+        }
+        n
+    };
+    nth_fun_param_type_str(params_text, count.saturating_sub(1))
+}
+
+/// Given a Kotlin function/lambda type `(A, B, ...) -> R`, return the base name
+/// of the first input type `A`.  Returns `None` for `() -> Unit` (no `it`).
+///
+/// Examples:
+///   `(ResultState<T>) -> Model`  → `Some("ResultState")`
+///   `(String, Int) -> Unit`      → `Some("String")`
+///   `() -> Unit`                 → `None`
+fn lambda_type_first_input(ty: &str) -> Option<String> {
+    let ty = ty.trim();
+    // Must start with `(` to be a function type.
+    if !ty.starts_with('(') { return None; }
+    // Find matching `)` (respecting nested `<>`)
+    let mut depth: i32 = 0;
+    let mut close = None;
+    for (i, ch) in ty.char_indices() {
+        match ch {
+            '(' | '<' => depth += 1,
+            ')' | '>' => {
+                depth -= 1;
+                if depth == 0 { close = Some(i); break; }
+            }
+            _ => {}
+        }
+    }
+    let close = close?;
+    let inner = ty[1..close].trim();
+    if inner.is_empty() { return None; }  // `() -> Unit` has no `it`
+
+    // Take the first type argument (before the first `,` at depth 0).
+    let mut first = inner;
+    let mut d: i32 = 0;
+    for (i, ch) in inner.char_indices() {
+        match ch {
+            '(' | '<' | '[' => d += 1,
+            ')' | '>' | ']' => d -= 1,
+            ',' if d == 0 => { first = &inner[..i]; break; }
+            _ => {}
+        }
+    }
+
+    // Strip any named-param prefix `name:` (Kotlin allows `(name: Type) -> R`)
+    let first = if let Some(colon) = first.find(':') {
+        first[colon + 1..].trim()
+    } else {
+        first.trim()
+    };
+
+    // Return the base type name (allow qualified names like `Outer.Inner`, strip generics).
+    let base: String = first.chars().take_while(|&c| is_id_char(c) || c == '.').collect();
+    let base = base.trim_end_matches('.');
+    if base.is_empty() || !base.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+        return None;
+    }
+    Some(base.to_owned())
 }
 
 /// Strip a balanced trailing `(…)` argument list from the end of `s`.
@@ -2516,5 +3417,462 @@ class Account(val name: String)"#;
         assert!(hover.contains("Represents a user account"), "got: {hover}");
         assert!(hover.contains("```kotlin"), "got: {hover}");
         assert!(hover.contains("---"), "separator missing: {hover}");
+    }
+
+    #[test]
+    fn hover_it_type_detection() {
+        let src = "val items: List<Product> = emptyList()\nitems.forEach { it.name }";
+        let (u, idx) = indexed("/t.kt", src);
+        // Cursor on `it` at line 1: "items.forEach { it.name }"
+        // `it` starts at column 16
+        let col = "items.forEach { ".len() as u32;
+        let result = idx.infer_lambda_param_type_at("it", &u, Position::new(1, col));
+        assert_eq!(result.as_deref(), Some("Product"), "hover should detect it: Product");
+    }
+
+    #[test]
+    fn hover_it_type_multiline() {
+        // `{` is on a different line than `it`
+        let src = "val items: List<User> = emptyList()\nitems.forEach {\n    val x = it.id\n}";
+        let (u, idx) = indexed("/t.kt", src);
+        // Cursor on `it` at line 2, col 13
+        let col = "    val x = ".len() as u32;
+        let result = idx.infer_lambda_param_type_at("it", &u, Position::new(2, col));
+        assert_eq!(result.as_deref(), Some("User"), "hover multiline it: User");
+    }
+
+    #[test]
+    fn hover_named_param_type_detection() {
+        let src = "val items: List<Order> = emptyList()\nitems.forEach { order ->\n    order.id\n}";
+        let (u, idx) = indexed("/t.kt", src);
+        // Cursor on `order` at line 2 (in the body)
+        let col = "    ".len() as u32;
+        let result = idx.infer_lambda_param_type_at("order", &u, Position::new(2, col));
+        assert_eq!(result.as_deref(), Some("Order"));
+    }
+
+    // ── multi-param lambda detection ─────────────────────────────────────────
+
+    #[test]
+    fn multi_param_lambda_params_at() {
+        let src = "items.zip(other) { a, b ->\n    a.id\n}";
+        let (u, idx) = indexed("/t.kt", src);
+        // Simulate live_lines for lambda_params_at
+        idx.set_live_lines(&u, src);
+        let params = idx.lambda_params_at(&u, 1);
+        assert!(params.contains(&"a".to_string()), "expected a, got: {params:?}");
+        assert!(params.contains(&"b".to_string()), "expected b, got: {params:?}");
+    }
+
+    #[test]
+    fn lambda_params_at_excludes_sibling_lambda() {
+        // `isRefresh` is in a CLOSED sibling lambda; cursor is in `resultState` body.
+        let src = concat!(
+            "reload({ isRefresh -> doSomething(isRefresh) }) { resultState ->\n",
+            "    resultState.value\n",
+            "}",
+        );
+        let (u, idx) = indexed("/t.kt", src);
+        idx.set_live_lines(&u, src);
+        let params = idx.lambda_params_at(&u, 1);
+        assert!(params.contains(&"resultState".to_string()),
+            "resultState should be in scope, got: {params:?}");
+        assert!(!params.contains(&"isRefresh".to_string()),
+            "isRefresh is a closed sibling — must NOT appear, got: {params:?}");
+    }
+
+    #[test]
+    fn lambda_params_at_col_inline_lambda() {
+        // Cursor is inside the body of an inline lambda on the SAME line.
+        // `lambda_params_at` (without col) would see the closing `}` first and
+        // NOT collect the params.  `lambda_params_at_col` limits the scan to
+        // the cursor column, so it correctly identifies `loanId` and `isWustenrot`.
+        let src = "    loan = { loanId, isWustenrot -> setEvent(OnSecondaryActionClick(loanId, isWustenrot)) },";
+        let (u, idx) = indexed("/t.kt", src);
+        idx.set_live_lines(&u, src);
+        // Cursor on the second `loanId` (inside the setEvent call).
+        // Column ~= position of second "loanId".
+        let col = src.rfind("loanId").unwrap();  // byte offset ≈ UTF-16 col for ASCII
+        let params = idx.lambda_params_at_col(&u, 0, col);
+        assert!(params.contains(&"loanId".to_string()),
+            "loanId should be in scope (col-aware), got: {params:?}");
+        assert!(params.contains(&"isWustenrot".to_string()),
+            "isWustenrot should be in scope (col-aware), got: {params:?}");
+    }
+
+    #[test]
+    fn find_named_param_on_line_with_multiple_arrows() {
+        // `resultState` is the SECOND lambda on the same line — the first `->` belongs
+        // to `{ isRefresh -> ... }`.  `line_has_lambda_param` must scan all arrows.
+        let line = "reloadableProduct(ProductKey.FAMILY, { isRefresh -> getFamilyAccount(isRefresh) }) { resultState ->";
+        assert!(line_has_lambda_param(line, "resultState"),
+            "must find resultState even when isRefresh arrow comes first");
+        assert!(line_has_lambda_param(line, "isRefresh"),
+            "must still find isRefresh");
+        assert!(!line_has_lambda_param(line, "other"),
+            "must NOT find unknown name");
+
+        let brace = lambda_brace_pos_for_param(line, "resultState");
+        assert!(brace.is_some(), "must find brace for resultState");
+        // The brace for resultState is the LAST `{` on the line.
+        let last_brace = line.rfind('{').unwrap();
+        assert_eq!(brace.unwrap(), last_brace,
+            "brace pos should be the last {{ on the line");
+    }
+
+    #[test]
+    fn multi_param_lambda_is_detected() {
+        let src = "items.zip(other) { a, b ->\n    a.id\n}";
+        let (u, idx) = indexed("/t.kt", src);
+        idx.set_live_lines(&u, src);
+        // Both `a` and `b` should be recognised as lambda params
+        assert!(is_lambda_param("a", "items.zip(other) { a, b ->", &idx, &u, 0));
+        assert!(is_lambda_param("b", "items.zip(other) { a, b ->", &idx, &u, 0));
+    }
+
+    // ── trailing-lambda it type (user-defined function) ───────────────────────
+
+    #[test]
+    fn trailing_lambda_it_from_fun_def() {
+        let src = concat!(
+            "private fun <T : Any> loadProduct(",
+            "key: ProductKey, flow: Flow<ResultState<T>>, ",
+            "map: (ResultState<T>) -> StatefulModel) {\n}\n",
+            "fun use() { loadProduct(k, f) { it.value } }",
+        );
+        let (u, idx) = indexed("/t.kt", src);
+        // `before_brace` as seen by lambda_receiver_type_from_context
+        let before = "loadProduct(k, f) ";
+        let result = lambda_receiver_type_from_context(before, &idx, &u);
+        assert_eq!(result.as_deref(), Some("ResultState"),
+            "trailing lambda it should resolve to ResultState, got: {result:?}");
+    }
+
+    #[test]
+    fn lambda_type_first_input_parses_correctly() {
+        assert_eq!(lambda_type_first_input("(ResultState<T>) -> Model"), Some("ResultState".into()));
+        assert_eq!(lambda_type_first_input("(String, Int) -> Unit"), Some("String".into()));
+        assert_eq!(lambda_type_first_input("() -> Unit"), None);
+        assert_eq!(lambda_type_first_input("(id: String, scan: String) -> Unit"), Some("String".into()));
+    }
+
+    // ── inline-lambda param type (Case C) ────────────────────────────────────
+
+    #[test]
+    fn inline_lambda_param_type_detection() {
+        // `reloadableProduct(ProductKey.FAMILY, { isRefresh -> ... })`
+        // The lambda is the 2nd arg (index 1); fun expects `(Boolean) -> Flow<T>`
+        let src = concat!(
+            "fun reloadableProduct(key: ProductKey, refresher: (Boolean) -> Flow<ResultState<T>>, ",
+            "map: (ResultState<T>) -> StatefulModel) {}\n",
+            "fun use() { reloadableProduct(ProductKey.FAMILY, { isRefresh -> null }) { it } }",
+        );
+        let (u, idx) = indexed("/t.kt", src);
+        // before_brace = "reloadableProduct(ProductKey.FAMILY, "
+        let before = "reloadableProduct(ProductKey.FAMILY, ";
+        let result = lambda_receiver_type_from_context(before, &idx, &u);
+        assert_eq!(result.as_deref(), Some("Boolean"),
+            "inline lambda param should be Boolean, got: {result:?}");
+    }
+
+    #[test]
+    fn find_last_dot_at_depth_zero_test() {
+        // Dot inside args should NOT match.
+        assert_eq!(find_last_dot_at_depth_zero("fn(Enum.VALUE, "), None);
+        // Simple method chain.
+        assert_eq!(find_last_dot_at_depth_zero("items.forEach"), Some(5));
+        // Chained calls — only last dot at depth 0.
+        assert_eq!(find_last_dot_at_depth_zero("a.b(x).c"), Some(6));
+    }
+
+    #[test]
+    fn trailing_lambda_method_it_not_confused_by_arg_dot() {
+        // `reloadableProduct(ProductKey.FAMILY) { it }` — trailing lambda,
+        // but the arg `ProductKey.FAMILY` has a dot. Should still resolve via Case B.
+        let src = concat!(
+            "fun reloadableProduct(key: ProductKey, map: (ResultState<T>) -> StatefulModel) {}\n",
+        );
+        let (u, idx) = indexed("/t.kt", src);
+        // After strip_trailing_call_args: "reloadableProduct"
+        let before = "reloadableProduct(ProductKey.FAMILY) ";
+        let result = lambda_receiver_type_from_context(before, &idx, &u);
+        assert_eq!(result.as_deref(), Some("ResultState"),
+            "trailing lambda with dot-in-arg should still resolve, got: {result:?}");
+    }
+
+    #[test]
+    fn trailing_lambda_it_with_method_call_arg() {
+        // `loadProduct(ProductKey.DEPOSIT, productsUseCases.getDepositAccountData()) { it }`
+        // The second arg is a method call `x.y()` — after stripping outer `(...)` the
+        // callee must be exactly "loadProduct" so Case B fires correctly.
+        let src = concat!(
+            "private fun <T : Any> loadProduct(\n",
+            "    key: ProductKey,\n",
+            "    productFlow: Flow<ResultState<T>>,\n",
+            "    map: (ResultState<T>) -> StatefulModel\n",
+            ") {}\n",
+            "fun use() {\n",
+            "    loadProduct(ProductKey.DEPOSIT, productsUseCases.getDepositAccountData()) { overviewMapper.depositAccToView(it) }\n",
+            "}\n",
+        );
+        let (u, idx) = indexed("/t.kt", src);
+        // Test via lambda_receiver_type_from_context directly.
+        let before = "    loadProduct(ProductKey.DEPOSIT, productsUseCases.getDepositAccountData()) ";
+        let result = lambda_receiver_type_from_context(before, &idx, &u);
+        assert_eq!(result.as_deref(), Some("ResultState"),
+            "loadProduct trailing lambda it type, got: {result:?}");
+    }
+
+    /// `reloadableProduct` has a `(Boolean) -> Flow<T>` param followed by a
+    /// `(ResultState<T>) -> Model` trailing lambda.  The `>` in `->` must not
+    /// upset the `<>` depth counter so `last_fun_param_type_str` picks `map`
+    /// (the last param) instead of `refresher`.
+    #[test]
+    fn reloadable_product_resultstate_not_boolean() {
+        let src = concat!(
+            "private fun <T : Any> reloadableProduct(\n",
+            "    key: ProductKey,\n",
+            "    productFlow: (isRefresh: Boolean) -> Flow<ResultState<T>>,\n",
+            "    map: (ResultState<T>) -> StatefulModel<SortableProducts>,\n",
+            ") {}\n",
+            "fun use() {\n",
+            "    reloadableProduct(ProductKey.FAMILY, { isRefresh -> null }) { resultState ->\n",
+            "        resultState.value\n",
+            "    }\n",
+            "}\n",
+        );
+        let (u, idx) = indexed("/t.kt", src);
+        // Trailing lambda: `before_brace` after stripping the inline call args
+        // should resolve `resultState` to `ResultState`, not `Boolean`.
+        let before = "    reloadableProduct(ProductKey.FAMILY, { isRefresh -> null }) ";
+        let result = lambda_receiver_type_from_context(before, &idx, &u);
+        assert_eq!(result.as_deref(), Some("ResultState"),
+            "resultState should resolve to ResultState not Boolean, got: {result:?}");
+    }
+
+    #[test]
+    fn trailing_lambda_it_infer_at_cursor() {
+        let src = concat!(
+            "private fun <T : Any> loadProduct(\n",
+            "    key: ProductKey,\n",
+            "    productFlow: Flow<ResultState<T>>,\n",
+            "    map: (ResultState<T>) -> StatefulModel\n",
+            ") {}\n",
+            "fun use() {\n",
+            "    loadProduct(ProductKey.DEPOSIT, productsUseCases.getDepositAccountData()) { overviewMapper.depositAccToView(it) }\n",
+            "}\n",
+        );
+        let (u, idx) = indexed("/t.kt", src);
+        // Line 6 (0-based): the call line. Column: position of `it`.
+        let call_line = "    loadProduct(ProductKey.DEPOSIT, productsUseCases.getDepositAccountData()) { overviewMapper.depositAccToView(";
+        let col = call_line.len() as u32;
+        let result = idx.infer_lambda_param_type_at("it", &u, Position::new(6, col));
+        assert_eq!(result.as_deref(), Some("ResultState"),
+            "infer_lambda_param_type_at for it in loadProduct, got: {result:?}");
+    }
+
+    // ── `this` in scope functions ─────────────────────────────────────────────
+
+    #[test]
+    fn this_in_run_resolves_to_receiver_type() {
+        // `user.run { this.name }` — `this` should infer as `User`
+        let src = "val user: User = User()\nuser.run { this.name }";
+        let (u, idx) = indexed("/t.kt", src);
+        let col = "user.run { ".len() as u32;
+        // `before_brace` via lambda_receiver_type_from_context
+        let before = "user.run ";
+        let result = lambda_receiver_type_from_context(before, &idx, &u);
+        assert_eq!(result.as_deref(), Some("User"),
+            "this in obj.run should be User, got: {result:?}");
+    }
+
+    #[test]
+    fn this_infer_lambda_param_type_at() {
+        let src = "val user: User = User()\nuser.run { this.name }";
+        let (u, idx) = indexed("/t.kt", src);
+        let col = "user.run { ".len() as u32;
+        let result = idx.infer_lambda_param_type_at("this", &u, Position::new(1, col));
+        assert_eq!(result.as_deref(), Some("User"),
+            "infer_lambda_param_type_at for this, got: {result:?}");
+    }
+
+    #[test]
+    fn with_scope_function_this_type() {
+        // `with(user) { this.name }` — `with` is stdlib, first arg is receiver
+        let src = "val user: User = User()\nwith(user) { this.name }";
+        let (u, idx) = indexed("/t.kt", src);
+        let before = "with(user) ";
+        let result = lambda_receiver_type_from_context(before, &idx, &u);
+        assert_eq!(result.as_deref(), Some("User"),
+            "with(user) this should be User, got: {result:?}");
+    }
+
+    // ── `this` in class method body ───────────────────────────────────────────
+
+    #[test]
+    fn this_in_class_method_resolves_to_class() {
+        let src = concat!(
+            "class OverviewViewModel {\n",
+            "    override fun handleEvent(event: Event) {\n",
+            "        this.doSomething()\n",
+            "    }\n",
+            "}\n",
+        );
+        let (u, idx) = indexed("/t.kt", src);
+        // Cursor on `this` at line 2, col 8
+        let col = "        ".len() as u32;
+        let result = idx.infer_lambda_param_type_at("this", &u, Position::new(2, col));
+        assert_eq!(result.as_deref(), Some("OverviewViewModel"),
+            "this in class method should resolve to enclosing class, got: {result:?}");
+    }
+
+    #[test]
+    fn this_in_class_method_lambda_scope_wins() {
+        // When `this` is inside a scope-function lambda inside a class method,
+        // the lambda scope should win over the class scope.
+        let src = concat!(
+            "class Vm {\n",
+            "    fun go() {\n",
+            "        val user: User = getUser()\n",
+            "        user.run {\n",
+            "            this.name\n",
+            "        }\n",
+            "    }\n",
+            "}\n",
+        );
+        let (u, idx) = indexed("/t.kt", src);
+        // Cursor on line 4 (inside user.run lambda)
+        let col = "            ".len() as u32;
+        let result = idx.infer_lambda_param_type_at("this", &u, Position::new(4, col));
+        assert_eq!(result.as_deref(), Some("User"),
+            "this inside run lambda should be User not Vm, got: {result:?}");
+    }
+
+    #[test]
+    fn named_arg_lambda_it_type_multiline() {
+        // `SheetReloadActions(buildingSavings = { setEvent(it) })` — lambda on new line
+        // after the constructor call. `it` should resolve to the first input type
+        // of `buildingSavings`'s functional type.
+        let src = concat!(
+            "data class SaveInfo(val id: String)\n",
+            "class SheetReloadActions(\n",
+            "  val buildingSavings: (SaveInfo) -> Unit,\n",
+            "  val cards: () -> Unit,\n",
+            ")\n",
+            "fun use() {\n",
+            "  SheetReloadActions(\n",
+            "    buildingSavings = { it },\n",  // line 7, cursor on `it`
+            "    cards = {},\n",
+            "  )\n",
+            "}\n",
+        );
+        let (u, idx) = indexed("/t.kt", src);
+        // cursor is on line 7, col inside `it`
+        let result = idx.infer_lambda_param_type_at("it", &u, Position::new(7, 25));
+        assert_eq!(result.as_deref(), Some("SaveInfo"),
+            "it in named-arg lambda should be SaveInfo, got: {result:?}");
+    }
+
+    #[test]
+    fn named_arg_lambda_multi_param_type() {
+        // `SheetReloadActions(loan = { loanId, isWustenrot -> ... })` — multi-param.
+        // `loanId` should be String (1st input), `isWustenrot` should be Boolean (2nd).
+        let src = concat!(
+            "class LoanInfo\n",
+            "class SheetReloadActions(\n",
+            "  val loan: (String, Boolean) -> Unit,\n",
+            ")\n",
+            "fun use() {\n",
+            "  SheetReloadActions(\n",
+            "    loan = { loanId, isWustenrot -> loanId },\n",  // line 6
+            "  )\n",
+            "}\n",
+        );
+        let (u, idx) = indexed("/t.kt", src);
+        let result_loanid = idx.infer_lambda_param_type_at("loanId", &u, Position::new(6, 22));
+        assert_eq!(result_loanid.as_deref(), Some("String"),
+            "loanId should be String, got: {result_loanid:?}");
+        let result_is = idx.infer_lambda_param_type_at("isWustenrot", &u, Position::new(6, 30));
+        assert_eq!(result_is.as_deref(), Some("Boolean"),
+            "isWustenrot should be Boolean, got: {result_is:?}");
+    }
+
+    #[test]
+    fn extract_named_arg_name_test() {
+        assert_eq!(super::extract_named_arg_name("  buildingSavings = "), Some("buildingSavings"));
+        assert_eq!(super::extract_named_arg_name("  loan = "),            Some("loan"));
+        assert_eq!(super::extract_named_arg_name("  loan="),              Some("loan"));
+        // Same-line comma-separated: `, cards = ` — should match
+        assert_eq!(super::extract_named_arg_name(", cards = "),           Some("cards"));
+        // Uppercase — should NOT match (constructors, not named args)
+        assert_eq!(super::extract_named_arg_name("  Foo = "),             None);
+        // operator — should NOT match
+        assert_eq!(super::extract_named_arg_name("a != "),                None);
+        assert_eq!(super::extract_named_arg_name("a <= "),                None);
+        // Nested: `(isRefresh = ` — opening `(` before the ident disqualifies
+        assert_eq!(super::extract_named_arg_name("(isRefresh = "),        None);
+        // Nested inside call args: `fn(x, isRefresh = ` — still has non-ws prefix
+        assert_eq!(super::extract_named_arg_name("fn(x, isRefresh = "),   None);
+    }
+
+    #[test]
+    fn lambda_type_nth_input_test() {
+        assert_eq!(super::lambda_type_nth_input("(String, Boolean) -> Unit", 0), Some("String".into()));
+        assert_eq!(super::lambda_type_nth_input("(String, Boolean) -> Unit", 1), Some("Boolean".into()));
+        assert_eq!(super::lambda_type_nth_input("() -> Unit", 0), None);
+        assert_eq!(super::lambda_type_nth_input("(SaveInfo) -> Unit", 0), Some("SaveInfo".into()));
+    }
+
+    #[test]
+    fn find_named_param_type_in_sig_test() {
+        let sig = "val buildingSavings: (SaveInfo) -> Unit, val loan: (String, Boolean) -> Unit";
+        assert_eq!(
+            super::find_named_param_type_in_sig(sig, "loan"),
+            Some("(String, Boolean) -> Unit".into())
+        );
+        assert_eq!(
+            super::find_named_param_type_in_sig(sig, "buildingSavings"),
+            Some("(SaveInfo) -> Unit".into())
+        );
+        assert_eq!(super::find_named_param_type_in_sig(sig, "unknown"), None);
+    }
+
+    #[test]
+    fn has_named_params_not_it_test() {
+        // Single-param named → true
+        assert!(super::has_named_params_not_it("item -> item.name"));
+        // Multi-param named → true
+        assert!(super::has_named_params_not_it("loanId, isWustenrot -> setEvent(loanId)"));
+        // Implicit `it` → false
+        assert!(!super::has_named_params_not_it("it.name"));
+        // Block / empty → false
+        assert!(!super::has_named_params_not_it("setEvent(something)"));
+        assert!(!super::has_named_params_not_it(""));
+        // `_` wildcard params — skip
+        assert!(!super::has_named_params_not_it("_ -> something"));
+    }
+
+    #[test]
+    fn it_not_resolved_inside_multi_param_named_lambda() {
+        // `it` inside `{ loanId, isWustenrot -> ... }` should return None,
+        // NOT `Some("String")` from the first param type.
+        let src = concat!(
+            "class SheetReloadActions(\n",
+            "  val loan: (String, Boolean) -> Unit,\n",
+            ")\n",
+            "fun use() {\n",
+            "  SheetReloadActions(\n",
+            "    loan = { loanId, isWustenrot ->\n",  // line 5
+            "      it\n",                               // line 6, cursor here
+            "    }\n",
+            "  )\n",
+            "}\n",
+        );
+        let (u, idx) = indexed("/t.kt", src);
+        // `it` inside the multi-param lambda body — should NOT resolve
+        // (no implicit `it` when explicit params exist)
+        let result = idx.infer_lambda_param_type_at("it", &u, Position::new(6, 6));
+        assert!(result.is_none(),
+            "it inside multi-param lambda should be None, got: {result:?}");
     }
 }

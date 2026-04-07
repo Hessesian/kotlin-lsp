@@ -1,6 +1,6 @@
 [package]
 name        = "kotlin-lsp"
-version = "0.2.1"
+version = "0.3.0"
 edition     = "2021"
 description = "Fast, low-memory LSP server for Kotlin and Java. Instant startup, dot-completion, go-to-definition, hover — no JVM required."
 license     = "MIT"
@@ -38,7 +38,8 @@ env_logger = "0.11"
 walkdir = "2"
 
 # Index cache serialization
-serde    = { version = "1", features = ["derive"] }
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
 bincode  = "1"
 
 [profile.release]

@@ -433,13 +433,14 @@ dependencies = [
 
 [[package]]
 name = "kotlin-lsp"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "bincode",
  "dashmap",
  "env_logger",
  "log",
  "serde",
+ "serde_json",
  "tokio",
  "tower-lsp",
  "tree-sitter",
