@@ -162,6 +162,33 @@ fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippets: bool) ->
         }
     }
 
+    // 1.5. Lambda parameters visible at the cursor (e.g. `{ item -> item`)
+    // These are ephemeral — not in the symbol index or declared_names.
+    if lowercase_mode {
+        // We don't have cursor position here, scan the whole file for arrow params.
+        let lines_opt = idx.live_lines.get(from_uri.as_str())
+            .map(|ll| ll.clone())
+            .or_else(|| idx.files.get(from_uri.as_str()).map(|f| f.lines.clone()));
+        if let Some(lines) = lines_opt {
+            for line in &lines {
+                for pat in &["{ ", "("] {
+                    if let Some(brace) = line.find(pat) {
+                        let rest = line[brace + pat.len()..].trim_start();
+                        let name: String = rest.chars()
+                            .take_while(|&c| c.is_alphanumeric() || c == '_')
+                            .collect();
+                        if !name.is_empty() && name != "it" && name.chars().next().map(|c| c.is_lowercase()).unwrap_or(false) {
+                            let after = rest[name.len()..].trim_start();
+                            if after.starts_with("->") || after.starts_with(',') {
+                                add(&name, CompletionItemKind::VARIABLE);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // 2. Same-package symbols.
     let pkg = idx.files.get(from_uri.as_str())
         .and_then(|f| f.package.clone())

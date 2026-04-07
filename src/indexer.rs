@@ -655,7 +655,70 @@ impl Indexer {
         crate::resolver::resolve_symbol(self, name, qualifier, from_uri)
     }
 
-    /// Completion candidates at `position` in `uri`.
+    /// If `name` at `position` is `it` or a named lambda parameter, return the
+    /// inferred element/receiver type name (e.g. `"Product"`, `"User"`).
+    ///
+    /// Used by hover and go-to-definition to provide useful info for lambda params.
+    pub fn infer_lambda_param_type_at(
+        &self,
+        name:     &str,
+        uri:      &Url,
+        position: Position,
+    ) -> Option<String> {
+        let line_no = position.line as usize;
+
+        // Get the text of the current line up to the cursor position.
+        let before: String = {
+            let src = self.live_lines.get(uri.as_str())
+                .and_then(|ll| ll.get(line_no).cloned())
+                .or_else(|| self.files.get(uri.as_str())
+                    .and_then(|f| f.lines.get(line_no).cloned()))?;
+            let col = position.character as usize;
+            let mut utf16 = 0usize;
+            let mut byte_end = src.len();
+            for (bi, ch) in src.char_indices() {
+                if utf16 >= col { byte_end = bi; break; }
+                utf16 += ch.len_utf16();
+            }
+            src[..byte_end].to_string()
+        };
+
+        if name == "it" {
+            find_it_element_type(&before, self, uri)
+        } else {
+            find_named_lambda_param_type(&before, name, self, uri, line_no)
+        }
+    }
+
+    /// Lambda parameter names visible at `cursor_line` in `uri`.
+    ///
+    /// Scans live_lines backward from the cursor to collect all `{ name ->`
+    /// params that are in scope (up to 50 lines back).
+    pub fn lambda_params_at(&self, uri: &Url, cursor_line: usize) -> Vec<String> {
+        let lines = self.live_lines.get(uri.as_str())
+            .map(|ll| ll.clone())
+            .or_else(|| self.files.get(uri.as_str()).map(|f| f.lines.clone()))
+            .unwrap_or_default();
+
+        let mut params = Vec::new();
+        let scan_start = cursor_line.saturating_sub(50);
+        for line in &lines[scan_start..=cursor_line.min(lines.len().saturating_sub(1))] {
+            // Match `{ name ->` or `(name ->` — capture the param name.
+            if let Some(brace) = line.find("{ ").or_else(|| line.find("(")) {
+                let rest = &line[brace + 1..].trim_start();
+                // Extract identifier before ` ->`
+                let name: String = rest.chars().take_while(|&c| c.is_alphanumeric() || c == '_').collect();
+                if !name.is_empty() && name != "it" {
+                    let after_name = &rest[name.len()..].trim_start();
+                    if after_name.starts_with("->") || after_name.starts_with(",") {
+                        if !params.contains(&name) { params.push(name); }
+                    }
+                }
+            }
+        }
+        params
+    }
+
     ///
     /// Uses `live_lines` (updated synchronously on every keystroke) for the
     /// current file's line text, falling back to indexed lines or disk.

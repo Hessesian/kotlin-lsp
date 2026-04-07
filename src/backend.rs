@@ -172,6 +172,20 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
 
+        // Special case: `it` or a named lambda parameter — resolve to the
+        // inferred element/receiver type class instead of trying a text search.
+        if qualifier.is_none() && (word == "it" || word.chars().next().map(|c| c.is_lowercase()).unwrap_or(true)) {
+            if let Some(type_name) = self.indexer.infer_lambda_param_type_at(&word, uri, position) {
+                let locs = self.indexer.find_definition_qualified(&type_name, None, uri);
+                if !locs.is_empty() {
+                    return Ok(match locs.len() {
+                        1 => Some(GotoDefinitionResponse::Scalar(locs.into_iter().next().unwrap())),
+                        _ => Some(GotoDefinitionResponse::Array(locs)),
+                    });
+                }
+            }
+        }
+
         let locs = self.indexer.find_definition_qualified(&word, qualifier.as_deref(), uri);
         Ok(match locs.len() {
             0 => None,
@@ -205,6 +219,29 @@ impl LanguageServer for Backend {
         let Some((word, qualifier)) = self.indexer.word_and_qualifier_at(uri, position) else {
             return Ok(None);
         };
+
+        // For `it` or a named lambda param, generate hover showing the inferred type.
+        if qualifier.is_none() && (word == "it" || word.chars().next().map(|c| c.is_lowercase()).unwrap_or(true)) {
+            if let Some(type_name) = self.indexer.infer_lambda_param_type_at(&word, uri, position) {
+                let lang = if uri.path().ends_with(".kt") { "kotlin" } else { "java" };
+                // Show the inferred binding: `val it: Product` or `val item: Product`
+                let sig_md = format!("```{lang}\nval {word}: {type_name}\n```");
+                // Also show the type's own hover (KDoc + signature) if available.
+                let type_hover = self.indexer.hover_info(&type_name);
+                let full = if let Some(th) = type_hover {
+                    format!("{sig_md}\n\n---\n\n{th}")
+                } else {
+                    sig_md
+                };
+                return Ok(Some(Hover {
+                    contents: HoverContents::Markup(MarkupContent {
+                        kind:  MarkupKind::Markdown,
+                        value: full,
+                    }),
+                    range: None,
+                }));
+            }
+        }
 
         // Use the same resolution chain as go-to-definition so hover always
         // points at the same symbol (import-aware, not just first index match).
