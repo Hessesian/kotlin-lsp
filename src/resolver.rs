@@ -391,9 +391,14 @@ fn resolve_qualified(idx: &Indexer, name: &str, qualifier: &str, from_uri: &Url)
 
     if root.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
         // ── Uppercase chain: find the root's file and search it for `name` ──
+        // Pass the qualifier's own line as a hint so that when the same field name
+        // appears in multiple classes in the same file (e.g. State and Effect both
+        // have `toastModel`), we pick the declaration closest *after* the qualifier
+        // class definition rather than the first match in the file.
         let qual_locs = resolve_symbol(idx, root, None, from_uri);
         for qual_loc in &qual_locs {
-            let locs = find_name_in_uri(idx, name, qual_loc.uri.as_str());
+            let after_line = qual_loc.range.start.line;
+            let locs = find_name_in_uri_after_line(idx, name, qual_loc.uri.as_str(), after_line);
             if !locs.is_empty() { return locs; }
         }
         return vec![];
@@ -1136,7 +1141,62 @@ fn find_name_in_uri(idx: &Indexer, name: &str, file_uri: &str) -> Vec<Location> 
     vec![]
 }
 
-/// Step 1.5 — find a local variable / parameter declaration by line scanning.
+/// Like `find_name_in_uri` but prefers declarations at or after `after_line`.
+///
+/// Used when we already know the qualifier class lives at `after_line` — we
+/// want the parameter/field of THAT class, not a same-named field in a
+/// different class that happens to appear earlier in the same file.
+///
+/// Strategy:
+///   1. Symbol table — pick the symbol at or after `after_line` with the
+///      smallest line number (closest match).  Fall back to any match if none
+///      found after the hint line.
+///   2. Line scan — search only lines >= `after_line`.
+///   3. On-demand parse (same as `find_name_in_uri`).
+fn find_name_in_uri_after_line(idx: &Indexer, name: &str, file_uri: &str, after_line: u32) -> Vec<Location> {
+    let Ok(uri) = Url::parse(file_uri) else { return vec![]; };
+
+    if let Some(f) = idx.files.get(file_uri) {
+        // a) Symbol table: find the closest symbol at or after `after_line`.
+        let best = f.symbols.iter()
+            .filter(|s| s.name == name && s.selection_range.start.line >= after_line)
+            .min_by_key(|s| s.selection_range.start.line);
+
+        if let Some(sym) = best {
+            return vec![Location { uri, range: sym.selection_range }];
+        }
+
+        // Fallback: any symbol with this name (different class, same file)
+        if let Some(sym) = f.symbols.iter().find(|s| s.name == name) {
+            return vec![Location { uri, range: sym.selection_range }];
+        }
+
+        // b) Line scan scoped to after_line first, then the whole file.
+        if let Some(range) = find_declaration_range_after_line(&f.lines, name, after_line) {
+            return vec![Location { uri, range }];
+        }
+        if let Some(range) = find_declaration_range_in_lines(&f.lines, name) {
+            return vec![Location { uri, range }];
+        }
+        return vec![];
+    }
+
+    // c) On-demand parse
+    find_name_in_uri(idx, name, file_uri)
+}
+
+/// Like `find_declaration_range_in_lines` but only searches from `start_line`.
+fn find_declaration_range_after_line(lines: &[String], name: &str, start_line: u32) -> Option<Range> {
+    let start = start_line as usize;
+    if start >= lines.len() { return None; }
+    find_declaration_range_in_lines(&lines[start..], name)
+        .map(|r| Range {
+            start: Position { line: r.start.line + start_line, character: r.start.character },
+            end:   Position { line: r.end.line   + start_line, character: r.end.character   },
+        })
+}
+
+
 ///
 /// Returns the location of `name:` in the current file.  This catches function
 /// parameters that lack `val`/`var` and are therefore absent from the symbol index.
@@ -1688,5 +1748,32 @@ mod tests {
         let locs = resolve_symbol(&idx, "name", Some("User"), &caller_uri);
         assert!(!locs.is_empty(), "named arg 'name' not resolved to User ctor param");
         assert_eq!(locs[0].uri, user_uri, "should point to User.kt, not caller");
+    }
+
+    #[test]
+    fn named_arg_same_name_different_classes_same_file() {
+        // Regression: Contract.kt has both State(val toastModel: ...) and
+        // OnClick(val toastModel: ...) in the same file.
+        // Resolving State(toastModel = ...) should land on State's field,
+        // not OnClick's (which appears later but might be returned first).
+        let contract_uri = uri("/Contract.kt");
+        let caller_uri   = uri("/Caller.kt");
+        let idx = Indexer::new();
+        idx.index_content(&contract_uri, "\
+package com.example
+sealed class Effect {
+    data class OnClick(val toastModel: String) : Effect()
+}
+data class State(
+    val toastModel: String? = null,
+)");
+        idx.index_content(&caller_uri,
+            "package com.example\nfun test() { State(toastModel = \"hi\") }");
+
+        let locs = resolve_symbol(&idx, "toastModel", Some("State"), &caller_uri);
+        assert!(!locs.is_empty(), "toastModel not resolved");
+        // Must point to State's toastModel (line 4), NOT OnClick's (line 2)
+        let line = locs[0].range.start.line;
+        assert!(line >= 4, "resolved to OnClick.toastModel (line {line}) instead of State.toastModel");
     }
 }
