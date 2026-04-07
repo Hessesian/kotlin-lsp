@@ -327,6 +327,8 @@ fn resolve_symbol_inner(idx: &Indexer, name: &str, from_uri: &Url, with_hierarch
 
     // 1.5 ── local variable / parameter declaration (line scan) ───────────────
     // Catches function parameters without val/var that aren't in the symbol index.
+    // Also catches named lambda parameters: `{ item -> ...}` found via the
+    // `name ->` pattern in find_declaration_range_in_lines.
     if name.chars().next().map(|c| c.is_lowercase()).unwrap_or(true) {
         let decl = find_local_declaration(idx, name, from_uri);
         if !decl.is_empty() { return decl; }
@@ -345,8 +347,6 @@ fn resolve_symbol_inner(idx: &Indexer, name: &str, from_uri: &Url, with_hierarch
     if !star.is_empty() { return star; }
 
     // 4.5 ── superclass / interface hierarchy ─────────────────────────────────
-    // For inherited methods that carry no explicit import (e.g. `collectEffects()`
-    // defined in a base class that is itself imported, but the method is not).
     if with_hierarchy {
         let mut visited: Vec<String> = Vec::new();
         let inherited = resolve_from_class_hierarchy(idx, name, from_uri, 0, &mut visited);
@@ -2009,5 +2009,26 @@ data class State(
             "    private val _state: StateFlow<UiState>".into(),
         ];
         assert_eq!(infer_type_in_lines_raw(&lines, "_state"), Some("StateFlow<UiState>".into()));
+    }
+
+    #[test]
+    fn goto_def_on_named_lambda_param_resolves_to_declaration_line() {
+        // items.forEach { product ->
+        //     product.name   ← gd on `product` here
+        // go-to-def should jump to the `{ product ->` declaration line (line 2)
+        let caller_uri  = uri("/Caller.kt");
+        let product_uri = uri("/Product.kt");
+        let idx = Indexer::new();
+        idx.index_content(&product_uri, "package com.example\ndata class Product(val name: String)");
+        idx.index_content(&caller_uri,
+            "package com.example\nval items: List<Product> = emptyList()\nitems.forEach { product ->\n    product.name\n}");
+
+        // step 1.5 finds `{ product ->` via the lambda arrow pattern
+        let locs = resolve_symbol(&idx, "product", None, &caller_uri);
+        assert!(!locs.is_empty(), "lambda param 'product' not found");
+        // Must land in the same file (the lambda declaration), NOT in rg results
+        assert_eq!(locs[0].uri, caller_uri, "should stay in Caller.kt at the lambda decl");
+        // Line 2 is where `items.forEach { product ->` is declared
+        assert_eq!(locs[0].range.start.line, 2, "should point to the lambda arrow line");
     }
 }

@@ -721,14 +721,24 @@ impl Indexer {
             None
         };
 
-        // Special case: `it` is Kotlin's implicit single-parameter lambda argument.
-        // Scan backward through `before` to find the enclosing lambda's collection
-        // receiver (e.g. `users.forEach { it.` → element type of `users`).
-        if dot_receiver.as_deref() == Some("it") {
-            if let Some(elem_type) = find_it_element_type(before, self, uri) {
-                return crate::resolver::complete_symbol(self, &prefix, Some(&elem_type), uri, snippets);
+        // Lambda implicit/explicit parameter completion:
+        //  - `it.`           → implicit single param
+        //  - `item -> item.` → explicitly named param
+        // In both cases, scan backward to find the enclosing collection/receiver
+        // and infer the element type.
+        if let Some(ref recv) = dot_receiver {
+            if recv == "it" || is_lambda_param(recv, before, self, uri, position.line as usize) {
+                let elem_type = if recv == "it" {
+                    find_it_element_type(before, self, uri)
+                } else {
+                    find_named_lambda_param_type(before, recv, self, uri, position.line as usize)
+                };
+                if let Some(elem_type) = elem_type {
+                    return crate::resolver::complete_symbol(self, &prefix, Some(&elem_type), uri, snippets);
+                }
+                // Known lambda param but type unresolvable → return empty (avoid rg)
+                if recv == "it" { return vec![]; }
             }
-            return vec![];
         }
 
         crate::resolver::complete_symbol(
@@ -1185,56 +1195,133 @@ fn is_id_char(c: char) -> bool {
 /// backward to find the lambda opening `{`, then the callee before it
 /// (e.g. `users.forEach`), then the receiver (`users`).
 ///
-/// - If the receiver has a collection-like generic type (`List<Product>`,
-///   `Flow<Event>`, …) → returns the inner type (`Product`, `Event`).
-/// - Otherwise (scope function: `user.let { it.`) → returns the receiver's
-///   base type directly (`User`).
-///
-/// Returns `None` when the type cannot be determined statically.
+/// Delegates to `lambda_receiver_type_from_context` for the actual inference.
 fn find_it_element_type(before_cursor: &str, idx: &Indexer, uri: &Url) -> Option<String> {
-    // Find the last `{` that opens the lambda we're inside.
     let brace_byte = before_cursor.rfind('{')?;
-    let before_brace = before_cursor[..brace_byte].trim_end();
+    let before_brace = &before_cursor[..brace_byte];
+    lambda_receiver_type_from_context(before_brace, idx, uri)
+}
 
-    // Strip a trailing `method(...)` call arg list so we're left with the
-    // dotted chain `receiver.method`.
-    let callee_str = strip_trailing_call_args(before_brace);
+/// Resolve the element/receiver type for an EXPLICITLY NAMED lambda parameter.
+///
+/// Handles both same-line and multi-line lambda declarations:
+///
+/// Same-line:  `items.forEach { item -> item.`
+/// Multi-line: `items.forEach { item ->\n    item.`  ← cursor on second line
+///
+/// Scans backward (up to 20 lines) for `{ param_name ->` to find where the lambda
+/// was opened, then infers the element type from what's before the `{`.
+fn find_named_lambda_param_type(
+    before_cursor: &str,
+    param_name:   &str,
+    idx:          &Indexer,
+    uri:          &Url,
+    cursor_line:  usize,
+) -> Option<String> {
+    let arrow_pat   = format!("{{ {} ->", param_name);     // `{ item ->`
+    let arrow_pat2  = format!("({} ->",   param_name);     // `(item ->`
 
-    // Handle `?.` null-safe calls by normalising to `.` for the split.
-    let callee_normalised = callee_str.replace("?.", ".");
-    let callee_trimmed = callee_normalised.trim_end();
+    // 1. Check same line first — covers `items.forEach { item -> item.`
+    for pat in &[&arrow_pat, &arrow_pat2] {
+        if let Some(brace_pos) = before_cursor.find(pat.as_str()) {
+            let before_brace = &before_cursor[..brace_pos];
+            if let Some(t) = lambda_receiver_type_from_context(before_brace, idx, uri) {
+                return Some(t);
+            }
+        }
+    }
 
-    // Split at the last `.` to separate receiver expression from method name.
-    let dot_pos = callee_trimmed.rfind('.')?;
+    // 2. Scan backward through previous lines.
+    let lines = idx.live_lines.get(uri.as_str())
+        .map(|ll| ll.clone())
+        .or_else(|| idx.files.get(uri.as_str()).map(|f| f.lines.clone()))?;
+
+    let scan_start = cursor_line.saturating_sub(20);
+    for ln in (scan_start..cursor_line).rev() {
+        let line = lines.get(ln)?;
+        if !line.contains(&arrow_pat) && !line.contains(&arrow_pat2) { continue; }
+        // Find the `{` on this line.
+        let brace_pos = line.find('{').unwrap_or(0);
+        let before_brace = &line[..brace_pos];
+        if let Some(t) = lambda_receiver_type_from_context(before_brace, idx, uri) {
+            return Some(t);
+        }
+    }
+    None
+}
+
+/// Check whether `recv` looks like an explicitly-named lambda parameter
+/// in the current editing context (same line or recent lines).
+///
+/// Used to avoid triggering lambda inference for ordinary local variables
+/// that just happen to be lowercase.
+fn is_lambda_param(
+    recv:        &str,
+    before_cur:  &str,
+    idx:         &Indexer,
+    uri:         &Url,
+    cursor_line: usize,
+) -> bool {
+    let arrow_pat  = format!("{{ {} ->", recv);
+    let arrow_pat2 = format!("({} ->",   recv);
+
+    if before_cur.contains(&arrow_pat) || before_cur.contains(&arrow_pat2) {
+        return true;
+    }
+
+    let lines_opt = idx.live_lines.get(uri.as_str())
+        .map(|ll| ll.clone())
+        .or_else(|| idx.files.get(uri.as_str()).map(|f| f.lines.clone()));
+
+    if let Some(lines) = lines_opt {
+        let scan_start = cursor_line.saturating_sub(20);
+        for ln in (scan_start..cursor_line).rev() {
+            if let Some(line) = lines.get(ln) {
+                if line.contains(&arrow_pat) || line.contains(&arrow_pat2) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Shared core: given the text BEFORE the `{` that opens a lambda, infer
+/// the element type that `it` / the named param will have.
+///
+/// `"items.forEach"` → receiver `items` → `List<Product>` → `Product`
+/// `"user.let"`      → receiver `user`  → `User` (scope fn, no generic)
+pub(crate) fn lambda_receiver_type_from_context(
+    before_brace: &str,
+    idx:          &Indexer,
+    uri:          &Url,
+) -> Option<String> {
+    let callee_str      = strip_trailing_call_args(before_brace.trim_end());
+    let callee_norm     = callee_str.replace("?.", ".");
+    let callee_trimmed  = callee_norm.trim_end();
+
+    let dot_pos      = callee_trimmed.rfind('.')?;
     let receiver_expr = callee_trimmed[..dot_pos].trim_end();
 
-    // Extract the last identifier in the receiver expression.
-    // `viewModel.items` → `items`;  `items` → `items`
     let receiver_var: String = receiver_expr
-        .chars()
-        .rev()
+        .chars().rev()
         .take_while(|&c| is_id_char(c))
         .collect::<String>()
-        .chars()
-        .rev()
+        .chars().rev()
         .collect();
 
     if receiver_var.is_empty() { return None; }
 
-    // Try raw type with generics first (covers List<T>, Flow<T>, StateFlow<T> …).
     if let Some(raw) = crate::resolver::infer_variable_type_raw(idx, &receiver_var, uri) {
-        // Collection-like type → return element type.
         if let Some(elem) = crate::resolver::extract_collection_element_type(&raw) {
             return Some(elem);
         }
-        // Scope function (let, also, apply …) → `it` IS the receiver.
         let base: String = raw.chars().take_while(|&c| is_id_char(c)).collect();
         if !base.is_empty() && base.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
             return Some(base);
         }
     }
 
-    // Uppercase bare name used as object receiver: `MyObject.let { it.`
     if receiver_var.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
         return Some(receiver_var);
     }
@@ -1965,6 +2052,47 @@ mod tests {
     fn it_unknown_var_returns_none() {
         let (u, idx) = indexed("/t.kt", "");
         assert_eq!(find_it_element_type("unknown.forEach { it.", &idx, &u), None);
+    }
+
+    // ── named lambda parameter type inference ─────────────────────────────────
+
+    #[test]
+    fn named_lambda_param_same_line() {
+        // items.forEach { item -> item.  ← same line
+        let src = "val items: List<Product> = emptyList()";
+        let (u, idx) = indexed("/t.kt", src);
+        let before = "items.forEach { item -> item.";
+        let result = find_named_lambda_param_type(before, "item", &idx, &u, 0);
+        assert_eq!(result.as_deref(), Some("Product"));
+    }
+
+    #[test]
+    fn named_lambda_param_multiline() {
+        // items.forEach { item ->
+        //     item.  ← cursor here
+        let src = "val items: List<Order> = emptyList()\nitems.forEach { order ->\n    order.x\n}";
+        let (u, idx) = indexed("/t.kt", src);
+        // cursor on line 2 ("    order.x"), scanning back to line 1 for `{ order ->`
+        let result = find_named_lambda_param_type("    order.", "order", &idx, &u, 2);
+        assert_eq!(result.as_deref(), Some("Order"));
+    }
+
+    #[test]
+    fn named_lambda_param_scope_fn() {
+        // val user: User — `user.also { u -> u.` — `u` is User itself
+        let src = "val user: User = User()";
+        let (u, idx) = indexed("/t.kt", src);
+        let before = "user.also { u -> u.";
+        let result = find_named_lambda_param_type(before, "u", &idx, &u, 0);
+        assert_eq!(result.as_deref(), Some("User"));
+    }
+
+    #[test]
+    fn is_lambda_param_detects_same_line() {
+        let src = "";
+        let (u, idx) = indexed("/t.kt", src);
+        assert!(is_lambda_param("item", "items.forEach { item -> item.", &idx, &u, 0));
+        assert!(!is_lambda_param("item", "val item = something()", &idx, &u, 0));
     }
 
     #[test]
