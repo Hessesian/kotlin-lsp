@@ -68,8 +68,10 @@ fn complete_dot(idx: &Indexer, receiver: &str, from_uri: &Url, snippets: bool) -
         }
     };
 
-    // Resolve type to its source file (index or rg fallback for lazy files).
-    let locs = resolve_symbol(idx, &type_name, None, from_uri);
+    // Resolve type to its source file.
+    // IMPORTANT: never run rg here — completion is called on every keystroke
+    // and spawning an external rg process would block and spike CPU.
+    let locs = resolve_symbol_no_rg(idx, &type_name, from_uri);
     let Some(type_loc) = locs.first() else { return vec![]; };
     let file_uri = type_loc.uri.to_string();
 
@@ -353,6 +355,56 @@ fn resolve_symbol_inner(idx: &Indexer, name: &str, from_uri: &Url, with_hierarch
 
     // 5 ── project-wide rg ───────────────────────────────────────────────────
     rg_find_definition(name, idx.workspace_root.get().map(PathBuf::as_path))
+}
+
+/// Index-only resolver for use in completion paths.
+///
+/// Identical to `resolve_symbol_inner` but omits:
+/// - Step 4's `rg_in_package_dir` fallback (inside `resolve_star_imports`)
+/// - Step 4.5 hierarchy walk
+/// - Step 5 `rg_find_definition`
+///
+/// Completion is triggered on every keystroke; spawning external `rg`/`fd`
+/// processes on each request would block the LSP thread and spike CPU.
+fn resolve_symbol_no_rg(idx: &Indexer, name: &str, from_uri: &Url) -> Vec<Location> {
+    let local = resolve_local(idx, name, from_uri);
+    if !local.is_empty() { return local; }
+
+    let imported = resolve_via_imports(idx, name, from_uri);
+    if !imported.is_empty() { return imported; }
+
+    let same_pkg = resolve_same_package(idx, name, from_uri);
+    if !same_pkg.is_empty() { return same_pkg; }
+
+    // Star imports: index-only scan (no rg fallback for unindexed files).
+    let star_pkgs: Vec<String> = match idx.files.get(from_uri.as_str()) {
+        Some(f) => f.imports.iter()
+            .filter(|i| i.is_star && !crate::resolver::is_stdlib(&i.full_path))
+            .map(|i| i.full_path.clone())
+            .collect(),
+        None => vec![],
+    };
+    for pkg in star_pkgs {
+        let peer_uris: Vec<String> = idx.packages.get(&pkg).map(|u| u.clone()).unwrap_or_default();
+        for peer_uri_str in peer_uris {
+            if let Some(f) = idx.files.get(&peer_uri_str) {
+                for sym in f.symbols.iter().filter(|s| s.name == name) {
+                    if let Ok(u) = Url::parse(&peer_uri_str) {
+                        return vec![Location { uri: u, range: sym.selection_range }];
+                    }
+                }
+            }
+        }
+    }
+
+    // Check the global definitions index as a final fast fallback.
+    if let Some(locs) = idx.definitions.get(name) {
+        if let Some(loc) = locs.first() {
+            return vec![loc.clone()];
+        }
+    }
+
+    vec![]
 }
 
 // ─── step implementations ────────────────────────────────────────────────────
