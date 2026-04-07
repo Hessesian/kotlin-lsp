@@ -631,6 +631,7 @@ impl Indexer {
                 && !after_trimmed.starts_with("==");
             if is_named_arg {
                 find_enclosing_call_name(&data.lines, position.line as usize, start)
+                    .and_then(|callee| callee_to_qualifier(&callee))
             } else {
                 None
             }
@@ -1174,21 +1175,18 @@ fn is_id_char(c: char) -> bool {
 /// Used to resolve named arguments: `User(name = "Alice")` with cursor on `name`
 /// → scan back past the `(` → return `"User"`.
 ///
-/// Only returns identifiers that start with an uppercase letter (constructor calls).
-/// Lowercase callees (e.g. `copy(name = …)`) are too ambiguous without type
-/// information and are left for the fallback resolver.
+/// Returns the FULL dotted callee name (e.g. `"BottomSheetState.empty"`, `"User"`).
+/// The caller converts this to a qualifier via `callee_to_qualifier`.
 ///
 /// Scans at most 20 lines backward to avoid runaway on deeply nested expressions.
+/// Tracks `()` and `[]` depth; lambda `{}` bodies are transparent (their inner
+/// `()` still balance) so we don't need special-case brace handling.
 fn find_enclosing_call_name(lines: &[String], line_no: usize, col: usize) -> Option<String> {
     let mut depth: i32 = 0;
-    let max_scan = 20usize;
-
-    // Scan the current line leftward from `col`, then previous lines rightward→left.
-    let scan_range_start = line_no.saturating_sub(max_scan);
+    let scan_range_start = line_no.saturating_sub(20);
 
     for ln in (scan_range_start..=line_no).rev() {
         let line_chars: Vec<char> = lines[ln].chars().collect();
-        // On the first (current) line only scan up to `col`; on earlier lines scan all.
         let scan_to = if ln == line_no { col } else { line_chars.len() };
 
         for i in (0..scan_to).rev() {
@@ -1197,21 +1195,17 @@ fn find_enclosing_call_name(lines: &[String], line_no: usize, col: usize) -> Opt
                 '(' | '[' => {
                     depth -= 1;
                     if depth < 0 {
-                        // This `(` opened the call we're inside. Extract the word just before it.
+                        // This `(` opened the call we're inside.
                         if i == 0 { return None; }
+                        // Extract the identifier (possibly dotted) just before `(`.
                         let mut end = i;
                         while end > 0 && (is_id_char(line_chars[end - 1]) || line_chars[end - 1] == '.') {
                             end -= 1;
                         }
                         if end >= i { return None; }
-                        // Take only the last identifier segment (strip package prefix).
                         let name: String = line_chars[end..i].iter().collect();
-                        let name = name.rsplit('.').next().unwrap_or(&name).to_string();
-                        // Only handle uppercase (constructor) calls for now.
-                        if name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
-                            return Some(name);
-                        }
-                        return None;
+                        let name = name.trim_matches('.').to_string();
+                        return if name.is_empty() { None } else { Some(name) };
                     }
                 }
                 _ => {}
@@ -1219,6 +1213,35 @@ fn find_enclosing_call_name(lines: &[String], line_no: usize, col: usize) -> Opt
         }
     }
     None
+}
+
+/// Convert a raw callee name (from `find_enclosing_call_name`) to the qualifier
+/// to use when resolving a named argument parameter.
+///
+/// Rules:
+/// - Last segment uppercase → constructor call, qualifier = last segment.
+///   `"User"` → `"User"`, `"com.example.User"` → `"User"`
+/// - Last segment lowercase (method call) → look for the rightmost uppercase
+///   segment in the receiver chain as the owner type.
+///   `"BottomSheetState.empty"` → `"BottomSheetState"`
+///   `"SomeClass.companion.build"` → `"SomeClass"` (last uppercase before method)
+/// - Pure lowercase, no uppercase anywhere → `None` (can't resolve statically).
+fn callee_to_qualifier(full_callee: &str) -> Option<String> {
+    let segments: Vec<&str> = full_callee.split('.').collect();
+    let last = *segments.last()?;
+
+    // Constructor call: last segment is a type name (uppercase first char).
+    if last.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+        return Some(last.to_string());
+    }
+
+    // Method call: find rightmost uppercase segment in the receiver chain.
+    // `BottomSheetState.empty` → segments[..-1] = ["BottomSheetState"] → "BottomSheetState"
+    // `viewModel.state.copy`   → no uppercase in receiver → None
+    let receiver = &segments[..segments.len() - 1];
+    receiver.iter().rev()
+        .find(|s| s.chars().next().map(|c| c.is_uppercase()).unwrap_or(false))
+        .map(|s| s.to_string())
 }
 
 fn symbol_kw(kind: SymbolKind) -> &'static str {
@@ -1720,7 +1743,7 @@ mod tests {
     fn named_arg_multiline_ctor() {
         // Constructor split across lines:
         //   User(
-        //       name = "Alice",  ← cursor on name (col 8)
+        //       name = "Alice",  ← cursor on name (col 4)
         //   )
         let src = "User(\n    name = \"Alice\",\n)";
         let (u, idx) = indexed("/t.kt", src);
@@ -1728,6 +1751,56 @@ mod tests {
             idx.word_and_qualifier_at(&u, Position::new(1, 4)),
             Some(("name".into(), Some("User".into())))
         );
+    }
+
+    #[test]
+    fn named_arg_method_with_uppercase_receiver() {
+        // BottomSheetState.empty(onBottomSheetClose = handler)
+        // → qualifier should be "BottomSheetState" (the receiver type)
+        let src = "BottomSheetState.empty(onBottomSheetClose = handler)";
+        let (u, idx) = indexed("/t.kt", src);
+        assert_eq!(
+            idx.word_and_qualifier_at(&u, Position::new(0, 23)),
+            Some(("onBottomSheetClose".into(), Some("BottomSheetState".into())))
+        );
+    }
+
+    #[test]
+    fn named_arg_fully_qualified_ctor() {
+        // com.example.User(name = "Alice") → qualifier "User" (last uppercase segment)
+        let src = "com.example.User(name = \"Alice\")";
+        let (u, idx) = indexed("/t.kt", src);
+        assert_eq!(
+            idx.word_and_qualifier_at(&u, Position::new(0, 17)),
+            Some(("name".into(), Some("User".into())))
+        );
+    }
+
+    #[test]
+    fn named_arg_lowercase_method_no_receiver() {
+        // someFunction(param = value) — pure lowercase, no type info → None qualifier
+        let src = "someFunction(param = value)";
+        let (u, idx) = indexed("/t.kt", src);
+        // qualifier should be None (we can't resolve this without type inference)
+        let result = idx.word_and_qualifier_at(&u, Position::new(0, 13));
+        assert_eq!(result.as_ref().map(|(w, _)| w.as_str()), Some("param"));
+        assert_eq!(result.as_ref().and_then(|(_, q)| q.as_deref()), None);
+    }
+
+    #[test]
+    fn named_arg_state_multiline_with_method_receiver() {
+        // Simulates the real-world pattern:
+        //   State(
+        //     sheetState = BottomSheetState.empty(SheetType.Empty, onBottomSheetClose = cb),
+        //     ...                                                   ^^^^^^^^^^^^^^^^^^
+        let src = "State(\n  sheetState = BottomSheetState.empty(SheetType.Empty, onBottomSheetClose = cb),\n)";
+        let (u, idx) = indexed("/t.kt", src);
+        // cursor on onBottomSheetClose (inside the inner .empty() call on line 1)
+        let line1 = &src.lines().collect::<Vec<_>>()[1];
+        let col = line1.find("onBottomSheetClose").unwrap() as u32;
+        let result = idx.word_and_qualifier_at(&u, Position::new(1, col));
+        assert_eq!(result.as_ref().map(|(w, _)| w.as_str()), Some("onBottomSheetClose"));
+        assert_eq!(result.as_ref().and_then(|(_, q)| q.as_deref()), Some("BottomSheetState"));
     }
 
     #[test]
