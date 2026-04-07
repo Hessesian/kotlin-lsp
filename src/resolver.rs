@@ -979,6 +979,82 @@ fn infer_variable_type(idx: &Indexer, var_name: &str, uri: &Url) -> Option<Strin
     infer_type_in_lines(&lines, var_name)
 }
 
+/// Like [`infer_variable_type`] but preserves generic parameters in the returned
+/// type string.  e.g. `val items: List<Product>` → `"List<Product>"`.
+///
+/// Used by the `it`-completion path to extract the collection element type.
+pub fn infer_variable_type_raw(idx: &Indexer, var_name: &str, uri: &Url) -> Option<String> {
+    if let Some(ll) = idx.live_lines.get(uri.as_str()) {
+        if let result @ Some(_) = infer_type_in_lines_raw(&*ll, var_name) {
+            return result;
+        }
+    }
+    if let Some(data) = idx.files.get(uri.as_str()) {
+        return infer_type_in_lines_raw(&data.lines, var_name);
+    }
+    let path = uri.to_file_path().ok()?;
+    let content = std::fs::read_to_string(&path).ok()?;
+    let lines: Vec<String> = content.lines().map(String::from).collect();
+    infer_type_in_lines_raw(&lines, var_name)
+}
+
+/// Extract the Kotlin/Android collection element type from a raw generic type string.
+///
+/// Handles the most common collection-like types seen in Android development:
+/// - `List<Product>` → `Product`
+/// - `MutableList<User>` → `User`
+/// - `Flow<Event>` → `Event`
+/// - `StateFlow<UiState>` → `UiState`
+/// - `Set<Tag>` → `Tag`
+/// - etc.
+///
+/// Returns `None` when the base type is not in the known collection list, or when
+/// the generic parameter is a primitive/lowercase type.  In those cases the
+/// caller should treat `it` as the receiver type itself (scope functions).
+pub fn extract_collection_element_type(raw_type: &str) -> Option<String> {
+    const COLLECTION_TYPES: &[&str] = &[
+        "List", "MutableList", "ArrayList",
+        "Set", "MutableSet", "HashSet", "LinkedHashSet",
+        "Collection", "MutableCollection", "Iterable", "MutableIterable",
+        "Sequence", "Flow", "StateFlow", "SharedFlow",
+        "Channel", "SendChannel", "ReceiveChannel",
+        "Array",
+    ];
+
+    let base: String = raw_type.chars().take_while(|&c| c.is_alphanumeric() || c == '_').collect();
+    if !COLLECTION_TYPES.contains(&base.as_str()) { return None; }
+
+    let open  = raw_type.find('<')?;
+    let close = raw_type.rfind('>')?;
+    if close <= open { return None; }
+    let inner = &raw_type[open + 1..close];
+
+    // Take first type argument (before the first `,` at depth 0).
+    let first = first_type_arg(inner).trim().trim_matches('?');
+
+    // Strip to the base class name only.
+    let elem: String = first.chars().take_while(|&c| c.is_alphanumeric() || c == '_').collect();
+    if elem.is_empty() || !elem.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+        return None;
+    }
+    Some(elem)
+}
+
+/// Return the first type argument in a comma-separated generic parameter list,
+/// respecting nested `<>` brackets.
+fn first_type_arg(s: &str) -> &str {
+    let mut depth = 0i32;
+    for (i, c) in s.char_indices() {
+        match c {
+            '<' => depth += 1,
+            '>' => depth -= 1,
+            ',' if depth == 0 => return &s[..i],
+            _ => {}
+        }
+    }
+    s
+}
+
 /// Scan a specific (possibly un-indexed) file for the declared type of `field_name`.
 ///
 /// Checks the in-memory index first (lines are cached); falls back to reading
@@ -1033,6 +1109,61 @@ fn infer_type_in_lines(lines: &[String], var_name: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Like `infer_type_in_lines` but preserves generic parameters in the result.
+///
+/// `val items: List<Product>` → `"List<Product>"`
+/// `val state: StateFlow<UiState>` → `"StateFlow<UiState>"`
+fn infer_type_in_lines_raw(lines: &[String], var_name: &str) -> Option<String> {
+    let pattern = format!("{var_name}:");
+
+    for line in lines {
+        if !line.contains(&pattern) { continue; }
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//") || trimmed.starts_with('*') || trimmed.starts_with("/*") {
+            continue;
+        }
+        if let Some(pos) = line.find(&pattern) {
+            let before_char = line[..pos].chars().last();
+            if before_char.map(|c| c.is_alphanumeric() || c == '_').unwrap_or(false) {
+                continue;
+            }
+            let after = &line[pos + var_name.len()..];
+            let after = after.trim_start_matches(':').trim_start();
+            let raw = extract_type_with_generics(after);
+            if !raw.is_empty() && raw.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                return Some(raw);
+            }
+        }
+    }
+    None
+}
+
+/// Capture a type expression including balanced generic parameters.
+///
+/// `"List<Product> = emptyList()"` → `"List<Product>"`
+/// `"StateFlow<UiState>"` → `"StateFlow<UiState>"`
+/// `"User?"` → `"User"`  (nullable stripped at the outer `?`)
+fn extract_type_with_generics(s: &str) -> String {
+    let mut result = String::new();
+    let mut depth = 0i32;
+    for c in s.chars() {
+        match c {
+            '<' => { depth += 1; result.push(c); }
+            '>' => {
+                if depth > 0 {
+                    depth -= 1;
+                    result.push(c);
+                    if depth == 0 { break; }
+                } else { break; }
+            }
+            // Stop at these outside of generic brackets.
+            '?' | ' ' | '=' | ',' | ')' | '\n' if depth == 0 => break,
+            _ => result.push(c),
+        }
+    }
+    result
 }
 
 /// Return the `Range` of the declaration `name:` on the first matching line,
@@ -1775,5 +1906,56 @@ data class State(
         // Must point to State's toastModel (line 4), NOT OnClick's (line 2)
         let line = locs[0].range.start.line;
         assert!(line >= 4, "resolved to OnClick.toastModel (line {line}) instead of State.toastModel");
+    }
+
+    // ── it-completion helpers ─────────────────────────────────────────────────
+
+    #[test]
+    fn extract_collection_element_list() {
+        assert_eq!(extract_collection_element_type("List<Product>"), Some("Product".into()));
+    }
+
+    #[test]
+    fn extract_collection_element_mutable_list() {
+        assert_eq!(extract_collection_element_type("MutableList<User>"), Some("User".into()));
+    }
+
+    #[test]
+    fn extract_collection_element_flow() {
+        assert_eq!(extract_collection_element_type("Flow<Event>"), Some("Event".into()));
+    }
+
+    #[test]
+    fn extract_collection_element_state_flow() {
+        assert_eq!(extract_collection_element_type("StateFlow<UiState>"), Some("UiState".into()));
+    }
+
+    #[test]
+    fn extract_collection_element_map_returns_first() {
+        // Map is not in the collection list → returns None (it's more complex).
+        // forEach on Map gives Map.Entry, not the first type arg.
+        assert_eq!(extract_collection_element_type("Map<String, Int>"), None);
+    }
+
+    #[test]
+    fn extract_collection_element_non_collection() {
+        // Plain class → not a collection, returns None.
+        assert_eq!(extract_collection_element_type("User"), None);
+    }
+
+    #[test]
+    fn infer_type_in_lines_raw_keeps_generics() {
+        let lines: Vec<String> = vec![
+            "val items: List<Product> = emptyList()".into(),
+        ];
+        assert_eq!(infer_type_in_lines_raw(&lines, "items"), Some("List<Product>".into()));
+    }
+
+    #[test]
+    fn infer_type_in_lines_raw_state_flow() {
+        let lines: Vec<String> = vec![
+            "    private val _state: StateFlow<UiState>".into(),
+        ];
+        assert_eq!(infer_type_in_lines_raw(&lines, "_state"), Some("StateFlow<UiState>".into()));
     }
 }

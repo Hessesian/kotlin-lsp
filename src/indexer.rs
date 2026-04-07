@@ -721,6 +721,16 @@ impl Indexer {
             None
         };
 
+        // Special case: `it` is Kotlin's implicit single-parameter lambda argument.
+        // Scan backward through `before` to find the enclosing lambda's collection
+        // receiver (e.g. `users.forEach { it.` → element type of `users`).
+        if dot_receiver.as_deref() == Some("it") {
+            if let Some(elem_type) = find_it_element_type(before, self, uri) {
+                return crate::resolver::complete_symbol(self, &prefix, Some(&elem_type), uri, snippets);
+            }
+            return vec![];
+        }
+
         crate::resolver::complete_symbol(
             self,
             &prefix,
@@ -1167,6 +1177,91 @@ pub(crate) fn parse_rg_line(line: &str) -> Option<Location> {
 
 fn is_id_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
+}
+
+/// Resolve the element type of `it` when inside a lambda.
+///
+/// Scans `before_cursor` (text from line start to cursor, ending with `it.`)
+/// backward to find the lambda opening `{`, then the callee before it
+/// (e.g. `users.forEach`), then the receiver (`users`).
+///
+/// - If the receiver has a collection-like generic type (`List<Product>`,
+///   `Flow<Event>`, …) → returns the inner type (`Product`, `Event`).
+/// - Otherwise (scope function: `user.let { it.`) → returns the receiver's
+///   base type directly (`User`).
+///
+/// Returns `None` when the type cannot be determined statically.
+fn find_it_element_type(before_cursor: &str, idx: &Indexer, uri: &Url) -> Option<String> {
+    // Find the last `{` that opens the lambda we're inside.
+    let brace_byte = before_cursor.rfind('{')?;
+    let before_brace = before_cursor[..brace_byte].trim_end();
+
+    // Strip a trailing `method(...)` call arg list so we're left with the
+    // dotted chain `receiver.method`.
+    let callee_str = strip_trailing_call_args(before_brace);
+
+    // Handle `?.` null-safe calls by normalising to `.` for the split.
+    let callee_normalised = callee_str.replace("?.", ".");
+    let callee_trimmed = callee_normalised.trim_end();
+
+    // Split at the last `.` to separate receiver expression from method name.
+    let dot_pos = callee_trimmed.rfind('.')?;
+    let receiver_expr = callee_trimmed[..dot_pos].trim_end();
+
+    // Extract the last identifier in the receiver expression.
+    // `viewModel.items` → `items`;  `items` → `items`
+    let receiver_var: String = receiver_expr
+        .chars()
+        .rev()
+        .take_while(|&c| is_id_char(c))
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+
+    if receiver_var.is_empty() { return None; }
+
+    // Try raw type with generics first (covers List<T>, Flow<T>, StateFlow<T> …).
+    if let Some(raw) = crate::resolver::infer_variable_type_raw(idx, &receiver_var, uri) {
+        // Collection-like type → return element type.
+        if let Some(elem) = crate::resolver::extract_collection_element_type(&raw) {
+            return Some(elem);
+        }
+        // Scope function (let, also, apply …) → `it` IS the receiver.
+        let base: String = raw.chars().take_while(|&c| is_id_char(c)).collect();
+        if !base.is_empty() && base.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+            return Some(base);
+        }
+    }
+
+    // Uppercase bare name used as object receiver: `MyObject.let { it.`
+    if receiver_var.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+        return Some(receiver_var);
+    }
+
+    None
+}
+
+/// Strip a balanced trailing `(…)` argument list from the end of `s`.
+/// `"collection.method(arg1, arg2)"` → `"collection.method"`
+/// `"collection.forEach"`           → `"collection.forEach"`  (unchanged)
+fn strip_trailing_call_args(s: &str) -> &str {
+    if !s.ends_with(')') { return s; }
+    let bytes = s.as_bytes();
+    let mut depth = 0i32;
+    let mut i = bytes.len();
+    while i > 0 {
+        i -= 1;
+        match bytes[i] {
+            b')' => depth += 1,
+            b'(' => {
+                depth -= 1;
+                if depth == 0 { return &s[..i]; }
+            }
+            _ => {}
+        }
+    }
+    s
 }
 
 /// Scan backward from `(line_no, col)` — where `col` is the START of the cursor
@@ -1801,6 +1896,75 @@ mod tests {
         let result = idx.word_and_qualifier_at(&u, Position::new(1, col));
         assert_eq!(result.as_ref().map(|(w, _)| w.as_str()), Some("onBottomSheetClose"));
         assert_eq!(result.as_ref().and_then(|(_, q)| q.as_deref()), Some("BottomSheetState"));
+    }
+
+    // ── it-completion ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn it_element_type_list() {
+        // val items: List<Product>
+        // items.forEach { it.  ← element type should be "Product"
+        let src = "val items: List<Product> = emptyList()";
+        let (u, idx) = indexed("/t.kt", src);
+        let before = "items.forEach { it.";
+        let result = find_it_element_type(before, &idx, &u);
+        assert_eq!(result.as_deref(), Some("Product"));
+    }
+
+    #[test]
+    fn it_element_type_flow() {
+        let src = "val events: Flow<Event> = emptyFlow()";
+        let (u, idx) = indexed("/t.kt", src);
+        let before = "events.collect { it.";
+        assert_eq!(find_it_element_type(before, &idx, &u).as_deref(), Some("Event"));
+    }
+
+    #[test]
+    fn it_element_type_state_flow() {
+        let src = "    private val _state: StateFlow<UiState>";
+        let (u, idx) = indexed("/t.kt", src);
+        let before = "_state.value.let { it."; // `value` is lowercase → chain, falls back
+        // _state itself is StateFlow, but we ask about `value` which isn't typed here.
+        // Just ensure no panic.
+        let _ = find_it_element_type(before, &idx, &u);
+    }
+
+    #[test]
+    fn it_scope_fn_let() {
+        // val user: User — `user.let { it.` — it IS the User type
+        let src = "val user: User = User()";
+        let (u, idx) = indexed("/t.kt", src);
+        let before = "user.let { it.";
+        // User is not a collection, so returns the base type directly
+        assert_eq!(find_it_element_type(before, &idx, &u).as_deref(), Some("User"));
+    }
+
+    #[test]
+    fn it_element_type_nullable_call() {
+        // val user: User? — `user?.let { it.`
+        let src = "val user: User? = null";
+        let (u, idx) = indexed("/t.kt", src);
+        let before = "user?.let { it.";
+        // `?` in `?.` is normalised away — should still find "User"
+        // `infer_type_in_lines_raw` for `user: User?` → "User" (? stripped at type boundary)
+        let result = find_it_element_type(before, &idx, &u);
+        assert_eq!(result.as_deref(), Some("User"));
+    }
+
+    #[test]
+    fn it_element_type_with_call_args() {
+        // items.map(transform) { it.  → strip `(transform)` first
+        let src = "val items: List<Order> = emptyList()";
+        let (u, idx) = indexed("/t.kt", src);
+        let before = "items.mapNotNull(::transform) { it.";
+        // strip `(::transform)` → callee = `items.mapNotNull` → receiver = `items` → List<Order>
+        assert_eq!(find_it_element_type(before, &idx, &u).as_deref(), Some("Order"));
+    }
+
+    #[test]
+    fn it_unknown_var_returns_none() {
+        let (u, idx) = indexed("/t.kt", "");
+        assert_eq!(find_it_element_type("unknown.forEach { it.", &idx, &u), None);
     }
 
     #[test]
