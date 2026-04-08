@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, RwLock};
 
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -24,6 +24,28 @@ mod progress {
 use crate::parser;
 use crate::types::{FileData, SymbolEntry};
 
+// ─── Indexing status file ─────────────────────────────────────────────────────
+
+/// Human-readable status written to `~/.cache/kotlin-lsp/status.json`.
+/// The skill extension reads this to report loading state with time estimates.
+fn status_cache_path() -> PathBuf {
+    let cache_base = std::env::var("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+            PathBuf::from(home).join(".cache")
+        });
+    cache_base.join("kotlin-lsp").join("status.json")
+}
+
+fn write_status_file(content: &str) {
+    let path = status_cache_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&path, content);
+}
+
 /// Hard cap on workspace files indexed eagerly.
 /// Files beyond this limit are resolved on-demand via `rg` when first needed.
 /// Override by setting the `KOTLIN_LSP_MAX_FILES` environment variable.
@@ -32,7 +54,7 @@ const DEFAULT_MAX_INDEX_FILES: usize = 2000;
 // ─── Disk cache ──────────────────────────────────────────────────────────────
 
 /// Bump when the serialized format changes; invalidates any older cache files.
-const CACHE_VERSION: u32 = 1;
+const CACHE_VERSION: u32 = 2;
 
 /// Per-file entry stored in the on-disk index cache.
 #[derive(Serialize, Deserialize)]
@@ -81,7 +103,14 @@ fn file_mtime(path: &Path) -> Option<u64> {
 fn try_load_cache(root: &Path) -> Option<IndexCache> {
     let path = workspace_cache_path(root);
     let bytes = std::fs::read(&path).ok()?;
-    let cache: IndexCache = bincode::deserialize(&bytes).ok()?;
+    let cache: IndexCache = match bincode::deserialize(&bytes) {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("Cache deserialize failed (struct layout changed?): {e} — will re-index. \
+                        Delete {path} to suppress this warning.", path = path.display());
+            return None;
+        }
+    };
     if cache.version != CACHE_VERSION {
         log::info!("Cache version mismatch — will re-index");
         return None;
@@ -106,7 +135,7 @@ pub struct Indexer {
     /// Package name → vec of URI strings (for same-package resolution).
     pub(crate) packages:    DashMap<String, Vec<String>>,
     /// Absolute path to the workspace root, set once on first `index_workspace`.
-    pub(crate) workspace_root: OnceLock<PathBuf>,
+    pub(crate) workspace_root: RwLock<Option<PathBuf>>,
     /// URI string → xxHash of last indexed content (skip identical re-parses).
     content_hashes: DashMap<String, u64>,
     /// Semaphore capping concurrent parse workers.
@@ -142,7 +171,7 @@ impl Indexer {
             definitions:    DashMap::new(),
             qualified:      DashMap::new(),
             packages:       DashMap::new(),
-            workspace_root: OnceLock::new(),
+            workspace_root: RwLock::new(None),
             content_hashes: DashMap::new(),
             // Allow at most 4 concurrent parse workers; workspace batch indexing
             // uses a dedicated await loop so this mainly guards did_change bursts.
@@ -174,7 +203,7 @@ impl Indexer {
 
     pub async fn index_workspace(self: Arc<Self>, root: &Path, client: tower_lsp::Client) {
         // Record workspace root so rg/fd always search within the project.
-        let _ = self.workspace_root.set(root.to_path_buf());
+        *self.workspace_root.write().unwrap() = Some(root.to_path_buf());
 
         let max = std::env::var("KOTLIN_LSP_MAX_FILES")
             .ok()
@@ -184,7 +213,7 @@ impl Indexer {
     }
 
     async fn index_workspace_impl(self: Arc<Self>, root: &Path, max: usize, client: tower_lsp::Client) {
-        let _ = self.workspace_root.set(root.to_path_buf());
+        *self.workspace_root.write().unwrap() = Some(root.to_path_buf());
 
         let mut paths = find_source_files(root);
         let total = paths.len();
@@ -236,6 +265,17 @@ impl Indexer {
             "Cache: {cache_hits} hits, {parse_count} files need (re-)parsing"
         );
 
+        // ── Status file: indexing started ────────────────────────────────────
+        let index_start = std::time::Instant::now();
+        let started_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let root_str = root.to_string_lossy();
+        write_status_file(&format!(
+            r#"{{"phase":"indexing","workspace":"{root_str}","indexed":0,"total":{parse_count},"cache_hits":{cache_hits},"symbols":0,"started_at":{started_unix},"elapsed_secs":0,"estimated_total_secs":null}}"#
+        ));
+
         // ── LSP progress: begin ──────────────────────────────────────────────
         let token = NumberOrString::String("kotlin-lsp/indexing".into());
         // Ask the client to create a progress token. Use a short timeout — some
@@ -276,6 +316,7 @@ impl Indexer {
             let client2    = client.clone();
             let token2     = token.clone();
             let total_cnt  = parse_count.max(1);
+            let root_str2  = root_str.to_string();
 
             handles.push(tokio::spawn(async move {
                 let _permit = sem.acquire_owned().await;
@@ -308,6 +349,13 @@ impl Indexer {
                             }
                         )),
                     }).await;
+                    // Update status file with elapsed and estimated remaining time.
+                    let elapsed = index_start.elapsed().as_secs_f64();
+                    let estimated_total = if pct > 0 { elapsed * 100.0 / pct as f64 } else { 0.0 };
+                    let estimated_remaining = (estimated_total - elapsed).max(0.0);
+                    write_status_file(&format!(
+                        r#"{{"phase":"indexing","workspace":"{root_str2}","indexed":{n},"total":{total_cnt},"cache_hits":{cache_hits},"symbols":0,"started_at":{started_unix},"elapsed_secs":{elapsed:.0},"estimated_remaining_secs":{estimated_remaining:.0}}}"#
+                    ));
                 }
             }));
         }
@@ -336,6 +384,17 @@ impl Indexer {
                 )),
             })),
         }).await;
+
+        // ── Status file: ready ───────────────────────────────────────────────
+        let elapsed = index_start.elapsed().as_secs_f64();
+        let completed_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        write_status_file(&format!(
+            r#"{{"phase":"ready","workspace":"{root_str}","indexed":{files},"total":{files},"cache_hits":{cache_hits},"symbols":{sym_count},"started_at":{started_unix},"elapsed_secs":{elapsed:.0},"completed_at":{completed_unix}}}"#,
+            files = self.files.len(),
+        ));
 
         log::info!(
             "Done — {} files indexed ({} cached), {} distinct symbols, {} packages",
@@ -390,7 +449,8 @@ impl Indexer {
     /// Serialize the current index to `~/.cache/kotlin-lsp/<root-hash>/index.bin`.
     /// Safe to call from a background thread.  Logs warnings on error; never panics.
     pub fn save_cache_to_disk(&self) {
-        let root = match self.workspace_root.get() {
+        let root_guard = self.workspace_root.read().unwrap();
+        let root = match root_guard.as_ref() {
             Some(r) => r,
             None    => return,
         };
@@ -2097,7 +2157,7 @@ fn lambda_receiver_type_named_arg_ml(
                 .or_else(|| {
                     // On-demand: use rg to find and index the outer class.
                     let rg_locs = rg_find_definition(
-                        outer, idx.workspace_root.get().map(PathBuf::as_path)
+                        outer, idx.workspace_root.read().unwrap().as_deref()
                     );
                     for loc in &rg_locs {
                         if !idx.files.contains_key(loc.uri.as_str()) {
@@ -2429,7 +2489,7 @@ fn find_fun_signature_full(fn_name: &str, idx: &Indexer, uri: &Url) -> Option<St
         return Some(sig);
     }
     // Slow path: rg to locate the definition, index on-demand.
-    let locs = rg_find_definition(fn_name, idx.workspace_root.get().map(PathBuf::as_path));
+    let locs = rg_find_definition(fn_name, idx.workspace_root.read().unwrap().as_deref());
     for loc in &locs {
         let file_uri_str = loc.uri.as_str();
         if !idx.files.contains_key(file_uri_str) {

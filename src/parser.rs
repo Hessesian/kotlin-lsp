@@ -75,7 +75,8 @@ pub fn parse_kotlin(content: &str) -> FileData {
         let (kind, _detail) = queries::def_pattern_meta(pidx);
         if kind != SymbolKind::NULL {
             let visibility = visibility_at_line(&data.lines, sel.start.line as usize);
-            data.symbols.push(SymbolEntry { name, kind, visibility, range, selection_range: sel });
+            let detail = extract_detail(&data.lines, range.start.line, range.end.line);
+            data.symbols.push(SymbolEntry { name, kind, visibility, range, selection_range: sel, detail });
         }
     }
 
@@ -146,6 +147,7 @@ fn extract_java(node: &Node, bytes: &[u8], data: &mut FileData) {
                             visibility: vis,
                             range: nr,
                             selection_range: ts_to_lsp(child.range()),
+                            detail: extract_detail(&data.lines, nr.start.line, nr.end.line),
                         });
                     }
                     break;
@@ -166,7 +168,7 @@ fn extract_java(node: &Node, bytes: &[u8], data: &mut FileData) {
             for child in node.children(&mut cur) {
                 if child.kind() == "variable_declarator" {
                     if let Some((name, sel)) = first_identifier(&child, bytes) {
-                        data.symbols.push(SymbolEntry { name, kind, visibility: vis, range: nr, selection_range: sel });
+                        data.symbols.push(SymbolEntry { name, kind, visibility: vis, range: nr, selection_range: sel, detail: extract_detail(&data.lines, nr.start.line, nr.end.line) });
                     }
                 }
             }
@@ -205,7 +207,9 @@ fn java_node_has_modifiers(node: &Node, required: &[&str]) -> bool {
 fn push_named(node: &Node, bytes: &[u8], kind: SymbolKind, data: &mut FileData) {
     if let Some((name, sel)) = first_identifier(node, bytes) {
         let visibility = visibility_at_line(&data.lines, node.range().start_point.row);
-        data.symbols.push(SymbolEntry { name, kind, visibility, range: ts_to_lsp(node.range()), selection_range: sel });
+        let range = ts_to_lsp(node.range());
+        let detail = extract_detail(&data.lines, range.start.line, range.end.line);
+        data.symbols.push(SymbolEntry { name, kind, visibility, range, selection_range: sel, detail });
     }
 }
 
@@ -230,6 +234,47 @@ fn ts_to_lsp(r: tree_sitter::Range) -> Range {
     Range {
         start: Position { line: r.start_point.row as u32, character: r.start_point.column as u32 },
         end:   Position { line: r.end_point.row   as u32, character: r.end_point.column   as u32 },
+    }
+}
+
+/// Extract a short declaration signature from source lines.
+///
+/// Concatenates lines starting at `start_line`, strips leading whitespace,
+/// and truncates at the first `{` or `=` that begins a body — leaving just
+/// the declaration header.  Result is capped at 120 characters.
+///
+/// Examples:
+///   `fun addBiometryToPowerAuth(isAllowedForActiveOp: Boolean): Boolean`
+///   `class CreatePinViewModel @Inject constructor(`
+///   `val isChecked: Boolean`
+pub(crate) fn extract_detail(lines: &[String], start_line: u32, end_line: u32) -> String {
+    let start = start_line as usize;
+    let end   = (end_line as usize + 1).min(lines.len());
+    let mut collected = String::new();
+    for line in &lines[start..end] {
+        if !collected.is_empty() {
+            collected.push(' ');
+        }
+        collected.push_str(line.trim_start());
+        // Stop collecting when we hit the body opener or annotation-only lines.
+        if collected.contains('{') || collected.contains(" = ") || collected.ends_with('=') {
+            break;
+        }
+    }
+    // Trim at body opener `{` or ` =`.
+    let trimmed = if let Some(pos) = collected.find('{') {
+        collected[..pos].trim_end().to_owned()
+    } else if let Some(pos) = collected.find(" = ") {
+        collected[..pos].trim_end().to_owned()
+    } else {
+        collected
+    };
+    // Strip trailing `)` then `: ReturnType` to keep it compact, or keep if short.
+    // Cap at 120 chars.
+    if trimmed.len() > 120 {
+        format!("{}…", &trimmed[..119])
+    } else {
+        trimmed
     }
 }
 

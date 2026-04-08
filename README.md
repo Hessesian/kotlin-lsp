@@ -241,6 +241,15 @@ Set environment variables before launching the binary (or in your editor's LSP e
 | Variable | Default | Description |
 |---|---|---|
 | `KOTLIN_LSP_MAX_FILES` | `2000` | Max files indexed eagerly at startup. Files beyond this are parsed on-demand. |
+| `KOTLIN_LSP_WORKSPACE_ROOT` | _(none)_ | Override the workspace root sent by the LSP client. Useful when the client is started from a different directory. |
+
+You can also set the workspace root via a config file (takes lower priority than the env var):
+
+```bash
+echo "/path/to/your/project" > ~/.config/kotlin-lsp/workspace
+```
+
+This is read on every startup, so it persists across LSP server restarts without needing to change editor config.
 
 Example for Helix:
 
@@ -249,6 +258,73 @@ Example for Helix:
 command = "/path/to/kotlin-lsp"
 environment = { KOTLIN_LSP_MAX_FILES = "4000" }
 ```
+
+---
+
+## GitHub Copilot CLI agent
+
+kotlin-lsp integrates with the [GitHub Copilot CLI](https://githubnext.com/projects/copilot-cli/) to give Copilot full code-intelligence tools when working on Kotlin/Java projects.
+
+> **Requires:** `copilot --experimental` (or `--exp`) — the `lsp` tool is only available in experimental mode.
+
+### Setup
+
+**1. Add kotlin-lsp to Copilot's LSP config** (`~/.copilot/lsp-config.json`):
+
+```json
+{
+  "lspServers": {
+    "kotlin-lsp": {
+      "command": "/path/to/kotlin-lsp",
+      "args": [],
+      "env": {
+        "KOTLIN_LSP_MAX_FILES": "20000"
+      },
+      "fileExtensions": {
+        ".kt": "kotlin",
+        ".kts": "kotlin",
+        ".java": "java"
+      }
+    }
+  }
+}
+```
+
+**2. (Optional) Set a fixed workspace root** so Copilot always indexes your project regardless of which directory it's started from:
+
+```bash
+mkdir -p ~/.config/kotlin-lsp
+echo "/path/to/your/project" > ~/.config/kotlin-lsp/workspace
+```
+
+**3. (Optional) Install the Copilot skill extension** for a richer agent experience — it injects indexing status context automatically and provides `kotlin_lsp_status` and `kotlin_lsp_set_workspace` tools:
+
+```bash
+# Copy the extension to your Copilot user extensions directory
+mkdir -p ~/.copilot/extensions/kotlin-lsp
+cp contrib/copilot-extension/extension.mjs ~/.copilot/extensions/kotlin-lsp/
+```
+
+The extension provides:
+- **`kotlin_lsp_status`** — check indexing phase, file counts, symbol count, and ETA before running queries
+- **`kotlin_lsp_set_workspace`** — switch the indexed project at runtime without restarting Copilot
+- **Auto-injected context** — when you open a session in a Kotlin project, indexing status and LSP capabilities are injected automatically
+
+### Agentic workflow
+
+Once configured, Copilot can navigate your codebase using:
+
+```
+lsp workspaceSymbol "MyClass"         → find any class/function by name (includes signature)
+lsp documentSymbol <file>             → list all symbols in a file with line numbers
+lsp hover <file> <line> <col>         → get type signature and docs at a position
+lsp goToDefinition <file> <line> <col>→ jump to the definition
+lsp findReferences <file> <line> <col>→ find all usages across the project
+lsp incomingCalls <file> <line> <col> → find all callers of a function
+lsp outgoingCalls <file> <line> <col> → find all functions called by a function
+```
+
+**Tip:** `workspaceSymbol` results now include the declaration signature (e.g. `fun processPayment(amount: BigDecimal, currency: String): Result<Unit>`), so you rarely need a follow-up `hover` call.
 
 ---
 
@@ -277,7 +353,7 @@ At ~50 chars/line × 300 lines/file ≈ 15 KB/file. At 2 000 files that is ~30 M
 - **CPU** — a 120 ms debounce prevents re-parsing on every keystroke. A semaphore caps concurrent parse workers at 8 during workspace scan.
 - **Content dedup** — files are only re-parsed when their content actually changes (FNV-1a hash check).
 - **Completion cache** — dot-completion results are cached per type-file; cleared only when that file changes.
-- **fd `--full-path` search** — when resolving an import like `cz.moneta.data.compat.EProductScreen`, the fd command searches for `*/cz/moneta/data/compat/EProductScreen.(kt|java)$` — a single O(1) traversal that skips unrelated modules entirely.
+- **fd `--full-path` search** — when resolving an import like `com.example.data.compat.EProductScreen`, the fd command searches for `*/com/example/data/compat/EProductScreen.(kt|java)$` — a single O(1) traversal that skips unrelated modules entirely.
 
 ---
 

@@ -457,7 +457,8 @@ fn resolve_symbol_inner(idx: &Indexer, name: &str, from_uri: &Url, with_hierarch
     }
 
     // 5 ── project-wide rg ───────────────────────────────────────────────────
-    rg_find_definition(name, idx.workspace_root.get().map(PathBuf::as_path))
+    let root_guard = idx.workspace_root.read().unwrap();
+    rg_find_definition(name, root_guard.as_deref())
 }
 
 /// Index-only resolver for use in completion paths.
@@ -667,7 +668,8 @@ fn resolve_via_imports(idx: &Indexer, name: &str, uri: &Url) -> Vec<Location> {
         }
 
         // iii) on-demand fd + parse (indexing race or file never opened).
-        let root = idx.workspace_root.get().map(PathBuf::as_path);
+        let root_guard = idx.workspace_root.read().unwrap();
+        let root = root_guard.as_deref();
         let locs = fd_find_and_parse(name, &imp.full_path, root);
         if !locs.is_empty() { return locs; }
     }
@@ -890,7 +892,8 @@ fn resolve_star_imports(idx: &Indexer, name: &str, uri: &Url) -> Vec<Location> {
         }
 
         // b) rg scoped to the package directory for unindexed files
-        let root = idx.workspace_root.get().map(PathBuf::as_path);
+        let root_guard = idx.workspace_root.read().unwrap();
+        let root = root_guard.as_deref();
         let locs = rg_in_package_dir(name, &pkg, root);
         if !locs.is_empty() { return locs; }
     }

@@ -56,18 +56,36 @@ impl LanguageServer for Backend {
                 .map(|f| f.uri.clone())
         });
 
-        if let Some(uri) = root_uri {
-            if let Ok(path) = uri.to_file_path() {
-                // Set workspace_root immediately so rg/fd calls work even before
-                // indexing finishes (the background task can be slow on large projects).
-                let _ = self.indexer.workspace_root.set(path.clone());
-                let indexer = Arc::clone(&self.indexer);
-                let client  = self.client.clone();
-                // Background task — server is usable before indexing finishes.
-                tokio::spawn(async move {
-                    indexer.index_workspace(&path, client).await;
-                });
-            }
+        // KOTLIN_LSP_WORKSPACE_ROOT env var or ~/.config/kotlin-lsp/workspace file
+        // overrides whatever root the LSP client sends.
+        // Useful when the LSP client (e.g. Copilot CLI) is started from a different directory.
+        let workspace_override = std::env::var("KOTLIN_LSP_WORKSPACE_ROOT")
+            .ok()
+            .map(std::path::PathBuf::from)
+            .filter(|p| p.is_dir())
+            .or_else(|| {
+                // Fall back to ~/.config/kotlin-lsp/workspace file
+                let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+                let config_file = std::path::Path::new(&home).join(".config/kotlin-lsp/workspace");
+                std::fs::read_to_string(&config_file).ok()
+                    .map(|s| std::path::PathBuf::from(s.trim()))
+                    .filter(|p| p.is_dir())
+            });
+
+        let resolved_root = workspace_override.or_else(|| {
+            root_uri.as_ref().and_then(|uri| uri.to_file_path().ok())
+        });
+
+        if let Some(path) = resolved_root {
+            // Set workspace_root immediately so rg/fd calls work even before
+            // indexing finishes (the background task can be slow on large projects).
+            *self.indexer.workspace_root.write().unwrap() = Some(path.clone());
+            let indexer = Arc::clone(&self.indexer);
+            let client  = self.client.clone();
+            // Background task — server is usable before indexing finishes.
+            tokio::spawn(async move {
+                indexer.index_workspace(&path, client).await;
+            });
         }
 
         Ok(InitializeResult {
@@ -96,7 +114,7 @@ impl LanguageServer for Backend {
                 }),
                 workspace_symbol_provider: Some(OneOf::Left(true)),
                 execute_command_provider: Some(ExecuteCommandOptions {
-                    commands: vec!["kotlin-lsp/reindex".into()],
+                    commands: vec!["kotlin-lsp/reindex".into(), "kotlin-lsp/changeRoot".into()],
                     ..Default::default()
                 }),
                 rename_provider: Some(OneOf::Right(RenameOptions {
@@ -155,22 +173,46 @@ impl LanguageServer for Backend {
 
     async fn execute_command(&self, params: ExecuteCommandParams) -> Result<Option<serde_json::Value>> {
         if params.command == "kotlin-lsp/reindex" {
-            let Some(root) = self.indexer.workspace_root.get().cloned() else {
+            let root = self.indexer.workspace_root.read().unwrap().clone();
+            let Some(root) = root else {
                 self.client.show_message(MessageType::WARNING, "kotlin-lsp: no workspace root set").await;
                 return Ok(None);
             };
             let idx    = Arc::clone(&self.indexer);
             let client = self.client.clone();
-            // Clear existing index so we re-parse everything (respecting the cache).
             idx.files.clear();
             idx.definitions.clear();
-            // Kick off full reindex (no file-count cap) in background.
             tokio::spawn(async move {
-                // Temporarily override the env var cap by setting a very high limit.
-                // We do this by passing usize::MAX directly via a new entry-point.
                 idx.index_workspace_full(&root, client).await;
             });
             self.client.show_message(MessageType::INFO, "kotlin-lsp: reindexing workspace…").await;
+        } else if params.command == "kotlin-lsp/changeRoot" {
+            // Expected argument: a single JSON string with the new workspace root path.
+            let new_root = params.arguments.first()
+                .and_then(|v| v.as_str())
+                .map(std::path::PathBuf::from);
+            let Some(new_root) = new_root else {
+                self.client.show_message(MessageType::WARNING,
+                    "kotlin-lsp/changeRoot: expected one string argument (path)").await;
+                return Ok(None);
+            };
+            if !new_root.is_dir() {
+                self.client.show_message(MessageType::WARNING,
+                    format!("kotlin-lsp/changeRoot: not a directory: {}", new_root.display())).await;
+                return Ok(None);
+            }
+            // Swap root and wipe stale index data.
+            *self.indexer.workspace_root.write().unwrap() = Some(new_root.clone());
+            self.indexer.files.clear();
+            self.indexer.definitions.clear();
+            let idx    = Arc::clone(&self.indexer);
+            let client = self.client.clone();
+            let new_root2 = new_root.clone();
+            tokio::spawn(async move {
+                idx.index_workspace_full(&new_root2, client).await;
+            });
+            self.client.show_message(MessageType::INFO,
+                format!("kotlin-lsp: switching root to {}…", new_root.display())).await;
         }
         Ok(None)
     }
@@ -445,7 +487,7 @@ impl LanguageServer for Backend {
             .unwrap_or_default();
 
         // Run rg off the async executor to avoid blocking the Tokio runtime.
-        let root = self.indexer.workspace_root.get().map(|p| p.to_path_buf());
+        let root = self.indexer.workspace_root.read().unwrap().clone();
         let uri_clone = uri.clone();
         let name2 = name.clone();
         let parent2 = parent_class.clone();
@@ -540,7 +582,7 @@ impl LanguageServer for Backend {
             .into_iter()
             .map(|s| DocumentSymbol {
                 name:             s.name,
-                detail:           None,
+                detail:           if s.detail.is_empty() { None } else { Some(s.detail) },
                 kind:             s.kind,
                 tags:             None,
                 deprecated:       None,
@@ -595,7 +637,7 @@ impl LanguageServer for Backend {
                         uri:   uri.clone(),
                         range: sym.selection_range,
                     },
-                    container_name: None,
+                    container_name: if sym.detail.is_empty() { None } else { Some(sym.detail.clone()) },
                 });
                 if results.len() >= 512 {
                     break;
@@ -849,7 +891,7 @@ impl LanguageServer for Backend {
             .unwrap_or_default();
 
         // ── Find all reference locations (off-thread, same as references handler) ──
-        let root = self.indexer.workspace_root.get().map(|p| p.to_path_buf());
+        let root = self.indexer.workspace_root.read().unwrap().clone();
         let uri_clone = uri.clone();
         let name2 = name.clone();
         let parent2 = parent_class.clone();

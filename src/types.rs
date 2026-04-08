@@ -22,6 +22,12 @@ pub struct SymbolEntry {
     pub range:            Range,
     /// Span of only the identifier — used for `selectionRange` in DocumentSymbol.
     pub selection_range:  Range,
+    /// Short signature shown in hover/symbol lists.
+    /// e.g. `"fun addBiometryToPowerAuth(isAllowedForActiveOp: Boolean)"`,
+    ///      `"class CreatePinViewModel"`, `"val isChecked: Boolean"`.
+    /// Empty string when not computed.
+    #[serde(default)]
+    pub detail:           String,
 }
 
 /// One import statement parsed from a Kotlin file.

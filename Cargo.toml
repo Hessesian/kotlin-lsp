@@ -1,6 +1,6 @@
 [package]
 name        = "kotlin-lsp"
-version = "0.3.10"
+version = "0.3.11"
 edition     = "2021"
 description = "Fast, low-memory LSP server for Kotlin and Java. Instant startup, dot-completion, go-to-definition, hover — no JVM required."
 license     = "MIT"
