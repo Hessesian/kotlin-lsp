@@ -520,7 +520,17 @@ impl LanguageServer for Backend {
         &self,
         params: DocumentSymbolParams,
     ) -> Result<Option<DocumentSymbolResponse>> {
-        let symbols = self.indexer.file_symbols(&params.text_document.uri);
+        let uri = &params.text_document.uri;
+        let mut symbols = self.indexer.file_symbols(uri);
+        // Disk fallback: if not indexed yet, parse on-demand and index.
+        if symbols.is_empty() {
+            if let Ok(path) = uri.to_file_path() {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    self.indexer.index_content(uri, &content);
+                    symbols = self.indexer.file_symbols(uri);
+                }
+            }
+        }
         if symbols.is_empty() {
             return Ok(None);
         }
