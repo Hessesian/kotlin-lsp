@@ -635,6 +635,7 @@ impl LanguageServer for Backend {
         let mut depth: i32 = 0;
         let mut active_param: u32 = 0;
         let mut call_name: Option<String> = None;
+        let mut call_qualifier: Option<String> = None; // receiver before the dot
         let chars: Vec<char> = before.chars().collect();
         let mut i = chars.len();
         while i > 0 {
@@ -655,6 +656,17 @@ impl LanguageServer for Backend {
                         let candidate: String = chars[j..i].iter().collect();
                         if !candidate.is_empty() && !is_non_call_keyword(&candidate) {
                             call_name = Some(candidate);
+                            // Capture qualifier: the identifier before a `.` if present.
+                            if j > 0 && chars[j - 1] == '.' {
+                                let mut k = j - 1;
+                                while k > 0 && (chars[k - 1].is_alphanumeric() || chars[k - 1] == '_') {
+                                    k -= 1;
+                                }
+                                let q: String = chars[k..j - 1].iter().collect();
+                                if !q.is_empty() {
+                                    call_qualifier = Some(q);
+                                }
+                            }
                         }
                         break;
                     }
@@ -710,7 +722,7 @@ impl LanguageServer for Backend {
             _ => return Ok(None),
         };
 
-        let params_text = self.indexer.find_fun_signature(uri, &name);
+        let params_text = self.indexer.find_fun_signature_with_receiver(uri, &name, call_qualifier.as_deref());
         if params_text.is_empty() {
             return Ok(None);
         }

@@ -760,6 +760,38 @@ impl Indexer {
         find_fun_signature(name, self, uri).unwrap_or_default()
     }
 
+    /// Signature lookup with optional dot-receiver context.
+    /// When `receiver` is given (e.g. `"oneYearOlderInteractor"`), resolves its
+    /// type, finds that type's file, and looks up `name` there specifically.
+    /// Falls back to the plain name-based search if receiver resolution fails.
+    pub fn find_fun_signature_with_receiver(&self, uri: &Url, name: &str, receiver: Option<&str>) -> String {
+        if let Some(recv) = receiver {
+            // Infer the receiver's type and resolve to its file.
+            if let Some(type_name) = crate::resolver::infer_variable_type_raw(self, recv, uri) {
+                let outer = type_name.split('.').next().unwrap_or(&type_name);
+                let locs = crate::resolver::resolve_symbol_no_rg(self, outer, uri);
+                for loc in &locs {
+                    if let Some(data) = self.files.get(loc.uri.as_str()) {
+                        if let Some(sig) = collect_fun_params_text(name, loc.uri.as_str(), self) {
+                            return sig;
+                        }
+                        // Also search by line range within the type's body.
+                        let type_end = data.symbols.iter()
+                            .find(|s| s.name == outer)
+                            .map(|s| s.range.end.line)
+                            .unwrap_or(u32::MAX);
+                        for sym in data.symbols.iter().filter(|s| s.name == name && s.range.start.line <= type_end) {
+                            if let Some(sig) = collect_params_from_line(&data.lines, sym.range.start.line as usize) {
+                                return sig;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        find_fun_signature(name, self, uri).unwrap_or_default()
+    }
+
     /// Scan all in-memory indexed files for whole-word occurrences of `name`.
     ///
     /// Used to supplement rg results when the buffer has unsaved changes (e.g.
