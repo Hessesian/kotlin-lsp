@@ -73,13 +73,14 @@ fn complete_dot(idx: &Indexer, receiver: &str, from_uri: &Url, snippets: bool) -
         return vec![];
     };
 
-    // When the type is `Outer.Inner`, show only the inner type's members;
-    // otherwise show all symbols in the file (which includes nested types).
+    // When the type is `Outer.Inner`, show only the inner type's members.
+    // For a plain type like `ProductKey`, also scope to just that type's body —
+    // avoids leaking top-level functions from the same file.
     let mut items = if let Some(dot) = type_name.find('.') {
         let inner_name = &type_name[dot + 1..];
         symbols_from_nested_type(idx, &file_uri, inner_name)
     } else {
-        symbols_from_uri_as_completions(idx, &file_uri)
+        symbols_from_nested_type(idx, &file_uri, &type_name)
     };
 
     // Filter out private members — they are inaccessible from outside the class.
@@ -2178,6 +2179,26 @@ data class State(
         assert_eq!(locs[0].uri, caller_uri, "should stay in Caller.kt at the lambda decl");
         // Line 2 is where `items.forEach { product ->` is declared
         assert_eq!(locs[0].range.start.line, 2, "should point to the lambda arrow line");
+    }
+
+    // ── complete_dot scoping — no local fns leak ─────────────────────────────
+
+    #[test]
+    fn dot_complete_does_not_leak_top_level_fns() {
+        let mut idx = Indexer::new();
+        let uri = Url::parse("file:///a/Keys.kt").unwrap();
+        idx.index_content(&uri, "package a\n\nobject ProductKey {\n    val CARD = \"card\"\n    val LOAN = \"loan\"\n    fun fromString(s: String) = s\n}\n\nfun topLevelHelper() {}\n");
+
+        // Simulate a variable typed as ProductKey in another file.
+        let caller_uri = Url::parse("file:///a/Caller.kt").unwrap();
+        idx.index_content(&caller_uri, "package a\nval key: ProductKey = TODO()");
+
+        let items = complete_dot(&idx, "ProductKey", &caller_uri, false);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+
+        assert!(labels.contains(&"fromString"),    "member fun should appear");
+        assert!(labels.contains(&"CARD"),          "member val should appear");
+        assert!(!labels.contains(&"topLevelHelper"), "top-level fn must NOT leak into dot completions");
     }
 
     // ── complete_bare distance sorting ───────────────────────────────────────
