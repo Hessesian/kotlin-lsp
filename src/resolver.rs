@@ -96,8 +96,8 @@ fn complete_dot(idx: &Indexer, receiver: &str, from_uri: &Url, snippets: bool) -
     // Sort: functions/methods first, then fields/vars, then everything else.
     items.sort_by_key(|i| kind_sort_rank(i.kind));
 
-    // Append stdlib extension functions (scope fns, collection, string helpers).
-    items.extend(crate::stdlib::dot_completions(snippets));
+    // Append stdlib extensions filtered to the receiver type.
+    items.extend(crate::stdlib::dot_completions_for(&type_name, snippets));
     items
 }
 
@@ -203,7 +203,8 @@ fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippets: bool) ->
     let mut seen = std::collections::HashSet::new();
     let mut items = Vec::new();
 
-    let mut add = |name: &str, kind: CompletionItemKind| {
+    // `tier` controls sort order: 0 = same file, 1 = same pkg, 2 = cross-pkg, 3 = stdlib.
+    let mut add = |name: &str, kind: CompletionItemKind, tier: u8| {
         // Case gate: in lowercase mode skip CamelCase symbols.
         if lowercase_mode && name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
             return;
@@ -213,6 +214,7 @@ fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippets: bool) ->
             items.push(CompletionItem {
                 label:              name.to_string(),
                 kind:               Some(kind),
+                sort_text:          Some(format!("{}:{}", tier, name.to_lowercase())),
                 insert_text:        if is_fn { Some(format!("{}($1)", name)) } else { None },
                 insert_text_format: if is_fn { Some(InsertTextFormat::SNIPPET) } else { None },
                 ..Default::default()
@@ -220,20 +222,20 @@ fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippets: bool) ->
         }
     };
 
-    // 1. Local file symbols — highest priority.
+    // 1. Local file symbols — tier 0 (highest priority).
     if let Some(f) = idx.files.get(from_uri.as_str()) {
         for sym in &f.symbols {
-            add(&sym.name, symbol_kind_to_completion(sym.kind));
+            add(&sym.name, symbol_kind_to_completion(sym.kind), 0);
         }
         // Surface constructor params / local vars from cached declared_names.
         if lowercase_mode {
             for name in &f.declared_names {
-                add(name, CompletionItemKind::VARIABLE);
+                add(name, CompletionItemKind::VARIABLE, 0);
             }
         }
     }
 
-    // 2. Same-package symbols.
+    // 2. Same-package symbols — tier 1.
     let pkg = idx.files.get(from_uri.as_str())
         .and_then(|f| f.package.clone())
         .unwrap_or_default();
@@ -243,33 +245,30 @@ fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippets: bool) ->
                 if uri_str == from_uri.as_str() { continue; }
                 if let Some(f) = idx.files.get(uri_str.as_str()) {
                     for sym in &f.symbols {
-                        add(&sym.name, symbol_kind_to_completion(sym.kind));
+                        add(&sym.name, symbol_kind_to_completion(sym.kind), 1);
                     }
                 }
             }
         }
     }
 
-    // 3. Cross-package class index — only in uppercase mode to avoid noise.
-    // Read from the pre-built bare_name_cache instead of iterating definitions.
+    // 3. Cross-package class index — tier 2, only in uppercase mode to avoid noise.
     if !lowercase_mode {
         if let Ok(cache) = idx.bare_name_cache.read() {
             for name in cache.iter() {
-                add(name, CompletionItemKind::CLASS);
+                add(name, CompletionItemKind::CLASS, 2);
             }
         }
     }
 
-    // 4. Stdlib top-level / scope functions (listOf, println, run, with, …)
-    for item in crate::stdlib::bare_completions(snippets) {
+    // 4. Stdlib top-level / scope functions (listOf, println, run, with, …) — tier 3.
+    for mut item in crate::stdlib::bare_completions(snippets) {
         if lowercase_mode && item.label.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
             continue;
         }
-        if item.label.starts_with(&prefix_lower) && seen.insert(item.label.clone()) {
-            // Re-apply prefix filter (bare_completions returns all of them).
-            if item.label.to_lowercase().starts_with(&prefix_lower) {
-                items.push(item);
-            }
+        if item.label.to_lowercase().starts_with(&prefix_lower) && seen.insert(item.label.clone()) {
+            item.sort_text = Some(format!("3:{}", item.label.to_lowercase()));
+            items.push(item);
         }
     }
 
@@ -2179,5 +2178,68 @@ data class State(
         assert_eq!(locs[0].uri, caller_uri, "should stay in Caller.kt at the lambda decl");
         // Line 2 is where `items.forEach { product ->` is declared
         assert_eq!(locs[0].range.start.line, 2, "should point to the lambda arrow line");
+    }
+
+    // ── complete_bare distance sorting ───────────────────────────────────────
+
+    #[test]
+    fn complete_bare_local_before_same_pkg() {
+        let mut idx = Indexer::new();
+        let local_uri = Url::parse("file:///pkg/a/Local.kt").unwrap();
+        let other_uri = Url::parse("file:///pkg/a/Other.kt").unwrap();
+        // local file has "localFoo"
+        idx.index_content(&local_uri, "package a\nfun localFoo() {}");
+        // same-package file has "pkgBar"
+        idx.index_content(&other_uri, "package a\nfun pkgBar() {}");
+
+        let items = complete_bare(&idx, "", &local_uri, false);
+
+        let local_pos = items.iter().position(|i| i.label == "localFoo");
+        let pkg_pos   = items.iter().position(|i| i.label == "pkgBar");
+        assert!(local_pos.is_some(), "localFoo should appear");
+        assert!(pkg_pos.is_some(),   "pkgBar should appear");
+
+        // sort_text with tier prefix means local (0:…) sorts before same-pkg (1:…).
+        let local_sort = items[local_pos.unwrap()].sort_text.as_deref().unwrap_or("");
+        let pkg_sort   = items[pkg_pos.unwrap()].sort_text.as_deref().unwrap_or("");
+        assert!(local_sort < pkg_sort, "local tier sort_text should be less than same-pkg tier");
+    }
+
+    // ── dot_completions_for type filtering ────────────────────────────────────
+
+    #[test]
+    fn dot_completions_string_receiver_has_string_fns() {
+        let items = crate::stdlib::dot_completions_for("String", false);
+        let names: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(names.contains(&"trim"),    "String should have trim()");
+        assert!(names.contains(&"split"),   "String should have split()");
+        assert!(names.contains(&"let"),     "String should have scope fn let()");
+        // Collection fns should NOT appear on String
+        assert!(!names.contains(&"map"),    "String should NOT have map()");
+        assert!(!names.contains(&"filter"), "String should NOT have filter()");
+    }
+
+    #[test]
+    fn dot_completions_list_receiver_has_collection_fns() {
+        let items = crate::stdlib::dot_completions_for("List", false);
+        let names: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(names.contains(&"map"),      "List should have map()");
+        assert!(names.contains(&"filter"),   "List should have filter()");
+        assert!(names.contains(&"forEach"),  "List should have forEach()");
+        assert!(names.contains(&"let"),      "List should have scope fn let()");
+        // String-only fns should NOT appear on List
+        assert!(!names.contains(&"trim"),    "List should NOT have trim()");
+        assert!(!names.contains(&"split"),   "List should NOT have split()");
+    }
+
+    #[test]
+    fn dot_completions_custom_type_has_scope_fns_only() {
+        let items = crate::stdlib::dot_completions_for("MyDomainClass", false);
+        let names: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(names.contains(&"let"),     "domain type should have let()");
+        assert!(names.contains(&"apply"),   "domain type should have apply()");
+        assert!(!names.contains(&"trim"),   "domain type should NOT have trim()");
+        assert!(!names.contains(&"map"),    "domain type should NOT have map()");
+        assert!(!names.contains(&"filter"), "domain type should NOT have filter()");
     }
 }

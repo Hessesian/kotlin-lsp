@@ -893,28 +893,10 @@ impl LanguageServer for Backend {
             let lines = lines.to_vec();
 
             let scope = (0, lines.len().saturating_sub(1));
-            let mut edits = rename_in_scope(&lines, &name, new_name, scope);
-            eprintln!("[rename] file={} edits={}", file_uri.path().rsplit('/').next().unwrap_or("?"), edits.len());
-
-            // Patch matching import line in current file to add alias.
-            if file_uri == uri {
-                if let Some((import_ln, import_text)) = lines.iter().enumerate().find(|(_, l)| {
-                    let t = l.trim();
-                    t.starts_with("import ") && !t.contains(" as ")
-                    && t.rsplit(['.', ' ']).next().map(|s| s == name.as_str()).unwrap_or(false)
-                }) {
-                    let col = import_text.encode_utf16().count() as u32;
-                    edits.push(TextEdit {
-                        range: Range {
-                            start: Position::new(import_ln as u32, col),
-                            end:   Position::new(import_ln as u32, col),
-                        },
-                        new_text: format!(" as {new_name}"),
-                    });
-                }
-            }
+            let edits = rename_in_scope(&lines, &name, new_name, scope);
 
             if !edits.is_empty() {
+                let mut edits = edits;
                 edits.sort_by(|a, b| b.range.start.cmp(&a.range.start));
                 changes.insert(file_uri.clone(), edits);
             }
@@ -1367,9 +1349,9 @@ fn rename_in_scope(
     let mut edits: Vec<TextEdit> = Vec::new();
 
     for ln in scope.0..=scope.1.min(lines.len().saturating_sub(1)) {
-        // Never touch import or package lines — alias is handled separately.
+        // Skip package declaration — never rename the package statement.
         let trimmed = lines[ln].trim_start();
-        if trimmed.starts_with("import ") || trimmed.starts_with("package ") {
+        if trimmed.starts_with("package ") {
             continue;
         }
         let chars: Vec<char> = lines[ln].chars().collect();

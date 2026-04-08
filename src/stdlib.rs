@@ -287,6 +287,45 @@ pub fn dot_completions(snippets: bool) -> Vec<tower_lsp::lsp_types::CompletionIt
     }
 }
 
+/// Returns stdlib dot-completions filtered to those applicable for `receiver_type`.
+/// Falls back to scope-functions-only for unknown project types.
+pub fn dot_completions_for(receiver_type: &str, snippets: bool) -> Vec<tower_lsp::lsp_types::CompletionItem> {
+    use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind};
+
+    let rt = receiver_type.to_lowercase();
+    let is_string     = rt == "string" || rt == "charsequence" || rt == "stringbuilder";
+    let is_collection = rt.starts_with("list") || rt.starts_with("mutablelist")
+        || rt.starts_with("set") || rt.starts_with("mutableset")
+        || rt.starts_with("collection") || rt.starts_with("iterable")
+        || rt.starts_with("sequence") || rt.starts_with("arraylist")
+        || rt.starts_with("hashset") || rt.starts_with("linkedhashset")
+        || rt.starts_with("array") || rt == "intarray" || rt == "longarray"
+        || rt == "floatarray" || rt == "doublearray" || rt == "booleanarray";
+    let is_map        = rt.starts_with("map") || rt.starts_with("mutablemap")
+        || rt.starts_with("hashmap") || rt.starts_with("linkedhashmap")
+        || rt.starts_with("sortedmap");
+    let is_nullable   = receiver_type.ends_with('?');
+
+    let sources: Vec<&[StdlibEntry]> = if is_string {
+        vec![SCOPE_FUNS, STRING_FUNS, if is_nullable { NULLABLE_FUNS } else { &[] }]
+    } else if is_collection || is_map {
+        vec![SCOPE_FUNS, COLLECTION_FUNS, if is_nullable { NULLABLE_FUNS } else { &[] }]
+    } else {
+        // Unknown / project type: only universal scope fns (let/run/apply/also/takeIf/toString…)
+        vec![SCOPE_FUNS, if is_nullable { NULLABLE_FUNS } else { &[] }]
+    };
+
+    let mut seen = std::collections::HashSet::new();
+    let mut items = Vec::new();
+    for entry in sources.into_iter().flatten() {
+        if seen.insert(entry.name) {
+            items.push(make_item_ex(entry.name, CompletionItemKind::METHOD,
+                entry.signature, snippets, entry.has_trailing_lambda()));
+        }
+    }
+    items
+}
+
 /// Completion items for bare (non-dot) trigger — returns a shared cached slice.
 pub fn bare_completions(snippets: bool) -> Vec<tower_lsp::lsp_types::CompletionItem> {
     if snippets {
