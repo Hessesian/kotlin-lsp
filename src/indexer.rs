@@ -2362,21 +2362,13 @@ fn fun_trailing_lambda_it_type(fn_name: &str, idx: &Indexer, uri: &Url) -> Optio
 }
 
 /// Collect the full parameter-list text for a function named `fn_name`.
-/// Searches the current file first, then all indexed files.
+/// Fast path only — no rg, no disk I/O, no index mutations.
+/// Used by signature help (fires on every keystroke).
 fn find_fun_signature(fn_name: &str, idx: &Indexer, uri: &Url) -> Option<String> {
-    // 1. Import-aware resolution (same path as goto-definition) — finds the
-    //    correct overload when multiple files define a function with the same name.
-    let locs = crate::resolver::resolve_symbol(idx, fn_name, None, uri);
+    // 1. Import-aware resolution using only already-indexed files (no rg/disk).
+    let locs = crate::resolver::resolve_symbol_no_rg(idx, fn_name, uri);
     for loc in &locs {
         let file_uri_str = loc.uri.as_str();
-        // Ensure the file is indexed (may need disk parse for rg-found files).
-        if !idx.files.contains_key(file_uri_str) {
-            if let Ok(path) = loc.uri.to_file_path() {
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    idx.index_content(&loc.uri, &content);
-                }
-            }
-        }
         if let Some(data) = idx.files.get(file_uri_str) {
             let start_line = loc.range.start.line as usize;
             if let Some(sig) = collect_params_from_line(&data.lines, start_line) {
@@ -2385,7 +2377,7 @@ fn find_fun_signature(fn_name: &str, idx: &Indexer, uri: &Url) -> Option<String>
         }
     }
 
-    // 2. Fallback: current file → all indexed files → rg.
+    // 2. Fallback: current file → all already-indexed files (name-only scan).
     if let Some(sig) = collect_fun_params_text(fn_name, uri.as_str(), idx) {
         return Some(sig);
     }
@@ -2395,6 +2387,16 @@ fn find_fun_signature(fn_name: &str, idx: &Indexer, uri: &Url) -> Option<String>
             return Some(sig);
         }
     }
+    None
+}
+
+/// Full signature lookup including rg + on-demand indexing.
+/// Used by hover and lambda type inference where latency is acceptable.
+fn find_fun_signature_full(fn_name: &str, idx: &Indexer, uri: &Url) -> Option<String> {
+    if let Some(sig) = find_fun_signature(fn_name, idx, uri) {
+        return Some(sig);
+    }
+    // Slow path: rg to locate the definition, index on-demand.
     let locs = rg_find_definition(fn_name, idx.workspace_root.get().map(PathBuf::as_path));
     for loc in &locs {
         let file_uri_str = loc.uri.as_str();
