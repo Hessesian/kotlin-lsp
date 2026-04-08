@@ -111,48 +111,59 @@ fn resolve_type_to_file(idx: &Indexer, type_name: &str, from_uri: &Url) -> Optio
     Some(locs.first()?.uri.to_string())
 }
 
-/// Return completions for symbols declared INSIDE a nested type `inner_name`
-/// within the given file.  Scans the file's symbol table for lines between
-/// the inner type's start and the next same-indent symbol.
+/// Return completions for symbols declared INSIDE `type_name` within the given file.
+/// Uses the symbol's range end (the closing `}` of the class body) to determine
+/// membership — no indentation heuristics needed.
 fn symbols_from_nested_type(
     idx:        &Indexer,
     file_uri:   &str,
     inner_name: &str,
 ) -> Vec<CompletionItem> {
-    let data = match idx.files.get(file_uri) {
-        Some(d) => d,
-        None    => return vec![],
+    // Try in-memory index first; fall back to on-demand disk parse.
+    let owned: crate::types::FileData;
+    let symbols_ref: &[crate::types::SymbolEntry] = if let Some(d) = idx.files.get(file_uri) {
+        // Clone symbols out of the DashMap guard so we can drop the guard.
+        owned = d.value().as_ref().clone();
+        &owned.symbols
+    } else {
+        // File not yet indexed — parse it on demand.
+        let url = match Url::parse(file_uri) { Ok(u) => u, Err(_) => return vec![] };
+        let path = match url.to_file_path() { Ok(p) => p, Err(_) => return vec![] };
+        let content = match std::fs::read_to_string(&path) { Ok(c) => c, Err(_) => return vec![] };
+        owned = crate::parser::parse_kotlin(&content);
+        &owned.symbols
     };
 
-    // Find the inner type's start line.
-    let inner_sym = data.symbols.iter()
-        .find(|s| s.name == inner_name);
-    let inner_start = match inner_sym {
-        Some(s) => s.range.start.line,
-        None    => return symbols_from_uri_as_completions(idx, file_uri), // fallback
+    // Find the type's declaration to get its body span.
+    let type_sym = match symbols_ref.iter().find(|s| s.name == inner_name) {
+        Some(s) => s,
+        None    => {
+            // Unknown type — return all non-private symbols as a fallback.
+            return symbols_ref.iter()
+                .filter(|s| s.visibility != crate::types::Visibility::Private)
+                .map(|s| {
+                    let kind = symbol_kind_to_completion(s.kind);
+                    let is_fn = matches!(kind, CompletionItemKind::FUNCTION | CompletionItemKind::METHOD);
+                    CompletionItem {
+                        label:              s.name.clone(),
+                        kind:               Some(kind),
+                        insert_text:        if is_fn { Some(format!("{}($1)", s.name)) } else { None },
+                        insert_text_format: if is_fn { Some(InsertTextFormat::SNIPPET) } else { None },
+                        sort_text:          Some(format!("{:02}:{}", kind_sort_rank(Some(kind)), s.name)),
+                        ..Default::default()
+                    }
+                })
+                .collect();
+        }
     };
 
-    // Find the next symbol at the SAME OR LOWER indentation level that comes
-    // after the inner type — that's where the inner body ends.
-    let inner_indent = data.lines.get(inner_start as usize)
-        .map(|l| l.chars().take_while(|c| c.is_whitespace()).count())
-        .unwrap_or(0);
+    let body_start = type_sym.range.start.line;
+    let body_end   = type_sym.range.end.line;
 
-    let inner_end = data.symbols.iter()
-        .filter(|s| s.range.start.line > inner_start)
-        .find(|s| {
-            let indent = data.lines.get(s.range.start.line as usize)
-                .map(|l| l.chars().take_while(|c| c.is_whitespace()).count())
-                .unwrap_or(0);
-            indent <= inner_indent
-        })
-        .map(|s| s.range.start.line)
-        .unwrap_or(u32::MAX);
-
-    // Collect symbols that fall within [inner_start, inner_end).
+    // Collect symbols that fall strictly inside the type's body span.
     use crate::types::Visibility;
-    data.symbols.iter()
-        .filter(|s| s.range.start.line > inner_start && s.range.start.line < inner_end)
+    symbols_ref.iter()
+        .filter(|s| s.range.start.line > body_start && s.range.start.line <= body_end)
         .filter(|s| s.visibility != Visibility::Private)
         .map(|s| {
             let kind = symbol_kind_to_completion(s.kind);
