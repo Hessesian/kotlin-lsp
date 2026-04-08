@@ -710,7 +710,7 @@ impl LanguageServer for Backend {
             _ => return Ok(None),
         };
 
-        let params_text = self.indexer.collect_fun_params_text(uri, &name);
+        let params_text = self.indexer.find_fun_signature(uri, &name);
         if params_text.is_empty() {
             return Ok(None);
         }

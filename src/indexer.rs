@@ -755,6 +755,11 @@ impl Indexer {
             .unwrap_or_default()
     }
 
+    /// Cross-file signature lookup: current file → all indexed files → rg fallback.
+    pub fn find_fun_signature(&self, uri: &Url, name: &str) -> String {
+        find_fun_signature(name, self, uri).unwrap_or_default()
+    }
+
     /// Scan all in-memory indexed files for whole-word occurrences of `name`.
     ///
     /// Used to supplement rg results when the buffer has unsaved changes (e.g.
