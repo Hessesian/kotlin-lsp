@@ -226,6 +226,9 @@ fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippets: bool) ->
             items.push(CompletionItem {
                 label:              name.to_string(),
                 kind:               Some(kind),
+                // filter_text must match the label so clients that use sort_text
+                // for fuzzy filtering (e.g. Helix) still find the item correctly.
+                filter_text:        Some(name.to_string()),
                 sort_text:          Some(format!("{}:{}", tier, name.to_lowercase())),
                 insert_text:        if is_fn { Some(format!("{}($1)", name)) } else { None },
                 insert_text_format: if is_fn { Some(InsertTextFormat::SNIPPET) } else { None },
@@ -279,6 +282,7 @@ fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippets: bool) ->
             continue;
         }
         if item.label.to_lowercase().starts_with(&prefix_lower) && seen.insert(item.label.clone()) {
+            item.filter_text = Some(item.label.clone());
             item.sort_text = Some(format!("3:{}", item.label.to_lowercase()));
             items.push(item);
         }
