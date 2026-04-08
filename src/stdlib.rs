@@ -14,6 +14,17 @@ pub struct StdlibEntry {
     pub is_extension: bool,
 }
 
+impl StdlibEntry {
+    /// Returns true if the last parameter of this function is a lambda,
+    /// meaning it should be called with trailing `{ }` syntax instead of `()`.
+    fn has_trailing_lambda(&self) -> bool {
+        // Heuristic: signature contains `->` inside the parameter list.
+        // All scope functions (apply, let, run, also, forEach, map, filter …)
+        // have signatures like `block: T.() -> R` or `(T) -> R`.
+        self.signature.contains("->")
+    }
+}
+
 // ─── scope / control-flow functions (available on every type) ─────────────────
 
 pub static SCOPE_FUNS: &[StdlibEntry] = &[
@@ -223,22 +234,32 @@ pub fn hover(name: &str) -> Option<String> {
     Some(format!("```kotlin\n{body}\n```\n*(Kotlin stdlib)*"))
 }
 
-/// Completion items for dot-trigger (extension functions on any receiver).
-pub fn dot_completions(snippets: bool) -> Vec<tower_lsp::lsp_types::CompletionItem> {
+// ── Cached completion lists ───────────────────────────────────────────────────
+//
+// Both dot_completions() and bare_completions() are called on every keystroke.
+// Building the Vec each time (fold + dedup + sort) is measurable CPU on large
+// files. Cache the two variants (snippets=true / snippets=false) statically.
+
+use std::sync::OnceLock;
+
+static DOT_COMPLETIONS_SNIPPETS:    OnceLock<Vec<tower_lsp::lsp_types::CompletionItem>> = OnceLock::new();
+static DOT_COMPLETIONS_NO_SNIPPETS: OnceLock<Vec<tower_lsp::lsp_types::CompletionItem>> = OnceLock::new();
+static BARE_COMPLETIONS_SNIPPETS:    OnceLock<Vec<tower_lsp::lsp_types::CompletionItem>> = OnceLock::new();
+static BARE_COMPLETIONS_NO_SNIPPETS: OnceLock<Vec<tower_lsp::lsp_types::CompletionItem>> = OnceLock::new();
+
+fn build_dot_completions(snippets: bool) -> Vec<tower_lsp::lsp_types::CompletionItem> {
     use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind};
     all()
         .filter(|e| e.is_extension)
-        // Deduplicate by name (same name in multiple tables → single item)
         .fold(Vec::<CompletionItem>::new(), |mut acc, e| {
             if !acc.iter().any(|i| i.label == e.name) {
-                acc.push(make_item(e.name, CompletionItemKind::METHOD, e.signature, snippets));
+                acc.push(make_item_ex(e.name, CompletionItemKind::METHOD, e.signature, snippets, e.has_trailing_lambda()));
             }
             acc
         })
 }
 
-/// Completion items for bare (non-dot) trigger — top-level and scope fns.
-pub fn bare_completions(snippets: bool) -> Vec<tower_lsp::lsp_types::CompletionItem> {
+fn build_bare_completions(snippets: bool) -> Vec<tower_lsp::lsp_types::CompletionItem> {
     use tower_lsp::lsp_types::CompletionItemKind;
     let mut items = Vec::new();
     for e in SCOPE_FUNS.iter().chain(TOP_LEVEL_FUNS) {
@@ -248,10 +269,131 @@ pub fn bare_completions(snippets: bool) -> Vec<tower_lsp::lsp_types::CompletionI
             } else {
                 CompletionItemKind::FUNCTION
             };
-            items.push(make_item(e.name, kind, e.signature, snippets));
+            items.push(make_item_ex(e.name, kind, e.signature, snippets, e.has_trailing_lambda()));
         }
     }
+    if snippets {
+        items.extend(live_templates());
+    }
     items
+}
+
+/// Completion items for dot-trigger — returns a shared cached slice.
+pub fn dot_completions(snippets: bool) -> Vec<tower_lsp::lsp_types::CompletionItem> {
+    if snippets {
+        DOT_COMPLETIONS_SNIPPETS.get_or_init(|| build_dot_completions(true)).clone()
+    } else {
+        DOT_COMPLETIONS_NO_SNIPPETS.get_or_init(|| build_dot_completions(false)).clone()
+    }
+}
+
+/// Completion items for bare (non-dot) trigger — returns a shared cached slice.
+pub fn bare_completions(snippets: bool) -> Vec<tower_lsp::lsp_types::CompletionItem> {
+    if snippets {
+        BARE_COMPLETIONS_SNIPPETS.get_or_init(|| build_bare_completions(true)).clone()
+    } else {
+        BARE_COMPLETIONS_NO_SNIPPETS.get_or_init(|| build_bare_completions(false)).clone()
+    }
+}
+
+/// Kotlin live templates — common code patterns as snippet completions.
+///
+/// Modelled on IntelliJ's built-in Kotlin live templates.
+/// Each item has a short trigger label and expands to a multi-line snippet.
+pub fn live_templates() -> Vec<tower_lsp::lsp_types::CompletionItem> {
+    use tower_lsp::lsp_types::{
+        CompletionItem, CompletionItemKind, InsertTextFormat, Documentation,
+        MarkupContent, MarkupKind,
+    };
+
+    // (label, description, snippet_body)
+    let templates: &[(&str, &str, &str)] = &[
+        // ── declarations ────────────────────────────────────────────────────
+        ("fun",     "Function declaration",
+         "fun ${1:name}(${2}): ${3:Unit} {\n\t${0}\n}"),
+        ("pfun",    "Private function declaration",
+         "private fun ${1:name}(${2}): ${3:Unit} {\n\t${0}\n}"),
+        ("class",   "Class declaration",
+         "class ${1:Name}(${2}) {\n\t${0}\n}"),
+        ("dclass",  "Data class declaration",
+         "data class ${1:Name}(\n\tval ${2:field}: ${3:Type}\n)"),
+        ("sclass",  "Sealed class declaration",
+         "sealed class ${1:Name} {\n\t${0}\n}"),
+        ("object",  "Object declaration",
+         "object ${1:Name} {\n\t${0}\n}"),
+        ("iface",   "Interface declaration",
+         "interface ${1:Name} {\n\t${0}\n}"),
+        ("comp",    "Companion object",
+         "companion object {\n\t${0}\n}"),
+        ("enum",    "Enum class",
+         "enum class ${1:Name} {\n\t${0}\n}"),
+        // ── properties ──────────────────────────────────────────────────────
+        ("val",     "Immutable property",
+         "val ${1:name}: ${2:Type} = ${0}"),
+        ("var",     "Mutable property",
+         "var ${1:name}: ${2:Type} = ${0}"),
+        ("lazy",    "Lazy property",
+         "val ${1:name}: ${2:Type} by lazy {\n\t${0}\n}"),
+        ("lateinit","Late-init property",
+         "lateinit var ${1:name}: ${2:Type}"),
+        // ── control flow ────────────────────────────────────────────────────
+        ("if",      "If expression",
+         "if (${1:condition}) {\n\t${0}\n}"),
+        ("ife",     "If-else expression",
+         "if (${1:condition}) {\n\t${2}\n} else {\n\t${0}\n}"),
+        ("when",    "When expression",
+         "when (${1:value}) {\n\t${2} -> ${3}\n\telse -> ${0}\n}"),
+        ("for",     "For loop",
+         "for (${1:item} in ${2:collection}) {\n\t${0}\n}"),
+        ("fori",    "For loop with index",
+         "for ((${1:index}, ${2:item}) in ${3:collection}.withIndex()) {\n\t${0}\n}"),
+        ("while",   "While loop",
+         "while (${1:condition}) {\n\t${0}\n}"),
+        ("try",     "Try-catch",
+         "try {\n\t${1}\n} catch (${2:e}: ${3:Exception}) {\n\t${0}\n}"),
+        ("trycf",   "Try-catch-finally",
+         "try {\n\t${1}\n} catch (${2:e}: ${3:Exception}) {\n\t${4}\n} finally {\n\t${0}\n}"),
+        // ── lambdas / higher-order ───────────────────────────────────────────
+        ("lam",     "Lambda expression",
+         "{ ${1:it} ->\n\t${0}\n}"),
+        ("main",    "Main function",
+         "fun main(args: Array<String>) {\n\t${0}\n}"),
+        // ── coroutines ───────────────────────────────────────────────────────
+        ("launch",  "Coroutine launch",
+         "viewModelScope.launch {\n\t${0}\n}"),
+        ("async",   "Coroutine async",
+         "viewModelScope.async {\n\t${0}\n}"),
+        ("flow",    "Flow builder",
+         "flow {\n\temit(${1})\n\t${0}\n}"),
+        // ── Android / common ─────────────────────────────────────────────────
+        ("logd",    "Log.d",
+         "Log.d(TAG, \"${0}\")"),
+        ("loge",    "Log.e",
+         "Log.e(TAG, \"${1}\", ${0})"),
+        ("tag",     "TAG constant",
+         "private const val TAG = \"${1:${TM_FILENAME_BASE}}\""),
+        ("todo",    "TODO stub",
+         "TODO(\"${0:Not yet implemented}\")"),
+        ("sout",    "println",
+         "println(\"${0}\")"),
+    ];
+
+    templates.iter().map(|(label, desc, body)| {
+        CompletionItem {
+            label:              label.to_string(),
+            kind:               Some(CompletionItemKind::SNIPPET),
+            detail:             Some(desc.to_string()),
+            documentation:      Some(Documentation::MarkupContent(MarkupContent {
+                kind:  MarkupKind::Markdown,
+                value: format!("```kotlin\n{}\n```", body.replace("${0}", "").replace(|c: char| c == '$' || c == '{' || c == '}', "")),
+            })),
+            insert_text:        Some(body.to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            // Templates sort just before stdlib (prefix "y:") but after project symbols.
+            sort_text:          Some(format!("y:{label}")),
+            ..Default::default()
+        }
+    }).collect()
 }
 
 fn make_item(
@@ -260,18 +402,36 @@ fn make_item(
     signature: &'static str,
     snippets:  bool,
 ) -> tower_lsp::lsp_types::CompletionItem {
+    make_item_ex(name, kind, signature, snippets, false)
+}
+
+fn make_item_ex(
+    name:            &'static str,
+    kind:            tower_lsp::lsp_types::CompletionItemKind,
+    signature:       &'static str,
+    snippets:        bool,
+    trailing_lambda: bool,
+) -> tower_lsp::lsp_types::CompletionItem {
     use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, InsertTextFormat};
     let is_fn = matches!(
         kind,
         CompletionItemKind::FUNCTION | CompletionItemKind::METHOD
     );
+    let insert = if is_fn && snippets {
+        if trailing_lambda {
+            Some(format!("{name} {{\n\t${{0}}\n}}"))
+        } else {
+            Some(format!("{name}($1)"))
+        }
+    } else {
+        None
+    };
     CompletionItem {
         label:              name.to_string(),
         kind:               Some(kind),
         detail:             Some(signature.to_string()),
-        // Stdlib items sort after project symbols (prefix "z:")
         sort_text:          Some(format!("z:{name}")),
-        insert_text:        if is_fn && snippets { Some(format!("{name}($1)")) } else { None },
+        insert_text:        insert,
         insert_text_format: if is_fn && snippets { Some(InsertTextFormat::SNIPPET) } else { None },
         ..Default::default()
     }

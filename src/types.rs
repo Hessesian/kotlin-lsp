@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tower_lsp::lsp_types::{Range, SymbolKind};
 
@@ -43,7 +44,9 @@ pub struct FileData {
     /// Package declaration, e.g. `"com.example.app"`.
     pub package: Option<String>,
     /// Raw source lines — kept for `word_at()` lookups without hitting disk.
-    pub lines:   Vec<String>,
+    /// Wrapped in Arc so that `clone()` is a cheap atomic refcount bump,
+    /// not a full Vec<String> copy (which allocates one heap block per line).
+    pub lines:   Arc<Vec<String>>,
     /// Lower-cased identifiers found before `:` on non-comment lines.
     /// Populated once at parse time; used by completion without re-scanning.
     pub declared_names: Vec<String>,

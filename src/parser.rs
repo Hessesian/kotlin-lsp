@@ -8,7 +8,7 @@ use crate::types::{FileData, ImportEntry, SymbolEntry, Visibility};
 
 pub fn parse_kotlin(content: &str) -> FileData {
     let lang  = tree_sitter_kotlin::language();
-    let lines = content.lines().map(str::to_owned).collect();
+    let lines = std::sync::Arc::new(content.lines().map(str::to_owned).collect());
     let mut data = FileData { lines, ..Default::default() };
 
     let mut parser = Parser::new();
@@ -90,7 +90,7 @@ pub fn parse_kotlin(content: &str) -> FileData {
 
 pub fn parse_java(content: &str) -> FileData {
     let lang  = tree_sitter_java::language();
-    let lines = content.lines().map(str::to_owned).collect();
+    let lines = std::sync::Arc::new(content.lines().map(str::to_owned).collect());
     let mut data = FileData { lines, ..Default::default() };
 
     let mut parser = Parser::new();
@@ -382,14 +382,20 @@ pub(crate) fn extract_declared_names(lines: &[String]) -> Vec<String> {
         let mut rest = t;
         while let Some(ci) = rest.find(':') {
             let before = &rest[..ci];
-            if let Some(word) = before.split_whitespace().last() {
-                if word.chars().all(|c| c.is_alphanumeric() || c == '_')
-                    && word.len() > 1
-                    && word.chars().next().map(|c| c.is_lowercase()).unwrap_or(false)
-                    && seen.insert(word.to_string())
-                {
-                    names.push(word.to_string());
-                }
+            // Extract the trailing identifier from `before` — handles both
+            // `val foo:` (whitespace-separated) and `fun bar(foo:` (paren-separated).
+            let word: String = before.chars()
+                .rev()
+                .take_while(|&c| c.is_alphanumeric() || c == '_')
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect();
+            if word.len() > 1
+                && word.chars().next().map(|c| c.is_lowercase()).unwrap_or(false)
+                && seen.insert(word.clone())
+            {
+                names.push(word);
             }
             rest = &rest[ci + 1..];
         }
@@ -696,6 +702,23 @@ mod tests {
         let sym = data.symbols.iter().find(|s| s.name == "count");
         assert!(sym.is_some(), "count not indexed");
         assert_eq!(sym.unwrap().kind, SymbolKind::FIELD);
+    }
+
+    #[test]
+    fn declared_names_includes_function_params() {
+        let src = "private fun handle(resultState: ResultState.Success<List<Int>>) {\n  val other: Foo\n}";
+        let names = extract_declared_names(&src.lines().map(String::from).collect::<Vec<_>>());
+        assert!(names.contains(&"resultState".to_string()), "param not found: {names:?}");
+        assert!(names.contains(&"other".to_string()), "local var not found: {names:?}");
+    }
+
+    #[test]
+    fn declared_names_includes_multi_params() {
+        let src = "fun foo(alpha: Int, betaValue: String, gamma: Foo)";
+        let names = extract_declared_names(&src.lines().map(String::from).collect::<Vec<_>>());
+        assert!(names.contains(&"alpha".to_string()),     "alpha missing: {names:?}");
+        assert!(names.contains(&"betaValue".to_string()), "betaValue missing: {names:?}");
+        assert!(names.contains(&"gamma".to_string()),     "gamma missing: {names:?}");
     }
 }
 

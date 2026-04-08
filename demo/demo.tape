@@ -43,3 +43,43 @@ Sleep 150ms
 Type "."
 Sleep 1500ms
 Escape
+
+# Scene 4: signature help — type a function call and see active param highlight
+Sleep 500ms
+Type "/bookmarksUiState"
+Enter
+Sleep 200ms
+Escape
+Type "o"
+Sleep 300ms
+Type "someCall("
+Sleep 1500ms
+Escape
+Type "u"
+
+# Scene 5: workspace/symbol — search across all indexed symbols
+Sleep 500ms
+Type " S"
+Sleep 400ms
+Type "BookmarksUiState"
+Sleep 1500ms
+Escape
+
+# Scene 6: find references
+Type "/bookmarksUiState"
+Enter
+Sleep 200ms
+Escape
+Type "gr"
+Sleep 2000ms
+Escape
+
+# Scene 7: it. completion inside a lambda
+Type "G"
+Sleep 200ms
+Type "o"
+Sleep 200ms
+Type "val x = listOf(1,2,3).filter { it."
+Sleep 1500ms
+Escape
+Type "u"

@@ -251,9 +251,12 @@ fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippets: bool) ->
     }
 
     // 3. Cross-package class index — only in uppercase mode to avoid noise.
+    // Read from the pre-built bare_name_cache instead of iterating definitions.
     if !lowercase_mode {
-        for entry in idx.definitions.iter() {
-            add(entry.key(), CompletionItemKind::CLASS);
+        if let Ok(cache) = idx.bare_name_cache.read() {
+            for name in cache.iter() {
+                add(name, CompletionItemKind::CLASS);
+            }
         }
     }
 
@@ -904,7 +907,7 @@ fn resolve_from_class_hierarchy(
     if visited.contains(&key) { return vec![]; }
     visited.push(key);
 
-    let lines: Vec<String> = match idx.files.get(from_uri.as_str()) {
+    let lines: Arc<Vec<String>> = match idx.files.get(from_uri.as_str()) {
         Some(f) => f.lines.clone(),
         None    => return vec![],
     };
@@ -1112,6 +1115,13 @@ fn rg_in_package_dir(name: &str, package: &str, root: Option<&Path>) -> Vec<Loca
 /// Scan the current file's lines for a type annotation on `var_name` and return
 /// the declared type name if found.  Delegates to [`infer_type_in_lines`].
 fn infer_variable_type(idx: &Indexer, var_name: &str, uri: &Url) -> Option<String> {
+    // Fast reject: if var_name isn't in declared_names, it has no `: Type`
+    // annotation in this file — skip the full line scan entirely.
+    if let Some(data) = idx.files.get(uri.as_str()) {
+        if !data.declared_names.iter().any(|n| n == var_name) {
+            return None;
+        }
+    }
     // Prefer live_lines: updated synchronously on every keystroke.
     if let Some(ll) = idx.live_lines.get(uri.as_str()) {
         if let result @ Some(_) = infer_type_in_lines(&*ll, var_name) {

@@ -119,7 +119,16 @@ pub struct Indexer {
     /// URI string → lines of the CURRENT document content.
     /// Updated synchronously on every did_change, bypassing the 120ms debounce.
     /// Used by `completions()` so dot-detection always sees the latest text.
-    pub(crate) live_lines: DashMap<String, Vec<String>>,
+    /// Arc-wrapped so `.clone()` is a cheap refcount bump, not a full Vec copy.
+    pub(crate) live_lines: DashMap<String, Arc<Vec<String>>>,
+    /// Cached sorted list of all project class/symbol names for bare-word completion.
+    /// Rebuilt after each file index; avoids iterating `definitions` on every keystroke.
+    pub(crate) bare_name_cache: std::sync::RwLock<Vec<String>>,
+    /// Last completion result: (uri, context_key, items).
+    /// `context_key` = line text up to (but not including) the current word.
+    /// When the key matches, the cached items are returned without recomputation —
+    /// covers the common "typing more characters in the same word/after same dot" case.
+    pub(crate) last_completion: std::sync::Mutex<Option<(String, String, Vec<CompletionItem>)>>,
 }
 
 impl Indexer {
@@ -141,6 +150,8 @@ impl Indexer {
             parse_count:    AtomicU64::new(0),
             completion_cache: DashMap::new(),
             live_lines:     DashMap::new(),
+            bare_name_cache: std::sync::RwLock::new(Vec::new()),
+            last_completion: std::sync::Mutex::new(None),
         }
     }
 
@@ -148,7 +159,7 @@ impl Indexer {
     /// Called from `did_change` before the debounced re-index so that
     /// `completions()` always sees the current document text.
     pub fn set_live_lines(&self, uri: &Url, content: &str) {
-        let lines: Vec<String> = content.lines().map(String::from).collect();
+        let lines: Arc<Vec<String>> = Arc::new(content.lines().map(String::from).collect());
         self.live_lines.insert(uri.to_string(), lines);
     }
 
@@ -156,6 +167,11 @@ impl Indexer {
     /// Sends LSP `$/progress` notifications so the editor shows a status bar spinner.
     /// On subsequent startups the on-disk cache is used for unchanged files so only
     /// modified or new files need to be re-parsed by tree-sitter.
+    /// Full reindex with no file-count cap — used by the `kotlin-lsp/reindex` workspace command.
+    pub async fn index_workspace_full(self: Arc<Self>, root: &Path, client: tower_lsp::Client) {
+        self.index_workspace_impl(root, usize::MAX, client).await;
+    }
+
     pub async fn index_workspace(self: Arc<Self>, root: &Path, client: tower_lsp::Client) {
         // Record workspace root so rg/fd always search within the project.
         let _ = self.workspace_root.set(root.to_path_buf());
@@ -164,6 +180,11 @@ impl Indexer {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(DEFAULT_MAX_INDEX_FILES);
+        self.index_workspace_impl(root, max, client).await;
+    }
+
+    async fn index_workspace_impl(self: Arc<Self>, root: &Path, max: usize, client: tower_lsp::Client) {
+        let _ = self.workspace_root.set(root.to_path_buf());
 
         let mut paths = find_source_files(root);
         let total = paths.len();
@@ -173,7 +194,7 @@ impl Indexer {
         let paths: Vec<_> = paths.into_iter().take(max).collect();
         let indexed_count = paths.len();
 
-        let truncated = total > max;
+        let truncated = total > max && max < usize::MAX;
         if truncated {
             log::warn!(
                 "Large project: eagerly indexing {indexed_count}/{total} files \
@@ -181,7 +202,7 @@ impl Indexer {
                  Set KOTLIN_LSP_MAX_FILES env var to raise the limit."
             );
         } else {
-            log::info!("Indexing {total} source files under {}", root.display());
+            log::info!("Indexing {} source files under {}", indexed_count, root.display());
         }
 
         // ── Try disk cache ────────────────────────────────────────────────────
@@ -494,6 +515,20 @@ impl Indexer {
         }
 
         self.files.insert(uri_str, Arc::new(data));
+
+        // Rebuild bare-name cache so complete_bare doesn't iterate definitions.
+        self.rebuild_bare_name_cache();
+    }
+
+    fn rebuild_bare_name_cache(&self) {
+        let mut names: Vec<String> = self.definitions.iter()
+            .map(|e| e.key().clone())
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        if let Ok(mut cache) = self.bare_name_cache.write() {
+            *cache = names;
+        }
     }
 
     /// Spawn background tasks to pre-warm the completion cache for all types
@@ -509,7 +544,7 @@ impl Indexer {
         let mut type_names: Vec<String> = Vec::new();
         {
             let mut seen = std::collections::HashSet::new();
-            for line in &data.lines {
+            for line in data.lines.iter() {
                 let t = line.trim_start();
                 if t.starts_with("//") || t.starts_with('*') { continue; }
                 let mut rest = t;
@@ -558,6 +593,65 @@ impl Indexer {
     /// character offset is identical to the UTF-16 unit offset.
     pub fn word_at(&self, uri: &Url, position: Position) -> Option<String> {
         self.word_and_qualifier_at(uri, position).map(|(w, _)| w)
+    }
+
+    /// Like `word_at` but also returns the `Range` of the word in LSP (UTF-16) coordinates.
+    pub fn word_and_range_at(&self, uri: &Url, position: Position) -> Option<(String, Range)> {
+        let data = self.files.get(uri.as_str())?;
+        let line_text = data.lines.get(position.line as usize)?;
+        let target_utf16 = position.character as usize;
+        let mut utf16_acc = 0usize;
+        let mut char_idx  = 0usize;
+        for ch in line_text.chars() {
+            if utf16_acc >= target_utf16 { break; }
+            utf16_acc += ch.len_utf16();
+            char_idx  += 1;
+        }
+        let chars: Vec<char> = line_text.chars().collect();
+        let effective = if char_idx < chars.len() && is_id_char(chars[char_idx]) {
+            char_idx
+        } else if char_idx > 0 && is_id_char(chars[char_idx - 1]) {
+            char_idx - 1
+        } else {
+            return None;
+        };
+        let start_char = (0..=effective).rev()
+            .find(|&i| !is_id_char(chars[i])).map(|i| i + 1).unwrap_or(0);
+        let end_char = (effective..chars.len())
+            .find(|&i| !is_id_char(chars[i])).unwrap_or(chars.len());
+        if start_char >= end_char { return None; }
+        let word: String = chars[start_char..end_char].iter().collect();
+        if word == "_" { return None; }
+        // Compute UTF-16 columns for start and end.
+        let start_utf16 = chars[..start_char].iter().map(|c| c.len_utf16() as u32).sum::<u32>();
+        let end_utf16   = start_utf16 + chars[start_char..end_char].iter().map(|c| c.len_utf16() as u32).sum::<u32>();
+        let range = Range {
+            start: Position::new(position.line, start_utf16),
+            end:   Position::new(position.line, end_utf16),
+        };
+        Some((word, range))
+    }
+
+    /// Returns true if `name` is a top-level indexed symbol (class, fun, val, etc.)
+    /// that likely has cross-file references.
+    pub fn is_indexed_symbol(&self, name: &str) -> bool {
+        self.definitions.contains_key(name)
+    }
+
+    /// Returns a clone of the live (possibly unsaved) lines for a URI.
+    pub fn lines_for(&self, uri: &Url) -> Option<Arc<Vec<String>>> {
+        // Prefer live (unsaved) lines, fall back to indexed file.
+        if let Some(live) = self.live_lines.get(uri.as_str()) {
+            return Some(live.clone());
+        }
+        self.files.get(uri.as_str()).map(|f| f.lines.clone())
+    }
+
+    /// Returns true if `name` has at least one definition location inside `uri`.
+    pub fn is_declared_in(&self, uri: &Url, name: &str) -> bool {
+        self.definitions.get(name)
+            .map(|locs| locs.iter().any(|l| l.uri == *uri))
+            .unwrap_or(false)
     }
 
     /// Like `word_at` but also returns the single dot-qualifier immediately
@@ -726,7 +820,7 @@ impl Indexer {
 
         // Use indexed lines (same source as word_and_qualifier_at) so line
         // numbers are consistent, regardless of live_lines state.
-        let lines: Vec<String> = self.files.get(uri.as_str())
+        let lines: Arc<Vec<String>> = self.files.get(uri.as_str())
             .map(|f| f.lines.clone())
             .or_else(|| {
                 // Fallback: live_lines if the file isn't indexed yet.
@@ -913,6 +1007,21 @@ impl Indexer {
 
         // Check if the char before the prefix is a dot.
         let before_prefix = &before[..before.len() - prefix.len()];
+
+        // ── completion result cache ──────────────────────────────────────────
+        // The candidate list only changes when the structural context changes
+        // (different dot receiver, different enclosing call, different line).
+        // Typing more characters in the same word doesn't change the candidates —
+        // the client filters them. Cache keyed on (uri, before_prefix, line).
+        let cache_key = format!("{}|{}|{}", uri.as_str(), before_prefix, position.line);
+        if let Ok(guard) = self.last_completion.lock() {
+            if let Some((ref k, _, ref cached)) = *guard {
+                if k == &cache_key {
+                    return cached.clone();
+                }
+            }
+        }
+        // (compute below, then store in cache at the end)
         let dot_receiver = if before_prefix.ends_with('.') {
             // Grab the identifier immediately preceding the dot.
             let recv: String = before_prefix[..before_prefix.len() - 1]
@@ -1000,6 +1109,11 @@ impl Indexer {
             }
         }
 
+        // Store in last_completion cache.
+        if let Ok(mut guard) = self.last_completion.lock() {
+            *guard = Some((cache_key, prefix.clone(), items.clone()));
+        }
+
         items
     }
 
@@ -1068,23 +1182,32 @@ impl Indexer {
         let file = self.files.get(uri.as_str())?;
         let row = row as usize;
 
-        // Walk backward from the cursor line looking for the nearest class-like
-        // declaration that is lexically at a lower indentation level than `row`.
-        // We stop at the first matching line rather than tracking brace depth
-        // (brace counting is unreliable with Kotlin multi-line lambdas).
-        let target_indent = file.lines.get(row).map(|l| leading_spaces(l)).unwrap_or(0);
-
-        for i in (0..row).rev() {
+        // Walk backward tracking brace depth to find the innermost class/object
+        // declaration that encloses the cursor.  We ignore indentation because
+        // the cursor may sit on an import or top-level line (indent 0) where the
+        // indentation heuristic always returns None.
+        let mut depth = 0i32;
+        let end = row.min(file.lines.len().saturating_sub(1));
+        for i in (0..=end).rev() {
             let line = match file.lines.get(i) { Some(l) => l, None => continue };
-            let indent = leading_spaces(line);
-            // Only consider lines at strictly lower indent — they could be the enclosure.
-            if indent >= target_indent { continue; }
-
-            let t = line.trim();
-            if t.is_empty() || t.starts_with("//") || t.starts_with('*') { continue; }
-
-            if let Some(name) = extract_class_decl_name(t) {
-                return Some(name);
+            // Count braces right-to-left on this line.
+            for ch in line.chars().rev() {
+                match ch {
+                    '}' => depth += 1,
+                    '{' => depth -= 1,
+                    _ => {}
+                }
+            }
+            // depth < 0: we just crossed the opening brace of a scope that
+            // starts on this line and isn't closed before the cursor.
+            // The cursor line itself is excluded (it can't enclose itself).
+            if depth < 0 && i < row {
+                let t = line.trim();
+                if let Some(name) = extract_class_decl_name(t) {
+                    return Some(name);
+                }
+                // Opening brace belongs to a function/lambda — keep searching.
+                depth = 0;
             }
         }
         None
@@ -1093,6 +1216,77 @@ impl Indexer {
     /// Return the package declared in the given file, if any.
     pub fn package_of(&self, uri: &Url) -> Option<String> {
         self.files.get(uri.as_str())?.package.clone()
+    }
+
+    /// Return the package in which `name` is declared, by looking up its
+    /// definition locations and reading the `package` field of those files.
+    /// If `prefer_uri` is set, prefer definitions from that file first.
+    pub fn declared_package_of(&self, name: &str) -> Option<String> {
+        let locs = self.definitions.get(name)?;
+        for loc in locs.iter() {
+            if let Some(f) = self.files.get(loc.uri.as_str()) {
+                if let Some(pkg) = &f.package {
+                    return Some(pkg.clone());
+                }
+            }
+        }
+        None
+    }
+
+    /// If `name` is declared as an inner/nested class, return the name of its
+    /// enclosing class at the declaration site in `preferred_uri` (if found there),
+    /// otherwise the first definition site.
+    pub fn declared_parent_class_of(&self, name: &str, preferred_uri: &Url) -> Option<String> {
+        let locs = self.definitions.get(name)?;
+        // Try declaration in the preferred (current) file first.
+        for loc in locs.iter() {
+            if loc.uri == *preferred_uri {
+                return self.enclosing_class_at(&loc.uri, loc.range.start.line);
+            }
+        }
+        // Fall back to first definition in any file.
+        for loc in locs.iter() {
+            if let Some(parent) = self.enclosing_class_at(&loc.uri, loc.range.start.line) {
+                return Some(parent);
+            }
+        }
+        None
+    }
+
+    /// Scan imports in `uri` for `name` and return (parent_class, declared_pkg)
+    /// as resolved from the import statement.  E.g.:
+    ///   `import com.example.DashboardViewModel.Effect`
+    ///   → parent_class = Some("DashboardViewModel"), pkg = Some("com.example.DashboardViewModel")
+    pub fn resolve_symbol_via_import(
+        &self,
+        uri: &Url,
+        name: &str,
+    ) -> (Option<String>, Option<String>) {
+        let file = match self.files.get(uri.as_str()) {
+            Some(f) => f,
+            None    => return (None, None),
+        };
+        for line in file.lines.iter() {
+            let t = line.trim();
+            if !t.starts_with("import ") { continue; }
+            // Handle `import a.b.c.Name` and `import a.b.c.Name as Alias`
+            let import_path = t["import ".len()..].split_whitespace().next().unwrap_or("");
+            let segments: Vec<&str> = import_path.split('.').collect();
+            // Last segment should match `name` (or be `*`).
+            let last = *segments.last().unwrap_or(&"");
+            if last != name && last != "*" { continue; }
+
+            // Found a matching import. The declared package is everything up to (not incl.) `name`.
+            // The parent class is the segment immediately before `name` if it starts uppercase.
+            if last == name && segments.len() >= 2 {
+                let pkg = segments[..segments.len() - 1].join(".");
+                let parent = segments.get(segments.len() - 2)
+                    .filter(|s| s.chars().next().map(|c| c.is_uppercase()).unwrap_or(false))
+                    .map(|s| s.to_string());
+                return (parent, Some(pkg));
+            }
+        }
+        (None, None)
     }
 }
 
@@ -1245,7 +1439,7 @@ pub(crate) fn rg_find_definition(name: &str, root: Option<&Path>) -> Vec<Locatio
 
     String::from_utf8_lossy(&out.stdout)
         .lines()
-        .filter_map(parse_rg_line)
+        .filter_map(|l| parse_rg_line_with_content_rooted(l, &search_root).map(|(loc, _)| loc))
         .collect()
 }
 
@@ -1260,9 +1454,14 @@ pub fn rg_find_references(
     name:         &str,
     parent_class: Option<&str>,
     same_pkg:     Option<&str>,
+    declared_pkg: Option<&str>,
     root:         Option<&Path>,
     include_decl: bool,
     from_uri:     &Url,
+    // Absolute file paths where `name` is declared — always included in bare-word
+    // search so the declaration site itself is never missed (it uses bare `Name`,
+    // not the qualified `Parent.Name` form that Pass A searches for).
+    decl_files:   &[String],
 ) -> Vec<Location> {
     let search_root: std::borrow::Cow<Path> = match root {
         Some(r) => std::borrow::Cow::Borrowed(r),
@@ -1274,6 +1473,11 @@ pub fn rg_find_references(
                     "typealias ", "enum class ", "enum "];
 
     let filter = |(loc, content): (Location, String)| -> Option<Location> {
+        let trimmed = content.trim_start();
+        // Import and package lines are never real references.
+        if trimmed.starts_with("import ") || trimmed.starts_with("package ") {
+            return None;
+        }
         if !include_decl {
             let is_decl = decl_kws.iter().any(|kw| content.contains(kw))
                 && loc.uri.as_str() == from_uri.as_str();
@@ -1292,36 +1496,46 @@ pub fn rg_find_references(
             .into_iter()
             .filter_map(filter)
             .collect();
+        eprintln!("[refs] parent={parent:?} Pass-A qualified={} locs", locs.len());
 
-        // Pass B: bare `Name` restricted to files that either…
-        //   (a) import the parent directly:  import .*.ParentClass
-        //   (b) import Name directly:        import .*.ParentClass.Name  or  .ParentClass.*
-        //   (c) are in the same package as the declaration (no import needed)
+        // Pass B: bare `Name` restricted to files that directly import the inner
+        // class itself (`import …ParentClass.Name` or `import …ParentClass.*`)
+        // OR are in the same package.
         //
-        // Step B1 — find candidate files via a fast rg file-list pass.
-        let import_pat = format!(r"import.*\b{}\b", safe_parent);
-        let candidate_files = rg_files_with_matches(&import_pat, &search_root);
+        // NOTE: we intentionally do NOT match files that only import the parent
+        // class itself (`import …ParentClass`) — those files use the qualified
+        // form `ParentClass.Name` which is already captured by Pass A, and
+        // including them causes massive false-positive counts (e.g. every
+        // ViewModel importing another ViewModel that also has a sealed `Effect`).
+        //
+        // Step B1 — files with explicit inner-class import.
+        // Pattern must match the parent and name as ADJACENT dot-segments:
+        //   import …ParentClass.Name   or   import …ParentClass.*
+        // NOT files that merely mention both words (e.g. OtherContract.State).
+        let direct_import_pat = format!(
+            r"import[^\n]*\b{}\.({}|\*)\b",
+            safe_parent, safe_name
+        );
+        let candidate_files = rg_files_with_matches(&direct_import_pat, &search_root);
 
-        // Step B2 — also add files in the same package (package-private visibility).
-        let same_pkg_prefix = same_pkg.unwrap_or("__no_package__");
-        // (same-package files will have the same package declaration; gather via a
-        // second file-list search rather than scanning the index — this function
-        // does not have access to the Indexer.)
-        let pkg_pat = format!(r"^\s*package\s+{}\s*$", regex_escape(same_pkg_prefix));
-        let pkg_files = if same_pkg.is_some() {
-            rg_files_with_matches(&pkg_pat, &search_root)
-        } else {
-            vec![]
-        };
+        // Step B2 — files in the same package as the parent class declaration.
+        // NOTE: for inner classes, same-package files use the QUALIFIED form
+        // `ParentClass.Name` which is already caught by Pass A. Adding them to
+        // the bare-name search causes false positives (e.g. AbilitiesSectionViewModel
+        // in the same package has its own `State`). So we skip same-package here.
+        let pkg_files: Vec<String> = vec![];
 
         // Merge candidate file sets.
+        // Always include declaration files so the declaration site itself is
+        // never missed (it uses bare `Name`, not the qualified `Parent.Name` form).
         let mut all_files: Vec<String> = candidate_files;
-        for f in pkg_files {
-            if !all_files.contains(&f) { all_files.push(f); }
+        for f in decl_files {
+            if !all_files.contains(f) { all_files.push(f.clone()); }
         }
 
         if !all_files.is_empty() {
             let bare_hits = rg_word_in_files(&safe_name, &all_files);
+            eprintln!("[refs] Pass-B candidate files={} bare_hits={}", all_files.len(), bare_hits.len());
             for (loc, content) in bare_hits {
                 if let Some(loc) = filter((loc, content)) {
                     // Deduplicate against the qualified hits.
@@ -1333,8 +1547,31 @@ pub fn rg_find_references(
         }
 
         locs
+    } else if let Some(dpkg) = declared_pkg {
+        // ── Top-level symbol with known declared package ──────────────────────
+        // Only search files that import `declared_pkg.Name` or `declared_pkg.*`
+        // or are in the same package. This avoids the "13000 matches for Effect"
+        // problem where every ViewModel has an inner class with the same name.
+        let safe_pkg = regex_escape(dpkg);
+        let import_pat = format!(
+            r"import[^\n]*\b{safe_pkg}\b[^\n]*\b{safe_name}\b|import[^\n]*\b{safe_pkg}\b\.\*"
+        );
+        let pkg_pat = format!(r"^\s*package\s+{safe_pkg}\s*$");
+
+        let mut candidate_files = rg_files_with_matches(&import_pat, &search_root);
+        for f in rg_files_with_matches(&pkg_pat, &search_root) {
+            if !candidate_files.contains(&f) { candidate_files.push(f); }
+        }
+
+        if candidate_files.is_empty() {
+            return vec![];
+        }
+        rg_word_in_files(&safe_name, &candidate_files)
+            .into_iter()
+            .filter_map(filter)
+            .collect()
     } else {
-        // ── Unscoped: fall back to the original word-boundary search ──────────
+        // ── Fully unscoped: lowercase / unknown symbol ────────────────────────
         let mut cmd = Command::new("rg");
         cmd.args([
             "--no-heading", "--with-filename", "--line-number", "--column",
@@ -1350,7 +1587,7 @@ pub fn rg_find_references(
 
         String::from_utf8_lossy(&out.stdout)
             .lines()
-            .filter_map(parse_rg_line_with_content)
+            .filter_map(|l| parse_rg_line_with_content_rooted(l, &search_root))
             .filter_map(filter)
             .collect()
     }
@@ -1375,7 +1612,7 @@ fn rg_raw(pattern: &str, root: &Path) -> Vec<(Location, String)> {
     };
     String::from_utf8_lossy(&out.stdout)
         .lines()
-        .filter_map(parse_rg_line_with_content)
+        .filter_map(|l| parse_rg_line_with_content_rooted(l, root))
         .collect()
 }
 
@@ -1391,7 +1628,14 @@ fn rg_files_with_matches(pattern: &str, root: &Path) -> Vec<String> {
     };
     String::from_utf8_lossy(&out.stdout)
         .lines()
-        .map(str::to_owned)
+        .map(|l| {
+            let p = std::path::Path::new(l);
+            if p.is_absolute() {
+                l.to_owned()
+            } else {
+                root.join(l).to_string_lossy().into_owned()
+            }
+        })
         .collect()
 }
 
@@ -1407,14 +1651,19 @@ fn rg_word_in_files(safe_name: &str, files: &[String]) -> Vec<(Location, String)
         Ok(o) if !o.stdout.is_empty() => o,
         _ => return vec![],
     };
+    // Files passed to rg_word_in_files are already absolute (from rg_files_with_matches).
     String::from_utf8_lossy(&out.stdout)
         .lines()
-        .filter_map(parse_rg_line_with_content)
+        .filter_map(|l| parse_rg_line_with_content_rooted(l, std::path::Path::new("/")))
         .collect()
 }
 
 /// Like `parse_rg_line` but also returns the matched line content.
 fn parse_rg_line_with_content(line: &str) -> Option<(Location, String)> {
+    parse_rg_line_with_content_rooted(line, std::path::Path::new("/"))
+}
+
+fn parse_rg_line_with_content_rooted(line: &str, root: &Path) -> Option<(Location, String)> {
     let mut parts = line.splitn(4, ':');
     let file     = parts.next()?;
     let line_num: u32 = parts.next()?.trim().parse().ok()?;
@@ -1422,12 +1671,17 @@ fn parse_rg_line_with_content(line: &str) -> Option<(Location, String)> {
     let content  = parts.next().unwrap_or("").to_string();
 
     let path = std::path::Path::new(file);
-    if !path.is_absolute() { return None; }
+    let abs_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    };
 
-    let uri = Url::from_file_path(path).ok()?;
+    let uri = Url::from_file_path(&abs_path).ok()?;
     let pos = Position::new(line_num.saturating_sub(1), col.saturating_sub(1));
     Some((Location { uri, range: Range::new(pos, pos) }, content))
 }
+
 pub(crate) fn parse_rg_line(line: &str) -> Option<Location> {
     // format: /abs/path/to/File.kt:line:col:content
     let mut parts = line.splitn(4, ':');
@@ -1487,7 +1741,7 @@ fn find_it_element_type_in_lines(
     // Characters to the right of the cursor (e.g., closing `}`) must not affect
     // the depth; otherwise a balanced `{ it.name }` would never trigger depth < 0.
     let mut depth: i32 = 0;
-    let scan_start = cursor_line.saturating_sub(40);
+    let scan_start = cursor_line.saturating_sub(15);
 
     for ln in (scan_start..=cursor_line).rev() {
         let line = match lines.get(ln) { Some(l) => l, None => continue };
@@ -1666,6 +1920,11 @@ fn is_lambda_param(
     uri:         &Url,
     cursor_line: usize,
 ) -> bool {
+    // Fast reject: if `recv` starts with uppercase or contains `.` it's a type/qualified
+    // name, never a lambda parameter name.
+    if recv.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) { return false; }
+    if recv.contains('.') { return false; }
+
     if line_has_lambda_param(before_cur, recv) { return true; }
 
     let lines_opt = idx.live_lines.get(uri.as_str())
@@ -1673,10 +1932,15 @@ fn is_lambda_param(
         .or_else(|| idx.files.get(uri.as_str()).map(|f| f.lines.clone()));
 
     if let Some(lines) = lines_opt {
-        let scan_start = cursor_line.saturating_sub(20);
+        // Only scan back up to 10 lines — lambda params declared further away
+        // are practically out of scope for normal code.
+        let scan_start = cursor_line.saturating_sub(10);
         for ln in (scan_start..cursor_line).rev() {
             if let Some(line) = lines.get(ln) {
                 if line_has_lambda_param(line, recv) { return true; }
+                // Stop early if we cross a closing brace at depth 0 — we've
+                // left the enclosing lambda scope entirely.
+                if line.trim_start().starts_with('}') { break; }
             }
         }
     }
@@ -3874,5 +4138,219 @@ class Account(val name: String)"#;
         let result = idx.infer_lambda_param_type_at("it", &u, Position::new(6, 6));
         assert!(result.is_none(),
             "it inside multi-param lambda should be None, got: {result:?}");
+    }
+
+    // ── rg_find_references scoping ───────────────────────────────────────────
+
+    /// Write `content` to `dir/rel_path` and return the absolute path as String.
+    fn write_temp(dir: &std::path::Path, rel_path: &str, content: &str) -> String {
+        let p = dir.join(rel_path);
+        if let Some(parent) = p.parent() { std::fs::create_dir_all(parent).unwrap(); }
+        std::fs::write(&p, content).unwrap();
+        p.to_str().unwrap().to_owned()
+    }
+
+    /// `rg_find_references` must not bleed references across sealed interfaces
+    /// that share the same inner name (`Event`) but belong to different contracts.
+    ///
+    /// Layout:
+    ///   activate_contract.kt   — declares interface ActivateUpdateAppContract { sealed interface Event }
+    ///   other_contract.kt      — declares interface OtherContract             { sealed interface Event }
+    ///   activate_vm.kt         — imports ActivateUpdateAppContract.Event, uses bare `Event`
+    ///   other_vm.kt            — imports OtherContract.Event,             uses bare `Event`
+    ///
+    /// Finding refs for ActivateUpdateAppContract.Event must return hits in
+    /// activate_contract.kt and activate_vm.kt ONLY — not other_vm.kt.
+    #[test]
+    fn refs_inner_class_does_not_bleed_across_contracts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+
+        write_temp(root, "activate_contract.kt", concat!(
+            "package com.example.activate\n",
+            "interface ActivateUpdateAppContract {\n",
+            "  sealed interface Event\n",
+            "}\n",
+        ));
+        write_temp(root, "other_contract.kt", concat!(
+            "package com.example.other\n",
+            "interface OtherContract {\n",
+            "  sealed interface Event\n",
+            "}\n",
+        ));
+        write_temp(root, "activate_vm.kt", concat!(
+            "package com.example.activate\n",
+            "import com.example.activate.ActivateUpdateAppContract.Event\n",
+            "class ActivateViewModel {\n",
+            "  fun handle(e: Event) {}\n",
+            "}\n",
+        ));
+        write_temp(root, "other_vm.kt", concat!(
+            "package com.example.other\n",
+            "import com.example.other.OtherContract.Event\n",
+            "class OtherViewModel {\n",
+            "  fun handle(e: Event) {}\n",
+            "}\n",
+        ));
+
+        let activate_uri = Url::from_file_path(root.join("activate_contract.kt")).unwrap();
+        let activate_decl = root.join("activate_contract.kt").to_str().unwrap().to_owned();
+
+        // Simulate: cursor on declaration of Event inside ActivateUpdateAppContract.
+        // parent_class = "ActivateUpdateAppContract", declared_pkg = "com.example.activate"
+        let locs = super::rg_find_references(
+            "Event",
+            Some("ActivateUpdateAppContract"),
+            Some("com.example.activate"),   // same_pkg
+            Some("com.example.activate"),   // declared_pkg
+            Some(root),
+            true,  // include_declaration
+            &activate_uri,
+            &[activate_decl],
+        );
+
+        let hit_files: std::collections::HashSet<String> = locs.iter()
+            .map(|l| l.uri.to_file_path().unwrap().file_name().unwrap().to_str().unwrap().to_owned())
+            .collect();
+
+        assert!(hit_files.contains("activate_contract.kt"),
+            "should include declaration file; got: {hit_files:?}");
+        assert!(hit_files.contains("activate_vm.kt"),
+            "should include file that imports ActivateUpdateAppContract.Event; got: {hit_files:?}");
+        assert!(!hit_files.contains("other_vm.kt"),
+            "must NOT include file that only imports OtherContract.Event; got: {hit_files:?}");
+        assert!(!hit_files.contains("other_contract.kt"),
+            "must NOT include OtherContract declaration; got: {hit_files:?}");
+    }
+
+    /// When cursor is on `Event` inside a file that imports `OtherContract.Event`,
+    /// refs must not include files that only import `ActivateUpdateAppContract.Event`.
+    #[test]
+    fn refs_inner_class_resolved_from_import_in_reference_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+
+        write_temp(root, "activate_contract.kt", concat!(
+            "package com.example.activate\n",
+            "interface ActivateUpdateAppContract {\n",
+            "  sealed interface Event\n",
+            "}\n",
+        ));
+        write_temp(root, "other_contract.kt", concat!(
+            "package com.example.other\n",
+            "interface OtherContract {\n",
+            "  sealed interface Event\n",
+            "}\n",
+        ));
+        write_temp(root, "activate_vm.kt", concat!(
+            "package com.example.activate\n",
+            "import com.example.activate.ActivateUpdateAppContract.Event\n",
+            "class ActivateViewModel {\n",
+            "  fun handle(e: Event) {}\n",
+            "}\n",
+        ));
+        write_temp(root, "other_vm.kt", concat!(
+            "package com.example.other\n",
+            "import com.example.other.OtherContract.Event\n",
+            "class OtherViewModel {\n",
+            "  fun handle(e: Event) {}\n",
+            "}\n",
+        ));
+
+        // Simulate: cursor on `Event` inside other_vm.kt (a reference, not declaration).
+        // resolve_symbol_via_import on other_vm.kt → parent=OtherContract, pkg=com.example.other
+        let other_vm_uri = Url::from_file_path(root.join("other_vm.kt")).unwrap();
+        let other_decl = root.join("other_contract.kt").to_str().unwrap().to_owned();
+
+        let locs = super::rg_find_references(
+            "Event",
+            Some("OtherContract"),
+            Some("com.example.other"),
+            Some("com.example.other"),
+            Some(root),
+            true,
+            &other_vm_uri,
+            &[other_decl],
+        );
+
+        let hit_files: std::collections::HashSet<String> = locs.iter()
+            .map(|l| l.uri.to_file_path().unwrap().file_name().unwrap().to_str().unwrap().to_owned())
+            .collect();
+
+        assert!(hit_files.contains("other_contract.kt"),
+            "should include OtherContract declaration; got: {hit_files:?}");
+        assert!(hit_files.contains("other_vm.kt"),
+            "should include file importing OtherContract.Event; got: {hit_files:?}");
+        assert!(!hit_files.contains("activate_vm.kt"),
+            "must NOT include file importing ActivateUpdateAppContract.Event; got: {hit_files:?}");
+    }
+
+    /// Regression: when `decl_files` is unfiltered it includes ALL contracts that
+    /// declare a `sealed interface Event`, causing every consumer ViewModel to appear
+    /// in results for an unrelated contract's Event.
+    ///
+    /// Layout: two contracts each with `sealed interface Event`, two ViewModels each
+    /// importing their own contract's Event.  Finding refs for DashboardContract.Event
+    /// must NOT return VisitBranchViewModel even though both are in `decl_files` when
+    /// unfiltered by enclosing-class.
+    #[test]
+    fn refs_decl_files_filtered_by_enclosing_class() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+
+        write_temp(root, "DashboardContract.kt", concat!(
+            "package com.example.dashboard\n",
+            "interface DashboardContract {\n",
+            "  sealed interface Event\n",
+            "}\n",
+        ));
+        write_temp(root, "VisitBranchContract.kt", concat!(
+            "package com.example.visitbranch\n",
+            "interface VisitBranchContract {\n",
+            "  sealed interface Event\n",
+            "}\n",
+        ));
+        write_temp(root, "DashboardViewModel.kt", concat!(
+            "package com.example.dashboard\n",
+            "import com.example.dashboard.DashboardContract.Event\n",
+            "class DashboardViewModel {\n",
+            "  fun handle(e: Event) {}\n",
+            "}\n",
+        ));
+        write_temp(root, "VisitBranchViewModel.kt", concat!(
+            "package com.example.visitbranch\n",
+            "import com.example.visitbranch.VisitBranchContract.Event\n",
+            "class VisitBranchViewModel {\n",
+            "  fun handle(e: Event) {}\n",
+            "}\n",
+        ));
+
+        let dashboard_uri = Url::from_file_path(root.join("DashboardContract.kt")).unwrap();
+        // decl_files filtered to only DashboardContract.kt (enclosing = DashboardContract)
+        let dashboard_decl = root.join("DashboardContract.kt").to_str().unwrap().to_owned();
+
+        let locs = super::rg_find_references(
+            "Event",
+            Some("DashboardContract"),
+            Some("com.example.dashboard"),
+            Some("com.example.dashboard"),
+            Some(root),
+            true,
+            &dashboard_uri,
+            &[dashboard_decl],  // NOT including VisitBranchContract.kt
+        );
+
+        let hit_files: std::collections::HashSet<String> = locs.iter()
+            .map(|l| l.uri.to_file_path().unwrap().file_name().unwrap().to_str().unwrap().to_owned())
+            .collect();
+
+        assert!(hit_files.contains("DashboardContract.kt"),
+            "should include DashboardContract declaration; got: {hit_files:?}");
+        assert!(hit_files.contains("DashboardViewModel.kt"),
+            "should include DashboardViewModel; got: {hit_files:?}");
+        assert!(!hit_files.contains("VisitBranchViewModel.kt"),
+            "must NOT include VisitBranchViewModel; got: {hit_files:?}");
+        assert!(!hit_files.contains("VisitBranchContract.kt"),
+            "must NOT include VisitBranchContract; got: {hit_files:?}");
     }
 }
