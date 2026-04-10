@@ -22,16 +22,16 @@ The server indexes files in the background on startup. **Before using workspaceS
 ### What works reliably ✅
 - **textDocument/documentSymbol** — list symbols in a file; always works (disk fallback for un-indexed files)
 - **textDocument/hover** — function/class signature + doc comments; works before full index is ready
-- **workspace/symbol** — find a class/function by name across the project; needs indexing complete
+- **workspace/symbol** — find a class/function by name across the project; supports dot-qualified queries for extension functions (e.g. `StoreState.isReady`); needs indexing complete
 - **textDocument/definition** — go to definition for class, object, fun, val, var; needs index
 - **textDocument/references** — find usages; needs index + rg fallback for out-of-index files
+- **textDocument/implementation** — find classes/objects implementing an interface or extending a class; supports transitive subtypes; needs index
 - **textDocument/rename** — cross-file rename; needs index
 - **textDocument/codeAction** — add missing import; uses rg, works without full index
 
 ### What works poorly or not at all ⚠️
 - **workspaceSymbol before index is ready** — returns empty; use `kotlin_lsp_status` to check first
 - **Extension functions (dot-receiver, cross-file)** — e.g. `actual.isZero()` where `isZero` is a top-level extension fn defined in another file; goToDefinition returns null
-- **goToImplementation** — often returns empty for interfaces; use `kotlin_find_subtypes` tool as fallback
 - **No type inference** — tree-sitter based, not compiler-backed; generic type params unresolved (`List<Foo>` → `List`)
 - **Java interop** — Java symbols indexed, but cross-language go-to-def is unreliable
 - **No diagnostics** — server never emits compile errors or warnings
@@ -42,11 +42,10 @@ The server indexes files in the background on startup. **Before using workspaceS
 ### Extension-provided tools
 
 #### `kotlin_find_subtypes`
-Find direct subtypes of a Kotlin interface/class/abstract class using text search.
+**Last-resort fallback** — `lsp goToImplementation` now handles this natively with transitive subtypes.
+Only use this tool if goToImplementation returns empty (e.g. LSP not indexed yet, or edge case missed).
+- Uses rg text search — returns candidates, not compiler-verified results
 - Handles: class/object/interface declarations, generics, multiline supertypes
-- Does NOT handle: indirect subtypes, import aliases, same-name-different-package
-- Returns **candidates**, not compiler-verified results
-- Use when `lsp goToImplementation` returns empty
 
 #### `kotlin_rg`
 Restricted ripgrep for Kotlin/Java files — **fallback only** when LSP cannot help.
@@ -64,7 +63,7 @@ For bug investigation across a large Android project, use this order:
 5. **`lsp hover`** at a line/col — get type info, signatures, doc comments
 6. **`lsp goToDefinition`** at a line/col — jump to source of a symbol under cursor
 7. **`lsp findReferences`** at a line/col — find all usages across the project (prefer over rg for symbol references)
-8. **`lsp goToImplementation`** — try for interface implementors; if empty, use `kotlin_find_subtypes`
+8. **`lsp goToImplementation`** — find classes implementing an interface (transitive); if empty, use `kotlin_find_subtypes` as last resort
 9. **`view` with line range** — read the actual code once you have exact locations
 10. **Only fall back to `kotlin_rg`** — for free-text search, extension functions, Java interop, or when LSP returns empty (provide reason)
 

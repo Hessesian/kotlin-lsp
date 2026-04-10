@@ -129,11 +129,10 @@ const session = await joinSession({
     {
       name: "kotlin_find_subtypes",
       description: [
-        "Find direct subtypes (classes/objects/interfaces) that extend or implement a given Kotlin type.",
-        "Uses text search — returns candidates, not compiler-verified results.",
+        "Last-resort fallback for finding subtypes — use `lsp goToImplementation` first.",
+        "Only use this if goToImplementation returns empty (LSP not indexed, or edge case).",
+        "Uses rg text search — returns candidates, not compiler-verified results.",
         "Handles: class/object/interface declarations, generics, multiline supertypes.",
-        "Does NOT handle: indirect subtypes, import aliases, same-name-different-package.",
-        "Use this when `lsp goToImplementation` returns empty.",
       ].join(" "),
       parameters: {
         type: "object",
@@ -220,8 +219,8 @@ const session = await joinSession({
           "Kotlin/Java code navigation must use Kotlin LSP first.",
           "Call `kotlin_lsp_status` before symbol lookup.",
           "Use grep/rg only for free-text, generated code, extension functions, or Java interop fallback.",
-          "If `lsp goToImplementation` returns empty, use `kotlin_find_subtypes` tool.",
-          "If you must grep Kotlin files after LSP fails, use `kotlin_rg` with a reason.",
+          "Use `lsp goToImplementation` for interface implementors (transitive). Only use `kotlin_find_subtypes` if LSP returns empty.",
+          "For extension functions, use `lsp workspaceSymbol` with dot-qualified query (e.g. 'StoreState.isReady').",
           `Guide: \`${README_PATH}\`.`,
         ].join(" "),
       };
