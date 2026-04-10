@@ -256,3 +256,79 @@ pub fn def_pattern_meta(pattern_index: usize) -> (SymbolKind, Option<&'static st
         _  => (SymbolKind::NULL,            None),
     }
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// SWIFT
+// ════════════════════════════════════════════════════════════════════════════
+
+// ────────────────────────────────────────────────────────────────────────────
+// SWIFT DEFINITIONS QUERY
+//
+// Grammar: alex-pinkus/tree-sitter-swift (devgen fork, 0.21)
+//
+// Key grammar facts:
+// • `class_declaration` is reused for class/struct/enum/extension — distinguished
+//   by the `declaration_kind` anonymous keyword child ("class"/"struct"/"enum"/"extension").
+// • Extensions have `name: (user_type (type_identifier))` instead of `name: (type_identifier)`.
+// • `protocol_declaration` is a separate node type.
+// • Properties use `(pattern bound_identifier: (simple_identifier))`.
+// • Protocol members: `protocol_function_declaration`, `protocol_property_declaration`.
+// • init → `init_declaration` (no name capture; caller can label "init").
+// ────────────────────────────────────────────────────────────────────────────
+
+pub const SWIFT_DEFINITIONS: &str = r#"
+; 0 — class
+(class_declaration "class" name: (type_identifier) @name) @def
+
+; 1 — struct
+(class_declaration "struct" name: (type_identifier) @name) @def
+
+; 2 — enum
+(class_declaration "enum" name: (type_identifier) @name) @def
+
+; 3 — extension (name is user_type wrapping type_identifier)
+(class_declaration "extension" name: (user_type (type_identifier) @name)) @def
+
+; 4 — protocol
+(protocol_declaration name: (type_identifier) @name) @def
+
+; 5 — function
+(function_declaration name: (simple_identifier) @name) @def
+
+; 6 — typealias
+(typealias_declaration name: (type_identifier) @name) @def
+
+; 7 — protocol function
+(protocol_function_declaration name: (simple_identifier) @name) @def
+
+; 8 — init declaration (no @name — caller assigns "init")
+(init_declaration) @def
+
+; 9 — property (let/var with bound identifier)
+(property_declaration name: (pattern bound_identifier: (simple_identifier) @name)) @def
+
+; 10 — protocol property
+(protocol_property_declaration name: (pattern bound_identifier: (simple_identifier) @name)) @def
+
+; 11 — enum entry
+(enum_entry name: (simple_identifier) @name) @def
+"#;
+
+/// Maps a pattern index from `SWIFT_DEFINITIONS` to `(SymbolKind, detail_label)`.
+pub fn swift_def_pattern_meta(pattern_index: usize) -> (SymbolKind, Option<&'static str>) {
+    match pattern_index {
+        0  => (SymbolKind::CLASS,           None),              // class
+        1  => (SymbolKind::STRUCT,          None),              // struct
+        2  => (SymbolKind::ENUM,            None),              // enum
+        3  => (SymbolKind::CLASS,           Some("extension")), // extension
+        4  => (SymbolKind::INTERFACE,       None),              // protocol
+        5  => (SymbolKind::FUNCTION,        None),              // func (top-level + methods)
+        6  => (SymbolKind::CLASS,           Some("typealias")), // typealias
+        7  => (SymbolKind::METHOD,          None),              // protocol func
+        8  => (SymbolKind::CONSTRUCTOR,     Some("init")),      // init
+        9  => (SymbolKind::PROPERTY,        None),              // let/var property
+        10 => (SymbolKind::PROPERTY,        Some("protocol")),  // protocol property
+        11 => (SymbolKind::ENUM_MEMBER,     None),              // case entry
+        _  => (SymbolKind::NULL,            None),
+    }
+}

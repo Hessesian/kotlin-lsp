@@ -139,25 +139,23 @@ impl LanguageServer for Backend {
             .log_message(MessageType::INFO, "kotlin-lsp ready")
             .await;
 
-        // Register a file-system watcher so we get notified when *.kt / *.java
+        // Register a file-system watcher so we get notified when source
         // files change on disk (e.g. after a workspace/rename edit is applied to
         // closed files that never send didChange).
+        let watchers: Vec<FileSystemWatcher> = crate::indexer::SOURCE_EXTENSIONS
+            .iter()
+            .map(|ext| FileSystemWatcher {
+                glob_pattern: GlobPattern::String(format!("**/*.{ext}")),
+                kind: None,
+            })
+            .collect();
         let _ = self.client.register_capability(vec![
             Registration {
-                id:     "watched-kotlin-files".into(),
+                id:     "watched-source-files".into(),
                 method: "workspace/didChangeWatchedFiles".into(),
                 register_options: Some(
                     serde_json::to_value(DidChangeWatchedFilesRegistrationOptions {
-                        watchers: vec![
-                            FileSystemWatcher {
-                                glob_pattern: GlobPattern::String("**/*.kt".into()),
-                                kind: None,
-                            },
-                            FileSystemWatcher {
-                                glob_pattern: GlobPattern::String("**/*.java".into()),
-                                kind: None,
-                            },
-                        ],
+                        watchers,
                     })
                     .unwrap_or_default(),
                 ),
@@ -463,9 +461,12 @@ impl LanguageServer for Backend {
         // For `it` or a named lambda param, generate hover showing the inferred type.
         if qualifier.is_none() && (word == "it" || word.chars().next().map(|c| c.is_lowercase()).unwrap_or(true)) {
             if let Some(type_name) = self.indexer.infer_lambda_param_type_at(&word, uri, position) {
-                let lang = if uri.path().ends_with(".kt") { "kotlin" } else { "java" };
-                // Show the inferred binding: `val it: Product` or `val item: Product`
-                let sig_md = format!("```{lang}\nval {word}: {type_name}\n```");
+                let lang = if uri.path().ends_with(".kt") { "kotlin" }
+                           else if uri.path().ends_with(".swift") { "swift" }
+                           else { "java" };
+                // Show the inferred binding
+                let kw = if uri.path().ends_with(".swift") { "let" } else { "val" };
+                let sig_md = format!("```{lang}\n{kw} {word}: {type_name}\n```");
                 // For symbol lookup use the last segment of a qualified name
                 // (symbols are indexed by short name, e.g. `CardProduct` not
                 // `CreditCardDashboardInteractor.CardProduct`).
@@ -499,7 +500,17 @@ impl LanguageServer for Backend {
         let hover_md = if let Some(loc) = locs.first() {
             self.indexer.hover_info_at_location(loc, &word)
         } else {
-            self.indexer.hover_info(&word)
+            // Index lookup — works for already-indexed symbols + stdlib.
+            let from_index = self.indexer.hover_info(&word);
+            if from_index.is_some() {
+                from_index
+            } else {
+                // rg fallback: find the declaration even when the index is empty.
+                let root_guard = self.indexer.workspace_root.read().unwrap();
+                let rg_locs = crate::indexer::rg_find_definition(&word, root_guard.as_deref());
+                drop(root_guard);
+                rg_locs.first().and_then(|loc| self.indexer.hover_info_at_location(loc, &word))
+            }
         };
 
         Ok(hover_md.map(|md| Hover {

@@ -6,10 +6,10 @@ const README_PATH = ".github/extensions/kotlin-lsp/README.md";
 
 // ── Trigger regexes ──────────────────────────────────────────────────
 
-const KOTLIN_FILE_TRIGGER = /\.kts?\b/i;
+const KOTLIN_FILE_TRIGGER = /\.(?:kts?|swift)\b/i;
 
 const KOTLIN_HINT_TRIGGER =
-  /\b(?:kotlin|java|\.kt|\.kts|\.java|ViewModel|Repository|UseCase|Composable|Activity|Fragment|CPageHeader|CPage)\b/i;
+  /\b(?:kotlin|java|swift|\.kt|\.kts|\.java|\.swift|ViewModel|Repository|UseCase|Composable|Activity|Fragment|CPageHeader|CPage|UIViewController|SwiftUI)\b/i;
 
 const FREE_TEXT_TRIGGER =
   /\b(?:TODO|FIXME|HACK|text|string|comment|comments|message|messages|translation|copy|literal|log|logs)\b/i;

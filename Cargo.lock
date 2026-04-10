@@ -509,7 +509,7 @@ dependencies = [
 
 [[package]]
 name = "kotlin-lsp"
-version = "0.3.13"
+version = "0.4.0"
 dependencies = [
  "bincode",
  "dashmap",
@@ -523,6 +523,7 @@ dependencies = [
  "tree-sitter",
  "tree-sitter-java",
  "tree-sitter-kotlin",
+ "tree-sitter-swift-bundled",
  "walkdir",
 ]
 
@@ -1092,6 +1093,14 @@ name = "tree-sitter-kotlin"
 version = "0.3.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "54ff60aeb036f5762515ceb31404512ea4f9599764bcd3857074bb82867bdd34"
+dependencies = [
+ "cc",
+ "tree-sitter",
+]
+
+[[package]]
+name = "tree-sitter-swift-bundled"
+version = "0.1.0"
 dependencies = [
  "cc",
  "tree-sitter",

@@ -1,7 +1,7 @@
 use tree_sitter::{Node, Parser, Query, QueryCursor};
 use tower_lsp::lsp_types::{Position, Range, SymbolKind};
 
-use crate::queries::{self, KOTLIN_DEFINITIONS};
+use crate::queries::{self, KOTLIN_DEFINITIONS, SWIFT_DEFINITIONS};
 use crate::types::{FileData, ImportEntry, SymbolEntry, SyntaxError, Visibility};
 
 // ─── public entry points ────────────────────────────────────────────────────
@@ -112,6 +112,109 @@ pub fn parse_java(content: &str) -> FileData {
     data.syntax_errors = collect_syntax_errors(tree.root_node(), bytes);
     data
 }
+
+pub fn parse_swift(content: &str) -> FileData {
+    let lang  = tree_sitter_swift_bundled::language();
+    let lines = std::sync::Arc::new(content.lines().map(str::to_owned).collect());
+    let mut data = FileData { lines, ..Default::default() };
+
+    let mut parser = Parser::new();
+    if parser.set_language(&lang).is_err() { return data; }
+    let Some(tree) = parser.parse(content, None) else { return data; };
+
+    let bytes = content.as_bytes();
+    let root  = tree.root_node();
+
+    // ── definitions ──────────────────────────────────────────────────────────
+    let def_q = match Query::new(&lang, SWIFT_DEFINITIONS) {
+        Ok(q)  => q,
+        Err(e) => { log::error!("Swift definitions query error: {e}"); return data; }
+    };
+    let def_idx  = def_q.capture_index_for_name("def").unwrap_or(0);
+    let name_idx = def_q.capture_index_for_name("name").unwrap_or(1);
+
+    let mut cur = QueryCursor::new();
+    let matches: Vec<(usize, [Option<(String, Range, Range)>; 2])> = cur
+        .matches(&def_q, root, bytes)
+        .map(|m| {
+            let pidx = m.pattern_index;
+            let mut def_range:  Option<Range> = None;
+            let mut name_text:  Option<String> = None;
+            let mut name_range: Option<Range> = None;
+            for cap in m.captures {
+                if cap.index == def_idx {
+                    def_range = Some(ts_to_lsp(cap.node.range()));
+                } else if cap.index == name_idx {
+                    name_text  = cap.node.utf8_text(bytes).ok().map(str::to_owned);
+                    name_range = Some(ts_to_lsp(cap.node.range()));
+                }
+            }
+            let slot = if let (Some(dr), Some(nt), Some(nr)) = (def_range, name_text, name_range) {
+                [Some((nt, dr, nr)), None]
+            } else if pidx == 8 {
+                // init_declaration — no @name, synthesize "init"
+                if let Some(dr) = def_range {
+                    let sel = Range::new(
+                        Position::new(dr.start.line, dr.start.character),
+                        Position::new(dr.start.line, dr.start.character + 4),
+                    );
+                    [Some(("init".to_owned(), dr, sel)), None]
+                } else {
+                    [None, None]
+                }
+            } else {
+                [None, None]
+            };
+            (pidx, slot)
+        })
+        .collect();
+
+    // Deduplicate: use same BTreeMap strategy as Kotlin parser.
+    let mut best: std::collections::BTreeMap<(u32, u32), (usize, String, Range, Range)> =
+        std::collections::BTreeMap::new();
+
+    for (pidx, slot) in matches {
+        if let Some((name, range, sel)) = slot[0].clone() {
+            let key = (sel.start.line, sel.start.character);
+            let is_better = best.get(&key).map(|(ep, _, _, _)| pidx < *ep).unwrap_or(true);
+            if is_better {
+                best.insert(key, (pidx, name, range, sel));
+            }
+        }
+    }
+
+    for (_, (pidx, name, range, sel)) in best {
+        let (kind, _detail) = queries::swift_def_pattern_meta(pidx);
+        if kind != SymbolKind::NULL {
+            let visibility = swift_visibility_at_line(&data.lines, sel.start.line as usize);
+            let detail = extract_detail(&data.lines, range.start.line, range.end.line);
+            data.symbols.push(SymbolEntry { name, kind, visibility, range, selection_range: sel, detail });
+        }
+    }
+
+    // ── imports (manual tree walk — Swift imports are simpler) ────────────────
+    extract_swift_imports(root, bytes, &mut data);
+
+    // ── declared_names ───────────────────────────────────────────────────────
+    data.declared_names = extract_declared_names(&data.lines);
+
+    // ── syntax errors ────────────────────────────────────────────────────────
+    data.syntax_errors = collect_syntax_errors(root, bytes);
+
+    data
+}
+
+/// Dispatch to the correct parser based on file extension.
+pub fn parse_by_extension(path: &str, content: &str) -> FileData {
+    if path.ends_with(".swift") {
+        parse_swift(content)
+    } else if path.ends_with(".java") {
+        parse_java(content)
+    } else {
+        parse_kotlin(content)
+    }
+}
+
 // ─── Java extraction (manual traversal — Java grammar has named fields) ──────
 
 fn extract_java(node: &Node, bytes: &[u8], data: &mut FileData) {
@@ -428,6 +531,30 @@ fn parse_import_header(header: &tree_sitter::Node, bytes: &[u8], data: &mut File
     }
 }
 
+// ─── Swift import extraction ─────────────────────────────────────────────────
+
+fn extract_swift_imports(root: tree_sitter::Node, bytes: &[u8], data: &mut FileData) {
+    let mut cur = root.walk();
+    for node in root.children(&mut cur) {
+        if node.kind() == "import_declaration" {
+            let mut ic = node.walk();
+            for child in node.children(&mut ic) {
+                if child.kind() == "identifier" {
+                    if let Ok(txt) = child.utf8_text(bytes) {
+                        let local = last_segment(txt);
+                        data.imports.push(ImportEntry {
+                            full_path:  txt.to_owned(),
+                            local_name: local.to_owned(),
+                            is_star:    false,
+                        });
+                    }
+                    break;
+                }
+            }
+        }
+    }
+}
+
 // ─── visibility detection ────────────────────────────────────────────────────
 
 /// Detect the Kotlin/Java visibility modifier on `line_no` by scanning that
@@ -462,6 +589,27 @@ pub(crate) fn visibility_at_line(lines: &[String], line_no: usize) -> Visibility
     if contains_word(decl, "protected") { return Visibility::Protected; }
     if contains_word(decl, "internal")  { return Visibility::Internal; }
     Visibility::Public
+}
+
+/// Swift visibility detection.
+///
+/// Swift modifiers: `private`, `fileprivate`, `internal`, `public`, `open`.
+/// Default is `internal` (unlike Kotlin which defaults to `public`).
+pub(crate) fn swift_visibility_at_line(lines: &[String], line_no: usize) -> Visibility {
+    let line = match lines.get(line_no) {
+        Some(l) => l,
+        None    => return Visibility::Internal,
+    };
+    let decl = line.split_once('{').map(|(l, _)| l)
+        .unwrap_or(line)
+        .split_once('=').map(|(l, _)| l)
+        .unwrap_or(line);
+
+    if contains_word(decl, "private")     { return Visibility::Private; }
+    if contains_word(decl, "fileprivate") { return Visibility::Private; }
+    if contains_word(decl, "public")      { return Visibility::Public; }
+    if contains_word(decl, "open")        { return Visibility::Public; }
+    Visibility::Internal // Swift default
 }
 
 fn contains_word(text: &str, word: &str) -> bool {
@@ -908,5 +1056,105 @@ mod tests {
             e.range.start.line == 2 || e.range.start.line == 3
         );
         assert!(has_line_2_or_3, "error should be near line 2-3: {:?}", data.syntax_errors);
+    }
+
+    // ── Swift parsing ────────────────────────────────────────────────────────
+
+    #[test]
+    fn swift_query_compiles() {
+        let lang = tree_sitter_swift_bundled::language();
+        tree_sitter::Query::new(&lang, crate::queries::SWIFT_DEFINITIONS)
+            .expect("SWIFT_DEFINITIONS query should compile");
+    }
+
+    #[test] fn swift_class()    { assert_eq!(sym(&parse_swift("class Foo {}"),    "Foo").unwrap().kind, SymbolKind::CLASS); }
+    #[test] fn swift_struct()   { assert_eq!(sym(&parse_swift("struct Bar {}"),   "Bar").unwrap().kind, SymbolKind::STRUCT); }
+    #[test] fn swift_enum()     { assert_eq!(sym(&parse_swift("enum Dir { case n }"), "Dir").unwrap().kind, SymbolKind::ENUM); }
+    #[test] fn swift_protocol() { assert_eq!(sym(&parse_swift("protocol P {}"),   "P").unwrap().kind, SymbolKind::INTERFACE); }
+    #[test] fn swift_func()     { assert_eq!(sym(&parse_swift("func foo() {}"),   "foo").unwrap().kind, SymbolKind::FUNCTION); }
+    #[test] fn swift_typealias(){ assert_eq!(sym(&parse_swift("typealias A = Int"), "A").unwrap().kind, SymbolKind::CLASS); }
+
+    #[test]
+    fn swift_property_let() {
+        let data = parse_swift("let x = 42");
+        assert_eq!(sym(&data, "x").unwrap().kind, SymbolKind::PROPERTY);
+    }
+
+    #[test]
+    fn swift_property_var() {
+        let data = parse_swift("var y: Int = 0");
+        assert_eq!(sym(&data, "y").unwrap().kind, SymbolKind::PROPERTY);
+    }
+
+    #[test]
+    fn swift_enum_entries() {
+        let data = parse_swift("enum Dir { case north, south, east }");
+        assert!(sym(&data, "north").is_some());
+        assert!(sym(&data, "south").is_some());
+        assert!(sym(&data, "east").is_some());
+    }
+
+    #[test]
+    fn swift_extension() {
+        let data = parse_swift("extension Point: Equatable { func dist() -> Double { 0 } }");
+        let ext = sym(&data, "Point").unwrap();
+        assert_eq!(ext.kind, SymbolKind::CLASS);
+        assert!(sym(&data, "dist").is_some());
+    }
+
+    #[test]
+    fn swift_init() {
+        let data = parse_swift("class Foo { init(x: Int) { } }");
+        assert!(sym(&data, "init").is_some());
+    }
+
+    #[test]
+    fn swift_imports() {
+        let data = parse_swift("import Foundation\nimport UIKit\nclass A {}");
+        assert_eq!(data.imports.len(), 2);
+        assert_eq!(data.imports[0].full_path, "Foundation");
+        assert_eq!(data.imports[1].full_path, "UIKit");
+    }
+
+    #[test]
+    fn swift_no_package() {
+        let data = parse_swift("class A {}");
+        assert!(data.package.is_none());
+    }
+
+    #[test]
+    fn swift_visibility() {
+        let data = parse_swift("private class Secret {}\npublic class Pub {}");
+        assert_eq!(sym(&data, "Secret").unwrap().visibility, Visibility::Private);
+        assert_eq!(sym(&data, "Pub").unwrap().visibility, Visibility::Public);
+    }
+
+    #[test]
+    fn swift_default_visibility_is_internal() {
+        let data = parse_swift("class Foo {}");
+        assert_eq!(sym(&data, "Foo").unwrap().visibility, Visibility::Internal);
+    }
+
+    #[test]
+    fn swift_detail_extraction() {
+        let data = parse_swift("func distance(to other: Point) -> Double { 0 }");
+        let s = sym(&data, "distance").unwrap();
+        assert!(s.detail.contains("distance"), "detail: {}", s.detail);
+    }
+
+    #[test]
+    fn swift_syntax_errors() {
+        let data = parse_swift("class Foo {\n    func bar() {}\n    let x =\n}");
+        assert!(!data.syntax_errors.is_empty(), "should detect syntax error");
+    }
+
+    #[test]
+    fn parse_by_extension_dispatch() {
+        let kt = parse_by_extension("/Foo.kt", "class Foo");
+        let java = parse_by_extension("/Foo.java", "public class Foo {}");
+        let swift = parse_by_extension("/Foo.swift", "class Foo {}");
+        assert!(sym(&kt, "Foo").is_some());
+        assert!(sym(&java, "Foo").is_some());
+        assert!(sym(&swift, "Foo").is_some());
     }
 }

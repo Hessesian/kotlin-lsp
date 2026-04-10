@@ -130,7 +130,7 @@ fn symbols_from_nested_type(
         let url = match Url::parse(file_uri) { Ok(u) => u, Err(_) => return vec![] };
         let path = match url.to_file_path() { Ok(p) => p, Err(_) => return vec![] };
         let content = match std::fs::read_to_string(&path) { Ok(c) => c, Err(_) => return vec![] };
-        owned = crate::parser::parse_kotlin(&content);
+        owned = crate::parser::parse_by_extension(file_uri, &content);
         &owned.symbols
     };
 
@@ -332,7 +332,7 @@ fn build_completion_items(idx: &Indexer, file_uri: &str) -> Vec<CompletionItem> 
     if let Ok(url) = Url::parse(file_uri) {
         if let Ok(path) = url.to_file_path() {
             if let Ok(content) = std::fs::read_to_string(&path) {
-                let file_data = crate::parser::parse_kotlin(&content);
+                let file_data = crate::parser::parse_by_extension(file_uri, &content);
                 for sym in &file_data.symbols {
                     let ck       = symbol_kind_to_completion(sym.kind);
                     let vis_tag  = vis_tag(sym.visibility);
@@ -604,10 +604,15 @@ fn resolve_qualified(idx: &Indexer, name: &str, qualifier: &str, from_uri: &Url)
         }
     }
 
-    current_file
-        .as_deref()
-        .map(|uri| find_name_in_uri(idx, name, uri))
-        .unwrap_or_default()
+    // Search the resolved type's file for the target member.
+    let Some(ref resolved_uri) = current_file else { return vec![]; };
+    let locs = find_name_in_uri(idx, name, resolved_uri);
+    if !locs.is_empty() { return locs; }
+
+    // Member not found directly — walk the superclass/interface hierarchy.
+    let Ok(parsed_uri) = Url::parse(resolved_uri) else { return vec![]; };
+    let mut visited = vec![];
+    resolve_from_class_hierarchy(idx, name, &parsed_uri, 0, &mut visited)
 }
 
 /// Step 1 — symbols defined in the same source file.
@@ -704,22 +709,26 @@ fn import_file_stems(import_path: &str) -> Vec<String> {
     }
 }
 
-/// Candidate .kt/.java filenames for a given import path, in priority order.
+/// Candidate source filenames for a given import path, in priority order.
 ///
 /// Kotlin convention: uppercase segments = class names; the first uppercase
 /// segment is always the top-level class (= the file).  Any further uppercase
 /// segment is a nested class defined *inside* that file.
 ///
 /// `…accountpicker.AccountPickerContract.Event`
-///   → `["AccountPickerContract.kt", "AccountPickerContract.java",
-///       "Event.kt", "Event.java"]`  (outer-class file tried first)
+///   → `["AccountPickerContract.kt", "AccountPickerContract.java", "AccountPickerContract.swift",
+///       "Event.kt", "Event.java", "Event.swift"]`  (outer-class file tried first)
 ///
 /// `…example.Foo`
-///   → `["Foo.kt", "Foo.java"]`
+///   → `["Foo.kt", "Foo.java", "Foo.swift"]`
 fn import_file_candidates(import_path: &str) -> Vec<String> {
     import_file_stems(import_path)
         .into_iter()
-        .flat_map(|stem| [format!("{stem}.kt"), format!("{stem}.java")])
+        .flat_map(|stem| {
+            crate::indexer::SOURCE_EXTENSIONS
+                .iter()
+                .map(move |ext| format!("{stem}.{ext}"))
+        })
         .collect()
 }
 
@@ -735,21 +744,22 @@ fn fd_find_and_parse(symbol_name: &str, full_import_path: &str, root: Option<&Pa
     let expected_pkg = if pkg.is_empty() { None } else { Some(pkg.as_str()) };
     let pkg_dir = pkg.replace('.', "/");
 
+    let ext_alt = crate::indexer::SOURCE_EXTENSIONS.join("|");
     for stem in import_file_stems(full_import_path) {
         // Strategy 1: precise full-path regex including the package directory.
-        // e.g. ".*/cz/moneta/data/compat/enums/product/EProductScreen\.(kt|java)$"
+        // e.g. ".*/cz/moneta/data/compat/enums/product/EProductScreen\.(kt|java|swift)$"
         if let Some(root) = root {
             let pat = if pkg_dir.is_empty() {
-                format!(r"{stem}\.(kt|java)$")
+                format!(r"{stem}\.({ext_alt})$")
             } else {
-                format!(r".*/{pkg_dir}/{stem}\.(kt|java)$")
+                format!(r".*/{pkg_dir}/{stem}\.({ext_alt})$")
             };
             let locs = fd_search_by_full_path_pattern(&pat, symbol_name, expected_pkg, root);
             if !locs.is_empty() { return locs; }
         }
 
         // Strategy 2: global filename-only search (fallback for flat / non-standard layouts).
-        for ext in ["kt", "java"] {
+        for ext in crate::indexer::SOURCE_EXTENSIONS {
             let locs = fd_search_file(&format!("{stem}.{ext}"), symbol_name, expected_pkg, root);
             if !locs.is_empty() { return locs; }
         }
@@ -809,11 +819,7 @@ fn parse_fd_hits(stdout: &[u8], symbol_name: &str, expected_pkg: Option<&str>) -
         let Ok(uri) = tower_lsp::lsp_types::Url::from_file_path(path) else { continue };
         let Ok(content) = std::fs::read_to_string(path) else { continue };
 
-        let file_data = if path_str.ends_with(".java") {
-            crate::parser::parse_java(&content)
-        } else {
-            crate::parser::parse_kotlin(&content)
-        };
+        let file_data = crate::parser::parse_by_extension(path_str, &content);
         let Some(sym) = file_data.symbols.iter().find(|s| s.name == symbol_name) else { continue };
 
         let loc = tower_lsp::lsp_types::Location { uri, range: sym.selection_range };
@@ -927,7 +933,16 @@ fn resolve_from_class_hierarchy(
 
     let lines: Arc<Vec<String>> = match idx.files.get(from_uri.as_str()) {
         Some(f) => f.lines.clone(),
-        None    => return vec![],
+        None => {
+            // File not indexed yet — read from disk so hierarchy walk works
+            // even before background indexing reaches this file.
+            let path = from_uri.to_file_path().ok();
+            let content = path.and_then(|p| std::fs::read_to_string(p).ok());
+            match content {
+                Some(c) => Arc::new(c.lines().map(String::from).collect()),
+                None => return vec![],
+            }
+        }
     };
 
     for super_name in extract_supers_from_lines(&lines) {
@@ -1093,13 +1108,11 @@ fn split_top_level_commas(text: &str) -> Vec<&str> {
 
 /// `rg` scoped to the directory that would contain `package` sources.
 ///
-/// Package `com.example.ui` → globs `**/com/example/ui/*.kt` and `…/*.java`.
+/// Package `com.example.ui` → globs `**/com/example/ui/*.{kt,java,swift}`.
 /// This handles the common case where the package structure mirrors the
 /// directory tree (standard Kotlin / Maven / Gradle convention).
 fn rg_in_package_dir(name: &str, package: &str, root: Option<&Path>) -> Vec<Location> {
     let pkg_path = package.replace('.', "/");
-    let kt_glob   = format!("**/{pkg_path}/*.kt");
-    let java_glob = format!("**/{pkg_path}/*.java");
     let pattern   = build_rg_pattern(name);
 
     let search_root: std::borrow::Cow<Path> = match root {
@@ -1110,10 +1123,11 @@ fn rg_in_package_dir(name: &str, package: &str, root: Option<&Path>) -> Vec<Loca
     let mut cmd = Command::new("rg");
     cmd.args([
         "--no-heading", "--with-filename", "--line-number", "--column",
-        "--glob", &kt_glob,
-        "--glob", &java_glob,
-        "-e", &pattern,
     ]);
+    for ext in crate::indexer::SOURCE_EXTENSIONS {
+        cmd.args(["--glob", &format!("**/{pkg_path}/*.{ext}")]);
+    }
+    cmd.args(["-e", &pattern]);
     cmd.arg(search_root.as_ref());
 
     let out = match cmd.output() {
@@ -1436,11 +1450,7 @@ fn find_name_in_uri(idx: &Indexer, name: &str, file_uri: &str) -> Vec<Location> 
     // c) File not yet indexed — parse on demand using the correct parser
     if let Ok(path) = uri.to_file_path() {
         if let Ok(content) = std::fs::read_to_string(&path) {
-            let file_data = if file_uri.ends_with(".java") {
-                crate::parser::parse_java(&content)
-            } else {
-                crate::parser::parse_kotlin(&content)
-            };
+            let file_data = crate::parser::parse_by_extension(file_uri, &content);
             if let Some(sym) = file_data.symbols.iter().find(|s| s.name == name) {
                 return vec![Location { uri, range: sym.selection_range }];
             }
@@ -1534,9 +1544,9 @@ pub(crate) fn build_rg_pattern(name: &str) -> String {
     }).collect();
     // Kotlin: standard keywords + `enum class` + extension function receiver
     // Java:   `enum NAME` (Java enums have no `class` after `enum`)
-    //         `class NAME` / `interface NAME` already covered by the Kotlin arm
+    // Swift:  struct, protocol, extension, let (in addition to shared keywords)
     format!(
-        r"(?:(?:class|interface|object|fun|val|var|typealias|enum\s+class)\s+|fun\s+\w[\w.]*\.|(?:public|private|protected|static|abstract|final|\s)+enum\s+){safe}\b"
+        r"(?:(?:class|struct|interface|object|protocol|fun|func|val|var|let|typealias|enum\s+class)\s+|fun\s+\w[\w.]*\.|(?:public|private|protected|fileprivate|open|internal|static|abstract|final|\s)+(?:enum|class|struct|protocol)\s+|extension\s+){safe}\b"
     )
 }
 
@@ -1548,10 +1558,17 @@ fn last_segment(dotted: &str) -> &str {
 ///
 /// Kotlin automatically imports `kotlin.*` and `kotlin.collections.*` etc.
 /// Android projects don't ship `android.*` / `androidx.*` sources by default.
+/// Swift: framework imports like Foundation, UIKit, etc. have no local sources.
 fn is_stdlib(pkg: &str) -> bool {
+    let first = pkg.split('.').next().unwrap_or("");
     matches!(
-        pkg.split('.').next().unwrap_or(""),
+        first,
         "kotlin" | "java" | "javax" | "android" | "androidx" | "sun" | "com.sun"
+        // Swift standard frameworks
+        | "Foundation" | "UIKit" | "SwiftUI" | "Combine" | "CoreData"
+        | "CoreGraphics" | "CoreLocation" | "MapKit" | "AVFoundation"
+        | "WebKit" | "StoreKit" | "GameKit" | "ARKit" | "RealityKit"
+        | "Swift" | "ObjectiveC" | "Darwin" | "Dispatch" | "os"
     )
 }
 
@@ -1582,6 +1599,7 @@ mod tests {
         let c = import_file_candidates("com.example.Foo");
         assert_eq!(c[0], "Foo.kt");
         assert_eq!(c[1], "Foo.java");
+        assert_eq!(c[2], "Foo.swift");
     }
 
     #[test]
@@ -1589,8 +1607,10 @@ mod tests {
         let c = import_file_candidates("com.example.OuterClass.InnerClass");
         assert_eq!(c[0], "OuterClass.kt");   // outer class file tried first
         assert_eq!(c[1], "OuterClass.java");
-        assert_eq!(c[2], "InnerClass.kt");
-        assert_eq!(c[3], "InnerClass.java");
+        assert_eq!(c[2], "OuterClass.swift");
+        assert_eq!(c[3], "InnerClass.kt");
+        assert_eq!(c[4], "InnerClass.java");
+        assert_eq!(c[5], "InnerClass.swift");
     }
 
     #[test]
@@ -1598,8 +1618,10 @@ mod tests {
         let c = import_file_candidates("a.b.Outer.Middle.Inner");
         assert_eq!(c[0], "Middle.kt");
         assert_eq!(c[1], "Middle.java");
-        assert_eq!(c[2], "Inner.kt");
-        assert_eq!(c[3], "Inner.java");
+        assert_eq!(c[2], "Middle.swift");
+        assert_eq!(c[3], "Inner.kt");
+        assert_eq!(c[4], "Inner.java");
+        assert_eq!(c[5], "Inner.swift");
     }
 
     #[test]
@@ -1840,6 +1862,26 @@ mod tests {
         let locs = resolve_symbol(&idx, "loadDataFlow", Some("interactor"), &vm_uri);
         assert!(!locs.is_empty(), "loadDataFlow not found via constructor param type inference");
         assert_eq!(locs[0].uri, int_uri);
+    }
+
+    #[test]
+    fn resolve_method_via_interface_hierarchy() {
+        // repo.contactAddressSetup() where repo: IGoldConversionRepository
+        // contactAddressSetup is defined in IBaseRepository (superinterface)
+        let vm_uri   = uri("/ViewModel.kt");
+        let repo_uri = uri("/IGoldConversionRepository.kt");
+        let base_uri = uri("/IBaseRepository.kt");
+        let idx = Indexer::new();
+        idx.index_content(&base_uri,
+            "package com.pkg\ninterface IBaseRepository {\n  fun contactAddressSetup(): String\n}");
+        idx.index_content(&repo_uri,
+            "package com.pkg\ninterface IGoldConversionRepository : IBaseRepository {\n  fun goldPrice(): Double\n}");
+        idx.index_content(&vm_uri,
+            "package com.pkg\nclass ViewModel(\n  private val repo: IGoldConversionRepository\n) {\n  fun init() { repo.contactAddressSetup() }\n}");
+
+        let locs = resolve_symbol(&idx, "contactAddressSetup", Some("repo"), &vm_uri);
+        assert!(!locs.is_empty(), "contactAddressSetup not found via interface hierarchy");
+        assert_eq!(locs[0].uri, base_uri, "should resolve to IBaseRepository");
     }
 
     // ── build_rg_pattern ─────────────────────────────────────────────────────

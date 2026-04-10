@@ -1,0 +1,13 @@
+[package]
+name    = "tree-sitter-swift-bundled"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Thin wrapper: alex-pinkus/tree-sitter-swift grammar compiled against tree-sitter 0.22"
+links   = "tree-sitter-swift"
+
+[dependencies]
+tree-sitter = "0.22"
+
+[build-dependencies]
+cc = "1"

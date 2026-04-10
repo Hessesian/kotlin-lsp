@@ -1,13 +1,16 @@
+[workspace]
+members = [".", "tree-sitter-swift"]
+
 [package]
 name        = "kotlin-lsp"
-version = "0.3.13"
+version = "0.4.0"
 edition     = "2021"
-description = "Fast, low-memory LSP server for Kotlin and Java. Instant startup, dot-completion, go-to-definition, hover — no JVM required."
+description = "Fast, low-memory LSP server for Kotlin, Java, and Swift. Instant startup, dot-completion, go-to-definition, hover — no JVM required."
 license     = "MIT"
 repository  = "https://github.com/Hessesian/kotlin-lsp"
 homepage    = "https://github.com/Hessesian/kotlin-lsp"
 readme      = "README.md"
-keywords    = ["lsp", "kotlin", "java", "language-server", "tree-sitter"]
+keywords    = ["lsp", "kotlin", "java", "swift", "language-server"]
 categories  = ["development-tools", "command-line-utilities"]
 
 [[bin]]
@@ -26,6 +29,7 @@ tree-sitter-java = "0.21"
 # Pin to the version that declared tree-sitter compat with 0.22.
 # If 0.3 fails to resolve, try: git = "https://github.com/fwcd/tree-sitter-kotlin"
 tree-sitter-kotlin = "0.3"
+tree-sitter-swift-bundled = { path = "tree-sitter-swift" }
 
 # Concurrent index storage (no Mutex needed)
 dashmap = "5"
