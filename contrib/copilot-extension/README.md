@@ -31,12 +31,29 @@ The server indexes files in the background on startup. **Before using workspaceS
 ### What works poorly or not at all ⚠️
 - **workspaceSymbol before index is ready** — returns empty; use `kotlin_lsp_status` to check first
 - **Extension functions (dot-receiver, cross-file)** — e.g. `actual.isZero()` where `isZero` is a top-level extension fn defined in another file; goToDefinition returns null
+- **goToImplementation** — often returns empty for interfaces; use `kotlin_find_subtypes` tool as fallback
 - **No type inference** — tree-sitter based, not compiler-backed; generic type params unresolved (`List<Foo>` → `List`)
 - **Java interop** — Java symbols indexed, but cross-language go-to-def is unreliable
 - **No diagnostics** — server never emits compile errors or warnings
 - **Lambda type inference** — complex nested lambda types may infer incorrectly
 - **Multiplatform (KMP)** — expect/actual resolution is partial
 - **rg alternation syntax** — use `|` (not `\|`) in ripgrep patterns; `\|` is GNU grep syntax and matches nothing in rg
+
+### Extension-provided tools
+
+#### `kotlin_find_subtypes`
+Find direct subtypes of a Kotlin interface/class/abstract class using text search.
+- Handles: class/object/interface declarations, generics, multiline supertypes
+- Does NOT handle: indirect subtypes, import aliases, same-name-different-package
+- Returns **candidates**, not compiler-verified results
+- Use when `lsp goToImplementation` returns empty
+
+#### `kotlin_rg`
+Restricted ripgrep for Kotlin/Java files — **fallback only** when LSP cannot help.
+- Requires a `reason` explaining why LSP can't help
+- Valid reasons: extension functions, LSP returned empty, free-text search, generated code, convention discovery
+- Rejects simple identifier lookups without valid justification
+- Use LSP `workspaceSymbol` / `goToDefinition` / `findReferences` first
 
 ### Practical workflow for code investigation
 For bug investigation across a large Android project, use this order:
@@ -47,10 +64,26 @@ For bug investigation across a large Android project, use this order:
 5. **`lsp hover`** at a line/col — get type info, signatures, doc comments
 6. **`lsp goToDefinition`** at a line/col — jump to source of a symbol under cursor
 7. **`lsp findReferences`** at a line/col — find all usages across the project (prefer over rg for symbol references)
-8. **`view` with line range** — read the actual code once you have exact locations
-9. **Only fall back to `rg`** — for free-text search, extension functions, Java interop, or when LSP returns empty
+8. **`lsp goToImplementation`** — try for interface implementors; if empty, use `kotlin_find_subtypes`
+9. **`view` with line range** — read the actual code once you have exact locations
+10. **Only fall back to `kotlin_rg`** — for free-text search, extension functions, Java interop, or when LSP returns empty (provide reason)
 
 **Prefer LSP over grep/rg whenever you have a known symbol name.** `findReferences` is significantly more precise than rg pattern matching and avoids false positives.
+
+### Hook behavior — what gets blocked vs allowed
+The `onPreToolUse` hook enforces LSP-first for Kotlin symbol navigation.
+
+**Always allowed:**
+- `glob` tool (file discovery)
+- `grep` targeting a single known file
+- `bash` with non-search commands (`ls`, `cat`, `head`, `find -name`, `fd`, etc.)
+- Complex regex patterns (convention/pattern discovery)
+- Free-text searches (TODO, comments, strings, logs)
+- Non-Kotlin context
+
+**Blocked:**
+- `grep`/`rg` with a simple identifier pattern across a broad directory in Kotlin context
+- Use LSP first, then `kotlin_rg` with a reason if LSP can't help
 
 ### Workspace root
 The kotlin-lsp server reads its workspace root from `~/.config/kotlin-lsp/workspace` (a plain text file with the absolute path).
