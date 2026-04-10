@@ -24,6 +24,9 @@ mod progress {
 use crate::parser;
 use crate::types::{FileData, SymbolEntry};
 
+/// File extensions recognized by rg/fd search and file watchers.
+pub const SOURCE_EXTENSIONS: &[&str] = &["kt", "java", "swift"];
+
 // ─── Indexing status file ─────────────────────────────────────────────────────
 
 /// Human-readable status written to `~/.cache/kotlin-lsp/status.json`.
