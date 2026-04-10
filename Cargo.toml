@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "tree-sitter-swift"]
+members = ["."]
 
 [package]
 name        = "kotlin-lsp"
