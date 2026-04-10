@@ -2,7 +2,7 @@ use tree_sitter::{Node, Parser, Query, QueryCursor};
 use tower_lsp::lsp_types::{Position, Range, SymbolKind};
 
 use crate::queries::{self, KOTLIN_DEFINITIONS};
-use crate::types::{FileData, ImportEntry, SymbolEntry, Visibility};
+use crate::types::{FileData, ImportEntry, SymbolEntry, SyntaxError, Visibility};
 
 // ─── public entry points ────────────────────────────────────────────────────
 
@@ -86,6 +86,9 @@ pub fn parse_kotlin(content: &str) -> FileData {
     // ── declared_names: scan lines once for `ident:` patterns ───────────────
     data.declared_names = extract_declared_names(&data.lines);
 
+    // ── syntax errors (ERROR / MISSING nodes) ────────────────────────────────
+    data.syntax_errors = collect_syntax_errors(root, bytes);
+
     data
 }
 
@@ -106,9 +109,9 @@ pub fn parse_java(content: &str) -> FileData {
         for child in node.children(&mut cur) { queue.push(child); }
     }
     data.declared_names = extract_declared_names(&data.lines);
+    data.syntax_errors = collect_syntax_errors(tree.root_node(), bytes);
     data
 }
-
 // ─── Java extraction (manual traversal — Java grammar has named fields) ──────
 
 fn extract_java(node: &Node, bytes: &[u8], data: &mut FileData) {
@@ -235,6 +238,69 @@ fn ts_to_lsp(r: tree_sitter::Range) -> Range {
         start: Position { line: r.start_point.row as u32, character: r.start_point.column as u32 },
         end:   Position { line: r.end_point.row   as u32, character: r.end_point.column   as u32 },
     }
+}
+
+/// Walk the tree-sitter tree and collect ERROR / MISSING nodes as syntax errors.
+///
+/// Uses `has_error()` to prune clean subtrees (no wasted traversal).
+/// Recurses into ERROR children to find nested MISSING nodes (more precise),
+/// but deduplicates by `(start_line, start_col)` and caps at `MAX_ERRORS`.
+const MAX_SYNTAX_ERRORS: usize = 20;
+
+fn collect_syntax_errors(root: Node, bytes: &[u8]) -> Vec<SyntaxError> {
+    if !root.has_error() { return Vec::new(); }
+
+    let mut errors = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut stack = vec![root];
+
+    while let Some(node) = stack.pop() {
+        if errors.len() >= MAX_SYNTAX_ERRORS { break; }
+
+        if node.is_missing() {
+            let range = ts_to_lsp(node.range());
+            let key = (range.start.line, range.start.character);
+            if seen.insert(key) {
+                let kind = node.kind();
+                errors.push(SyntaxError {
+                    range,
+                    message: format!("missing `{kind}`"),
+                });
+            }
+        } else if node.is_error() {
+            let range = ts_to_lsp(node.range());
+            let key = (range.start.line, range.start.character);
+            if seen.insert(key) {
+                let text: String = node.utf8_text(bytes).unwrap_or("")
+                    .chars()
+                    .take(30)
+                    .collect();
+                let text = text.lines().next().unwrap_or(&text);
+                errors.push(SyntaxError {
+                    range,
+                    message: if text.is_empty() {
+                        "syntax error".into()
+                    } else {
+                        format!("unexpected `{text}`")
+                    },
+                });
+            }
+            // Recurse into ERROR children to find nested MISSING nodes.
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                stack.push(child);
+            }
+        } else if node.has_error() {
+            // Only recurse into subtrees that contain errors.
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                stack.push(child);
+            }
+        }
+        // else: clean subtree — skip entirely.
+    }
+
+    errors
 }
 
 /// Extract a short declaration signature from source lines.
@@ -765,5 +831,82 @@ mod tests {
         assert!(names.contains(&"betaValue".to_string()), "betaValue missing: {names:?}");
         assert!(names.contains(&"gamma".to_string()),     "gamma missing: {names:?}");
     }
-}
 
+    // ── Syntax error detection tests ─────────────────────────────────────────
+
+    #[test]
+    fn no_errors_on_valid_kotlin() {
+        let data = parse_kotlin("package com.example\nclass Foo { fun bar() {} }");
+        assert!(data.syntax_errors.is_empty(), "expected no errors: {:?}", data.syntax_errors);
+    }
+
+    #[test]
+    fn missing_closing_brace_kotlin() {
+        let data = parse_kotlin("class Foo {\n    fun bar() {}\n");
+        assert!(!data.syntax_errors.is_empty(), "expected errors for unclosed brace");
+    }
+
+    #[test]
+    fn missing_closing_paren_kotlin() {
+        let data = parse_kotlin("fun foo(x: Int {\n}");
+        assert!(!data.syntax_errors.is_empty(), "expected errors for unclosed paren");
+    }
+
+    #[test]
+    fn dangling_equals_kotlin() {
+        let data = parse_kotlin("val x =\n");
+        assert!(!data.syntax_errors.is_empty(), "expected errors for dangling =");
+    }
+
+    #[test]
+    fn garbled_syntax_kotlin() {
+        let data = parse_kotlin("class @@@ invalid!!! {{{");
+        assert!(!data.syntax_errors.is_empty(), "expected errors for garbled syntax");
+    }
+
+    #[test]
+    fn no_errors_on_valid_java() {
+        let data = parse_java("package com.example;\npublic class Foo { void bar() {} }");
+        assert!(data.syntax_errors.is_empty(), "expected no errors: {:?}", data.syntax_errors);
+    }
+
+    #[test]
+    fn missing_semicolon_java() {
+        let data = parse_java("public class Foo { int x = 5 }");
+        assert!(!data.syntax_errors.is_empty(), "expected errors for missing semicolon");
+    }
+
+    #[test]
+    fn error_message_contains_context() {
+        let data = parse_kotlin("fun foo(x: Int { }");
+        let msgs: Vec<&str> = data.syntax_errors.iter().map(|e| e.message.as_str()).collect();
+        assert!(
+            msgs.iter().any(|m| m.contains("missing") || m.contains("unexpected")),
+            "error messages should be descriptive: {msgs:?}"
+        );
+    }
+
+    #[test]
+    fn errors_capped_at_max() {
+        // Generate a file with many syntax errors.
+        let bad = (0..50).map(|_| "@@@ ").collect::<String>();
+        let data = parse_kotlin(&bad);
+        assert!(
+            data.syntax_errors.len() <= super::MAX_SYNTAX_ERRORS,
+            "expected at most {} errors, got {}",
+            super::MAX_SYNTAX_ERRORS, data.syntax_errors.len()
+        );
+    }
+
+    #[test]
+    fn error_has_correct_line() {
+        let src = "class Foo {\n    fun bar() {}\n    val x =\n}";
+        let data = parse_kotlin(src);
+        assert!(!data.syntax_errors.is_empty());
+        // The error should be on or near line 2 (0-indexed) where `val x =` is.
+        let has_line_2_or_3 = data.syntax_errors.iter().any(|e|
+            e.range.start.line == 2 || e.range.start.line == 3
+        );
+        assert!(has_line_2_or_3, "error should be near line 2-3: {:?}", data.syntax_errors);
+    }
+}

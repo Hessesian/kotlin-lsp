@@ -523,12 +523,16 @@ impl Indexer {
 
     /// (Re-)parse and index a single file's content in-place.
     /// Returns immediately (no-op) when content is identical to the last indexed version.
-    pub fn index_content(&self, uri: &Url, content: &str) {
+    /// Parse and index a single file.  Returns `Some(data)` when the file was
+    /// actually (re-)parsed, or `None` when the content-hash matched the previous
+    /// parse (no work done).  Callers that need to publish diagnostics should
+    /// read `data.syntax_errors` from the returned value.
+    pub fn index_content(&self, uri: &Url, content: &str) -> Option<Arc<FileData>> {
         // Fast-path: skip re-parse if content hasn't changed since last index.
         let hash = hash_str(content);
         let uri_str = uri.to_string();
         if self.content_hashes.get(&uri_str).map(|h| *h == hash).unwrap_or(false) {
-            return;
+            return None;
         }
         self.content_hashes.insert(uri_str.clone(), hash);
         self.parse_count.fetch_add(1, Ordering::Relaxed);
@@ -636,10 +640,13 @@ impl Indexer {
             }
         }
 
-        self.files.insert(uri_str, Arc::new(data));
+        let data = Arc::new(data);
+        self.files.insert(uri_str, Arc::clone(&data));
 
         // Rebuild bare-name cache so complete_bare doesn't iterate definitions.
         self.rebuild_bare_name_cache();
+
+        Some(data)
     }
 
     fn rebuild_bare_name_cache(&self) {
@@ -719,8 +726,8 @@ impl Indexer {
 
     /// Like `word_at` but also returns the `Range` of the word in LSP (UTF-16) coordinates.
     pub fn word_and_range_at(&self, uri: &Url, position: Position) -> Option<(String, Range)> {
-        let data = self.files.get(uri.as_str())?;
-        let line_text = data.lines.get(position.line as usize)?;
+        let lines = self.lines_for(uri)?;
+        let line_text = lines.get(position.line as usize)?;
         let target_utf16 = position.character as usize;
         let mut utf16_acc = 0usize;
         let mut char_idx  = 0usize;
@@ -789,8 +796,8 @@ impl Indexer {
         uri: &Url,
         position: Position,
     ) -> Option<(String, Option<String>)> {
-        let data = self.files.get(uri.as_str())?;
-        let line = data.lines.get(position.line as usize)?;
+        let lines = self.lines_for(uri)?;
+        let line = lines.get(position.line as usize)?;
 
         // UTF-16 → char index
         let target_utf16 = position.character as usize;
@@ -846,7 +853,7 @@ impl Indexer {
             let is_named_arg = after_trimmed.starts_with('=')
                 && !after_trimmed.starts_with("==");
             if is_named_arg {
-                find_enclosing_call_name(&data.lines, position.line as usize, start)
+                find_enclosing_call_name(&lines, position.line as usize, start)
                     .and_then(|callee| callee_to_qualifier(&callee))
             } else {
                 None
@@ -977,13 +984,14 @@ impl Indexer {
     ) -> Option<String> {
         let line_no = position.line as usize;
 
-        // Use indexed lines (same source as word_and_qualifier_at) so line
-        // numbers are consistent, regardless of live_lines state.
-        let lines: Arc<Vec<String>> = self.files.get(uri.as_str())
-            .map(|f| f.lines.clone())
+        // Prefer live_lines (current editor content, updated synchronously on
+        // did_change) over files.lines (refreshed after debounced reindex).
+        // Type resolution still uses the index (definitions, files) by name —
+        // that data remains valid even before reindex completes.
+        let lines: Arc<Vec<String>> = self.live_lines.get(uri.as_str())
+            .map(|ll| ll.clone())
             .or_else(|| {
-                // Fallback: live_lines if the file isn't indexed yet.
-                self.live_lines.get(uri.as_str()).map(|ll| ll.clone())
+                self.files.get(uri.as_str()).map(|f| f.lines.clone())
             })?;
 
         if name == "it" || name == "this" {

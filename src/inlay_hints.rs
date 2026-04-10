@@ -13,10 +13,12 @@ use tower_lsp::lsp_types::{InlayHint, InlayHintKind, InlayHintLabel, Position, R
 use crate::indexer::Indexer;
 
 pub fn compute_inlay_hints(idx: &Arc<Indexer>, uri: &Url, range: Range) -> Vec<InlayHint> {
-    let lines = match idx.files.get(uri.as_str()) {
-        Some(f) => f.lines.clone(),
-        None    => idx.live_lines.get(uri.as_str()).map(|l| l.clone()).unwrap_or_default(),
-    };
+    // Prefer live_lines (updated synchronously on every did_change) over
+    // files.lines (only refreshed after debounced reindex).  This keeps hint
+    // positions consistent with the text the editor is currently showing.
+    let lines = idx.live_lines.get(uri.as_str()).map(|l| l.clone())
+        .or_else(|| idx.files.get(uri.as_str()).map(|f| f.lines.clone()))
+        .unwrap_or_default();
     if lines.is_empty() { return vec![]; }
 
     let start = range.start.line as usize;
@@ -253,5 +255,132 @@ mod tests {
         assert_eq!(find_word("bits.name", "it"), None);  // `it` inside `bits`
         assert_eq!(find_word("  it ", "it"), Some(2));
         assert_eq!(find_word("with(it)", "it"), Some(5));
+    }
+
+    #[test]
+    fn hints_inject_constructor_lambdas() {
+        // Reproduces DashboardProductsViewModel pattern:
+        // @Inject constructor with nested lambdas containing `it`.
+        let src = r#"package test
+
+class ProductsUseCases
+class MviViewModel
+
+class DashboardProductsViewModel @javax.inject.Inject constructor(
+  private val productsUseCases: ProductsUseCases,
+) : MviViewModel() {
+
+  private val items: List<String> = emptyList()
+
+  fun loadData() {
+    items.forEach { it.length }
+    items.map { item ->
+      item.uppercase()
+    }
+  }
+}
+"#;
+        let hints = hints_for(src);
+        eprintln!("inject_constructor hints: {hints:?}");
+        assert!(
+            hints.iter().any(|h| matches!(&h.label, InlayHintLabel::String(s) if s == ": String")),
+            "expected ': String' hint for it/item in @Inject constructor class, got: {hints:?}",
+        );
+    }
+
+    #[test]
+    fn hints_survive_syntax_error() {
+        // Simulate a file with a missing closing brace — tree-sitter error recovery.
+        let src = "val items: List<Product> = emptyList()\nitems.forEach { it.name\n";
+        let hints = hints_for(src);
+        assert!(
+            hints.iter().any(|h| matches!(&h.label, InlayHintLabel::String(s) if s == ": Product")),
+            "hints should still work despite syntax error, got: {hints:?}",
+        );
+    }
+
+    #[test]
+    fn hints_nested_named_arg_lambda() {
+        // Reproduces DashboardProductsViewModel pattern:
+        // nested named-arg lambdas inside a constructor call.
+        let src = r#"package test
+
+class SheetReloadActions(
+    val buildingSavings: (String) -> Unit,
+    val loan: (String, Boolean) -> Unit,
+)
+
+class Vm {
+    private val reducer by lazy {
+        SheetReloadActions(
+            buildingSavings = { println(it) },
+            loan = { loanId, isWustenrot -> println(loanId) },
+        )
+    }
+}
+"#;
+        let hints = hints_for(src);
+        eprintln!("nested_named_arg hints: {hints:?}");
+        // `it` in buildingSavings lambda should infer `: String`
+        let has_string = hints.iter().any(|h| {
+            matches!(&h.label, InlayHintLabel::String(s) if s == ": String")
+        });
+        eprintln!("has_string={has_string}");
+        // At minimum, we should be able to resolve `it` type from constructor param
+        assert!(has_string,
+            "expected ': String' hint for it/loanId in nested named-arg lambda, got: {hints:?}");
+    }
+
+    #[test]
+    fn hints_nested_named_arg_cross_file() {
+        // Cross-file variant: SheetReloadActions is a nested data class
+        // inside DashboardProductsReducer (separate file), matching the real codebase.
+        let idx = Arc::new(Indexer::new());
+        let u1 = uri("/DashboardProductsReducer.kt");
+        idx.index_content(&u1, r#"package test
+
+class DashboardProductsReducer {
+    data class SheetReloadActions(
+        val buildingSavings: (String) -> Unit,
+        val cards: (CardProduct) -> Unit,
+        val loan: (String, Boolean) -> Unit,
+    )
+}
+
+class CardProduct
+"#);
+        let u2 = uri("/Vm.kt");
+        let vm_src = r#"package test
+
+import test.DashboardProductsReducer
+
+class Vm {
+    private val reducer by lazy {
+        DashboardProductsReducer.SheetReloadActions(
+            buildingSavings = { println(it) },
+            cards = { println(it) },
+            loan = { loanId, isWustenrot -> println(loanId) },
+        )
+    }
+}
+"#;
+        idx.index_content(&u2, vm_src);
+        let lines = vm_src.lines().count() as u32;
+        let hints = compute_inlay_hints(&idx, &u2, Range {
+            start: Position::new(0, 0),
+            end: Position::new(lines, 0),
+        });
+        eprintln!("cross_file hints: {hints:?}");
+        let has_string = hints.iter().any(|h| {
+            matches!(&h.label, InlayHintLabel::String(s) if s == ": String")
+        });
+        let has_card = hints.iter().any(|h| {
+            matches!(&h.label, InlayHintLabel::String(s) if s == ": CardProduct")
+        });
+        eprintln!("has_string={has_string} has_card={has_card}");
+        assert!(has_string,
+            "expected ': String' hint for it in cross-file named-arg lambda, got: {hints:?}");
+        assert!(has_card,
+            "expected ': CardProduct' hint for it in cards lambda, got: {hints:?}");
     }
 }

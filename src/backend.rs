@@ -227,11 +227,31 @@ impl LanguageServer for Backend {
         let text = params.text_document.text;
         let idx  = Arc::clone(&self.indexer);
         let sem  = idx.parse_sem();
-        tokio::task::spawn_blocking(move || {
-            let _permit = sem.try_acquire_owned();
-            idx.index_content(&uri, &text);
-            // Pre-warm completion cache for all types referenced in this file.
-            Arc::clone(&idx).prewarm_completion_cache(&uri);
+        let client = self.client.clone();
+        let idx2 = Arc::clone(&self.indexer);
+        tokio::task::spawn(async move {
+            let uri2 = uri.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                let _permit = sem.try_acquire_owned();
+                let data = idx.index_content(&uri, &text);
+                // Pre-warm completion cache for all types referenced in this file.
+                Arc::clone(&idx).prewarm_completion_cache(&uri);
+                data
+            }).await;
+
+            // Publish diagnostics from syntax errors (or clear if hash-skipped).
+            let diags = match result {
+                Ok(Some(data)) => syntax_diagnostics(&data.syntax_errors),
+                Ok(None) => {
+                    // Hash-skipped — read cached errors.
+                    let uri_str = uri2.to_string();
+                    idx2.files.get(&uri_str)
+                        .map(|fd| syntax_diagnostics(&fd.syntax_errors))
+                        .unwrap_or_default()
+                }
+                Err(_) => Vec::new(),
+            };
+            client.publish_diagnostics(uri2, diags, None).await;
         });
     }
 
@@ -251,22 +271,30 @@ impl LanguageServer for Backend {
                 handle.abort();
             }
 
-            let pending = Arc::clone(&self.indexer);
-            let _ = pending;
+            let client = self.client.clone();
             let sem = idx.parse_sem();
             let handle = tokio::spawn(async move {
                 tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
                 let _permit = sem.acquire_owned().await;
-                tokio::task::spawn_blocking(move || {
-                    idx.index_content(&uri, &text);
-                });
+                let uri2 = uri.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    idx.index_content(&uri, &text)
+                }).await;
+                // Drop semaphore permit before async notifications.
+                drop(_permit);
+
+                if let Ok(Some(data)) = result {
+                    let diags = syntax_diagnostics(&data.syntax_errors);
+                    client.publish_diagnostics(uri2, diags, None).await;
+                }
             });
             self.pending_reindex.insert(key, handle.abort_handle());
         }
     }
 
-    async fn did_close(&self, _: DidCloseTextDocumentParams) {
-        // Nothing to do — we keep the index entry so cross-file lookup still works.
+    async fn did_close(&self, params: DidCloseTextDocumentParams) {
+        // Clear diagnostics so stale errors don't linger after the file is closed.
+        self.client.publish_diagnostics(params.text_document.uri, Vec::new(), None).await;
     }
 
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
@@ -1532,4 +1560,18 @@ fn rename_in_scope(
     // Reverse so callers applying sequentially won't shift earlier positions.
     edits.sort_by(|a, b| b.range.start.cmp(&a.range.start));
     edits
+}
+
+// ─── Diagnostics helper ──────────────────────────────────────────────────────
+
+use crate::types::SyntaxError;
+
+fn syntax_diagnostics(errors: &[SyntaxError]) -> Vec<Diagnostic> {
+    errors.iter().map(|e| Diagnostic {
+        range:    e.range,
+        severity: Some(DiagnosticSeverity::ERROR),
+        source:   Some("kotlin-lsp".into()),
+        message:  e.message.clone(),
+        ..Default::default()
+    }).collect()
 }

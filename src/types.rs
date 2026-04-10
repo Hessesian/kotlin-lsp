@@ -42,6 +42,17 @@ pub struct ImportEntry {
     pub is_star:    bool,
 }
 
+/// A structural syntax error detected by tree-sitter.
+///
+/// These are zero-false-positive issues: missing brackets, unclosed strings,
+/// garbled syntax from a bad edit.  They are NOT serialized to the disk cache
+/// (cheap to recompute on every parse).
+#[derive(Debug, Clone)]
+pub struct SyntaxError {
+    pub range:   Range,
+    pub message: String,
+}
+
 /// All data we keep in memory for one source file.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FileData {
@@ -56,4 +67,8 @@ pub struct FileData {
     /// Lower-cased identifiers found before `:` on non-comment lines.
     /// Populated once at parse time; used by completion without re-scanning.
     pub declared_names: Vec<String>,
+    /// Structural syntax errors from tree-sitter (ERROR / MISSING nodes).
+    /// Transient — not serialized to disk cache.
+    #[serde(skip)]
+    pub syntax_errors: Vec<SyntaxError>,
 }
