@@ -30,7 +30,7 @@ There are two Kotlin LSP implementations. Here is how they differ:
 | **Startup** | Instant | Gradle project import required (slow on large projects) |
 | **Memory** | < 200 MB for 10k+ files | IntelliJ engine — typically 1+ GB |
 | **Build system** | Any (no build required) | JVM-only Gradle projects officially supported |
-| **Type checking / diagnostics** | ✗ — structural only | ✓ on-the-fly Kotlin diagnostics |
+| **Type checking / diagnostics** | Syntax errors (tree-sitter) | ✓ on-the-fly Kotlin diagnostics |
 | **Semantic accuracy** | Syntactic (tree-sitter) | Full IntelliJ Analysis API |
 | **Rename / refactor** | ✓ project-wide text search | ✓ semantic (+ Move, Change signature) |
 | **Go-to-definition** | Fast (index + rg fallback) | Accurate (binary + source, builtins) |
@@ -55,14 +55,17 @@ They can coexist: configure kotlin-lsp for fast navigation and use the official 
 | LSP capability | Notes |
 |---|---|
 | `textDocument/definition` | Index lookup → superclass hierarchy → `rg` fallback |
-| `textDocument/hover` | Declaration kind, source line, Kotlin stdlib signatures |
+| `textDocument/hover` | Declaration kind, source line, lambda param types, Kotlin stdlib signatures |
 | `textDocument/documentSymbol` | All symbols in the current file (outline view) |
 | `textDocument/completion` | Dot-completion (`it.`, `this.`, named params), bare-word, stdlib entries |
 | `textDocument/references` | Project-wide `rg --word-regexp` + in-memory scan of open buffers |
 | `textDocument/signatureHelp` | Active function signature + highlighted parameter as you type |
 | `textDocument/rename` | Renames symbol across all files via `WorkspaceEdit`; index updated via file watcher |
 | `textDocument/foldingRange` | Brace-based region folds + consecutive comment block folds |
-| `workspace/symbol` | Fuzzy substring search across all indexed symbols |
+| `textDocument/inlayHint` | Type hints for lambda `it`, named lambda params, `this`, untyped `val`/`var` |
+| `textDocument/publishDiagnostics` | Syntax errors from tree-sitter (ERROR/MISSING nodes) — not type checking |
+| `textDocument/implementation` | Transitive subtype lookup (interface → all implementing classes, BFS) |
+| `workspace/symbol` | Fuzzy substring search; supports dot-qualified queries for extension functions |
 | `$/progress` | Spinner while workspace is indexed; non-blocking |
 
 ### What gets indexed
@@ -111,7 +114,7 @@ Go-to-definition resolves symbols in this order:
 
 - **No type inference for generic lambda parameters** — `list.map { item -> item.field }` cannot resolve `item`'s type from generic parameters without full type inference. Named-arg and trailing lambdas with known function signatures are resolved cross-file (with `rg` fallback if the dependency isn't indexed yet). For unresolvable cases, use explicit type annotations (`list.map { item: MyType -> … }`).
 - **No incremental re-index** — each `did_change` re-parses the whole file after a 120 ms debounce. Very large files (5000+ lines) may feel slightly delayed.
-- **No diagnostics / type checking** — kotlin-lsp is purely structural; it doesn't compile or type-check your code.
+- **No type checking** — kotlin-lsp reports structural syntax errors (unmatched braces, missing tokens) but does not compile or type-check your code. Use Gradle/CI for semantic diagnostics.
 - **Visibility is line-scanned** — visibility is detected from the declaration line. Multi-line modifier blocks (modifier on a separate line) default to `public`.
 - **`protected` not filtered** — protected members appear in dot-completion from outside the class hierarchy.
 - **Nested lambda scope** — variables introduced by nested lambdas (e.g. inner `.map {}` inside outer `.mapSuccess {}`) are not resolved.
@@ -354,6 +357,21 @@ At ~50 chars/line × 300 lines/file ≈ 15 KB/file. At 2 000 files that is ~30 M
 - **Content dedup** — files are only re-parsed when their content actually changes (FNV-1a hash check).
 - **Completion cache** — dot-completion results are cached per type-file; cleared only when that file changes.
 - **fd `--full-path` search** — when resolving an import like `com.example.data.compat.EProductScreen`, the fd command searches for `*/com/example/data/compat/EProductScreen.(kt|java)$` — a single O(1) traversal that skips unrelated modules entirely.
+
+---
+
+## Changelog
+
+### 0.3.13
+
+- **Inlay hints** — type hints for lambda `it`, named lambda params (`{ loanId, isWustenrot -> }`), `this` in scope functions, and untyped `val`/`var` declarations
+- **Go-to-implementation** — transitive subtype lookup via BFS (`interface → all implementing classes`), cached in subtypes index
+- **Syntax diagnostics** — tree-sitter ERROR/MISSING nodes reported as `publishDiagnostics` (unmatched braces, missing tokens)
+- **Cross-file lambda resolution** — named-arg lambdas (e.g. `SheetReloadActions(loan = { loanId -> })`) resolve parameter types from constructor signatures in other files, with `rg` fallback for unindexed dependencies
+- **Instant feature availability** — all features (hover, goto-def, inlay hints) work immediately via `rg` on-demand fallback, no need to wait for background indexing
+- **Live-lines consistency** — hover, goto-def, and inlay hints read current editor text instead of stale index data after edits
+- **Race condition fix** — semaphore permit held through `spawn_blocking` in `did_change`, preventing concurrent reindex corruption
+- **Workspace symbol** — dot-qualified queries for extension functions (e.g. `StoreState.isReady`)
 
 ---
 
