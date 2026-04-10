@@ -25,7 +25,7 @@ The server indexes files in the background on startup. **Before using workspaceS
 - **workspace/symbol** — find a class/function by name across the project; supports dot-qualified queries for extension functions (e.g. `StoreState.isReady`); needs indexing complete
 - **textDocument/definition** — go to definition for class, object, fun, val, var; needs index
 - **textDocument/references** — find usages; needs index + rg fallback for out-of-index files
-- **textDocument/implementation** — find classes/objects implementing an interface or extending a class; supports transitive subtypes; needs index
+- **textDocument/implementation** — find classes/objects implementing an interface or extending a class; supports transitive subtypes via BFS; survives cache restarts; needs index
 - **textDocument/rename** — cross-file rename; needs index
 - **textDocument/codeAction** — add missing import; uses rg, works without full index
 

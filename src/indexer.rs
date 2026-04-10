@@ -447,6 +447,30 @@ impl Indexer {
             }
         }
 
+        // Rebuild subtypes index from cached symbols (same logic as index_content).
+        let class_kinds = [
+            SymbolKind::CLASS, SymbolKind::INTERFACE, SymbolKind::STRUCT,
+            SymbolKind::ENUM, SymbolKind::OBJECT,
+        ];
+        for sym in &data.symbols {
+            if !class_kinds.contains(&sym.kind) { continue; }
+            let start = sym.selection_range.start.line as usize;
+            let limit = (start + 10).min(data.lines.len());
+            let mut decl_lines: Vec<String> = Vec::new();
+            for line in &data.lines[start..limit] {
+                decl_lines.push(line.clone());
+                if line.contains('{') { break; }
+            }
+            let supers = crate::resolver::extract_supers_from_lines(&decl_lines);
+            let class_loc = Location { uri: uri.clone(), range: sym.selection_range };
+            for super_name in supers {
+                let mut locs = self.subtypes.entry(super_name).or_default();
+                if !locs.iter().any(|l| l.uri == class_loc.uri && l.range == class_loc.range) {
+                    locs.push(class_loc.clone());
+                }
+            }
+        }
+
         self.files.insert(uri_str, Arc::new(data.clone()));
     }
 
@@ -591,7 +615,10 @@ impl Indexer {
         ];
         for sym in &data.symbols {
             if !class_kinds.contains(&sym.kind) { continue; }
-            let start = sym.range.start.line as usize;
+            // Start from the selection_range (identifier line), not range.start
+            // which may include annotation lines that contain `{}` characters
+            // (e.g. @Provides({Foo::class})) and would prematurely stop collection.
+            let start = sym.selection_range.start.line as usize;
             // Collect declaration header lines until we hit the body opener `{`.
             let limit = (start + 10).min(data.lines.len());
             let mut decl_lines: Vec<String> = Vec::new();
@@ -1275,7 +1302,10 @@ impl Indexer {
             }
         }
         let data = self.files.get(loc.uri.as_str())?;
-        let sym  = data.symbols.iter().find(|s| s.name == name)?;
+        // Prefer exact match by resolved location range; fall back to name match
+        // for symbols found via rg where the range may not align exactly.
+        let sym = data.symbols.iter().find(|s| s.selection_range == loc.range)
+            .or_else(|| data.symbols.iter().find(|s| s.name == name))?;
 
         let start_line = sym.selection_range.start.line as usize;
         let sig = collect_signature(&data.lines, start_line);
@@ -4576,5 +4606,302 @@ class Bar : Beta {\n}");
             assert!(names.contains(&"Foo".to_string()), "Alpha subtype should be Foo, got {names:?}");
             assert!(!names.contains(&"Bar".to_string()), "Bar should NOT be Alpha subtype");
         };
+    }
+
+    #[test]
+    fn subtypes_sealed_class_inner_objects() {
+        // sealed class with inner subtypes — a common Kotlin MVI pattern.
+        let idx = Indexer::new();
+        idx.index_content(&uri("/StoreState.kt"), "\
+sealed class StoreState {
+    object Uninitialized : StoreState()
+    data class Ready(val data: String) : StoreState()
+    data class Error(val msg: String) : StoreState()
+}");
+        let subs = idx.subtypes.get("StoreState").expect("should have subtypes for StoreState");
+        let names: Vec<String> = subs.iter().filter_map(|l| {
+            idx.files.get(l.uri.as_str()).and_then(|f|
+                f.symbols.iter().find(|s| s.selection_range == l.range).map(|s| s.name.clone()))
+        }).collect();
+        assert!(names.contains(&"Uninitialized".to_string()), "Uninitialized should be a subtype, got {names:?}");
+        assert!(names.contains(&"Ready".to_string()), "Ready should be a subtype, got {names:?}");
+        assert!(names.contains(&"Error".to_string()), "Error should be a subtype, got {names:?}");
+        assert_eq!(subs.len(), 3, "should find exactly 3 sealed subtypes");
+    }
+
+    #[test]
+    fn subtypes_generic_supertype() {
+        // class extends a generic base: `class Concrete : Base<String>()`
+        let idx = Indexer::new();
+        idx.index_content(&uri("/ILoader.kt"), "interface ILoader<out T>");
+        idx.index_content(&uri("/BaseLoader.kt"), "abstract class BaseLoader<T> : ILoader<T>");
+        idx.index_content(&uri("/StringLoader.kt"), "class StringLoader : BaseLoader<String>()");
+
+        // Direct: BaseLoader is subtype of ILoader
+        let iloader_subs = idx.subtypes.get("ILoader").expect("ILoader subtypes");
+        assert_eq!(iloader_subs.len(), 1, "ILoader should have 1 direct subtype (BaseLoader)");
+
+        // Direct: StringLoader is subtype of BaseLoader
+        let base_subs = idx.subtypes.get("BaseLoader").expect("BaseLoader subtypes");
+        assert_eq!(base_subs.len(), 1, "BaseLoader should have 1 direct subtype (StringLoader)");
+    }
+
+    #[test]
+    fn subtypes_constructor_with_params() {
+        // Class with constructor params before supertype: `class Foo(val x: Int) : Bar(x)`
+        let idx = Indexer::new();
+        idx.index_content(&uri("/Bar.kt"), "open class Bar(val x: Int)");
+        idx.index_content(&uri("/Foo.kt"), "class Foo(val x: Int) : Bar(x) {\n    fun doStuff() {}\n}");
+
+        let subs = idx.subtypes.get("Bar").expect("Bar subtypes");
+        assert_eq!(subs.len(), 1, "Bar should have 1 subtype (Foo)");
+    }
+
+    #[test]
+    fn subtypes_sealed_generic() {
+        // Generic sealed class — subtypes use concrete type args: `StoreState<Nothing>()`
+        let idx = Indexer::new();
+        idx.index_content(&uri("/State.kt"), "\
+sealed class StoreState<out T> {
+    object Uninitialized : StoreState<Nothing>()
+    data class Ready<out T>(val data: T) : StoreState<T>()
+    data class Error(val error: Throwable) : StoreState<Nothing>()
+}");
+        let subs = idx.subtypes.get("StoreState").expect("should have subtypes for generic StoreState");
+        let names: Vec<String> = subs.iter().filter_map(|l| {
+            idx.files.get(l.uri.as_str()).and_then(|f|
+                f.symbols.iter().find(|s| s.selection_range == l.range).map(|s| s.name.clone()))
+        }).collect();
+        assert!(names.contains(&"Uninitialized".to_string()), "Uninitialized missing, got {names:?}");
+        assert!(names.contains(&"Ready".to_string()), "Ready missing, got {names:?}");
+        assert!(names.contains(&"Error".to_string()), "Error missing, got {names:?}");
+        assert_eq!(subs.len(), 3, "should find exactly 3 sealed subtypes");
+    }
+
+    #[test]
+    fn subtypes_transitive_chain_realistic() {
+        // Mimics Android interactor pattern:
+        // ISimpleLoadDataInteractor <- SimpleLoadDataInteractor (abstract generic base)
+        // SimpleLoadDataInteractor <- ConcreteInteractor1, ConcreteInteractor2, ...
+        let idx = Indexer::new();
+        idx.index_content(&uri("/ISimpleLoadDataInteractor.kt"), "\
+interface ISimpleLoadDataInteractor<out T> {
+    suspend fun loadData(): T
+}");
+        idx.index_content(&uri("/SimpleLoadDataInteractor.kt"), "\
+abstract class SimpleLoadDataInteractor<out T>(
+    private val dispatcher: String
+) : ISimpleLoadDataInteractor<T> {
+    override suspend fun loadData(): T = withContext(dispatcher) { doLoad() }
+    protected abstract suspend fun doLoad(): T
+}");
+        idx.index_content(&uri("/ContactLoader.kt"), "\
+class ContactAddressInteractor(
+    dispatcher: String
+) : SimpleLoadDataInteractor<String>(dispatcher) {
+    override suspend fun doLoad(): String = \"contacts\"
+}");
+        idx.index_content(&uri("/BalanceLoader.kt"), "\
+class BalanceInteractor(
+    dispatcher: String,
+    private val repo: String
+) : SimpleLoadDataInteractor<Int>(dispatcher) {
+    override suspend fun doLoad(): Int = 42
+}");
+
+        // Direct subtypes of ISimpleLoadDataInteractor
+        let direct = idx.subtypes.get("ISimpleLoadDataInteractor")
+            .expect("ISimpleLoadDataInteractor should have direct subtypes");
+        assert_eq!(direct.len(), 1, "should have 1 direct subtype (SimpleLoadDataInteractor)");
+
+        // Direct subtypes of SimpleLoadDataInteractor
+        let base_subs = idx.subtypes.get("SimpleLoadDataInteractor")
+            .expect("SimpleLoadDataInteractor should have subtypes");
+        assert_eq!(base_subs.len(), 2, "should have 2 direct subtypes");
+    }
+
+    #[test]
+    fn subtypes_multiline_constructor() {
+        // Multi-line constructor where supertype is on a continuation line:
+        // class Foo(
+        //     val x: Int,
+        //     val y: String
+        // ) : Bar(x) {
+        let idx = Indexer::new();
+        idx.index_content(&uri("/Base.kt"), "open class Base");
+        idx.index_content(&uri("/Sub.kt"), "\
+class Sub(
+    val x: Int,
+    val y: String
+) : Base() {
+    fun doStuff() {}
+}");
+        let subs = idx.subtypes.get("Base").expect("Base subtypes");
+        assert_eq!(subs.len(), 1, "Base should have 1 subtype (Sub)");
+    }
+
+    #[test]
+    fn subtypes_annotation_with_braces() {
+        // Annotation on the class declaration that contains `{}`
+        // should not stop header collection prematurely.
+        let idx = Indexer::new();
+        idx.index_content(&uri("/Mod.kt"), "\
+@Module
+@Provides({Foo::class, Bar::class})
+class FooModule : BaseModule() {
+    fun provide() {}
+}");
+        let subs = idx.subtypes.get("BaseModule")
+            .expect("BaseModule should have subtypes");
+        assert_eq!(subs.len(), 1, "annotation braces should not prevent supertype extraction");
+    }
+
+    #[test]
+    fn subtypes_survive_cache_roundtrip() {
+        // Simulate cache restore: index a file, save its FileData, create a
+        // fresh indexer, restore from the saved data, check subtypes populated.
+        let idx1 = Indexer::new();
+        let u = uri("/Dog.kt");
+        idx1.index_content(&u, "class Dog : IAnimal {\n    fun bark() {}\n}");
+
+        // Grab the FileData that index_content produced.
+        let data = idx1.files.get(u.as_str()).unwrap().clone();
+        assert!(idx1.subtypes.get("IAnimal").is_some(), "subtypes populated after index_content");
+
+        // Simulate loading from cache into a new indexer.
+        let idx2 = Indexer::new();
+        let entry = FileCacheEntry {
+            mtime_secs: 0,
+            content_hash: 42,
+            file_data: (*data).clone(),
+        };
+        idx2.restore_from_cache_entry(&u, &entry);
+
+        // subtypes should be populated from cache restore.
+        let subs = idx2.subtypes.get("IAnimal")
+            .expect("subtypes should be populated after cache restore");
+        assert_eq!(subs.len(), 1, "Dog should be a subtype of IAnimal after cache restore");
+    }
+
+    // ── hover on val bindings ────────────────────────────────────────────────
+
+    #[test]
+    fn hover_val_binding_constructor_param() {
+        // Constructor parameter: `private val repo: IGoldConversionRepository`
+        let idx = Indexer::new();
+        let u = uri("/Foo.kt");
+        idx.index_content(&u, "\
+class Foo(
+    private val repo: IGoldConversionRepository
+) {
+    fun doStuff() {}
+}");
+        // 1. repo should be captured as a symbol
+        let data = idx.files.get(u.as_str()).unwrap();
+        let repo_sym = data.symbols.iter().find(|s| s.name == "repo");
+        assert!(repo_sym.is_some(), "repo should be in symbols; got: {:?}",
+            data.symbols.iter().map(|s| &s.name).collect::<Vec<_>>());
+
+        // 2. find_definition_qualified should find it
+        let locs = idx.find_definition_qualified("repo", None, &u);
+        assert!(!locs.is_empty(), "repo should be found via find_definition_qualified");
+
+        // 3. hover_info_at_location should return something
+        let hover = idx.hover_info_at_location(locs.first().unwrap(), "repo");
+        assert!(hover.is_some(), "hover on val repo should produce result");
+        let md = hover.unwrap();
+        assert!(md.contains("repo"), "hover should mention 'repo', got: {md}");
+    }
+
+    // ── real-world patterns from Moneta/android ──────────────────────────────
+
+    #[test]
+    fn real_sealed_interface_store_state() {
+        let idx = Indexer::new();
+        idx.index_content(&uri("/StoreState.kt"), "\
+package cz.moneta.smartbanka.common.mvi.store
+
+sealed interface StoreState<out S> : BusinessState {
+  data object Uninitialized : StoreState<Nothing>
+  data class Ready<S>(val state: S) : StoreState<S>
+
+  fun readyOrNull(): S? {
+    return when (this) {
+      is Ready -> this.state
+      Uninitialized -> null
+    }
+  }
+}");
+        let subs = idx.subtypes.get("StoreState")
+            .expect("StoreState should have subtypes");
+        let names: Vec<String> = subs.iter().filter_map(|l| {
+            idx.files.get(l.uri.as_str()).and_then(|f|
+                f.symbols.iter().find(|s| s.selection_range == l.range).map(|s| s.name.clone()))
+        }).collect();
+        assert!(names.contains(&"Uninitialized".to_string()), "Uninitialized missing: {names:?}");
+        assert!(names.contains(&"Ready".to_string()), "Ready missing: {names:?}");
+        assert_eq!(subs.len(), 2);
+    }
+
+    #[test]
+    fn real_isimpleloaddatainteractor_chain() {
+        let idx = Indexer::new();
+        idx.index_content(&uri("/IInteractor.kt"), "\
+package cz.moneta.smartbanka.shared_logic.product
+interface IInteractor<Output>");
+        idx.index_content(&uri("/ISimpleLoadDataInteractor.kt"), "\
+package cz.moneta.smartbanka.shared_logic.product
+interface ISimpleLoadDataInteractor<Output> : IInteractor<Output> {
+  suspend fun loadData(): Output
+}");
+        idx.index_content(&uri("/ContactAddressInteractor.kt"), "\
+package cz.moneta.smartbanka.feature.gold_conversion.model.goldcard
+internal class ContactAddressInteractor @Inject constructor(
+  private val repo: IGoldConversionRepository,
+) : ISimpleLoadDataInteractor<PersonalAddress> {
+  override suspend fun loadData(): PersonalAddress =
+    requireNotNull(repo.contactAddressSetup().contactAddress)
+}");
+        idx.index_content(&uri("/PermanentAddressInteractor.kt"), "\
+package cz.moneta.smartbanka.feature.gold_conversion.model.goldcard
+internal class PermanentAddressInteractor @Inject constructor(
+  private val repo: IGoldConversionRepository,
+) : ISimpleLoadDataInteractor<PersonalAddress> {
+  override suspend fun loadData(): PersonalAddress =
+    requireNotNull(repo.permanentAddressSetup().permanentAddress)
+}");
+
+        // Direct subtypes of ISimpleLoadDataInteractor
+        let subs = idx.subtypes.get("ISimpleLoadDataInteractor")
+            .expect("ISimpleLoadDataInteractor should have subtypes");
+        assert_eq!(subs.len(), 2, "should find both interactors");
+
+        // ISimpleLoadDataInteractor itself is a subtype of IInteractor
+        let iinteractor_subs = idx.subtypes.get("IInteractor")
+            .expect("IInteractor should have subtypes");
+        assert_eq!(iinteractor_subs.len(), 1, "ISimpleLoadDataInteractor is subtype of IInteractor");
+    }
+
+    #[test]
+    fn real_hover_constructor_val_binding() {
+        // From report: hover on `repo` in constructor param returns nothing
+        let idx = Indexer::new();
+        let u = uri("/ContactAddressInteractor.kt");
+        idx.index_content(&u, "\
+package cz.moneta.smartbanka.feature.gold_conversion.model.goldcard
+internal class ContactAddressInteractor @Inject constructor(
+  private val repo: IGoldConversionRepository,
+) : ISimpleLoadDataInteractor<PersonalAddress> {
+  override suspend fun loadData(): PersonalAddress =
+    requireNotNull(repo.contactAddressSetup().contactAddress)
+}");
+        // hover on `repo` (line 2, col ~14)
+        let locs = idx.find_definition_qualified("repo", None, &u);
+        assert!(!locs.is_empty(), "repo should be found");
+        let hover = idx.hover_info_at_location(locs.first().unwrap(), "repo");
+        assert!(hover.is_some(), "hover on val repo should work");
+        let md = hover.unwrap();
+        assert!(md.contains("repo"), "hover should mention repo: {md}");
+        assert!(md.contains("IGoldConversionRepository"), "hover should show type: {md}");
     }
 }

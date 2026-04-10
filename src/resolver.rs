@@ -965,7 +965,6 @@ pub(crate) fn extract_supers_from_lines(lines: &[String]) -> Vec<String> {
             || t.starts_with('*')
             || t.starts_with("import ")
             || t.starts_with("package ")
-            || t.starts_with('@')
         {
             continue;
         }
@@ -2280,5 +2279,44 @@ data class State(
         assert!(!names.contains(&"trim"),   "domain type should NOT have trim()");
         assert!(!names.contains(&"map"),    "domain type should NOT have map()");
         assert!(!names.contains(&"filter"), "domain type should NOT have filter()");
+    }
+
+    // ── extract_supers_from_lines – annotation handling ─────────────────────
+
+    #[test]
+    fn extract_supers_annotation_same_line() {
+        let lines = vec!["@Suppress(\"unused\") class Foo : Bar {".to_string()];
+        let supers = extract_supers_from_lines(&lines);
+        assert_eq!(supers, vec!["Bar"]);
+    }
+
+    #[test]
+    fn extract_supers_annotation_separate_line() {
+        let lines = vec![
+            "@Module".to_string(),
+            "class Foo : Bar, Baz {".to_string(),
+        ];
+        let supers = extract_supers_from_lines(&lines);
+        assert!(supers.contains(&"Bar".to_string()), "got {supers:?}");
+        assert!(supers.contains(&"Baz".to_string()), "got {supers:?}");
+    }
+
+    #[test]
+    fn extract_supers_field_inject_annotation() {
+        // @field:Inject should not produce false supers
+        let lines = vec!["@field:Inject".to_string()];
+        let supers = extract_supers_from_lines(&lines);
+        assert!(supers.is_empty(), "annotation-only line should produce no supers, got {supers:?}");
+    }
+
+    #[test]
+    fn extract_supers_multiple_annotations() {
+        let lines = vec![
+            "@Module".to_string(),
+            "@Provides".to_string(),
+            "class FooModule : BaseModule() {".to_string(),
+        ];
+        let supers = extract_supers_from_lines(&lines);
+        assert_eq!(supers, vec!["BaseModule"]);
     }
 }
