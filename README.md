@@ -109,7 +109,7 @@ Go-to-definition resolves symbols in this order:
 
 ## Limitations
 
-- **No type inference for generic lambda parameters** — `list.map { item -> item.field }` cannot resolve `item`'s type from generic parameters without full type inference. Untyped lambda parameters that appear in the same file are found; cross-file inference is not. Use explicit type annotations (`list.map { item: MyType -> … }`) as a workaround.
+- **No type inference for generic lambda parameters** — `list.map { item -> item.field }` cannot resolve `item`'s type from generic parameters without full type inference. Named-arg and trailing lambdas with known function signatures are resolved cross-file (with `rg` fallback if the dependency isn't indexed yet). For unresolvable cases, use explicit type annotations (`list.map { item: MyType -> … }`).
 - **No incremental re-index** — each `did_change` re-parses the whole file after a 120 ms debounce. Very large files (5000+ lines) may feel slightly delayed.
 - **No diagnostics / type checking** — kotlin-lsp is purely structural; it doesn't compile or type-check your code.
 - **Visibility is line-scanned** — visibility is detected from the declaration line. Multi-line modifier blocks (modifier on a separate line) default to `public`.
@@ -349,7 +349,7 @@ At ~50 chars/line × 300 lines/file ≈ 15 KB/file. At 2 000 files that is ~30 M
 
 ## Performance notes
 
-- **Startup** — the server starts instantly and indexes in the background. The editor is usable before indexing completes.
+- **Startup** — the server starts instantly and indexes in the background. All features (hover, go-to-definition, inlay hints) work immediately via `rg` fallback — no need to wait for indexing to finish.
 - **CPU** — a 120 ms debounce prevents re-parsing on every keystroke. A semaphore caps concurrent parse workers at 8 during workspace scan.
 - **Content dedup** — files are only re-parsed when their content actually changes (FNV-1a hash check).
 - **Completion cache** — dot-completion results are cached per type-file; cleared only when that file changes.

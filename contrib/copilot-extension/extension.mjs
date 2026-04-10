@@ -39,7 +39,7 @@ function denyMessage() {
   return [
     "Blocked: Kotlin/Java symbol lookup must use Kotlin LSP first.",
     `Read \`${README_PATH}\` first.`,
-    "Then call `kotlin_lsp_status` and use Kotlin LSP symbol/navigation tools before grep/glob/bash search.",
+    "Use Kotlin LSP symbol/navigation tools before grep/glob/bash search.",
     "Use grep/rg only for free-text search, extension functions, generated code, or Java interop cases where LSP cannot help.",
   ].join(" ");
 }
@@ -217,7 +217,6 @@ const session = await joinSession({
       return {
         additionalContext: [
           "Kotlin/Java code navigation must use Kotlin LSP first.",
-          "Call `kotlin_lsp_status` before symbol lookup.",
           "Use grep/rg only for free-text, generated code, extension functions, or Java interop fallback.",
           "Use `lsp goToImplementation` for interface implementors (transitive). Only use `kotlin_find_subtypes` if LSP returns empty.",
           "For extension functions, use `lsp workspaceSymbol` with dot-qualified query (e.g. 'StoreState.isReady').",
