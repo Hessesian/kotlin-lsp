@@ -275,13 +275,18 @@ impl LanguageServer for Backend {
             let sem = idx.parse_sem();
             let handle = tokio::spawn(async move {
                 tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
-                let _permit = sem.acquire_owned().await;
+                let permit = sem.acquire_owned().await;
                 let uri2 = uri.clone();
+                // Move the permit INTO spawn_blocking so it's held for the
+                // entire index_content call.  If this async task is aborted
+                // (debounce cancelled), spawn_blocking still runs to
+                // completion holding the permit — preventing a concurrent
+                // reindex for the same file from corrupting the shared maps.
                 let result = tokio::task::spawn_blocking(move || {
-                    idx.index_content(&uri, &text)
+                    let data = idx.index_content(&uri, &text);
+                    drop(permit);
+                    data
                 }).await;
-                // Drop semaphore permit before async notifications.
-                drop(_permit);
 
                 if let Ok(Some(data)) = result {
                     let diags = syntax_diagnostics(&data.syntax_errors);
