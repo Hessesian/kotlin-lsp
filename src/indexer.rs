@@ -886,7 +886,7 @@ impl Indexer {
 
     /// Cross-file signature lookup: current file → all indexed files → rg fallback.
     pub fn find_fun_signature(&self, uri: &Url, name: &str) -> String {
-        find_fun_signature(name, self, uri).unwrap_or_default()
+        find_fun_signature_full(name, self, uri).unwrap_or_default()
     }
 
     /// Signature lookup with optional dot-receiver context.
@@ -898,7 +898,7 @@ impl Indexer {
             // Infer the receiver's type and resolve to its file.
             if let Some(type_name) = crate::resolver::infer_variable_type_raw(self, recv, uri) {
                 let outer = type_name.split('.').next().unwrap_or(&type_name);
-                let locs = crate::resolver::resolve_symbol_no_rg(self, outer, uri);
+                let locs = crate::resolver::resolve_symbol(self, outer, None, uri);
                 for loc in &locs {
                     if let Some(data) = self.files.get(loc.uri.as_str()) {
                         if let Some(sig) = collect_fun_params_text(name, loc.uri.as_str(), self) {
@@ -918,7 +918,7 @@ impl Indexer {
                 }
             }
         }
-        find_fun_signature(name, self, uri).unwrap_or_default()
+        find_fun_signature_full(name, self, uri).unwrap_or_default()
     }
 
     /// Scan all in-memory indexed files for whole-word occurrences of `name`.
@@ -2254,12 +2254,12 @@ fn lambda_receiver_type_named_arg_ml(
             if let Some((_sig, param_type)) = found {
                 return lambda_type_nth_input(&param_type, lambda_param_pos);
             }
-            find_fun_signature(fn_name, idx, uri)
+            find_fun_signature_full(fn_name, idx, uri)
         } else {
-            find_fun_signature(fn_name, idx, uri)
+            find_fun_signature_full(fn_name, idx, uri)
         }
     } else {
-        find_fun_signature(fn_name, idx, uri)
+        find_fun_signature_full(fn_name, idx, uri)
     }?;
 
     let param_type = find_named_param_type_in_sig(&sig, named_arg)?;
@@ -2510,7 +2510,7 @@ fn inline_lambda_param_type(before_brace: &str, idx: &Indexer, uri: &Url) -> Opt
 
     if fn_name.is_empty() { return None; }
 
-    let sig = find_fun_signature(&fn_name, idx, uri)?;
+    let sig = find_fun_signature_full(&fn_name, idx, uri)?;
     let param_type = nth_fun_param_type_str(&sig, comma_count)?;
     lambda_type_first_input(&param_type)
 }
@@ -2521,7 +2521,7 @@ fn inline_lambda_param_type(before_brace: &str, idx: &Indexer, uri: &Url) -> Opt
 /// Example: `fun loadProduct(key: K, flow: Flow<T>, map: (ResultState<T>) -> Model)`
 /// returns `Some("ResultState")` so that `it` in `loadProduct(...) { it }` resolves.
 fn fun_trailing_lambda_it_type(fn_name: &str, idx: &Indexer, uri: &Url) -> Option<String> {
-    let sig = find_fun_signature(fn_name, idx, uri)?;
+    let sig = find_fun_signature_full(fn_name, idx, uri)?;
     let last_type = last_fun_param_type_str(&sig)?;
     lambda_type_first_input(&last_type)
 }
