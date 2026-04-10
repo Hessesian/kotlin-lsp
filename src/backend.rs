@@ -105,6 +105,7 @@ impl LanguageServer for Backend {
                 }),
                 hover_provider:          Some(HoverProviderCapability::Simple(true)),
                 definition_provider:     Some(OneOf::Left(true)),
+                implementation_provider: Some(ImplementationProviderCapability::Simple(true)),
                 references_provider:     Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 inlay_hint_provider: Some(OneOf::Left(true)),
@@ -182,6 +183,7 @@ impl LanguageServer for Backend {
             let client = self.client.clone();
             idx.files.clear();
             idx.definitions.clear();
+            idx.subtypes.clear();
             tokio::spawn(async move {
                 idx.index_workspace_full(&root, client).await;
             });
@@ -205,6 +207,7 @@ impl LanguageServer for Backend {
             *self.indexer.workspace_root.write().unwrap() = Some(new_root.clone());
             self.indexer.files.clear();
             self.indexer.definitions.clear();
+            self.indexer.subtypes.clear();
             let idx    = Arc::clone(&self.indexer);
             let client = self.client.clone();
             let new_root2 = new_root.clone();
@@ -331,6 +334,60 @@ impl LanguageServer for Backend {
         }
 
         let locs = self.indexer.find_definition_qualified(&word, qualifier.as_deref(), uri);
+        Ok(match locs.len() {
+            0 => None,
+            1 => Some(GotoDefinitionResponse::Scalar(locs.into_iter().next().unwrap())),
+            _ => Some(GotoDefinitionResponse::Array(locs)),
+        })
+    }
+
+    // ── textDocument/implementation ──────────────────────────────────────────
+
+    async fn goto_implementation(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> Result<Option<GotoDefinitionResponse>> {
+        let pp       = params.text_document_position_params;
+        let uri      = &pp.text_document.uri;
+        let position = pp.position;
+
+        let Some((word, _qualifier)) = self.indexer.word_and_qualifier_at(uri, position) else {
+            return Ok(None);
+        };
+
+        // Direct subtypes from the index.
+        let mut locs: Vec<Location> = self.indexer.subtypes
+            .get(&word)
+            .map(|v| v.clone())
+            .unwrap_or_default();
+
+        // Also collect transitive subtypes (BFS, depth-limited).
+        let mut queue: Vec<String> = locs.iter()
+            .filter_map(|loc| {
+                let data = self.indexer.files.get(loc.uri.as_str())?;
+                data.symbols.iter()
+                    .find(|s| s.selection_range == loc.range)
+                    .map(|s| s.name.clone())
+            })
+            .collect();
+        let mut visited = vec![word.clone()];
+        while let Some(name) = queue.pop() {
+            if visited.contains(&name) { continue; }
+            visited.push(name.clone());
+            if let Some(sub_locs) = self.indexer.subtypes.get(&name) {
+                for loc in sub_locs.iter() {
+                    if !locs.iter().any(|l| l.uri == loc.uri && l.range == loc.range) {
+                        locs.push(loc.clone());
+                        if let Some(data) = self.indexer.files.get(loc.uri.as_str()) {
+                            if let Some(sym) = data.symbols.iter().find(|s| s.selection_range == loc.range) {
+                                queue.push(sym.name.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(match locs.len() {
             0 => None,
             1 => Some(GotoDefinitionResponse::Scalar(locs.into_iter().next().unwrap())),
@@ -611,6 +668,14 @@ impl LanguageServer for Backend {
         let query = params.query.to_lowercase();
         let mut results: Vec<SymbolInformation> = Vec::new();
 
+        // For dot-qualified queries like "StoreState.isReady", split into
+        // receiver qualifier and function name to match extension functions.
+        let (query_qualifier, query_name) = if let Some(dot) = query.rfind('.') {
+            (Some(&query[..dot]), &query[dot + 1..])
+        } else {
+            (None, query.as_str())
+        };
+
         for entry in self.indexer.files.iter() {
             let uri_str = entry.key();
             let file_data = entry.value();
@@ -622,8 +687,17 @@ impl LanguageServer for Backend {
                 },
             };
             for sym in &file_data.symbols {
-                let matches = query.is_empty()
-                    || sym.name.to_lowercase().contains(&query);
+                let name_lower = sym.name.to_lowercase();
+                let matches = if query.is_empty() {
+                    true
+                } else if let Some(qualifier) = query_qualifier {
+                    // Dot-qualified: name must match AND detail must contain
+                    // the receiver type (e.g. "fun StoreState.isReady()")
+                    name_lower.contains(query_name)
+                        && sym.detail.to_lowercase().contains(qualifier)
+                } else {
+                    name_lower.contains(&query)
+                };
                 if !matches {
                     continue;
                 }

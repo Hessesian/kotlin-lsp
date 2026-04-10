@@ -150,6 +150,9 @@ pub struct Indexer {
     /// Used by `completions()` so dot-detection always sees the latest text.
     /// Arc-wrapped so `.clone()` is a cheap refcount bump, not a full Vec copy.
     pub(crate) live_lines: DashMap<String, Arc<Vec<String>>>,
+    /// Reverse supertype index: supertype name → locations of implementing/extending classes.
+    /// Populated during `index_content()` for fast `goToImplementation` lookups.
+    pub(crate) subtypes: DashMap<String, Vec<Location>>,
     /// Cached sorted list of all project class/symbol names for bare-word completion.
     /// Rebuilt after each file index; avoids iterating `definitions` on every keystroke.
     pub(crate) bare_name_cache: std::sync::RwLock<Vec<String>>,
@@ -179,6 +182,7 @@ impl Indexer {
             parse_count:    AtomicU64::new(0),
             completion_cache: DashMap::new(),
             live_lines:     DashMap::new(),
+            subtypes:       DashMap::new(),
             bare_name_cache: std::sync::RwLock::new(Vec::new()),
             last_completion: std::sync::Mutex::new(None),
         }
@@ -530,6 +534,10 @@ impl Indexer {
                     uris.retain(|u| u != &uri_str);
                 }
             }
+            // Remove stale subtype entries for this URI.
+            for mut entry in self.subtypes.iter_mut() {
+                entry.value_mut().retain(|l| l.uri.as_str() != uri.as_str());
+            }
         }
 
         // ── Register fresh definitions ────────────────────────────────────────
@@ -571,6 +579,33 @@ impl Indexer {
             let mut uris = self.packages.entry(pkg.clone()).or_default();
             if !uris.contains(&uri_str) {
                 uris.push(uri_str.clone());
+            }
+        }
+
+        // ── Subtypes index: supertype name → implementing class locations ────
+        // For each class/interface/object symbol, extract its supertypes from
+        // the declaration header lines and register the reverse mapping.
+        let class_kinds = [
+            SymbolKind::CLASS, SymbolKind::INTERFACE, SymbolKind::STRUCT,
+            SymbolKind::ENUM, SymbolKind::OBJECT,
+        ];
+        for sym in &data.symbols {
+            if !class_kinds.contains(&sym.kind) { continue; }
+            let start = sym.range.start.line as usize;
+            // Collect declaration header lines until we hit the body opener `{`.
+            let limit = (start + 10).min(data.lines.len());
+            let mut decl_lines: Vec<String> = Vec::new();
+            for line in &data.lines[start..limit] {
+                decl_lines.push(line.clone());
+                if line.contains('{') { break; }
+            }
+            let supers = crate::resolver::extract_supers_from_lines(&decl_lines);
+            let class_loc = Location { uri: uri.clone(), range: sym.selection_range };
+            for super_name in supers {
+                let mut locs = self.subtypes.entry(super_name).or_default();
+                if !locs.iter().any(|l| l.uri == class_loc.uri && l.range == class_loc.range) {
+                    locs.push(class_loc.clone());
+                }
             }
         }
 
@@ -4472,5 +4507,74 @@ class Account(val name: String)"#;
             "must NOT include VisitBranchViewModel; got: {hit_files:?}");
         assert!(!hit_files.contains("VisitBranchContract.kt"),
             "must NOT include VisitBranchContract; got: {hit_files:?}");
+    }
+
+    // ── subtypes index (goToImplementation) ──────────────────────────────────
+
+    #[test]
+    fn subtypes_index_basic() {
+        let idx = Indexer::new();
+        let iface_uri = uri("/IAnimal.kt");
+        idx.index_content(&iface_uri, "interface IAnimal {\n    fun speak(): String\n}");
+        let dog_uri = uri("/Dog.kt");
+        idx.index_content(&dog_uri, "class Dog : IAnimal {\n    override fun speak() = \"woof\"\n}");
+        let cat_uri = uri("/Cat.kt");
+        idx.index_content(&cat_uri, "class Cat : IAnimal {\n    override fun speak() = \"meow\"\n}");
+
+        let subs = idx.subtypes.get("IAnimal").expect("should have subtypes for IAnimal");
+        let sub_uris: Vec<_> = subs.iter().map(|l| l.uri.to_string()).collect();
+        assert!(sub_uris.contains(&dog_uri.to_string()), "Dog should be a subtype");
+        assert!(sub_uris.contains(&cat_uri.to_string()), "Cat should be a subtype");
+        assert_eq!(subs.len(), 2);
+    }
+
+    #[test]
+    fn subtypes_index_multiple_supertypes() {
+        let idx = Indexer::new();
+        idx.index_content(&uri("/A.kt"), "interface Flyable");
+        idx.index_content(&uri("/B.kt"), "interface Swimmable");
+        idx.index_content(&uri("/Duck.kt"), "class Duck : Flyable, Swimmable {\n}");
+
+        let fly_subs = idx.subtypes.get("Flyable").expect("Flyable subtypes");
+        assert_eq!(fly_subs.len(), 1);
+        let swim_subs = idx.subtypes.get("Swimmable").expect("Swimmable subtypes");
+        assert_eq!(swim_subs.len(), 1);
+    }
+
+    #[test]
+    fn subtypes_index_reindex_cleans_stale() {
+        let idx = Indexer::new();
+        let u = uri("/Dog.kt");
+        idx.index_content(&u, "class Dog : IAnimal {}");
+        assert!(idx.subtypes.get("IAnimal").is_some());
+
+        // Re-index same file without supertype — stale entry should be cleaned.
+        idx.index_content(&u, "class Dog {}");
+        let subs = idx.subtypes.get("IAnimal");
+        let empty = subs.map(|s| s.is_empty()).unwrap_or(true);
+        assert!(empty, "stale subtype entry should be removed on re-index");
+    }
+
+    #[test]
+    fn subtypes_no_false_positive_across_classes() {
+        // File with two classes — each should only register its own supertypes.
+        let idx = Indexer::new();
+        idx.index_content(&uri("/multi.kt"), "\
+class Foo : Alpha {\n}\n\
+class Bar : Beta {\n}");
+
+        let alpha_subs = idx.subtypes.get("Alpha").map(|s| s.len()).unwrap_or(0);
+        let beta_subs = idx.subtypes.get("Beta").map(|s| s.len()).unwrap_or(0);
+        assert_eq!(alpha_subs, 1, "Alpha should have exactly 1 subtype (Foo)");
+        assert_eq!(beta_subs, 1, "Beta should have exactly 1 subtype (Bar)");
+        // Foo should NOT appear as subtype of Beta, and vice versa.
+        if let Some(alpha) = idx.subtypes.get("Alpha") {
+            let names: Vec<_> = alpha.iter().filter_map(|l| {
+                idx.files.get(l.uri.as_str()).and_then(|f|
+                    f.symbols.iter().find(|s| s.selection_range == l.range).map(|s| s.name.clone()))
+            }).collect();
+            assert!(names.contains(&"Foo".to_string()), "Alpha subtype should be Foo, got {names:?}");
+            assert!(!names.contains(&"Bar".to_string()), "Bar should NOT be Alpha subtype");
+        };
     }
 }
