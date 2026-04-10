@@ -29,7 +29,7 @@ tree-sitter-java = "0.21"
 # Pin to the version that declared tree-sitter compat with 0.22.
 # If 0.3 fails to resolve, try: git = "https://github.com/fwcd/tree-sitter-kotlin"
 tree-sitter-kotlin = "0.3"
-tree-sitter-swift-bundled = { path = "tree-sitter-swift" }
+tree-sitter-swift-bundled = "0.1.0"
 
 # Concurrent index storage (no Mutex needed)
 dashmap = "5"
