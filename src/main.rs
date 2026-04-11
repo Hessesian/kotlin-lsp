@@ -31,15 +31,11 @@ async fn main() {
                 // Build a headless client stub: use tower_lsp::Client::new is internal,
                 // so call indexer.index_workspace_full with a dummy client via channel.
                 let idx = std::sync::Arc::new(indexer::Indexer::new());
-                // Create a real tokio runtime handle and a simple Client via LspService is heavy.
-                // Instead, call the blocking save_cache_to_disk after indexing to persist.
-                let rt = tokio::runtime::Runtime::new().unwrap();
                 let root = pb.canonicalize().unwrap_or(pb);
                 println!("Indexing workspace: {}", root.display());
                 let root_clone = root.clone();
-                rt.block_on(async move {
-                    idx.index_workspace_full(&root_clone, None).await;
-                });
+                // Already inside #[tokio::main] runtime — await directly.
+                idx.index_workspace_full(&root_clone, None).await;
                 println!("Indexing complete: {}", root.display());
                 std::process::exit(0);
             }
