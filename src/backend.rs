@@ -202,10 +202,29 @@ impl LanguageServer for Backend {
                 return Ok(None);
             }
             // Swap root and wipe stale index data.
+            let prev_root = self.indexer.workspace_root.read().unwrap().clone();
             *self.indexer.workspace_root.write().unwrap() = Some(new_root.clone());
+            // Increment generation so in-flight background tasks can detect staleness.
+            self.indexer.root_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // Clear in-memory maps.
             self.indexer.files.clear();
             self.indexer.definitions.clear();
             self.indexer.subtypes.clear();
+            // Remove on-disk cache for the new root to avoid using stale or incompatible cache.
+            // workspace_cache_path returns path to index.bin under XDG cache — remove its parent dir.
+            let cache_path = crate::indexer::workspace_cache_path(&new_root);
+            if let Some(cache_dir) = cache_path.parent() {
+                let _ = std::fs::remove_dir_all(cache_dir);
+                log::info!("Removed workspace cache directory: {}", cache_dir.display());
+            }
+            // Optionally remove previous root cache as well to free space.
+            if let Some(prev) = prev_root {
+                let prev_cache = crate::indexer::workspace_cache_path(&prev);
+                if let Some(prev_dir) = prev_cache.parent() {
+                    let _ = std::fs::remove_dir_all(prev_dir);
+                    log::info!("Removed previous workspace cache directory: {}", prev_dir.display());
+                }
+            }
             let idx    = Arc::clone(&self.indexer);
             let client = self.client.clone();
             let new_root2 = new_root.clone();
@@ -223,6 +242,37 @@ impl LanguageServer for Backend {
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri  = params.text_document.uri;
         let text = params.text_document.text;
+
+        // If workspace_root not set, infer from opened file: look for common project markers
+        // (.git, build.gradle, settings.gradle, build.gradle.kts, Cargo.toml, Package.swift) walking up.
+        if self.indexer.workspace_root.read().unwrap().is_none() {
+            if let Ok(path) = uri.to_file_path() {
+                let mut cur = path.parent().map(|p| p.to_path_buf());
+                let mut found: Option<std::path::PathBuf> = None;
+                while let Some(ref dir) = cur {
+                    let markers = [
+                        ".git", "build.gradle", "settings.gradle", "build.gradle.kts",
+                        "Cargo.toml", "Package.swift", "pom.xml", "settings.gradle.kts",
+                    ];
+                    if markers.iter().any(|m| dir.join(m).exists()) {
+                        found = Some(dir.clone());
+                        break;
+                    }
+                    cur = dir.parent().map(|p| p.to_path_buf());
+                }
+                let chosen = found.or_else(|| path.parent().map(|p| p.to_path_buf()));
+                if let Some(root) = chosen {
+                    *self.indexer.workspace_root.write().unwrap() = Some(root.clone());
+                    let idx = Arc::clone(&self.indexer);
+                    let client = self.client.clone();
+                    // Start background indexing with default eager cap.
+                    tokio::spawn(async move {
+                        idx.index_workspace(&root, client).await;
+                    });
+                }
+            }
+        }
+
         let idx  = Arc::clone(&self.indexer);
         let sem  = idx.parse_sem();
         let client = self.client.clone();

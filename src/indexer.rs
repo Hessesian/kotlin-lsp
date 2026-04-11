@@ -84,7 +84,7 @@ struct IndexCache {
 }
 
 /// Returns the cache file path for the given workspace root.
-fn workspace_cache_path(root: &Path) -> PathBuf {
+pub(crate) fn workspace_cache_path(root: &Path) -> PathBuf {
     let root_hash = hash_str(&root.to_string_lossy());
     let cache_base = std::env::var("XDG_CACHE_HOME")
         .map(PathBuf::from)
@@ -380,9 +380,12 @@ impl Indexer {
         for h in handles { h.await.ok(); }
 
         // ── Persist updated index to disk ────────────────────────────────────
-        // Spawn as a blocking task so we don't hold up the progress End notification.
+        // Run as a blocking task and WAIT for completion so the client receives
+        // the End progress notification only after the cache is fully written.
         let idx_for_save = Arc::clone(&self);
-        tokio::task::spawn_blocking(move || idx_for_save.save_cache_to_disk());
+        let save_handle = tokio::task::spawn_blocking(move || idx_for_save.save_cache_to_disk());
+        // Await save completion; ignore errors but ensure task finished.
+        let _ = save_handle.await;
 
         // ── LSP progress: end ────────────────────────────────────────────────
         let sym_count = self.definitions.len();
