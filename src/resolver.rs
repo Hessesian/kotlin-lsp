@@ -97,8 +97,10 @@ fn complete_dot(idx: &Indexer, receiver: &str, from_uri: &Url, snippets: bool) -
     // Sort: functions/methods first, then fields/vars, then everything else.
     items.sort_by_key(|i| kind_sort_rank(i.kind));
 
-    // Append stdlib extensions filtered to the receiver type.
-    items.extend(crate::stdlib::dot_completions_for(&type_name, snippets));
+    // Append stdlib extensions filtered to the receiver type. Only add Kotlin stdlib
+    // when the current file is a Kotlin file; add Swift-specific snippets for Swift.
+    let from_path = from_uri.path();
+    items.extend(crate::stdlib::dot_completions_for_lang(from_path, &type_name, snippets));
     items
 }
 

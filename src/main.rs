@@ -5,6 +5,7 @@ mod parser;
 mod queries;
 mod resolver;
 mod stdlib;
+mod stdlib_tail;
 mod types;
 
 use tower_lsp::{LspService, Server};
