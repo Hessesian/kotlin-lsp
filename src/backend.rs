@@ -466,9 +466,10 @@ impl LanguageServer for Backend {
         // If the in-memory definitions index is empty (indexing in progress),
         // use rg fallback immediately for low-latency results.
         if self.indexer.definitions.is_empty() {
-            let root_guard = self.indexer.workspace_root.read().unwrap();
+            let root_opt = { self.indexer.workspace_root.read().unwrap().clone() };
+            let name_clone = word.clone();
             let rg_locs = tokio::task::spawn_blocking(move || {
-                crate::indexer::rg_find_definition(&word, root_guard.as_deref())
+                crate::indexer::rg_find_definition(&name_clone, root_opt.as_deref())
             }).await.unwrap_or_default();
             if !rg_locs.is_empty() {
                 return Ok(match rg_locs.len() {
