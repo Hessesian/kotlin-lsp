@@ -425,10 +425,11 @@ impl Indexer {
                     message: Some(format!(
                         "Indexed {} files, {} symbols{}{}",
                         self.files.len(), sym_count, cache_note,
-                    if truncated { format!(" (+{} lazy)", total - indexed_count) } else { String::new() }
-                )),
-            })),
-        }).await;
+                        if truncated { format!(" (+{} lazy)", total - indexed_count) } else { String::new() }
+                    )),
+                })),
+            }).await;
+        }
 
         // ── Status file: ready ───────────────────────────────────────────────
         let elapsed = index_start.elapsed().as_secs_f64();
