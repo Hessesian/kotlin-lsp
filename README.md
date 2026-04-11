@@ -55,7 +55,7 @@ More editors: [Neovim, VS Code, Zed →](docs/editors.md)
 | **Signature help** | Active parameter highlighting |
 | **Folding** | Brace regions + consecutive comment blocks |
 
-All features work immediately — `rg` fallback handles symbols before indexing finishes.
+All features work immediately — `rg` fallback handles symbols before indexing finishes (applies to Kotlin, Java and Swift).
 
 [Full feature details →](docs/features.md)
 
