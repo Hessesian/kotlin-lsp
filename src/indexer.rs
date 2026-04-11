@@ -200,9 +200,15 @@ impl Indexer {
             packages:       DashMap::new(),
             workspace_root: RwLock::new(None),
             content_hashes: DashMap::new(),
-            // Allow at most 4 concurrent parse workers; workspace batch indexing
-            // uses a dedicated await loop so this mainly guards did_change bursts.
-            parse_sem:      Arc::new(tokio::sync::Semaphore::new(4)),
+            // Allow configurable concurrent parse workers. Default to number of CPU cores.
+            // Use env KOTLIN_LSP_PARSE_WORKERS to override.
+            parse_sem: {
+                let default = num_cpus::get().max(1);
+                let configured = std::env::var("KOTLIN_LSP_PARSE_WORKERS").ok()
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .unwrap_or(default);
+                Arc::new(tokio::sync::Semaphore::new(configured))
+            },
             parse_count:    AtomicU64::new(0),
             completion_cache: DashMap::new(),
             live_lines:     DashMap::new(),
