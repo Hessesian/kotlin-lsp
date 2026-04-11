@@ -440,8 +440,9 @@ pub(crate) fn extract_detail(lines: &[String], start_line: u32, end_line: u32) -
     };
     // Strip trailing `)` then `: ReturnType` to keep it compact, or keep if short.
     // Cap at 120 chars.
-    if trimmed.len() > 120 {
-        format!("{}…", &trimmed[..119])
+    if trimmed.chars().count() > 120 {
+        let s: String = trimmed.chars().take(119).collect();
+        format!("{}…", s)
     } else {
         trimmed
     }
