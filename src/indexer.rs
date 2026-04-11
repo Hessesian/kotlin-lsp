@@ -24,8 +24,13 @@ mod progress {
 use crate::parser;
 use crate::types::{FileData, SymbolEntry};
 
-/// File extensions recognized by rg/fd search and file watchers.
+/// Supported file extensions for indexing and rg/fd searches.
 pub const SOURCE_EXTENSIONS: &[&str] = &["kt", "java", "swift"];
+
+/// Check whether a file path has a supported extension.
+pub fn is_supported_file(path: &str) -> bool {
+    SOURCE_EXTENSIONS.iter().any(|ext| path.ends_with(&format!(".{ext}")))
+}
 
 // ─── Indexing status file ─────────────────────────────────────────────────────
 
@@ -57,7 +62,7 @@ const DEFAULT_MAX_INDEX_FILES: usize = 2000;
 // ─── Disk cache ──────────────────────────────────────────────────────────────
 
 /// Bump when the serialized format changes; invalidates any older cache files.
-const CACHE_VERSION: u32 = 2;
+const CACHE_VERSION: u32 = 3;
 
 /// Per-file entry stored in the on-disk index cache.
 #[derive(Serialize, Deserialize)]
@@ -164,6 +169,10 @@ pub struct Indexer {
     /// When the key matches, the cached items are returned without recomputation —
     /// covers the common "typing more characters in the same word/after same dot" case.
     pub(crate) last_completion: std::sync::Mutex<Option<(String, String, Vec<CompletionItem>)>>,
+    /// Monotonically increasing generation counter.  Incremented on every root
+    /// switch so that background tasks spawned for an older root can detect
+    /// staleness and bail out early.
+    pub(crate) root_generation: AtomicU64,
 }
 
 impl Indexer {
@@ -188,6 +197,7 @@ impl Indexer {
             subtypes:       DashMap::new(),
             bare_name_cache: std::sync::RwLock::new(Vec::new()),
             last_completion: std::sync::Mutex::new(None),
+            root_generation: AtomicU64::new(0),
         }
     }
 
@@ -541,12 +551,7 @@ impl Indexer {
         self.parse_count.fetch_add(1, Ordering::Relaxed);
         // Invalidate cached completion items — the file is changing.
         self.completion_cache.remove(&uri_str);
-        let is_kotlin = uri.path().ends_with(".kt");
-        let data = if is_kotlin {
-            parser::parse_kotlin(content)
-        } else {
-            parser::parse_java(content)
-        };
+        let data = parser::parse_by_extension(uri.path(), content);
 
 
 
@@ -1321,7 +1326,9 @@ impl Indexer {
         let start_line = sym.selection_range.start.line as usize;
         let sig = collect_signature(&data.lines, start_line);
 
-        let lang = if loc.uri.path().ends_with(".kt") { "kotlin" } else { "java" };
+        let lang = if loc.uri.path().ends_with(".kt") { "kotlin" }
+                   else if loc.uri.path().ends_with(".swift") { "swift" }
+                   else { "java" };
 
         let code_block = if sig.is_empty() {
             format!("```{}\n{} {}\n```", lang, symbol_kw(sym.kind), name)
@@ -1470,24 +1477,31 @@ fn leading_spaces(line: &str) -> usize {
 
 /// If `line` is a class/interface/object/sealed declaration, return the type name.
 fn extract_class_decl_name(line: &str) -> Option<String> {
-    // Strip common modifiers: abstract sealed data open inner enum @Annotation etc.
+    // Strip common modifiers: Kotlin + Java + Swift
     let mut rest = line;
     let modifiers = [
         "abstract ", "sealed ", "data ", "open ", "inner ", "private ",
         "protected ", "public ", "internal ", "inline ", "value ", "enum ",
         "companion ", "override ", "final ",
+        // Swift-specific
+        "fileprivate ", "@objc ", "static ", "final ",
     ];
     loop {
         let before = rest;
         for m in &modifiers { rest = rest.strip_prefix(m).unwrap_or(rest).trim_start(); }
+        // Skip @Annotations (Kotlin) and @attributes (Swift)
+        if rest.starts_with('@') {
+            if let Some(after) = rest.find(' ') { rest = rest[after..].trim_start(); }
+        }
         if rest == before { break; }
     }
-    // Now rest should start with "class", "interface", or "object"
-    let rest = if let Some(r) = rest.strip_prefix("class ").or_else(|| rest.strip_prefix("interface ")).or_else(|| rest.strip_prefix("object ")) {
-        r
-    } else {
-        return None;
-    };
+    // Now rest should start with a type keyword
+    let rest = rest.strip_prefix("class ")
+        .or_else(|| rest.strip_prefix("interface "))
+        .or_else(|| rest.strip_prefix("object "))
+        .or_else(|| rest.strip_prefix("struct "))
+        .or_else(|| rest.strip_prefix("protocol "))
+        .or_else(|| rest.strip_prefix("extension "))?;
     // Extract the identifier
     let name: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
     if name.is_empty() || !name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
@@ -1501,21 +1515,26 @@ fn extract_class_decl_name(line: &str) -> Option<String> {
 fn find_source_files(root: &Path) -> Vec<std::path::PathBuf> {
     let root_str = root.to_string_lossy();
 
+    // Build --extension args dynamically from SOURCE_EXTENSIONS.
+    let mut fd_args: Vec<&str> = vec!["--type", "f"];
+    for ext in SOURCE_EXTENSIONS {
+        fd_args.push("--extension");
+        fd_args.push(ext);
+    }
+    fd_args.extend_from_slice(&[
+        "--absolute-path",
+        "--exclude", ".git",
+        "--exclude", "build",
+        "--exclude", "target",
+        "--exclude", ".gradle",
+        "--exclude", ".build",       // SwiftPM
+        "--exclude", "DerivedData",  // Xcode
+        ".",
+    ]);
+    fd_args.push(root_str.as_ref());
+
     // Prefer `fd` — order of magnitude faster for large trees.
-    let fd_result = Command::new("fd")
-        .args([
-            "--type", "f",
-            "--extension", "kt",
-            "--extension", "java",
-            "--absolute-path",
-            "--exclude", ".git",
-            "--exclude", "build",
-            "--exclude", "target",
-            "--exclude", ".gradle",
-            ".",
-            root_str.as_ref(),
-        ])
-        .output();
+    let fd_result = Command::new("fd").args(&fd_args).output();
 
     if let Ok(out) = fd_result {
         if out.status.success() {
@@ -1545,6 +1564,7 @@ fn walkdir_find(root: &Path) -> Vec<std::path::PathBuf> {
                     name.as_ref(),
                     ".git" | "build" | "target" | "node_modules"
                         | ".gradle" | ".idea" | ".kotlin"
+                        | ".build" | "DerivedData"
                 )
             } else {
                 true
@@ -1553,10 +1573,10 @@ fn walkdir_find(root: &Path) -> Vec<std::path::PathBuf> {
         .filter_map(|e| e.ok())
         .filter(|e| {
             e.file_type().is_file()
-                && matches!(
-                    e.path().extension().and_then(|s| s.to_str()),
-                    Some("kt") | Some("java")
-                )
+                && e.path().extension()
+                    .and_then(|s| s.to_str())
+                    .map(|ext| SOURCE_EXTENSIONS.contains(&ext))
+                    .unwrap_or(false)
         })
         .map(|e| e.into_path())
         .collect()
@@ -1599,10 +1619,11 @@ pub(crate) fn rg_find_definition(name: &str, root: Option<&Path>) -> Vec<Locatio
         "--column",
         // NOTE: rg has no --absolute-path flag; absolute output comes from
         // passing an absolute search root as the positional argument.
-        "--glob", "*.kt",
-        "--glob", "*.java",
-        "-e", &pattern,
     ]);
+    for ext in SOURCE_EXTENSIONS {
+        cmd.args(["--glob", &format!("*.{ext}")]);
+    }
+    cmd.args(["-e", &pattern]);
     cmd.arg(search_root.as_ref());
 
     let out = match cmd.output() {
@@ -1643,7 +1664,9 @@ pub fn rg_find_references(
 
     let safe_name: String = regex_escape(name);
     let decl_kws = ["class ", "interface ", "object ", "fun ", "val ", "var ",
-                    "typealias ", "enum class ", "enum "];
+                    "typealias ", "enum class ", "enum ",
+                    // Swift
+                    "struct ", "protocol ", "func ", "let ", "extension "];
 
     let filter = |(loc, content): (Location, String)| -> Option<Location> {
         let trimmed = content.trim_start();
@@ -1748,9 +1771,12 @@ pub fn rg_find_references(
         let mut cmd = Command::new("rg");
         cmd.args([
             "--no-heading", "--with-filename", "--line-number", "--column",
-            "--word-regexp", "--glob", "*.kt", "--glob", "*.java",
-            "-e", &safe_name,
+            "--word-regexp",
         ]);
+        for ext in SOURCE_EXTENSIONS {
+            cmd.args(["--glob", &format!("*.{ext}")]);
+        }
+        cmd.args(["-e", &safe_name]);
         cmd.arg(search_root.as_ref());
 
         let out = match cmd.output() {
@@ -1774,12 +1800,13 @@ fn regex_escape(s: &str) -> String {
 
 /// Run rg with a regex pattern; return `(Location, line_content)` pairs.
 fn rg_raw(pattern: &str, root: &Path) -> Vec<(Location, String)> {
-    let out = match Command::new("rg")
-        .args(["--no-heading", "--with-filename", "--line-number", "--column",
-               "--glob", "*.kt", "--glob", "*.java", "-e", pattern])
-        .arg(root)
-        .output()
-    {
+    let mut cmd = Command::new("rg");
+    cmd.args(["--no-heading", "--with-filename", "--line-number", "--column"]);
+    for ext in SOURCE_EXTENSIONS {
+        cmd.args(["--glob", &format!("*.{ext}")]);
+    }
+    cmd.args(["-e", pattern]).arg(root);
+    let out = match cmd.output() {
         Ok(o) if !o.stdout.is_empty() => o,
         _ => return vec![],
     };
@@ -1791,11 +1818,13 @@ fn rg_raw(pattern: &str, root: &Path) -> Vec<(Location, String)> {
 
 /// Run `rg -l` to get the list of files matching a pattern.
 fn rg_files_with_matches(pattern: &str, root: &Path) -> Vec<String> {
-    let out = match Command::new("rg")
-        .args(["-l", "--glob", "*.kt", "--glob", "*.java", "-e", pattern])
-        .arg(root)
-        .output()
-    {
+    let mut cmd = Command::new("rg");
+    cmd.arg("-l");
+    for ext in SOURCE_EXTENSIONS {
+        cmd.args(["--glob", &format!("*.{ext}")]);
+    }
+    cmd.args(["-e", pattern]).arg(root);
+    let out = match cmd.output() {
         Ok(o) if !o.stdout.is_empty() => o,
         _ => return vec![],
     };
