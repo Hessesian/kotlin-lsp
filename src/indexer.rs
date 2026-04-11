@@ -232,11 +232,11 @@ impl Indexer {
     /// On subsequent startups the on-disk cache is used for unchanged files so only
     /// modified or new files need to be re-parsed by tree-sitter.
     /// Full reindex with no file-count cap — used by the `kotlin-lsp/reindex` workspace command.
-    pub async fn index_workspace_full(self: Arc<Self>, root: &Path, client: tower_lsp::Client) {
+    pub async fn index_workspace_full(self: Arc<Self>, root: &Path, client: Option<tower_lsp::Client>) {
         self.index_workspace_impl(root, usize::MAX, client).await;
     }
 
-    pub async fn index_workspace(self: Arc<Self>, root: &Path, client: tower_lsp::Client) {
+    pub async fn index_workspace(self: Arc<Self>, root: &Path, client: Option<tower_lsp::Client>) {
         // Record workspace root so rg/fd always search within the project.
         *self.workspace_root.write().unwrap() = Some(root.to_path_buf());
 
@@ -247,7 +247,7 @@ impl Indexer {
         self.index_workspace_impl(root, max, client).await;
     }
 
-    async fn index_workspace_impl(self: Arc<Self>, root: &Path, max: usize, client: tower_lsp::Client) {
+    async fn index_workspace_impl(self: Arc<Self>, root: &Path, max: usize, client: Option<tower_lsp::Client>) {
         *self.workspace_root.write().unwrap() = Some(root.to_path_buf());
 
         let mut paths = find_source_files(root);
@@ -315,12 +315,14 @@ impl Indexer {
         let token = NumberOrString::String("kotlin-lsp/indexing".into());
         // Ask the client to create a progress token. Use a short timeout — some
         // editors (older Helix versions) never reply, which would stall indexing.
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_secs(3),
-            client.send_request::<tower_lsp::lsp_types::request::WorkDoneProgressCreate>(
-                WorkDoneProgressCreateParams { token: token.clone() }
-            )
-        ).await;
+        if let Some(ref client) = client {
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                client.send_request::<tower_lsp::lsp_types::request::WorkDoneProgressCreate>(
+                    WorkDoneProgressCreateParams { token: token.clone() }
+                )
+            ).await;
+        }
 
         let begin_msg = if cache_hits > 0 {
             format!("Indexing {parse_count}/{indexed_count} files ({cache_hits} cached)…")
@@ -329,18 +331,20 @@ impl Indexer {
         } else {
             format!("Indexing {total} Kotlin files…")
         };
-        client.send_notification::<progress::KotlinProgress>(ProgressParams {
-            token: token.clone(),
-            value: ProgressParamsValue::WorkDone(WorkDoneProgress::Begin(WorkDoneProgressBegin {
-                title: "kotlin-lsp".into(),
-                cancellable: Some(false),
-                message: Some(begin_msg),
-                percentage: Some(0),
-            })),
-        }).await;
+        if let Some(ref client) = client {
+            client.send_notification::<progress::KotlinProgress>(ProgressParams {
+                token: token.clone(),
+                value: ProgressParamsValue::WorkDone(WorkDoneProgress::Begin(WorkDoneProgressBegin {
+                    title: "kotlin-lsp".into(),
+                    cancellable: Some(false),
+                    message: Some(begin_msg),
+                    percentage: Some(0),
+                })),
+            }).await;
+        }
 
         // ── concurrent parse (up to 8 workers) ──────────────────────────────
-        let sem          = Arc::new(tokio::sync::Semaphore::new(8));
+        let sem = Arc::new(tokio::sync::Semaphore::new(self.parse_sem.available_permits()));
         let done_count   = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut handles: Vec<tokio::task::JoinHandle<()>> = Vec::with_capacity(parse_count);
 
@@ -374,16 +378,18 @@ impl Indexer {
                 let report_every = (total_cnt / 20).max(50);
                 if n % report_every == 0 && n < total_cnt {
                     let pct = ((n * 100) / total_cnt).min(99) as u32;
-                    client2.send_notification::<progress::KotlinProgress>(ProgressParams {
-                        token: token2,
-                        value: ProgressParamsValue::WorkDone(WorkDoneProgress::Report(
-                            WorkDoneProgressReport {
-                                cancellable: Some(false),
-                                message: Some(format!("{n}/{total_cnt} files")),
-                                percentage: Some(pct),
-                            }
-                        )),
-                    }).await;
+                    if let Some(ref c) = client2 {
+                        c.send_notification::<progress::KotlinProgress>(ProgressParams {
+                            token: token2,
+                            value: ProgressParamsValue::WorkDone(WorkDoneProgress::Report(
+                                WorkDoneProgressReport {
+                                    cancellable: Some(false),
+                                    message: Some(format!("{n}/{total_cnt} files")),
+                                    percentage: Some(pct),
+                                }
+                            )),
+                        }).await;
+                    }
                     // Update status file with elapsed and estimated remaining time.
                     let elapsed = index_start.elapsed().as_secs_f64();
                     let estimated_total = if pct > 0 { elapsed * 100.0 / pct as f64 } else { 0.0 };
@@ -412,12 +418,13 @@ impl Indexer {
         } else {
             String::new()
         };
-        client.send_notification::<progress::KotlinProgress>(ProgressParams {
-            token,
-            value: ProgressParamsValue::WorkDone(WorkDoneProgress::End(WorkDoneProgressEnd {
-                message: Some(format!(
-                    "Indexed {} files, {} symbols{}{}",
-                    self.files.len(), sym_count, cache_note,
+        if let Some(ref client) = client {
+            client.send_notification::<progress::KotlinProgress>(ProgressParams {
+                token,
+                value: ProgressParamsValue::WorkDone(WorkDoneProgress::End(WorkDoneProgressEnd {
+                    message: Some(format!(
+                        "Indexed {} files, {} symbols{}{}",
+                        self.files.len(), sym_count, cache_note,
                     if truncated { format!(" (+{} lazy)", total - indexed_count) } else { String::new() }
                 )),
             })),

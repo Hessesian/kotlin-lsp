@@ -50,10 +50,8 @@ async fn main() {
                     // (LspService::new returned service factory; grabbing client is non-trivial).
                     // Fallback: create a Client via tower_lsp::Client::new won't compile (private).
                     // So call index_workspace directly and then save cache.
-                    idx.index_workspace_full(&root, tower_lsp::Client::new(tokio::sync::mpsc::unbounded_channel().0)).await;
-                    // Persist cache
-                    tokio::task::spawn_blocking(move || idx.save_cache_to_disk()).await.ok();
-                    // Shutdown helper
+                    idx.index_workspace_full(&root, None).await;
+                    // Persist cache (already done by indexer) and shutdown helper
                     svc_handle.abort();
                 });
                 println!("Indexing complete: {}", root.display());

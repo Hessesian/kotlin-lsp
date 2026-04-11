@@ -84,7 +84,7 @@ impl LanguageServer for Backend {
             let client  = self.client.clone();
             // Background task — server is usable before indexing finishes.
             tokio::spawn(async move {
-                indexer.index_workspace(&path, client).await;
+                indexer.index_workspace(&path, Some(client)).await;
             });
         }
 
@@ -217,7 +217,7 @@ impl LanguageServer for Backend {
             let client = self.client.clone();
             let new_root2 = new_root.clone();
             tokio::spawn(async move {
-                idx.index_workspace_full(&new_root2, client).await;
+                idx.index_workspace_full(&new_root2, Some(client)).await;
             });
             self.client.show_message(MessageType::INFO,
                 format!("kotlin-lsp: switching root to {}…", new_root.display())).await;
