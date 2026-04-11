@@ -183,7 +183,7 @@ impl LanguageServer for Backend {
             idx.definitions.clear();
             idx.subtypes.clear();
             tokio::spawn(async move {
-                idx.index_workspace_full(&root, client).await;
+                idx.index_workspace_full(&root, Some(client)).await;
             });
             self.client.show_message(MessageType::INFO, "kotlin-lsp: reindexing workspace…").await;
         } else if params.command == "kotlin-lsp/changeRoot" {
