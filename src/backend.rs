@@ -221,6 +221,45 @@ impl LanguageServer for Backend {
             });
             self.client.show_message(MessageType::INFO,
                 format!("kotlin-lsp: switching root to {}…", new_root.display())).await;
+        } else if params.command == "kotlin-lsp/clearCache" {
+            // Optional arg: path to workspace root. If absent, clear current root's cache.
+            let arg = params.arguments.first().and_then(|v| v.as_str()).map(|s| s.to_string());
+            let target_root = if let Some(p) = arg {
+                let pb = std::path::PathBuf::from(p);
+                if !pb.is_dir() {
+                    self.client.show_message(MessageType::WARNING,
+                        format!("kotlin-lsp/clearCache: not a directory: {}", pb.display())).await;
+                    return Ok(None);
+                }
+                pb
+            } else {
+                match self.indexer.workspace_root.read().unwrap().clone() {
+                    Some(r) => r,
+                    None => {
+                        self.client.show_message(MessageType::WARNING,
+                            "kotlin-lsp/clearCache: no workspace root set and no path provided").await;
+                        return Ok(None);
+                    }
+                }
+            };
+            let cache_path = crate::indexer::workspace_cache_path(&target_root);
+            if let Some(cache_dir) = cache_path.parent() {
+                match std::fs::remove_dir_all(cache_dir) {
+                    Ok(_) => {
+                        log::info!("Cleared workspace cache directory: {}", cache_dir.display());
+                        self.client.show_message(MessageType::INFO,
+                            format!("kotlin-lsp: cleared cache for {}", target_root.display())).await;
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to remove cache dir {}: {}", cache_dir.display(), e);
+                        self.client.show_message(MessageType::WARNING,
+                            format!("kotlin-lsp: failed to clear cache: {}", e)).await;
+                    }
+                }
+            } else {
+                self.client.show_message(MessageType::WARNING,
+                    "kotlin-lsp/clearCache: cache path parent missing").await;
+            }
         }
         Ok(None)
     }
