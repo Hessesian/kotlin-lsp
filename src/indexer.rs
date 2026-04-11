@@ -85,7 +85,19 @@ struct IndexCache {
 
 /// Returns the cache file path for the given workspace root.
 pub(crate) fn workspace_cache_path(root: &Path) -> PathBuf {
-    let root_hash = hash_str(&root.to_string_lossy());
+    // Use canonicalized absolute path so equivalent roots map to same cache.
+    let canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    // Hash canonical path for filesystem-friendly cache directory name.
+    let root_hash = {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(canonical.to_string_lossy().as_bytes());
+        let digest = hasher.finalize();
+        // take first 8 bytes as u64
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(&digest[..8]);
+        u64::from_be_bytes(bytes)
+    };
     let cache_base = std::env::var("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
