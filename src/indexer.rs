@@ -1586,32 +1586,27 @@ fn find_source_files(root: &Path) -> Vec<std::path::PathBuf> {
 }
 
 fn walkdir_find(root: &Path) -> Vec<std::path::PathBuf> {
-    walkdir::WalkDir::new(root)
-        .into_iter()
-        // filter_entry prunes directories — don't descend into VCS / build dirs.
-        .filter_entry(|e| {
-            let name = e.file_name().to_string_lossy();
-            if e.file_type().is_dir() {
-                !matches!(
-                    name.as_ref(),
-                    ".git" | "build" | "target" | "node_modules"
-                        | ".gradle" | ".idea" | ".kotlin"
-                        | ".build" | "DerivedData"
-                )
-            } else {
-                true
+    // Use `ignore` crate's WalkBuilder which respects .gitignore and global git excludes.
+    let mut paths: Vec<std::path::PathBuf> = Vec::new();
+    let mut builder = ignore::WalkBuilder::new(root);
+    builder
+        .standard_filters(true) // respects .gitignore, .git/info/exclude, and global excludes
+        .hidden(false)
+        .parents(false);
+    let walker = builder.build();
+    for result in walker {
+        if let Ok(entry) = result {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+                    if SOURCE_EXTENSIONS.contains(&ext) {
+                        paths.push(path.to_path_buf());
+                    }
+                }
             }
-        })
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.file_type().is_file()
-                && e.path().extension()
-                    .and_then(|s| s.to_str())
-                    .map(|ext| SOURCE_EXTENSIONS.contains(&ext))
-                    .unwrap_or(false)
-        })
-        .map(|e| e.into_path())
-        .collect()
+        }
+    }
+    paths
 }
 
 // ─── hash helper ─────────────────────────────────────────────────────────────
