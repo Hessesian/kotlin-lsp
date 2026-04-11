@@ -233,7 +233,9 @@ impl LanguageServer for Backend {
                 }
                 pb
             } else {
-                match self.indexer.workspace_root.read().unwrap().clone() {
+                // Acquire current root upfront and drop the lock before any await.
+                let current_root_opt = { self.indexer.workspace_root.read().unwrap().clone() };
+                match current_root_opt {
                     Some(r) => r,
                     None => {
                         self.client.show_message(MessageType::WARNING,
