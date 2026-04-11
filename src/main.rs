@@ -36,23 +36,9 @@ async fn main() {
                 let rt = tokio::runtime::Runtime::new().unwrap();
                 let root = pb.canonicalize().unwrap_or(pb);
                 println!("Indexing workspace: {}", root.display());
+                let root_clone = root.clone();
                 rt.block_on(async move {
-                    // Use a dummy tower_lsp::Client from LspService by spinning up a minimal service
-                    // but simpler: call index_workspace_full with a fake Client created from a channel.
-                    // For minimal effect, create a real LspService but don't attach stdio: use a pipe pair.
-                    let (service, socket) = tower_lsp::LspService::new(backend::Backend::new);
-                    // Spawn server in background to obtain a Client
-                    let (stdin_r, stdin_w) = tokio::io::duplex(64);
-                    let (stdout_r, stdout_w) = tokio::io::duplex(64);
-                    let server = Server::new(stdin_r, stdout_w, socket);
-                    let svc_handle = tokio::spawn(async move { server.serve(service).await });
-                    // Create a real client from the service handle
-                    // (LspService::new returned service factory; grabbing client is non-trivial).
-                    // Fallback: create a Client via tower_lsp::Client::new won't compile (private).
-                    // So call index_workspace directly and then save cache.
-                    idx.index_workspace_full(&root, None).await;
-                    // Persist cache (already done by indexer) and shutdown helper
-                    svc_handle.abort();
+                    idx.index_workspace_full(&root_clone, None).await;
                 });
                 println!("Indexing complete: {}", root.display());
                 std::process::exit(0);

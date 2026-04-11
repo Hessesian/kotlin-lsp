@@ -203,7 +203,10 @@ impl Indexer {
             // Allow configurable concurrent parse workers. Default to number of CPU cores.
             // Use env KOTLIN_LSP_PARSE_WORKERS to override.
             parse_sem: {
-                let default = num_cpus::get().max(1);
+                let default = std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(4)
+                    .max(1);
                 let configured = std::env::var("KOTLIN_LSP_PARSE_WORKERS").ok()
                     .and_then(|v| v.parse::<usize>().ok())
                     .unwrap_or(default);

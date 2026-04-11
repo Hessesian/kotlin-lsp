@@ -318,7 +318,7 @@ impl LanguageServer for Backend {
             let client = self.client.clone();
             let root2 = root.clone();
             tokio::spawn(async move {
-                idx.index_workspace(&root2, client).await;
+                idx.index_workspace(&root2, Some(client)).await;
             });
         }
 

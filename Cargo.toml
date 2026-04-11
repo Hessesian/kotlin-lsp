@@ -55,4 +55,4 @@ strip     = true
 
 [dev-dependencies]
 tempfile = "3"
-num_cpus = "1.17"
+
