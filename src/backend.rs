@@ -274,20 +274,30 @@ impl LanguageServer for Backend {
         // Keep the opened file path (if available) so prioritized indexing can seed it.
         let opened_path_opt = uri.to_file_path().ok();
         if let Some(ref path) = opened_path_opt {
-            // Compute candidate root for the opened file
+            // Compute candidate root for the opened file.
+            // Strategy: walk all the way up looking for .git (repo root wins).
+            // If no .git found, use the first directory that has any other marker.
+            // This prevents stopping at a nested Package.swift inside a mono-repo
+            // when the true root (with .git) is further up.
+            let repo_markers = [
+                "build.gradle", "settings.gradle", "build.gradle.kts",
+                "Cargo.toml", "Package.swift", "pom.xml", "settings.gradle.kts",
+            ];
             let mut cur = path.parent().map(|p| p.to_path_buf());
-            let mut found: Option<std::path::PathBuf> = None;
+            let mut git_root: Option<std::path::PathBuf> = None;
+            let mut nearest_marker: Option<std::path::PathBuf> = None;
             while let Some(ref dir) = cur {
-                let markers = [
-                    ".git", "build.gradle", "settings.gradle", "build.gradle.kts",
-                    "Cargo.toml", "Package.swift", "pom.xml", "settings.gradle.kts",
-                ];
-                if markers.iter().any(|m| dir.join(m).exists()) {
-                    found = Some(dir.clone());
+                if dir.join(".git").exists() {
+                    git_root = Some(dir.clone());
+                    // .git found — no need to walk further
                     break;
+                }
+                if nearest_marker.is_none() && repo_markers.iter().any(|m| dir.join(m).exists()) {
+                    nearest_marker = Some(dir.clone());
                 }
                 cur = dir.parent().map(|p| p.to_path_buf());
             }
+            let found = git_root.or(nearest_marker);
             let chosen = found.or_else(|| path.parent().map(|p| p.to_path_buf()));
             if let Some(candidate_root) = chosen {
                 let current_root = self.indexer.workspace_root.read().unwrap().clone();
