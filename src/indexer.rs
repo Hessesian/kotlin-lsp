@@ -662,7 +662,29 @@ impl Indexer {
         
         log::info!("Workspace indexing complete: {} files parsed, {} cache hits, {} errors",
             stats.files_parsed, stats.cache_hits, stats.errors);
-        
+
+        // ── LSP progress: end ────────────────────────────────────────────────
+        if let Some(ref client) = client {
+            client.send_notification::<progress::KotlinProgress>(ProgressParams {
+                token: token.clone(),
+                value: ProgressParamsValue::WorkDone(WorkDoneProgress::End(WorkDoneProgressEnd {
+                    message: Some(format!(
+                        "Indexed {} files ({} cached, {} parsed)",
+                        total, cache_hits, stats.files_parsed
+                    )),
+                })),
+            }).await;
+        }
+
+        // ── Status file: done ────────────────────────────────────────────────
+        let elapsed = index_start.elapsed().as_secs();
+        let root_str = root.to_string_lossy();
+        write_status_file(&format!(
+            r#"{{"phase":"done","workspace":"{root_str}","indexed":{files_parsed},"total":{total},"cache_hits":{cache_hits},"symbols":{symbols},"elapsed_secs":{elapsed},"estimated_total_secs":null}}"#,
+            files_parsed = stats.files_parsed,
+            symbols = stats.symbols_extracted,
+        ));
+
         WorkspaceIndexResult {
             files: file_results,
             stats,
