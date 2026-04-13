@@ -157,7 +157,144 @@ fn try_load_cache(root: &Path) -> Option<IndexCache> {
     Some(cache)
 }
 
+// ─── Pure helper types ────────────────────────────────────────────────────────
 
+/// Everything a single file *adds* to the index. Pure value — no DashMaps.
+pub(crate) struct FileContributions {
+    pub definitions:    HashMap<String, Vec<Location>>,
+    /// Both `pkg.Sym` and `pkg.FileStem.Sym` keys.
+    pub qualified:      HashMap<String, Location>,
+    pub packages:       HashMap<String, Vec<String>>,
+    pub subtypes:       HashMap<String, Vec<Location>>,
+    pub file_data:      (String, Arc<crate::types::FileData>),
+    pub content_hash:   (String, u64),
+}
+
+/// Keys to remove from the index when a file is replaced.
+pub(crate) struct StaleKeys {
+    pub definition_names: Vec<String>,
+    /// Both aliases: `pkg.Sym` AND `pkg.FileStem.Sym`.
+    pub qualified_keys:   Vec<String>,
+    pub package:          Option<String>,
+    pub uri_str:          String,
+}
+
+// ─── Pure functions ───────────────────────────────────────────────────────────
+
+/// Pure: compute what a parsed file contributes to each index map.
+/// No side effects. Call `Indexer::apply_contributions` to commit.
+pub(crate) fn file_contributions(result: &FileIndexResult) -> FileContributions {
+    let uri_str = result.uri.to_string();
+    let file_stem: Option<String> = result.uri.to_file_path().ok()
+        .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()));
+
+    let mut definitions: HashMap<String, Vec<Location>> = HashMap::new();
+    let mut qualified:   HashMap<String, Location>      = HashMap::new();
+
+    for sym in &result.data.symbols {
+        let loc = Location { uri: result.uri.clone(), range: sym.selection_range };
+        definitions.entry(sym.name.clone()).or_default().push(loc.clone());
+        if let Some(ref pkg) = result.data.package {
+            qualified.insert(format!("{pkg}.{}", sym.name), loc.clone());
+            if let Some(ref stem) = file_stem {
+                if *stem != sym.name {
+                    qualified.insert(format!("{pkg}.{stem}.{}", sym.name), loc);
+                }
+            }
+        }
+    }
+
+    let mut packages: HashMap<String, Vec<String>> = HashMap::new();
+    if let Some(ref pkg) = result.data.package {
+        packages.entry(pkg.clone()).or_default().push(uri_str.clone());
+    }
+
+    let mut subtypes: HashMap<String, Vec<Location>> = HashMap::new();
+    for (super_name, class_loc) in &result.supertypes {
+        subtypes.entry(super_name.clone()).or_default().push(class_loc.clone());
+    }
+
+    FileContributions {
+        definitions,
+        qualified,
+        packages,
+        subtypes,
+        file_data: (uri_str.clone(), Arc::new(result.data.clone())),
+        content_hash: (uri_str, result.content_hash),
+    }
+}
+
+/// Pure: compute which keys to remove from each index map when `uri` is re-indexed.
+/// Requires the *old* FileData to know what the file previously contributed.
+pub(crate) fn stale_keys_for(uri: &Url, old_data: &crate::types::FileData) -> StaleKeys {
+    let uri_str = uri.to_string();
+    let file_stem: Option<String> = uri.to_file_path().ok()
+        .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()));
+
+    let definition_names: Vec<String> = old_data.symbols.iter()
+        .map(|s| s.name.clone())
+        .collect();
+
+    let mut qualified_keys: Vec<String> = Vec::new();
+    if let Some(ref pkg) = old_data.package {
+        for sym in &old_data.symbols {
+            qualified_keys.push(format!("{pkg}.{}", sym.name));
+            if let Some(ref stem) = file_stem {
+                if *stem != sym.name {
+                    qualified_keys.push(format!("{pkg}.{stem}.{}", sym.name));
+                }
+            }
+        }
+    }
+
+    StaleKeys {
+        definition_names,
+        qualified_keys,
+        package: old_data.package.clone(),
+        uri_str,
+    }
+}
+
+/// Pure: convert a disk-cache entry into a `FileIndexResult` ready for indexing.
+/// Reconstructs `supertypes` from cached lines (not stored in cache) so that
+/// `goToImplementation` works correctly on cache hits.
+pub(crate) fn cache_entry_to_file_result(uri: &Url, entry: &FileCacheEntry) -> FileIndexResult {
+    let data = &entry.file_data;
+    let class_kinds = [
+        SymbolKind::CLASS, SymbolKind::INTERFACE, SymbolKind::STRUCT,
+        SymbolKind::ENUM, SymbolKind::OBJECT,
+    ];
+    let mut supertypes: Vec<(String, Location)> = Vec::new();
+    for sym in &data.symbols {
+        if !class_kinds.contains(&sym.kind) { continue; }
+        let start = sym.selection_range.start.line as usize;
+        let limit  = (start + 10).min(data.lines.len());
+        let mut decl_lines: Vec<String> = Vec::new();
+        for line in &data.lines[start..limit] {
+            decl_lines.push(line.clone());
+            if line.contains('{') { break; }
+        }
+        let class_loc = Location { uri: uri.clone(), range: sym.selection_range };
+        for super_name in crate::resolver::extract_supers_from_lines(&decl_lines) {
+            supertypes.push((super_name, class_loc.clone()));
+        }
+    }
+    FileIndexResult {
+        uri: uri.clone(),
+        data: data.clone(),
+        supertypes,
+        content_hash: entry.content_hash,
+        error: None,
+    }
+}
+
+/// Pure: build sorted, deduplicated list of all symbol names from the definitions map.
+pub(crate) fn build_bare_names(definitions: &DashMap<String, Vec<Location>>) -> Vec<String> {
+    let mut names: Vec<String> = definitions.iter().map(|e| e.key().clone()).collect();
+    names.sort_unstable();
+    names.dedup();
+    names
+}
 
 pub struct Indexer {
     /// URI string → parsed file data.
@@ -245,6 +382,26 @@ impl Indexer {
             parse_tasks_completed: std::sync::atomic::AtomicUsize::new(0),
             parse_tasks_total: std::sync::atomic::AtomicUsize::new(0),
             scheduled_paths: DashMap::new(),
+        }
+    }
+
+    /// Clear all index maps. Called before a full workspace re-index and on root switch.
+    /// Clears everything: files, definitions, qualified, packages, subtypes, content_hashes,
+    /// completion_cache, bare_name_cache. Does NOT touch orchestration fields
+    /// (workspace_root, parse_sem, generation counters, live_lines).
+    pub fn reset_index_state(&self) {
+        self.files.clear();
+        self.definitions.clear();
+        self.qualified.clear();
+        self.packages.clear();
+        self.subtypes.clear();
+        self.content_hashes.clear();
+        self.completion_cache.clear();
+        if let Ok(mut cache) = self.bare_name_cache.write() {
+            cache.clear();
+        }
+        if let Ok(mut last) = self.last_completion.lock() {
+            *last = None;
         }
     }
 
@@ -692,69 +849,13 @@ impl Indexer {
         }
     }
 
-    /// Restore a single file from the on-disk cache into all index maps.
-    /// This is the cache-hit path: no tree-sitter, no disk read.
+    /// Coordinator: restore a single file from the on-disk cache.
+    /// Converts the cache entry via `cache_entry_to_file_result` (supertypes
+    /// reconstructed) then calls `apply_contributions`.
     fn restore_from_cache_entry(&self, uri: &Url, entry: &FileCacheEntry) {
-        let uri_str = uri.to_string();
-        let data = &entry.file_data;
-
-        // Mark as already-hashed so index_content skips it if called again.
-        self.content_hashes.insert(uri_str.clone(), entry.content_hash);
-
-        let file_stem: Option<String> = uri.to_file_path().ok()
-            .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()));
-
-        for sym in &data.symbols {
-            let loc = Location { uri: uri.clone(), range: sym.selection_range };
-
-            let mut locs = self.definitions.entry(sym.name.clone()).or_default();
-            if !locs.iter().any(|l| l.uri == loc.uri && l.range == loc.range) {
-                locs.push(loc.clone());
-            }
-            drop(locs);
-
-            if let Some(ref pkg) = data.package {
-                self.qualified.insert(format!("{pkg}.{}", sym.name), loc.clone());
-                if let Some(ref stem) = file_stem {
-                    if *stem != sym.name {
-                        self.qualified.insert(format!("{pkg}.{stem}.{}", sym.name), loc);
-                    }
-                }
-            }
-        }
-
-        if let Some(ref pkg) = data.package {
-            let mut uris = self.packages.entry(pkg.clone()).or_default();
-            if !uris.contains(&uri_str) {
-                uris.push(uri_str.clone());
-            }
-        }
-
-        // Rebuild subtypes index from cached symbols (same logic as index_content).
-        let class_kinds = [
-            SymbolKind::CLASS, SymbolKind::INTERFACE, SymbolKind::STRUCT,
-            SymbolKind::ENUM, SymbolKind::OBJECT,
-        ];
-        for sym in &data.symbols {
-            if !class_kinds.contains(&sym.kind) { continue; }
-            let start = sym.selection_range.start.line as usize;
-            let limit = (start + 10).min(data.lines.len());
-            let mut decl_lines: Vec<String> = Vec::new();
-            for line in &data.lines[start..limit] {
-                decl_lines.push(line.clone());
-                if line.contains('{') { break; }
-            }
-            let supers = crate::resolver::extract_supers_from_lines(&decl_lines);
-            let class_loc = Location { uri: uri.clone(), range: sym.selection_range };
-            for super_name in supers {
-                let mut locs = self.subtypes.entry(super_name).or_default();
-                if !locs.iter().any(|l| l.uri == class_loc.uri && l.range == class_loc.range) {
-                    locs.push(class_loc.clone());
-                }
-            }
-        }
-
-        self.files.insert(uri_str, Arc::new(data.clone()));
+        let result = cache_entry_to_file_result(uri, entry);
+        let contrib = file_contributions(&result);
+        self.apply_contributions(contrib);
     }
 
     /// Serialize the current index to `~/.cache/kotlin-lsp/<root-hash>/index.bin`.
@@ -850,105 +951,113 @@ impl Indexer {
         }
     }
 
-    /// Apply a file parse result to the index (mutates shared state).
-    /// 
-    /// This is where all DashMap updates happen. Separated from parsing
-    /// so parsing can be pure and testable.
+    /// Coordinator: apply a single file parse result to the index.
+    ///
+    /// Uses pure `stale_keys_for` to compute removals and `file_contributions`
+    /// to compute insertions. This is the per-file delta path (live edits, on_open).
     pub fn apply_file_result(&self, result: &FileIndexResult) {
         let uri_str = result.uri.to_string();
-        
-        // Update content hash
-        self.content_hashes.insert(uri_str.clone(), result.content_hash);
-        
-        // ── Remove stale entries for this URI ─────────────────────────────────
+
+        // ── Remove stale entries ──────────────────────────────────────────────
         if let Some(old) = self.files.get(&uri_str) {
-            for sym in &old.symbols {
-                if let Some(mut locs) = self.definitions.get_mut(&sym.name) {
-                    locs.retain(|l| l.uri.as_str() != result.uri.as_str());
-                }
-                if let Some(ref pkg) = old.package {
-                    self.qualified.remove(&format!("{pkg}.{}", sym.name));
+            let stale = stale_keys_for(&result.uri, &old);
+            for name in &stale.definition_names {
+                if let Some(mut locs) = self.definitions.get_mut(name) {
+                    locs.retain(|l| l.uri.as_str() != uri_str.as_str());
                 }
             }
-            if let Some(ref pkg) = old.package {
+            for key in &stale.qualified_keys {
+                self.qualified.remove(key);
+            }
+            if let Some(ref pkg) = stale.package {
                 if let Some(mut uris) = self.packages.get_mut(pkg) {
                     uris.retain(|u| u != &uri_str);
                 }
             }
-            // Remove stale subtype entries for this URI.
             for mut entry in self.subtypes.iter_mut() {
-                entry.value_mut().retain(|l| l.uri.as_str() != result.uri.as_str());
+                entry.value_mut().retain(|l| l.uri.as_str() != uri_str.as_str());
             }
         }
 
-        // ── Register fresh definitions ────────────────────────────────────────
-        let file_stem: Option<String> = result.uri.to_file_path().ok()
-            .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()));
+        // ── Insert fresh contributions ────────────────────────────────────────
+        let contrib = file_contributions(result);
+        self.apply_contributions(contrib);
+    }
 
-        for sym in &result.data.symbols {
-            let loc = Location { uri: result.uri.clone(), range: sym.selection_range };
+    /// Coordinator: apply workspace indexing results to the index.
+    ///
+    /// Full-replace path: resets all index maps first, then inserts all file
+    /// contributions. Cache hits are already converted to FileIndexResult by
+    /// `cache_entry_to_file_result` (supertypes included).
+    pub fn apply_workspace_result(&self, result: &WorkspaceIndexResult) {
+        log::info!(
+            "Applying workspace results: {} files parsed, {} cache hits",
+            result.stats.files_parsed, result.stats.cache_hits
+        );
 
-            // short-name index (guarded against duplicates)
-            let mut locs = self.definitions.entry(sym.name.clone()).or_default();
-            if !locs.iter().any(|l| l.uri == loc.uri && l.range == loc.range) {
-                locs.push(loc.clone());
-            }
-            drop(locs);
+        // Full replace — clear stale state from any previous root or run.
+        self.reset_index_state();
 
-            // qualified index: "com.example.Foo" → Location
-            if let Some(ref pkg) = result.data.package {
-                self.qualified.insert(format!("{pkg}.{}", sym.name), loc.clone());
-                if let Some(ref stem) = file_stem {
-                    if *stem != sym.name {
-                        self.qualified.insert(format!("{pkg}.{stem}.{}", sym.name), loc);
-                    }
+        for file_result in &result.files {
+            let contrib = file_contributions(file_result);
+            self.apply_contributions(contrib);
+        }
+
+        self.rebuild_bare_name_cache();
+
+        log::info!(
+            "Index ready: {} symbols from {} files",
+            self.definitions.len(), self.files.len()
+        );
+    }
+
+    /// Primitive: drain a `FileContributions` into the DashMaps.
+    /// Deduplicates before inserting (same behaviour as before).
+    fn apply_contributions(&self, contrib: FileContributions) {
+        let (uri_str, file_data) = contrib.file_data;
+        let (hash_key, hash_val) = contrib.content_hash;
+
+        self.content_hashes.insert(hash_key, hash_val);
+        self.files.insert(uri_str.clone(), file_data);
+
+        for (name, locs) in contrib.definitions {
+            let mut entry = self.definitions.entry(name).or_default();
+            for loc in locs {
+                if !entry.iter().any(|l| l.uri == loc.uri && l.range == loc.range) {
+                    entry.push(loc);
                 }
             }
         }
 
-        // ── Package membership ────────────────────────────────────────────────
-        if let Some(ref pkg) = result.data.package {
-            let mut uris = self.packages.entry(pkg.clone()).or_default();
-            if !uris.contains(&uri_str) {
-                uris.push(uri_str.clone());
+        for (key, loc) in contrib.qualified {
+            self.qualified.insert(key, loc);
+        }
+
+        for (pkg, uris) in contrib.packages {
+            let mut entry = self.packages.entry(pkg).or_default();
+            for u in uris {
+                if !entry.contains(&u) {
+                    entry.push(u);
+                }
             }
         }
 
-        // ── Subtypes index ────────────────────────────────────────────────────
-        for (super_name, class_loc) in &result.supertypes {
-            let mut locs = self.subtypes.entry(super_name.clone()).or_default();
-            if !locs.iter().any(|l| l.uri == class_loc.uri && l.range == class_loc.range) {
-                locs.push(class_loc.clone());
+        for (super_name, locs) in contrib.subtypes {
+            let mut entry = self.subtypes.entry(super_name).or_default();
+            for loc in locs {
+                if !entry.iter().any(|l| l.uri == loc.uri && l.range == loc.range) {
+                    entry.push(loc);
+                }
             }
         }
-
-        // ── Store file data ───────────────────────────────────────────────────
-        self.files.insert(uri_str, Arc::new(result.data.clone()));
     }
 
-    /// Apply workspace indexing results to the index (mutates shared state).
-    /// 
-    /// This merges all parse results into the index and rebuilds derived caches.
-    /// Called after index_workspace_impl returns its result.
-    pub fn apply_workspace_result(&self, result: &WorkspaceIndexResult) {
-        log::info!("Applying workspace results: {} files, {} cache hits",
-            result.stats.files_parsed, result.stats.cache_hits);
-        
-        // Apply each file result
-        for file_result in &result.files {
-            self.apply_file_result(file_result);
+    /// Coordinator: rebuild bare-name cache from current definitions map.
+    pub fn rebuild_bare_name_cache(&self) {
+        if let Ok(mut cache) = self.bare_name_cache.write() {
+            *cache = build_bare_names(&self.definitions);
         }
-        
-        // Rebuild derived caches
-        self.rebuild_bare_name_cache();
-        
-        log::info!("Applied {} files to index, {} total symbols now",
-            result.files.len(), self.definitions.len());
     }
-
-    // ────────────────────────────────────────────────────────────────────────
-    // Legacy index_content (to be deprecated after full refactoring)
-    // ────────────────────────────────────────────────────────────────────────
 
     /// (Re-)parse and index a single file's content in-place.
     /// Returns immediately (no-op) when content is identical to the last indexed version.
@@ -978,17 +1087,6 @@ impl Indexer {
         self.rebuild_bare_name_cache();
 
         Some(Arc::new(result.data))
-    }
-
-    fn rebuild_bare_name_cache(&self) {
-        let mut names: Vec<String> = self.definitions.iter()
-            .map(|e| e.key().clone())
-            .collect();
-        names.sort_unstable();
-        names.dedup();
-        if let Ok(mut cache) = self.bare_name_cache.write() {
-            *cache = names;
-        }
     }
 
     /// Spawn background tasks to pre-warm the completion cache for all types
@@ -5376,5 +5474,122 @@ internal class ContactAddressInteractor @Inject constructor(
         let md = hover.unwrap();
         assert!(md.contains("repo"), "hover should mention repo: {md}");
         assert!(md.contains("IGoldConversionRepository"), "hover should show type: {md}");
+    }
+
+    // ─── Pure function tests ──────────────────────────────────────────────────
+
+    fn make_result(uri_str: &str, pkg: &str, sym_name: &str, content: &str) -> FileIndexResult {
+        let u = Url::parse(uri_str).unwrap();
+        let mut result = Indexer::parse_file(&u, content);
+        // Ensure package is set for qualified-key tests.
+        result.data.package = Some(pkg.to_string());
+        result
+    }
+
+    #[test]
+    fn file_contributions_definitions() {
+        let result = make_result(
+            "file:///pkg/Foo.kt",
+            "com.example",
+            "Foo",
+            "package com.example\nclass Foo",
+        );
+        let contrib = super::file_contributions(&result);
+        assert!(contrib.definitions.contains_key("Foo"), "should have Foo in definitions");
+        let locs = &contrib.definitions["Foo"];
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0].uri.as_str(), "file:///pkg/Foo.kt");
+    }
+
+    #[test]
+    fn file_contributions_qualified_both_keys() {
+        // file stem = "Foo", class = "Bar" → both pkg.Bar and pkg.Foo.Bar inserted
+        let result = make_result(
+            "file:///pkg/Foo.kt",
+            "com.example",
+            "Bar",
+            "package com.example\nclass Bar",
+        );
+        let contrib = super::file_contributions(&result);
+        assert!(contrib.qualified.contains_key("com.example.Bar"), "pkg.Sym key missing");
+        assert!(contrib.qualified.contains_key("com.example.Foo.Bar"), "pkg.Stem.Sym key missing");
+    }
+
+    #[test]
+    fn file_contributions_qualified_stem_same_as_sym_no_alias() {
+        // file stem = "Foo", class = "Foo" → only pkg.Foo, no pkg.Foo.Foo
+        let result = make_result(
+            "file:///pkg/Foo.kt",
+            "com.example",
+            "Foo",
+            "package com.example\nclass Foo",
+        );
+        let contrib = super::file_contributions(&result);
+        assert!(contrib.qualified.contains_key("com.example.Foo"), "pkg.Sym key missing");
+        assert!(!contrib.qualified.contains_key("com.example.Foo.Foo"), "alias should not appear when stem == sym");
+    }
+
+    #[test]
+    fn stale_keys_includes_both_qualified_aliases() {
+        use crate::types::FileData;
+        let uri = Url::parse("file:///pkg/Foo.kt").unwrap();
+        let mut data = FileData::default();
+        data.package = Some("com.example".to_string());
+        let sym = crate::types::SymbolEntry {
+            name: "Bar".to_string(),
+            kind: tower_lsp::lsp_types::SymbolKind::CLASS,
+            visibility: crate::types::Visibility::Public,
+            range: Default::default(),
+            selection_range: Default::default(),
+            detail: String::new(),
+        };
+        data.symbols.push(sym);
+        let stale = super::stale_keys_for(&uri, &data);
+        assert!(stale.qualified_keys.contains(&"com.example.Bar".to_string()), "pkg.Sym missing");
+        assert!(stale.qualified_keys.contains(&"com.example.Foo.Bar".to_string()), "pkg.Stem.Sym missing");
+    }
+
+    #[test]
+    fn stale_keys_stem_equals_sym_no_alias() {
+        use crate::types::FileData;
+        let uri = Url::parse("file:///pkg/Foo.kt").unwrap();
+        let mut data = FileData::default();
+        data.package = Some("com.example".to_string());
+        let sym = crate::types::SymbolEntry {
+            name: "Foo".to_string(),
+            kind: tower_lsp::lsp_types::SymbolKind::CLASS,
+            visibility: crate::types::Visibility::Public,
+            range: Default::default(),
+            selection_range: Default::default(),
+            detail: String::new(),
+        };
+        data.symbols.push(sym);
+        let stale = super::stale_keys_for(&uri, &data);
+        assert!(stale.qualified_keys.contains(&"com.example.Foo".to_string()), "pkg.Sym missing");
+        assert!(!stale.qualified_keys.contains(&"com.example.Foo.Foo".to_string()), "alias should not appear");
+    }
+
+    #[test]
+    fn build_bare_names_sorted_deduped() {
+        let defs: DashMap<String, Vec<tower_lsp::lsp_types::Location>> = DashMap::new();
+        defs.insert("Zebra".to_string(), vec![]);
+        defs.insert("Apple".to_string(), vec![]);
+        defs.insert("Apple".to_string(), vec![]); // duplicate key — DashMap replaces
+        let names = super::build_bare_names(&defs);
+        assert_eq!(names, vec!["Apple", "Zebra"]);
+    }
+
+    #[test]
+    fn apply_file_result_removes_both_stale_qualified_keys() {
+        let idx = Indexer::new();
+        let u = Url::parse("file:///pkg/Foo.kt").unwrap();
+        // First index: class Bar in file Foo.kt
+        idx.index_content(&u, "package com.example\nclass Bar {}");
+        assert!(idx.qualified.contains_key("com.example.Bar"), "initial pkg.Sym missing");
+        assert!(idx.qualified.contains_key("com.example.Foo.Bar"), "initial pkg.Stem.Sym missing");
+        // Re-index with Bar removed
+        idx.index_content(&u, "package com.example\n// empty");
+        assert!(!idx.qualified.contains_key("com.example.Bar"), "stale pkg.Sym not removed");
+        assert!(!idx.qualified.contains_key("com.example.Foo.Bar"), "stale pkg.Stem.Sym not removed");
     }
 }

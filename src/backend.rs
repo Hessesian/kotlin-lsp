@@ -180,9 +180,7 @@ impl LanguageServer for Backend {
             };
             let idx    = Arc::clone(&self.indexer);
             let client = self.client.clone();
-            idx.files.clear();
-            idx.definitions.clear();
-            idx.subtypes.clear();
+            idx.reset_index_state();
             tokio::spawn(async move {
                 idx.index_workspace(&root, Some(client)).await;
             });
@@ -207,13 +205,9 @@ impl LanguageServer for Backend {
             *self.indexer.workspace_root.write().unwrap() = Some(new_root.clone());
             // Increment generation so in-flight background tasks can detect staleness.
             self.indexer.root_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            // Clear in-memory maps.
-            self.indexer.files.clear();
-            self.indexer.definitions.clear();
-            self.indexer.subtypes.clear();
-            // Preserve per-root caches. Indexer will load cache for the new
-            // root if present; do not delete other roots' caches here.
-            log::info!("Preserving on-disk caches when switching root");
+            // Clear all index maps for the new root.
+            self.indexer.reset_index_state();
+            log::info!("Root switched; preserving on-disk caches for other roots");
             let idx    = Arc::clone(&self.indexer);
             let client = self.client.clone();
             let new_root2 = new_root.clone();
@@ -309,14 +303,11 @@ impl LanguageServer for Backend {
         }
 
         if let Some(root) = need_root_switch {
-            // Perform root swap similar to changeRoot: bump generation, clear maps, remove caches, spawn index
+            // Perform root swap similar to changeRoot: bump generation, clear maps, spawn index.
             let prev_root = self.indexer.workspace_root.read().unwrap().clone();
             *self.indexer.workspace_root.write().unwrap() = Some(root.clone());
             self.indexer.root_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            self.indexer.files.clear();
-            self.indexer.definitions.clear();
-            self.indexer.subtypes.clear();
-            // Preserve per-root caches on auto root switch as well.
+            self.indexer.reset_index_state();
             log::info!("Preserving on-disk caches after auto root detection");
             let idx = Arc::clone(&self.indexer);
             let client = self.client.clone();
