@@ -32,18 +32,13 @@ where
     let worker = Arc::new(worker);
     let mut handles = Vec::with_capacity(items.len());
     
-    // CRITICAL FIX: Acquire permit BEFORE spawning task to prevent spawn_blocking pool exhaustion.
-    // Old behavior: spawn all tasks → each acquires permit inside → all call spawn_blocking → deadlock.
-    // New behavior: acquire permit → spawn task → task calls spawn_blocking with guarantee of execution.
+    // Spawn all tasks immediately - semaphore is only for throttling spawn_blocking inside worker
     for item in items {
         let sem = Arc::clone(&semaphore);
-        let sem_for_worker = Arc::clone(&sem);
-        let permit = sem.acquire_owned().await.unwrap();
         let worker = Arc::clone(&worker);
         
         handles.push(tokio::spawn(async move {
-            let _permit = permit; // Hold permit for task lifetime
-            worker(item, sem_for_worker).await
+            worker(item, sem).await
         }));
     }
     
@@ -86,10 +81,12 @@ mod tests {
         let active_clone = Arc::clone(&active);
         let max_clone = Arc::clone(&max_concurrent);
         
-        let results = run_concurrent(items, sem, move |n, _sem| {
+        // Worker acquires semaphore permit to throttle concurrent work
+        let results = run_concurrent(items, sem, move |n, sem| {
             let active = Arc::clone(&active_clone);
             let max_concurrent = Arc::clone(&max_clone);
             async move {
+                let _permit = sem.acquire().await.unwrap();  // Acquire inside worker
                 let current = active.fetch_add(1, Ordering::SeqCst) + 1;
                 max_concurrent.fetch_max(current, Ordering::SeqCst);
                 tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;

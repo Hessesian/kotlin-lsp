@@ -574,7 +574,7 @@ impl Indexer {
         let results = crate::task_runner::run_concurrent(
             work_items,
             sem,
-            move |item, _sem| {
+            move |item, sem| {
                 let idx = Arc::clone(&idx_ref);
                 async move {
                     log::debug!("Parsing: {}", item.path.display());
@@ -603,7 +603,9 @@ impl Indexer {
                         }
                     };
                     
-                    // Parse (CPU-bound tree-sitter work — must use spawn_blocking)
+                    // Parse (CPU-bound tree-sitter work)
+                    // Acquire permit to throttle concurrent spawn_blocking calls
+                    let _permit = sem.acquire().await.unwrap();
                     let t0 = std::time::Instant::now();
                     let uri_clone = uri.clone();
                     let content_clone = content.clone();
