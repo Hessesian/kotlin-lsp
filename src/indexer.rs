@@ -68,10 +68,28 @@ fn write_status_file(content: &str) {
     let _ = std::fs::write(&path, content);
 }
 
-/// Hard cap on workspace files indexed eagerly.
+/// Hard cap on workspace files indexed eagerly in LSP mode.
 /// Files beyond this limit are resolved on-demand via `rg` when first needed.
 /// Override by setting the `KOTLIN_LSP_MAX_FILES` environment variable.
 const DEFAULT_MAX_INDEX_FILES: usize = 2000;
+
+/// Sentinel value meaning "no file-count limit" — index all discovered files.
+/// Used by `--index-only` CLI mode which should always process the full workspace.
+pub const MAX_FILES_UNLIMITED: usize = usize::MAX;
+
+/// Pure: resolve the maximum number of files to eagerly index.
+///
+/// Reads `KOTLIN_LSP_MAX_FILES` from the environment once.
+/// Returns `default` when the variable is absent or not a valid integer.
+///
+/// - LSP mode callers pass `DEFAULT_MAX_INDEX_FILES` (2000).
+/// - CLI `--index-only` callers pass `MAX_FILES_UNLIMITED`.
+pub fn resolve_max_files(default: usize) -> usize {
+    std::env::var("KOTLIN_LSP_MAX_FILES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
 
 // ─── Disk cache ──────────────────────────────────────────────────────────────
 
@@ -419,11 +437,7 @@ impl Indexer {
     /// modified or new files need to be re-parsed by tree-sitter.
     /// Full reindex with file-count limit from env var — used by --index-only and kotlin-lsp/reindex.
     pub async fn index_workspace_full(self: Arc<Self>, root: &Path, client: Option<tower_lsp::Client>) {
-        let max = std::env::var("KOTLIN_LSP_MAX_FILES")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(usize::MAX); // Default to unlimited for --index-only
-        
+        let max = resolve_max_files(MAX_FILES_UNLIMITED);
         let result = Arc::clone(&self).index_workspace_impl(root, max, client).await;
         self.apply_workspace_result(&result);
         self.save_cache_to_disk();
@@ -441,9 +455,8 @@ impl Indexer {
         
         log::info!("Indexing {} files synchronously", paths.len());
         
-        // Try cache
         let cache = try_load_cache(root);
-        let mut file_results = Vec::new();
+        let mut all_results: Vec<FileIndexResult> = Vec::new();
         let mut cache_hits = 0;
         
         for (i, path) in paths.iter().enumerate() {
@@ -454,13 +467,12 @@ impl Indexer {
             let path_str = path.to_string_lossy().to_string();
             let mtime = file_mtime(&path).unwrap_or(0);
             
-            // Check cache
             let mut from_cache = false;
             if let Some(ref c) = cache {
                 if let Some(entry) = c.entries.get(&path_str) {
                     if entry.mtime_secs == mtime {
                         if let Ok(uri) = Url::from_file_path(&path) {
-                            self.restore_from_cache_entry(&uri, entry);
+                            all_results.push(cache_entry_to_file_result(&uri, entry));
                             cache_hits += 1;
                             from_cache = true;
                         }
@@ -468,44 +480,38 @@ impl Indexer {
                 }
             }
             
-            // Parse if not cached
             if !from_cache {
                 if let Ok(content) = std::fs::read_to_string(&path) {
                     if let Ok(uri) = Url::from_file_path(&path) {
                         log::debug!("Parsing: {}", path.display());
-                        let result = Indexer::parse_file(&uri, &content);
-                        file_results.push(result);
+                        all_results.push(Indexer::parse_file(&uri, &content));
                     }
                 }
             }
         }
         
-        log::info!("Sync indexing complete: {} parsed, {} cache hits", file_results.len(), cache_hits);
+        let files_parsed = all_results.len() - cache_hits;
+        log::info!("Sync indexing complete: {} parsed, {} cache hits", files_parsed, cache_hits);
         
         let stats = IndexStats {
             files_discovered: total,
             cache_hits,
-            files_parsed: file_results.len(),
-            symbols_extracted: file_results.iter().map(|f| f.data.symbols.len()).sum(),
-            packages_found: file_results.iter().filter_map(|f| f.data.package.as_ref()).count(),
+            files_parsed,
+            symbols_extracted: all_results.iter().map(|f| f.data.symbols.len()).sum(),
+            packages_found: all_results.iter().filter_map(|f| f.data.package.as_ref()).count(),
             errors: 0,
         };
         
         WorkspaceIndexResult {
-            files: file_results,
+            files: all_results,
             stats,
             workspace_root: root.to_path_buf(),
         }
     }
 
     pub async fn index_workspace(self: Arc<Self>, root: &Path, client: Option<tower_lsp::Client>) {
-        // Record workspace root so rg/fd always search within the project.
         *self.workspace_root.write().unwrap() = Some(root.to_path_buf());
-
-        let max = std::env::var("KOTLIN_LSP_MAX_FILES")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(DEFAULT_MAX_INDEX_FILES);
+        let max = resolve_max_files(DEFAULT_MAX_INDEX_FILES);
         let result = Arc::clone(&self).index_workspace_impl(root, max, client).await;
         self.apply_workspace_result(&result);
         self.save_cache_to_disk();
@@ -542,10 +548,7 @@ impl Indexer {
         }
 
         // Then proceed with the normal (bounded) workspace indexing in the background.
-        let max = std::env::var("KOTLIN_LSP_MAX_FILES")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(DEFAULT_MAX_INDEX_FILES);
+        let max = resolve_max_files(DEFAULT_MAX_INDEX_FILES);
         let result = Arc::clone(&self).index_workspace_impl(root, max, client).await;
         self.apply_workspace_result(&result);
         self.save_cache_to_disk();
@@ -580,7 +583,7 @@ impl Indexer {
         let paths: Vec<_> = paths.into_iter().take(max).collect();
         let indexed_count = paths.len();
 
-        let truncated = total > max && max < usize::MAX;
+        let truncated = total > max && max != MAX_FILES_UNLIMITED;
         if truncated {
             log::warn!(
                 "Large project: eagerly indexing {indexed_count}/{total} files \
@@ -591,17 +594,19 @@ impl Indexer {
             log::info!("Indexing {} source files under {}", indexed_count, root.display());
         }
 
-        // ── Try disk cache ────────────────────────────────────────────────────
-        // Restore unchanged files from the on-disk cache (mtime check, no parse).
-        // Only files whose mtime has changed (or are new) go through tree-sitter.
+        // ── Partition: cache hits → FileIndexResult, misses → need_parse ────────
+        // Pure partition: no DashMap mutations here.
+        // Both halves are collected into file_results so apply_workspace_result
+        // can do a single authoritative reset + full insert.
         let cache = try_load_cache(root);
         let mut need_parse: Vec<PathBuf> = Vec::new();
+        let mut cached_results: Vec<FileIndexResult> = Vec::new();
         let mut cache_hits: usize = 0;
 
         for path in &paths {
-            // Check for generation change and exit early if reindex requested.
+            // Bail early if generation changed (root switch / explicit reindex).
             if self.root_generation.load(std::sync::atomic::Ordering::SeqCst) != start_gen {
-                log::info!("index_workspace_impl: generation changed, aborting remaining parse list");
+                log::info!("index_workspace_impl: generation changed, aborting partition");
                 break;
             }
 
@@ -611,9 +616,8 @@ impl Indexer {
             if let Some(ref c) = cache {
                 if let Some(entry) = c.entries.get(&path_str) {
                     if entry.mtime_secs == mtime {
-                        // Cache hit: restore into all index maps without tree-sitter.
                         if let Ok(uri) = Url::from_file_path(path) {
-                            self.restore_from_cache_entry(&uri, entry);
+                            cached_results.push(cache_entry_to_file_result(&uri, entry));
                         }
                         cache_hits += 1;
                         continue;
@@ -803,22 +807,29 @@ impl Indexer {
         
         log::info!("All {} parse tasks completed", results.len());
         
-        // Filter out None results
-        let file_results: Vec<FileIndexResult> = results.into_iter().flatten().collect();
-        
+        // Combine cache hits + newly parsed into one list.
+        // apply_workspace_result does a full reset + insert of ALL files.
+        let mut parsed_results: Vec<FileIndexResult> = results.into_iter().flatten().collect();
+        let files_parsed = parsed_results.len();
+        let parse_errors = parse_count - files_parsed;
+
+        let mut all_results = cached_results;
+        all_results.append(&mut parsed_results);
+
         // Build stats
-        let parse_errors = parse_count - file_results.len();
         let stats = IndexStats {
             files_discovered: total,
             cache_hits,
-            files_parsed: file_results.len(),
-            symbols_extracted: file_results.iter().map(|f| f.data.symbols.len()).sum(),
-            packages_found: file_results.iter().filter_map(|f| f.data.package.as_ref()).count(),
+            files_parsed,
+            symbols_extracted: all_results.iter().map(|f| f.data.symbols.len()).sum(),
+            packages_found: all_results.iter().filter_map(|f| f.data.package.as_ref()).count(),
             errors: parse_errors,
         };
         
-        log::info!("Workspace indexing complete: {} files parsed, {} cache hits, {} errors",
-            stats.files_parsed, stats.cache_hits, stats.errors);
+        log::info!(
+            "Workspace indexing complete: {} parsed, {} cache hits, {} errors ({} total)",
+            files_parsed, cache_hits, parse_errors, all_results.len()
+        );
 
         // ── LSP progress: end ────────────────────────────────────────────────
         if let Some(ref client) = client {
@@ -827,7 +838,7 @@ impl Indexer {
                 value: ProgressParamsValue::WorkDone(WorkDoneProgress::End(WorkDoneProgressEnd {
                     message: Some(format!(
                         "Indexed {} files ({} cached, {} parsed)",
-                        total, cache_hits, stats.files_parsed
+                        all_results.len(), cache_hits, files_parsed
                     )),
                 })),
             }).await;
@@ -838,24 +849,14 @@ impl Indexer {
         let root_str = root.to_string_lossy();
         write_status_file(&format!(
             r#"{{"phase":"done","workspace":"{root_str}","indexed":{files_parsed},"total":{total},"cache_hits":{cache_hits},"symbols":{symbols},"elapsed_secs":{elapsed},"estimated_total_secs":null}}"#,
-            files_parsed = stats.files_parsed,
             symbols = stats.symbols_extracted,
         ));
 
         WorkspaceIndexResult {
-            files: file_results,
+            files: all_results,
             stats,
             workspace_root: root.to_path_buf(),
         }
-    }
-
-    /// Coordinator: restore a single file from the on-disk cache.
-    /// Converts the cache entry via `cache_entry_to_file_result` (supertypes
-    /// reconstructed) then calls `apply_contributions`.
-    fn restore_from_cache_entry(&self, uri: &Url, entry: &FileCacheEntry) {
-        let result = cache_entry_to_file_result(uri, entry);
-        let contrib = file_contributions(&result);
-        self.apply_contributions(contrib);
     }
 
     /// Serialize the current index to `~/.cache/kotlin-lsp/<root-hash>/index.bin`.
@@ -5346,7 +5347,9 @@ class FooModule : BaseModule() {
             content_hash: 42,
             file_data: (*data).clone(),
         };
-        idx2.restore_from_cache_entry(&u, &entry);
+        // Use the pure pipeline: cache_entry_to_file_result → apply_file_result.
+        let result = cache_entry_to_file_result(&u, &entry);
+        idx2.apply_file_result(&result);
 
         // subtypes should be populated from cache restore.
         let subs = idx2.subtypes.get("IAnimal")
@@ -5591,5 +5594,29 @@ internal class ContactAddressInteractor @Inject constructor(
         idx.index_content(&u, "package com.example\n// empty");
         assert!(!idx.qualified.contains_key("com.example.Bar"), "stale pkg.Sym not removed");
         assert!(!idx.qualified.contains_key("com.example.Foo.Bar"), "stale pkg.Stem.Sym not removed");
+    }
+
+    #[test]
+    fn resolve_max_files_uses_default_when_unset() {
+        // Ensure env var is unset for this test.
+        std::env::remove_var("KOTLIN_LSP_MAX_FILES");
+        assert_eq!(super::resolve_max_files(2000), 2000);
+        assert_eq!(super::resolve_max_files(super::MAX_FILES_UNLIMITED), super::MAX_FILES_UNLIMITED);
+    }
+
+    #[test]
+    fn resolve_max_files_reads_env_var() {
+        std::env::set_var("KOTLIN_LSP_MAX_FILES", "500");
+        let result = super::resolve_max_files(2000);
+        std::env::remove_var("KOTLIN_LSP_MAX_FILES");
+        assert_eq!(result, 500);
+    }
+
+    #[test]
+    fn resolve_max_files_invalid_env_falls_back_to_default() {
+        std::env::set_var("KOTLIN_LSP_MAX_FILES", "not_a_number");
+        let result = super::resolve_max_files(2000);
+        std::env::remove_var("KOTLIN_LSP_MAX_FILES");
+        assert_eq!(result, 2000);
     }
 }
