@@ -703,8 +703,6 @@ impl LanguageServer for Backend {
         } else {
             (None, None)
         };
-        let same_pkg = self.indexer.package_of(uri);
-
         // Collect declaration file paths — but only those where the enclosing class
         // matches parent_class (if known).  Without this filter, every contract file
         // that has `sealed interface Event` would be included, causing false positives
@@ -729,13 +727,11 @@ impl LanguageServer for Backend {
         let uri_clone = uri.clone();
         let name2 = name.clone();
         let parent2 = parent_class.clone();
-        let same2 = same_pkg.clone();
         let decl2 = declared_pkg.clone();
         let mut locs = tokio::task::spawn_blocking(move || {
             crate::indexer::rg_find_references(
                 &name2,
                 parent2.as_deref(),
-                same2.as_deref(),
                 decl2.as_deref(),
                 root.as_deref(),
                 include_decl,
@@ -1152,7 +1148,6 @@ impl LanguageServer for Backend {
             changes.insert(uri.clone(), file_edits);
             return Ok(Some(WorkspaceEdit { changes: Some(changes), document_changes: None, change_annotations: None }));
         };
-        let same_pkg = self.indexer.package_of(uri);
 
         let decl_files: Vec<String> = self.indexer.definitions.get(&name)
             .map(|locs| locs.iter()
@@ -1174,14 +1169,12 @@ impl LanguageServer for Backend {
         let uri_clone = uri.clone();
         let name2 = name.clone();
         let parent2 = parent_class.clone();
-        let same2 = same_pkg.clone();
         let decl2 = declared_pkg.clone();
         // include_declaration=true so we also rename the declaration site
         let ref_locs = tokio::task::spawn_blocking(move || {
             crate::indexer::rg_find_references(
                 &name2,
                 parent2.as_deref(),
-                same2.as_deref(),
                 decl2.as_deref(),
                 root.as_deref(),
                 true,

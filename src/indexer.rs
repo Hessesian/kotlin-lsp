@@ -41,11 +41,6 @@ impl Drop for IndexingGuard {
 /// Supported file extensions for indexing and rg/fd searches.
 pub const SOURCE_EXTENSIONS: &[&str] = &["kt", "java", "swift"];
 
-/// Check whether a file path has a supported extension.
-pub fn is_supported_file(path: &str) -> bool {
-    SOURCE_EXTENSIONS.iter().any(|ext| path.ends_with(&format!(".{ext}")))
-}
-
 // ─── Indexing status file ─────────────────────────────────────────────────────
 
 /// Human-readable status written to `~/.cache/kotlin-lsp/status.json`.
@@ -194,7 +189,6 @@ pub(crate) struct StaleKeys {
     /// Both aliases: `pkg.Sym` AND `pkg.FileStem.Sym`.
     pub qualified_keys:   Vec<String>,
     pub package:          Option<String>,
-    pub uri_str:          String,
 }
 
 // ─── Pure functions ───────────────────────────────────────────────────────────
@@ -245,7 +239,6 @@ pub(crate) fn file_contributions(result: &FileIndexResult) -> FileContributions 
 /// Pure: compute which keys to remove from each index map when `uri` is re-indexed.
 /// Requires the *old* FileData to know what the file previously contributed.
 pub(crate) fn stale_keys_for(uri: &Url, old_data: &crate::types::FileData) -> StaleKeys {
-    let uri_str = uri.to_string();
     let file_stem: Option<String> = uri.to_file_path().ok()
         .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()));
 
@@ -269,7 +262,6 @@ pub(crate) fn stale_keys_for(uri: &Url, old_data: &crate::types::FileData) -> St
         definition_names,
         qualified_keys,
         package: old_data.package.clone(),
-        uri_str,
     }
 }
 
@@ -449,73 +441,6 @@ impl Indexer {
         }
     }
     
-    /// Synchronous workspace indexing for --index-only mode.
-    /// Avoids async complexity and blocking pool exhaustion.
-    fn index_workspace_sync(&self, root: &Path, max: usize) -> WorkspaceIndexResult {
-        *self.workspace_root.write().unwrap() = Some(root.to_path_buf());
-        
-        let mut paths = find_source_files(root);
-        let total = paths.len();
-        paths.sort_by_key(|p| p.components().count());
-        let paths: Vec<_> = paths.into_iter().take(max).collect();
-        
-        log::info!("Indexing {} files synchronously", paths.len());
-        
-        let cache = try_load_cache(root);
-        let mut all_results: Vec<FileIndexResult> = Vec::new();
-        let mut cache_hits = 0;
-        
-        for (i, path) in paths.iter().enumerate() {
-            if i % 50 == 0 {
-                log::info!("Progress: {}/{} files", i, paths.len());
-            }
-            
-            let path_str = path.to_string_lossy().to_string();
-            let mtime = file_mtime(&path).unwrap_or(0);
-            
-            let mut from_cache = false;
-            if let Some(ref c) = cache {
-                if let Some(entry) = c.entries.get(&path_str) {
-                    if entry.mtime_secs == mtime {
-                        if let Ok(uri) = Url::from_file_path(&path) {
-                            all_results.push(cache_entry_to_file_result(&uri, entry));
-                            cache_hits += 1;
-                            from_cache = true;
-                        }
-                    }
-                }
-            }
-            
-            if !from_cache {
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    if let Ok(uri) = Url::from_file_path(&path) {
-                        log::debug!("Parsing: {}", path.display());
-                        all_results.push(Indexer::parse_file(&uri, &content));
-                    }
-                }
-            }
-        }
-        
-        let files_parsed = all_results.len() - cache_hits;
-        log::info!("Sync indexing complete: {} parsed, {} cache hits", files_parsed, cache_hits);
-        
-        let stats = IndexStats {
-            files_discovered: total,
-            cache_hits,
-            files_parsed,
-            symbols_extracted: all_results.iter().map(|f| f.data.symbols.len()).sum(),
-            packages_found: all_results.iter().filter_map(|f| f.data.package.as_ref()).count(),
-            errors: 0,
-        };
-        
-        WorkspaceIndexResult {
-            files: all_results,
-            stats,
-            workspace_root: root.to_path_buf(),
-            aborted: false,
-        }
-    }
-
     pub async fn index_workspace(self: Arc<Self>, root: &Path, client: Option<tower_lsp::Client>) {
         *self.workspace_root.write().unwrap() = Some(root.to_path_buf());
         let max = resolve_max_files(DEFAULT_MAX_INDEX_FILES);
@@ -1256,12 +1181,6 @@ impl Indexer {
         Some((word, range))
     }
 
-    /// Returns true if `name` is a top-level indexed symbol (class, fun, val, etc.)
-    /// that likely has cross-file references.
-    pub fn is_indexed_symbol(&self, name: &str) -> bool {
-        self.definitions.contains_key(name)
-    }
-
     /// Returns a clone of the live (possibly unsaved) lines for a URI.
     pub fn lines_for(&self, uri: &Url) -> Option<Arc<Vec<String>>> {
         // Prefer live (unsaved) lines, fall back to indexed file.
@@ -1384,17 +1303,6 @@ impl Indexer {
         crate::resolver::resolve_symbol(self, name, qualifier, from_uri)
     }
 
-    /// Return the params text `(a: T, b: U)` for `name` in `uri`'s file context.
-    pub fn collect_fun_params_text(&self, uri: &Url, name: &str) -> String {
-        collect_fun_params_text(name, uri.as_str(), self)
-            .unwrap_or_default()
-    }
-
-    /// Cross-file signature lookup: current file → all indexed files → rg fallback.
-    pub fn find_fun_signature(&self, uri: &Url, name: &str) -> String {
-        find_fun_signature_full(name, self, uri).unwrap_or_default()
-    }
-
     /// Signature lookup with optional dot-receiver context.
     /// When `receiver` is given (e.g. `"oneYearOlderInteractor"`), resolves its
     /// type, finds that type's file, and looks up `name` there specifically.
@@ -1425,55 +1333,6 @@ impl Indexer {
             }
         }
         find_fun_signature_full(name, self, uri).unwrap_or_default()
-    }
-
-    /// Scan all in-memory indexed files for whole-word occurrences of `name`.
-    ///
-    /// Used to supplement rg results when the buffer has unsaved changes (e.g.
-    /// immediately after a rename before the file is written to disk).
-    /// Returns `(uri_string, line_number_0based, col_0based)` triples.
-    pub fn in_memory_references(&self, name: &str) -> Vec<Location> {
-        let mut results = Vec::new();
-        for entry in self.files.iter() {
-            let uri_str = entry.key();
-            let data    = entry.value();
-            let uri = match Url::parse(uri_str) {
-                Ok(u) => u,
-                Err(_) => match Url::from_file_path(uri_str) {
-                    Ok(u) => u,
-                    Err(_) => continue,
-                },
-            };
-            for (line_idx, line) in data.lines.iter().enumerate() {
-                let mut search = line.as_str();
-                let mut offset = 0usize;
-                while let Some(pos) = search.find(name) {
-                    let abs = offset + pos;
-                    // Whole-word check
-                    let before_ok = abs == 0 || {
-                        let ch = line[..abs].chars().next_back().unwrap_or(' ');
-                        !ch.is_alphanumeric() && ch != '_'
-                    };
-                    let after_ok = {
-                        let end = abs + name.len();
-                        end >= line.len() || {
-                            let ch = line[end..].chars().next().unwrap_or(' ');
-                            !ch.is_alphanumeric() && ch != '_'
-                        }
-                    };
-                    if before_ok && after_ok {
-                        let col = line[..abs].chars().count() as u32;
-                        let start = Position::new(line_idx as u32, col);
-                        let end   = Position::new(line_idx as u32, col + name.chars().count() as u32);
-                        results.push(Location { uri: uri.clone(), range: Range::new(start, end) });
-                    }
-                    // Advance past this occurrence.
-                    offset += pos + name.len().max(1);
-                    search = &line[offset.min(line.len())..];
-                }
-            }
-        }
-        results
     }
 
     /// If `name` at `position` is `it` or a named lambda parameter, return the
@@ -1968,11 +1827,6 @@ impl Indexer {
     }
 }
 
-/// Count leading ASCII spaces (used for indentation-based enclosing-class detection).
-fn leading_spaces(line: &str) -> usize {
-    line.chars().take_while(|c| *c == ' ' || *c == '\t').count()
-}
-
 /// If `line` is a class/interface/object/sealed declaration, return the type name.
 fn extract_class_decl_name(line: &str) -> Option<String> {
     // Strip common modifiers: Kotlin + Java + Swift
@@ -2140,7 +1994,6 @@ pub(crate) fn rg_find_definition(name: &str, root: Option<&Path>) -> Vec<Locatio
 pub fn rg_find_references(
     name:         &str,
     parent_class: Option<&str>,
-    same_pkg:     Option<&str>,
     declared_pkg: Option<&str>,
     root:         Option<&Path>,
     include_decl: bool,
@@ -2212,7 +2065,6 @@ pub fn rg_find_references(
         // `ParentClass.Name` which is already caught by Pass A. Adding them to
         // the bare-name search causes false positives (e.g. AbilitiesSectionViewModel
         // in the same package has its own `State`). So we skip same-package here.
-        let pkg_files: Vec<String> = vec![];
 
         // Merge candidate file sets.
         // Always include declaration files so the declaration site itself is
@@ -2351,11 +2203,6 @@ fn rg_word_in_files(safe_name: &str, files: &[String]) -> Vec<(Location, String)
         .lines()
         .filter_map(|l| parse_rg_line_with_content_rooted(l, std::path::Path::new("/")))
         .collect()
-}
-
-/// Like `parse_rg_line` but also returns the matched line content.
-fn parse_rg_line_with_content(line: &str) -> Option<(Location, String)> {
-    parse_rg_line_with_content_rooted(line, std::path::Path::new("/"))
 }
 
 fn parse_rg_line_with_content_rooted(line: &str, root: &Path) -> Option<(Location, String)> {
@@ -3727,10 +3574,6 @@ fn split_first_word(s: &str) -> (&str, &str) {
     }
 }
 
-/// Cap on number of lines to walk backward when searching for a doc comment.
-/// (Used as the maximum `search_end` starting point inside `extract_doc_comment`.)
-const DOC_SEARCH_LIMIT: usize = 40;
-
 /// Rules:
 /// - Track `(` / `)` depth.
 /// - Once depth is back to 0, the signature ends at the current line.
@@ -5034,7 +4877,6 @@ class Account(val name: String)"#;
         let locs = super::rg_find_references(
             "Event",
             Some("ActivateUpdateAppContract"),
-            Some("com.example.activate"),   // same_pkg
             Some("com.example.activate"),   // declared_pkg
             Some(root),
             true,  // include_declaration
@@ -5098,7 +4940,6 @@ class Account(val name: String)"#;
         let locs = super::rg_find_references(
             "Event",
             Some("OtherContract"),
-            Some("com.example.other"),
             Some("com.example.other"),
             Some(root),
             true,
@@ -5165,7 +5006,6 @@ class Account(val name: String)"#;
         let locs = super::rg_find_references(
             "Event",
             Some("DashboardContract"),
-            Some("com.example.dashboard"),
             Some("com.example.dashboard"),
             Some(root),
             true,

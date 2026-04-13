@@ -91,6 +91,7 @@ pub struct FileIndexResult {
     /// Content hash for cache invalidation.
     pub content_hash: u64,
     /// Parse error if tree-sitter failed.
+    #[allow(dead_code)]
     pub error: Option<String>,
 }
 
@@ -98,6 +99,7 @@ pub struct FileIndexResult {
 #[derive(Debug, Clone, Default)]
 pub struct IndexStats {
     /// Total files discovered.
+    #[allow(dead_code)]
     pub files_discovered: usize,
     /// Files loaded from cache (mtime unchanged).
     pub cache_hits: usize,
@@ -106,8 +108,10 @@ pub struct IndexStats {
     /// Total symbols extracted.
     pub symbols_extracted: usize,
     /// Total packages found.
+    #[allow(dead_code)]
     pub packages_found: usize,
     /// Parse errors encountered.
+    #[allow(dead_code)]
     pub errors: usize,
 }
 
@@ -120,6 +124,7 @@ pub struct WorkspaceIndexResult {
     /// Statistics about the indexing run.
     pub stats: IndexStats,
     /// Workspace root that was indexed.
+    #[allow(dead_code)]
     pub workspace_root: std::path::PathBuf,
     /// True if the run was aborted mid-way (e.g. root generation changed).
     /// Callers must NOT call apply_workspace_result when this is true — doing

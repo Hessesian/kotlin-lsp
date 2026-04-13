@@ -11,6 +11,7 @@ pub struct StdlibEntry {
     pub name:      &'static str,
     pub signature: &'static str,
     /// True = method/extension (dot-completable).  False = top-level.
+    #[allow(dead_code)]
     pub is_extension: bool,
 }
 
@@ -242,22 +243,8 @@ pub fn hover(name: &str) -> Option<String> {
 
 use std::sync::OnceLock;
 
-static DOT_COMPLETIONS_SNIPPETS:    OnceLock<Vec<tower_lsp::lsp_types::CompletionItem>> = OnceLock::new();
-static DOT_COMPLETIONS_NO_SNIPPETS: OnceLock<Vec<tower_lsp::lsp_types::CompletionItem>> = OnceLock::new();
 static BARE_COMPLETIONS_SNIPPETS:    OnceLock<Vec<tower_lsp::lsp_types::CompletionItem>> = OnceLock::new();
 static BARE_COMPLETIONS_NO_SNIPPETS: OnceLock<Vec<tower_lsp::lsp_types::CompletionItem>> = OnceLock::new();
-
-fn build_dot_completions(snippets: bool) -> Vec<tower_lsp::lsp_types::CompletionItem> {
-    use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind};
-    all()
-        .filter(|e| e.is_extension)
-        .fold(Vec::<CompletionItem>::new(), |mut acc, e| {
-            if !acc.iter().any(|i| i.label == e.name) {
-                acc.push(make_item_ex(e.name, CompletionItemKind::METHOD, e.signature, snippets, e.has_trailing_lambda()));
-            }
-            acc
-        })
-}
 
 fn build_bare_completions(snippets: bool) -> Vec<tower_lsp::lsp_types::CompletionItem> {
     use tower_lsp::lsp_types::CompletionItemKind;
@@ -278,19 +265,10 @@ fn build_bare_completions(snippets: bool) -> Vec<tower_lsp::lsp_types::Completio
     items
 }
 
-/// Completion items for dot-trigger — returns a shared cached slice.
-pub fn dot_completions(snippets: bool) -> Vec<tower_lsp::lsp_types::CompletionItem> {
-    if snippets {
-        DOT_COMPLETIONS_SNIPPETS.get_or_init(|| build_dot_completions(true)).clone()
-    } else {
-        DOT_COMPLETIONS_NO_SNIPPETS.get_or_init(|| build_dot_completions(false)).clone()
-    }
-}
-
 /// Returns stdlib dot-completions filtered to those applicable for `receiver_type`.
 /// Falls back to scope-functions-only for unknown project types.
 pub fn dot_completions_for(receiver_type: &str, snippets: bool) -> Vec<tower_lsp::lsp_types::CompletionItem> {
-    use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind};
+    use tower_lsp::lsp_types::CompletionItemKind;
 
     let rt = receiver_type.to_lowercase();
     let is_string     = rt == "string" || rt == "charsequence" || rt == "stringbuilder";
@@ -433,15 +411,6 @@ pub fn live_templates() -> Vec<tower_lsp::lsp_types::CompletionItem> {
             ..Default::default()
         }
     }).collect()
-}
-
-fn make_item(
-    name:      &'static str,
-    kind:      tower_lsp::lsp_types::CompletionItemKind,
-    signature: &'static str,
-    snippets:  bool,
-) -> tower_lsp::lsp_types::CompletionItem {
-    make_item_ex(name, kind, signature, snippets, false)
 }
 
 fn make_item_ex(

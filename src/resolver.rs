@@ -18,7 +18,7 @@
 //! Stdlib packages (`kotlin.*`, `java.*`, `android.*`, `androidx.*`) are skipped because
 //! their sources aren't present in the project tree.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 
@@ -734,29 +734,6 @@ fn import_file_stems(import_path: &str) -> Vec<String> {
         [only]         => vec![only.to_string()],
         [.., par, lst] => vec![par.to_string(), lst.to_string()],
     }
-}
-
-/// Candidate source filenames for a given import path, in priority order.
-///
-/// Kotlin convention: uppercase segments = class names; the first uppercase
-/// segment is always the top-level class (= the file).  Any further uppercase
-/// segment is a nested class defined *inside* that file.
-///
-/// `…accountpicker.AccountPickerContract.Event`
-///   → `["AccountPickerContract.kt", "AccountPickerContract.java", "AccountPickerContract.swift",
-///       "Event.kt", "Event.java", "Event.swift"]`  (outer-class file tried first)
-///
-/// `…example.Foo`
-///   → `["Foo.kt", "Foo.java", "Foo.swift"]`
-fn import_file_candidates(import_path: &str) -> Vec<String> {
-    import_file_stems(import_path)
-        .into_iter()
-        .flat_map(|stem| {
-            crate::indexer::SOURCE_EXTENSIONS
-                .iter()
-                .map(move |ext| format!("{stem}.{ext}"))
-        })
-        .collect()
 }
 
 /// Find and synchronously parse the file most likely to contain `symbol_name`.
@@ -1609,6 +1586,17 @@ mod tests {
 
     fn uri(path: &str) -> Url {
         Url::parse(&format!("file:///test{path}")).unwrap()
+    }
+
+    fn import_file_candidates(import_path: &str) -> Vec<String> {
+        import_file_stems(import_path)
+            .into_iter()
+            .flat_map(|stem| {
+                crate::indexer::SOURCE_EXTENSIONS
+                    .iter()
+                    .map(move |ext| format!("{stem}.{ext}"))
+            })
+            .collect()
     }
 
     // ── pure helpers ─────────────────────────────────────────────────────────
