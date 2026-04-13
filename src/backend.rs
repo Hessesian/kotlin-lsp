@@ -275,29 +275,39 @@ impl LanguageServer for Backend {
         let opened_path_opt = uri.to_file_path().ok();
         if let Some(ref path) = opened_path_opt {
             // Compute candidate root for the opened file.
-            // Strategy: walk all the way up looking for .git (repo root wins).
-            // If no .git found, use the first directory that has any other marker.
-            // This prevents stopping at a nested Package.swift inside a mono-repo
-            // when the true root (with .git) is further up.
-            let repo_markers = [
+            //
+            // Marker tiers (highest → lowest priority):
+            //   1. Strong project markers (build.gradle.kts, settings.gradle, pom.xml, Cargo.toml)
+            //      — typically appear exactly once at the project root. Nearest wins over .git.
+            //   2. .git — repo root; wins over weak markers like Package.swift.
+            //   3. Weak markers (Package.swift) — present at every Swift module; last resort.
+            //
+            // This correctly handles mono-repos where .git is at the parent of a subproject
+            // (e.g. Moneta/.git with Moneta/android/settings.gradle.kts) and Swift mono-repos
+            // where ios/.git is the right root but ios/Modules/*/Package.swift should be ignored.
+            let strong_markers = [
                 "build.gradle", "settings.gradle", "build.gradle.kts",
-                "Cargo.toml", "Package.swift", "pom.xml", "settings.gradle.kts",
+                "Cargo.toml", "pom.xml", "settings.gradle.kts",
             ];
+            let weak_markers = ["Package.swift"];
             let mut cur = path.parent().map(|p| p.to_path_buf());
-            let mut git_root: Option<std::path::PathBuf> = None;
-            let mut nearest_marker: Option<std::path::PathBuf> = None;
+            let mut nearest_strong: Option<std::path::PathBuf> = None;
+            let mut git_root:        Option<std::path::PathBuf> = None;
+            let mut nearest_weak:    Option<std::path::PathBuf> = None;
             while let Some(ref dir) = cur {
+                if nearest_strong.is_none() && strong_markers.iter().any(|m| dir.join(m).exists()) {
+                    nearest_strong = Some(dir.clone());
+                }
                 if dir.join(".git").exists() {
                     git_root = Some(dir.clone());
-                    // .git found — no need to walk further
-                    break;
+                    break; // no need to walk above .git
                 }
-                if nearest_marker.is_none() && repo_markers.iter().any(|m| dir.join(m).exists()) {
-                    nearest_marker = Some(dir.clone());
+                if nearest_weak.is_none() && weak_markers.iter().any(|m| dir.join(m).exists()) {
+                    nearest_weak = Some(dir.clone());
                 }
                 cur = dir.parent().map(|p| p.to_path_buf());
             }
-            let found = git_root.or(nearest_marker);
+            let found = nearest_strong.or(git_root).or(nearest_weak);
             let chosen = found.or_else(|| path.parent().map(|p| p.to_path_buf()));
             if let Some(candidate_root) = chosen {
                 let current_root = self.indexer.workspace_root.read().unwrap().clone();
