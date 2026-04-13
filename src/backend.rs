@@ -473,27 +473,24 @@ impl LanguageServer for Backend {
             }
         }
 
-        // If the in-memory definitions index is empty (indexing in progress),
-        // use rg fallback immediately for low-latency results.
-        if self.indexer.definitions.is_empty() {
-            let root_opt = { self.indexer.workspace_root.read().unwrap().clone() };
-            let name_clone = word.clone();
-            let rg_locs = tokio::task::spawn_blocking(move || {
-                crate::indexer::rg_find_definition(&name_clone, root_opt.as_deref())
-            }).await.unwrap_or_default();
-            if !rg_locs.is_empty() {
-                return Ok(match rg_locs.len() {
-                    1 => Some(GotoDefinitionResponse::Scalar(rg_locs.into_iter().next().unwrap())),
-                    _ => Some(GotoDefinitionResponse::Array(rg_locs)),
-                });
-            }
+        let locs = self.indexer.find_definition_qualified(&word, qualifier.as_deref(), uri);
+        if !locs.is_empty() {
+            return Ok(match locs.len() {
+                1 => Some(GotoDefinitionResponse::Scalar(locs.into_iter().next().unwrap())),
+                _ => Some(GotoDefinitionResponse::Array(locs)),
+            });
         }
 
-        let locs = self.indexer.find_definition_qualified(&word, qualifier.as_deref(), uri);
-        Ok(match locs.len() {
+        // Index miss (symbol not indexed or indexing in progress) → rg fallback.
+        let root_opt = { self.indexer.workspace_root.read().unwrap().clone() };
+        let name_clone = word.clone();
+        let rg_locs = tokio::task::spawn_blocking(move || {
+            crate::indexer::rg_find_definition(&name_clone, root_opt.as_deref())
+        }).await.unwrap_or_default();
+        Ok(match rg_locs.len() {
             0 => None,
-            1 => Some(GotoDefinitionResponse::Scalar(locs.into_iter().next().unwrap())),
-            _ => Some(GotoDefinitionResponse::Array(locs)),
+            1 => Some(GotoDefinitionResponse::Scalar(rg_locs.into_iter().next().unwrap())),
+            _ => Some(GotoDefinitionResponse::Array(rg_locs)),
         })
     }
 
@@ -909,6 +906,30 @@ impl LanguageServer for Backend {
         }
 
         results.sort_by(|a, b| a.name.cmp(&b.name));
+
+        // rg fallback when index is empty (indexing in progress or cold start).
+        if results.is_empty() && !query.is_empty() && query_qualifier.is_none() {
+            let root_opt = { self.indexer.workspace_root.read().unwrap().clone() };
+            let q = query.to_string();
+            let rg_locs = tokio::task::spawn_blocking(move || {
+                crate::indexer::rg_find_definition(&q, root_opt.as_deref())
+            }).await.unwrap_or_default();
+            if !rg_locs.is_empty() {
+                let rg_syms: Vec<SymbolInformation> = rg_locs.into_iter().map(|loc| {
+                    #[allow(deprecated)]
+                    SymbolInformation {
+                        name: query_name.to_string(),
+                        kind: tower_lsp::lsp_types::SymbolKind::FILE,
+                        tags: None,
+                        deprecated: None,
+                        location: loc,
+                        container_name: Some("rg fallback".to_string()),
+                    }
+                }).collect();
+                return Ok(Some(rg_syms));
+            }
+        }
+
         Ok(if results.is_empty() { None } else { Some(results) })
     }
 
