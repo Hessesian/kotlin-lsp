@@ -121,4 +121,8 @@ pub struct WorkspaceIndexResult {
     pub stats: IndexStats,
     /// Workspace root that was indexed.
     pub workspace_root: std::path::PathBuf,
+    /// True if the run was aborted mid-way (e.g. root generation changed).
+    /// Callers must NOT call apply_workspace_result when this is true — doing
+    /// so would reset_index_state() and apply only the partial result set.
+    pub aborted: bool,
 }

@@ -439,8 +439,10 @@ impl Indexer {
     pub async fn index_workspace_full(self: Arc<Self>, root: &Path, client: Option<tower_lsp::Client>) {
         let max = resolve_max_files(MAX_FILES_UNLIMITED);
         let result = Arc::clone(&self).index_workspace_impl(root, max, client).await;
-        self.apply_workspace_result(&result);
-        self.save_cache_to_disk();
+        if !result.aborted {
+            self.apply_workspace_result(&result);
+            self.save_cache_to_disk();
+        }
     }
     
     /// Synchronous workspace indexing for --index-only mode.
@@ -506,6 +508,7 @@ impl Indexer {
             files: all_results,
             stats,
             workspace_root: root.to_path_buf(),
+            aborted: false,
         }
     }
 
@@ -513,8 +516,10 @@ impl Indexer {
         *self.workspace_root.write().unwrap() = Some(root.to_path_buf());
         let max = resolve_max_files(DEFAULT_MAX_INDEX_FILES);
         let result = Arc::clone(&self).index_workspace_impl(root, max, client).await;
-        self.apply_workspace_result(&result);
-        self.save_cache_to_disk();
+        if !result.aborted {
+            self.apply_workspace_result(&result);
+            self.save_cache_to_disk();
+        }
     }
 
     /// Prioritized indexing: parse `initial_paths` first (high-priority), then
@@ -550,8 +555,10 @@ impl Indexer {
         // Then proceed with the normal (bounded) workspace indexing in the background.
         let max = resolve_max_files(DEFAULT_MAX_INDEX_FILES);
         let result = Arc::clone(&self).index_workspace_impl(root, max, client).await;
-        self.apply_workspace_result(&result);
-        self.save_cache_to_disk();
+        if !result.aborted {
+            self.apply_workspace_result(&result);
+            self.save_cache_to_disk();
+        }
     }
 
     async fn index_workspace_impl(self: Arc<Self>, root: &Path, max: usize, client: Option<tower_lsp::Client>) -> WorkspaceIndexResult {
@@ -568,6 +575,7 @@ impl Indexer {
                 files: Vec::new(),
                 stats: IndexStats::default(),
                 workspace_root: root.to_path_buf(),
+                aborted: true,
             };
         }
 
@@ -602,11 +610,13 @@ impl Indexer {
         let mut need_parse: Vec<PathBuf> = Vec::new();
         let mut cached_results: Vec<FileIndexResult> = Vec::new();
         let mut cache_hits: usize = 0;
+        let mut aborted_early = false;
 
         for path in &paths {
             // Bail early if generation changed (root switch / explicit reindex).
             if self.root_generation.load(std::sync::atomic::Ordering::SeqCst) != start_gen {
                 log::info!("index_workspace_impl: generation changed, aborting partition");
+                aborted_early = true;
                 break;
             }
 
@@ -654,7 +664,7 @@ impl Indexer {
         // editors (older Helix versions) never reply, which would stall indexing.
         if let Some(ref client) = client {
             let _ = tokio::time::timeout(
-                std::time::Duration::from_secs(3),
+                std::time::Duration::from_millis(500),
                 client.send_request::<tower_lsp::lsp_types::request::WorkDoneProgressCreate>(
                     WorkDoneProgressCreateParams { token: token.clone() }
                 )
@@ -697,6 +707,7 @@ impl Indexer {
             // Abort early if generation changed while scheduling parses.
             if self.root_generation.load(std::sync::atomic::Ordering::SeqCst) != start_gen {
                 log::info!("index_workspace_impl: generation changed during scheduling, aborting remaining parses");
+                aborted_early = true;
                 break;
             }
 
@@ -807,6 +818,22 @@ impl Indexer {
         
         log::info!("All {} parse tasks completed", results.len());
         
+        // If generation changed while parse tasks ran, discard results — the new
+        // root's indexing run will populate the index correctly.
+        if self.root_generation.load(std::sync::atomic::Ordering::SeqCst) != start_gen {
+            log::info!("index_workspace_impl: generation changed after parse, discarding results");
+            aborted_early = true;
+        }
+
+        if aborted_early {
+            return WorkspaceIndexResult {
+                files: Vec::new(),
+                stats: IndexStats::default(),
+                workspace_root: root.to_path_buf(),
+                aborted: true,
+            };
+        }
+
         // Combine cache hits + newly parsed into one list.
         // apply_workspace_result does a full reset + insert of ALL files.
         let mut parsed_results: Vec<FileIndexResult> = results.into_iter().flatten().collect();
@@ -856,6 +883,7 @@ impl Indexer {
             files: all_results,
             stats,
             workspace_root: root.to_path_buf(),
+            aborted: false,
         }
     }
 
@@ -5672,6 +5700,7 @@ internal class ContactAddressInteractor @Inject constructor(
             files: vec![cached],
             stats: IndexStats { cache_hits: 1, ..Default::default() },
             workspace_root: std::path::PathBuf::from("/"),
+            aborted: false,
         };
 
         let idx = Indexer::new();
@@ -5694,6 +5723,7 @@ internal class ContactAddressInteractor @Inject constructor(
             files: vec![Indexer::parse_file(&u1, "class ClassA")],
             stats: IndexStats::default(),
             workspace_root: std::path::PathBuf::from("/workspace_a"),
+            aborted: false,
         });
         assert!(idx.definitions.contains_key("ClassA"), "ClassA should be present after first apply");
 
@@ -5702,6 +5732,7 @@ internal class ContactAddressInteractor @Inject constructor(
             files: vec![Indexer::parse_file(&u2, "class ClassB")],
             stats: IndexStats::default(),
             workspace_root: std::path::PathBuf::from("/workspace_b"),
+            aborted: false,
         });
 
         assert!(!idx.definitions.contains_key("ClassA"),
@@ -5730,6 +5761,7 @@ internal class ContactAddressInteractor @Inject constructor(
             files: vec![cached_result, parsed_result],
             stats: IndexStats { cache_hits: 1, files_parsed: 1, ..Default::default() },
             workspace_root: std::path::PathBuf::from("/"),
+            aborted: false,
         });
 
         assert!(idx.definitions.contains_key("CachedClass"),

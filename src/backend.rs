@@ -696,8 +696,6 @@ impl LanguageServer for Backend {
         };
         let same_pkg = self.indexer.package_of(uri);
 
-        eprintln!("[refs] name={name:?} parent={parent_class:?} same_pkg={same_pkg:?} declared_pkg={declared_pkg:?}");
-
         // Collect declaration file paths — but only those where the enclosing class
         // matches parent_class (if known).  Without this filter, every contract file
         // that has `sealed interface Event` would be included, causing false positives
