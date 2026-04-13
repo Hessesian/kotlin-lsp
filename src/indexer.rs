@@ -506,10 +506,9 @@ impl Indexer {
                                 None
                             } else {
                                 let t0 = std::time::Instant::now();
-                                // Pure parse in blocking task
-                                let parse_result = tokio::task::spawn_blocking(move || {
-                                    Indexer::parse_file(&uri, &content)
-                                }).await.ok();
+                                // Parse synchronously (tree-sitter is CPU-bound but we're already in
+                                // a tokio::spawn task throttled by semaphore, no need for spawn_blocking)
+                                let parse_result = Some(Indexer::parse_file(&uri, &content));
                                 
                                 let took = t0.elapsed().as_millis();
                                 log::debug!("Parsed {} in {} ms", path.display(), took);
@@ -573,6 +572,11 @@ impl Indexer {
         // BLOCKING mode: await ALL handles to collect results
         // This is the key fix — function doesn't return until all work completes
         log::info!("Awaiting completion of {} parse tasks", handles.len());
+        
+        // Yield to ensure spawned tasks get scheduled before we block waiting
+        tokio::task::yield_now().await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        
         let results = futures::future::join_all(handles).await;
         log::info!("All parse tasks completed");
         
