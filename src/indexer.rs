@@ -740,7 +740,37 @@ impl Indexer {
         
         let idx_ref = Arc::clone(&self);
         let sem = Arc::clone(&self.parse_sem);
-        
+
+        // Spawn a task that sends WorkDoneProgress::Report every 500 ms so the
+        // editor shows live progress instead of jumping straight from 0% to done.
+        let progress_idx   = Arc::clone(&self);
+        let progress_client = client.clone();
+        let progress_token  = token.clone();
+        let progress_total  = parse_count;
+        let progress_handle = tokio::spawn(async move {
+            if progress_client.is_none() || progress_total == 0 { return; }
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                let done = progress_idx.parse_tasks_completed.load(std::sync::atomic::Ordering::Relaxed);
+                let pct  = ((done * 100) / progress_total) as u32;
+                if let Some(ref c) = progress_client {
+                    c.send_notification::<progress::KotlinProgress>(ProgressParams {
+                        token: progress_token.clone(),
+                        value: ProgressParamsValue::WorkDone(WorkDoneProgress::Report(
+                            WorkDoneProgressReport {
+                                cancellable: Some(false),
+                                message: Some(format!("{done}/{progress_total} files…")),
+                                percentage: Some(pct),
+                            }
+                        )),
+                    }).await;
+                }
+                if done >= progress_total { break; }
+            }
+        });
+
         let results = crate::task_runner::run_concurrent(
             work_items,
             sem,
@@ -815,7 +845,10 @@ impl Indexer {
                 }
             }
         ).await;
-        
+
+        // Stop the progress reporter (it may still be sleeping on its interval).
+        progress_handle.abort();
+
         log::info!("All {} parse tasks completed", results.len());
         
         // If generation changed while parse tasks ran, discard results — the new
