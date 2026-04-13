@@ -11,8 +11,18 @@ mod types;
 
 use tower_lsp::{LspService, Server};
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
-async fn main() {
+fn main() {
+    // Build custom tokio runtime with larger blocking pool
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .max_blocking_threads(512)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async_main());
+}
+
+async fn async_main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .target(env_logger::Target::Stderr) // keep stdout clean for LSP JSON-RPC
         .init();

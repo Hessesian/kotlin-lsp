@@ -38,8 +38,7 @@ where
         
         handles.push(tokio::spawn(async move {
             let _permit = sem.acquire().await.unwrap();
-            let sem_clone = Arc::clone(&sem);
-            worker(item, sem_clone).await
+            worker(item, Arc::clone(&sem)).await
         }));
     }
     

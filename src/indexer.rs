@@ -266,9 +266,81 @@ impl Indexer {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(usize::MAX); // Default to unlimited for --index-only
-        let result = Arc::clone(&self).index_workspace_impl(root, max, client).await;
-        self.apply_workspace_result(&result);
-        self.save_cache_to_disk();
+        
+        // For --index-only mode (client.is_none()), use synchronous sequential parsing
+        // to avoid async/blocking pool exhaustion deadlock
+        if client.is_none() {
+            log::info!("--index-only mode: using synchronous sequential parsing");
+            let result = self.index_workspace_sync(root, max);
+            self.apply_workspace_result(&result);
+            self.save_cache_to_disk();
+        } else {
+            let result = Arc::clone(&self).index_workspace_impl(root, max, client).await;
+            self.apply_workspace_result(&result);
+            self.save_cache_to_disk();
+        }
+    }
+    
+    /// Synchronous workspace indexing for --index-only mode.
+    /// Avoids async complexity and blocking pool exhaustion.
+    fn index_workspace_sync(&self, root: &Path, max: usize) -> WorkspaceIndexResult {
+        *self.workspace_root.write().unwrap() = Some(root.to_path_buf());
+        
+        let mut paths = find_source_files(root);
+        let total = paths.len();
+        paths.sort_by_key(|p| p.components().count());
+        let paths: Vec<_> = paths.into_iter().take(max).collect();
+        
+        log::info!("Indexing {} files synchronously", paths.len());
+        
+        // Try cache
+        let cache = try_load_cache(root);
+        let mut file_results = Vec::new();
+        let mut cache_hits = 0;
+        
+        for path in paths {
+            let path_str = path.to_string_lossy().to_string();
+            let mtime = file_mtime(&path).unwrap_or(0);
+            
+            // Check cache
+            let mut from_cache = false;
+            if let Some(ref c) = cache {
+                if let Some(entry) = c.entries.get(&path_str) {
+                    if entry.mtime_secs == mtime {
+                        if let Ok(uri) = Url::from_file_path(&path) {
+                            self.restore_from_cache_entry(&uri, entry);
+                            cache_hits += 1;
+                            from_cache = true;
+                        }
+                    }
+                }
+            }
+            
+            // Parse if not cached
+            if !from_cache {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if let Ok(uri) = Url::from_file_path(&path) {
+                        let result = Indexer::parse_file(&uri, &content);
+                        file_results.push(result);
+                    }
+                }
+            }
+        }
+        
+        let stats = IndexStats {
+            files_discovered: total,
+            cache_hits,
+            files_parsed: file_results.len(),
+            symbols_extracted: file_results.iter().map(|f| f.data.symbols.len()).sum(),
+            packages_found: file_results.iter().filter_map(|f| f.data.package.as_ref()).count(),
+            errors: 0,
+        };
+        
+        WorkspaceIndexResult {
+            files: file_results,
+            stats,
+            workspace_root: root.to_path_buf(),
+        }
     }
 
     pub async fn index_workspace(self: Arc<Self>, root: &Path, client: Option<tower_lsp::Client>) {
@@ -452,12 +524,16 @@ impl Indexer {
         // Clear any previous scheduling state for this run so stale entries don't block new work.
         self.scheduled_paths.clear();
 
-        // ── concurrent parse (throttled by parse_sem) ─────────────────────────
-        // Use the global parse semaphore (configured via env or default) so
-        // spawn_blocking submissions are naturally throttled to parse workers.
-        let sem = Arc::clone(&self.parse_sem);
-        let mut handles: Vec<tokio::task::JoinHandle<Option<FileIndexResult>>> = Vec::with_capacity(parse_count);
-
+        // ── Prepare work items for concurrent parsing ─────────────────────────
+        // Package each path with context needed by worker
+        #[derive(Clone)]
+        struct ParseWorkItem {
+            path: PathBuf,
+            key: String,
+            start_gen: u64,
+        }
+        
+        let mut work_items = Vec::new();
         for path in need_parse {
             // Abort early if generation changed while scheduling parses.
             if self.root_generation.load(std::sync::atomic::Ordering::SeqCst) != start_gen {
@@ -465,10 +541,9 @@ impl Indexer {
                 break;
             }
 
-            log::debug!("Scheduling parse for: {}", path.display());
-
             // Deduplicate scheduling: compute canonical absolute path string as key
             let key = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone()).to_string_lossy().to_string();
+            
             // Atomically insert scheduling entry if not already scheduled for this generation.
             match self.scheduled_paths.entry(key.clone()) {
                 dashmap::mapref::entry::Entry::Occupied(mut o) => {
@@ -486,115 +561,95 @@ impl Indexer {
                     v.insert(start_gen);
                 }
             }
-
-            let sem        = Arc::clone(&sem);
-            let idx        = Arc::clone(&self);
-            let client2    = client.clone();
-            let token2     = token.clone();
-            let total_cnt  = parse_count.max(1);
-            let root_str2  = root_str.to_string();
-
-            handles.push(tokio::spawn(async move {
-                let _permit = sem.acquire_owned().await;
-                log::debug!("Acquired permit for: {}", path.display());
-                let result = match tokio::fs::read_to_string(&path).await {
-                    Ok(content) => {
-                        if let Ok(uri) = Url::from_file_path(&path) {
-                            // Check generation again inside task before heavy parse.
-                            if idx.root_generation.load(std::sync::atomic::Ordering::SeqCst) != start_gen {
-                                log::info!("index task: generation changed, skipping parse for {}", path.display());
-                                None
-                            } else {
-                                let t0 = std::time::Instant::now();
-                                // Parse synchronously (tree-sitter is CPU-bound but we're already in
-                                // a tokio::spawn task throttled by semaphore, no need for spawn_blocking)
-                                let parse_result = Some(Indexer::parse_file(&uri, &content));
-                                
-                                let took = t0.elapsed().as_millis();
-                                log::debug!("Parsed {} in {} ms", path.display(), took);
-                                // Remove scheduled_paths entry only if it points to this generation
-                                if let Some(pair) = idx.scheduled_paths.get(&key) {
-                                    if *pair == start_gen {
-                                        idx.scheduled_paths.remove(&key);
-                                    }
-                                }
-                                let threshold: u128 = std::env::var("KOTLIN_LSP_PARSE_LOG_MS").ok()
-                                    .and_then(|v| v.parse::<u128>().ok())
-                                    .unwrap_or(1000);
-                                if took as u128 > threshold {
-                                    log::warn!("Slow parse: {} took {} ms", path.display(), took);
-                                }
-                                parse_result
-                            }
-                        } else {
-                            None
+            
+            work_items.push(ParseWorkItem { path, key, start_gen });
+        }
+        
+        // ── concurrent parse using task_runner ────────────────────────────────
+        log::info!("Parsing {} files concurrently", work_items.len());
+        
+        let idx_ref = Arc::clone(&self);
+        let sem = Arc::clone(&self.parse_sem);
+        
+        let results = crate::task_runner::run_concurrent(
+            work_items,
+            sem,
+            move |item, _sem| {
+                let idx = Arc::clone(&idx_ref);
+                async move {
+                    log::debug!("Parsing: {}", item.path.display());
+                    
+                    // Check generation before parsing
+                    if idx.root_generation.load(std::sync::atomic::Ordering::SeqCst) != item.start_gen {
+                        log::info!("Parse task: generation changed, skipping {}", item.path.display());
+                        return None;
+                    }
+                    
+                    // Read file
+                    let content = match tokio::fs::read_to_string(&item.path).await {
+                        Ok(c) => c,
+                        Err(e) => {
+                            log::warn!("Could not read {}: {}", item.path.display(), e);
+                            return None;
+                        }
+                    };
+                    
+                    // Get URI
+                    let uri = match Url::from_file_path(&item.path) {
+                        Ok(u) => u,
+                        Err(_) => {
+                            log::warn!("Invalid file path: {}", item.path.display());
+                            return None;
+                        }
+                    };
+                    
+                    // Parse (CPU-bound tree-sitter work — must use spawn_blocking)
+                    let t0 = std::time::Instant::now();
+                    let uri_clone = uri.clone();
+                    let content_clone = content.clone();
+                    let parse_result = match tokio::task::spawn_blocking(move || {
+                        Indexer::parse_file(&uri_clone, &content_clone)
+                    }).await {
+                        Ok(result) => result,
+                        Err(e) => {
+                            log::warn!("Parse task panicked for {}: {}", item.path.display(), e);
+                            return None;
+                        }
+                    };
+                    let took = t0.elapsed().as_millis();
+                    
+                    log::debug!("Parsed {} in {} ms", item.path.display(), took);
+                    
+                    // Remove scheduling marker
+                    if let Some(pair) = idx.scheduled_paths.get(&item.key) {
+                        if *pair == item.start_gen {
+                            idx.scheduled_paths.remove(&item.key);
                         }
                     }
-                    Err(e) => {
-                        log::warn!("Could not read {}: {e}", path.display());
-                        None
+                    
+                    // Log slow parses
+                    let threshold: u128 = std::env::var("KOTLIN_LSP_PARSE_LOG_MS").ok()
+                        .and_then(|v| v.parse::<u128>().ok())
+                        .unwrap_or(1000);
+                    if took as u128 > threshold {
+                        log::warn!("Slow parse: {} took {} ms", item.path.display(), took);
                     }
-                };
-
-                let n = idx.parse_tasks_completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                // Report progress every ~5% (but at least every 50 files).
-                // Never send percentage=100 here — some editors (Helix) treat that
-                // as "done" and clear the spinner before the End notification fires.
-                // The End notification below carries the final summary.
-                let report_every = (total_cnt / 20).max(50);
-                if n % report_every == 0 && n < total_cnt {
-                    let pct = ((n * 100) / total_cnt).min(99) as u32;
-                    if let Some(ref c) = client2 {
-                        c.send_notification::<progress::KotlinProgress>(ProgressParams {
-                            token: token2,
-                            value: ProgressParamsValue::WorkDone(WorkDoneProgress::Report(
-                                WorkDoneProgressReport {
-                                    cancellable: Some(false),
-                                    message: Some(format!("{n}/{total_cnt} files")),
-                                    percentage: Some(pct),
-                                }
-                            )),
-                        }).await;
-                    }
-                    // Update status file with elapsed and estimated remaining time.
-                    let elapsed = index_start.elapsed().as_secs_f64();
-                    let estimated_total = if pct > 0 { elapsed * 100.0 / pct as f64 } else { 0.0 };
-                    let estimated_remaining = (estimated_total - elapsed).max(0.0);
-                    write_status_file(&format!(
-                        r#"{{"phase":"indexing","workspace":"{root_str2}","indexed":{n},"total":{total_cnt},"cache_hits":{cache_hits},"symbols":0,"started_at":{started_unix},"elapsed_secs":{elapsed:.0},"estimated_remaining_secs":{estimated_remaining:.0}}}"#
-                    ));
-                }
-                
-                result
-            }));
-        }
-
-        // BLOCKING mode: await ALL handles to collect results
-        // This is the key fix — function doesn't return until all work completes
-        log::info!("Awaiting completion of {} parse tasks", handles.len());
-        
-        // Yield to ensure spawned tasks get scheduled before we block waiting
-        tokio::task::yield_now().await;
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-        
-        let results = futures::future::join_all(handles).await;
-        log::info!("All parse tasks completed");
-        
-        // Collect successful results
-        let mut file_results: Vec<FileIndexResult> = Vec::new();
-        let mut parse_errors = 0;
-        for join_result in results {
-            match join_result {
-                Ok(Some(file_result)) => file_results.push(file_result),
-                Ok(None) => parse_errors += 1,
-                Err(e) => {
-                    log::warn!("Parse task panicked: {}", e);
-                    parse_errors += 1;
+                    
+                    // Track completion
+                    idx.parse_tasks_completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    
+                    Some(parse_result)
                 }
             }
-        }
+        ).await;
+        
+        log::info!("All {} parse tasks completed", results.len());
+        
+        // Filter out None results
+        let file_results: Vec<FileIndexResult> = results.into_iter().flatten().collect();
         
         // Build stats
+        let parse_errors = parse_count - file_results.len();
         let stats = IndexStats {
             files_discovered: total,
             cache_hits,
