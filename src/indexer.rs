@@ -298,7 +298,11 @@ impl Indexer {
         let mut file_results = Vec::new();
         let mut cache_hits = 0;
         
-        for path in paths {
+        for (i, path) in paths.iter().enumerate() {
+            if i % 50 == 0 {
+                log::info!("Progress: {}/{} files", i, paths.len());
+            }
+            
             let path_str = path.to_string_lossy().to_string();
             let mtime = file_mtime(&path).unwrap_or(0);
             
@@ -320,12 +324,15 @@ impl Indexer {
             if !from_cache {
                 if let Ok(content) = std::fs::read_to_string(&path) {
                     if let Ok(uri) = Url::from_file_path(&path) {
+                        log::debug!("Parsing: {}", path.display());
                         let result = Indexer::parse_file(&uri, &content);
                         file_results.push(result);
                     }
                 }
             }
         }
+        
+        log::info!("Sync indexing complete: {} parsed, {} cache hits", file_results.len(), cache_hits);
         
         let stats = IndexStats {
             files_discovered: total,
