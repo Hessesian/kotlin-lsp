@@ -426,6 +426,17 @@ pub fn resolve_symbol(idx: &Indexer, name: &str, qualifier: Option<&str>, from_u
 /// this function to locate each superclass, and those files would in turn call
 /// the hierarchy walk again with a fresh visited-set, looping forever).
 fn resolve_symbol_inner(idx: &Indexer, name: &str, from_uri: &Url, with_hierarchy: bool) -> Vec<Location> {
+    // 0.5 ── on-demand index of the current file if not yet indexed ────────────
+    // Ensures resolve_local and find_local_declaration work even at cold start
+    // (e.g. the user invokes gd/hover before indexing has reached this file).
+    if !idx.files.contains_key(from_uri.as_str()) {
+        if let Ok(path) = from_uri.to_file_path() {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                idx.index_content(from_uri, &content);
+            }
+        }
+    }
+
     // 1 ── local (indexed symbols) ────────────────────────────────────────────
     let local = resolve_local(idx, name, from_uri);
     if !local.is_empty() { return local; }
