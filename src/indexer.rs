@@ -98,7 +98,7 @@ const CACHE_VERSION: u32 = 3;
 
 /// Per-file entry stored in the on-disk index cache.
 #[derive(Serialize, Deserialize)]
-struct FileCacheEntry {
+pub(crate) struct FileCacheEntry {
     /// File mtime (seconds since Unix epoch) — cheap cache validity check.
     mtime_secs: u64,
     /// FNV-1a content hash — secondary guard for mtime collisions / FAT FS.
@@ -5618,5 +5618,124 @@ internal class ContactAddressInteractor @Inject constructor(
         let result = super::resolve_max_files(2000);
         std::env::remove_var("KOTLIN_LSP_MAX_FILES");
         assert_eq!(result, 2000);
+    }
+
+    // ── cache_entry_to_file_result ────────────────────────────────────────────
+
+    /// cache_entry_to_file_result must reconstruct supertypes from FileData.lines
+    /// even when the FileCacheEntry was loaded from disk (lines are always cached).
+    #[test]
+    fn cache_entry_to_file_result_supertypes_extracted() {
+        let u = uri("/Cat.kt");
+        let mut data = crate::types::FileData::default();
+        data.lines = Arc::new(vec![
+            "class Cat : IAnimal {".into(),
+            "    fun meow() {}".into(),
+            "}".into(),
+        ]);
+        data.symbols.push(crate::types::SymbolEntry {
+            name: "Cat".into(),
+            kind: tower_lsp::lsp_types::SymbolKind::CLASS,
+            visibility: crate::types::Visibility::Public,
+            range: Default::default(),
+            selection_range: Default::default(),
+            detail: String::new(),
+        });
+
+        let entry = FileCacheEntry {
+            mtime_secs: 100,
+            content_hash: 42,
+            file_data: data,
+        };
+
+        let result = super::cache_entry_to_file_result(&u, &entry);
+        let super_names: Vec<&str> = result.supertypes.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(super_names.contains(&"IAnimal"), "IAnimal missing from supertypes: {super_names:?}");
+    }
+
+    // ── apply_workspace_result ────────────────────────────────────────────────
+
+    /// apply_workspace_result must include files from cache hits (not just parsed files).
+    #[test]
+    fn apply_workspace_result_includes_cached_files() {
+        let u = uri("/Cached.kt");
+        // Build cache entry from a prior parse.
+        let parsed = Indexer::parse_file(&u, "class CachedClass");
+        let entry = FileCacheEntry {
+            mtime_secs: 0,
+            content_hash: 0,
+            file_data: parsed.data.clone(),
+        };
+        let cached = super::cache_entry_to_file_result(&u, &entry);
+
+        let workspace_result = WorkspaceIndexResult {
+            files: vec![cached],
+            stats: IndexStats { cache_hits: 1, ..Default::default() },
+            workspace_root: std::path::PathBuf::from("/"),
+        };
+
+        let idx = Indexer::new();
+        idx.apply_workspace_result(&workspace_result);
+
+        assert!(idx.definitions.contains_key("CachedClass"),
+            "CachedClass from cache hit should be in definitions index");
+        assert!(idx.files.contains_key(u.as_str()),
+            "CachedClass file should be in files map");
+    }
+
+    /// apply_workspace_result must do a full reset — switching workspaces removes
+    /// all symbols from the previous workspace.
+    #[test]
+    fn apply_workspace_result_clears_stale_workspace() {
+        let idx = Indexer::new();
+
+        let u1 = uri("/A.kt");
+        idx.apply_workspace_result(&WorkspaceIndexResult {
+            files: vec![Indexer::parse_file(&u1, "class ClassA")],
+            stats: IndexStats::default(),
+            workspace_root: std::path::PathBuf::from("/workspace_a"),
+        });
+        assert!(idx.definitions.contains_key("ClassA"), "ClassA should be present after first apply");
+
+        let u2 = uri("/B.kt");
+        idx.apply_workspace_result(&WorkspaceIndexResult {
+            files: vec![Indexer::parse_file(&u2, "class ClassB")],
+            stats: IndexStats::default(),
+            workspace_root: std::path::PathBuf::from("/workspace_b"),
+        });
+
+        assert!(!idx.definitions.contains_key("ClassA"),
+            "ClassA should be gone after workspace switch");
+        assert!(idx.definitions.contains_key("ClassB"),
+            "ClassB should be present in new workspace");
+    }
+
+    /// apply_workspace_result must combine both cache hits and freshly parsed files
+    /// into the final index — neither should be silently dropped.
+    #[test]
+    fn apply_workspace_result_mixed_cache_and_parsed() {
+        let u_cached = uri("/Cached.kt");
+        let u_parsed  = uri("/Parsed.kt");
+
+        let cached_parse = Indexer::parse_file(&u_cached, "class CachedClass");
+        let entry = FileCacheEntry {
+            mtime_secs: 0, content_hash: 0, file_data: cached_parse.data.clone()
+        };
+        let cached_result = super::cache_entry_to_file_result(&u_cached, &entry);
+
+        let parsed_result = Indexer::parse_file(&u_parsed, "class ParsedClass");
+
+        let idx = Indexer::new();
+        idx.apply_workspace_result(&WorkspaceIndexResult {
+            files: vec![cached_result, parsed_result],
+            stats: IndexStats { cache_hits: 1, files_parsed: 1, ..Default::default() },
+            workspace_root: std::path::PathBuf::from("/"),
+        });
+
+        assert!(idx.definitions.contains_key("CachedClass"),
+            "CachedClass (from cache) should be in index");
+        assert!(idx.definitions.contains_key("ParsedClass"),
+            "ParsedClass (freshly parsed) should be in index");
+        assert_eq!(idx.files.len(), 2, "exactly 2 files in index");
     }
 }
