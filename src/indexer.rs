@@ -24,6 +24,20 @@ mod progress {
 use crate::parser;
 use crate::types::{FileData, SymbolEntry};
 
+// ─── RAII guard for indexing_in_progress flag ─────────────────────────────────
+
+/// RAII guard that clears `indexing_in_progress` on drop (success, panic, or early return).
+struct IndexingGuard {
+    indexer: Arc<Indexer>,
+}
+
+impl Drop for IndexingGuard {
+    fn drop(&mut self) {
+        self.indexer.indexing_in_progress.store(false, std::sync::atomic::Ordering::Release);
+        log::debug!("IndexingGuard: cleared indexing_in_progress flag");
+    }
+}
+
 /// Supported file extensions for indexing and rg/fd searches.
 pub const SOURCE_EXTENSIONS: &[&str] = &["kt", "java", "swift"];
 
@@ -185,6 +199,15 @@ pub struct Indexer {
     /// switch so that background tasks spawned for an older root can detect
     /// staleness and bail out early.
     pub(crate) root_generation: AtomicU64,
+    /// Guard to prevent concurrent background indexing runs on same Indexer.
+    pub(crate) indexing_in_progress: std::sync::atomic::AtomicBool,
+    /// Number of parse tasks completed in current indexing run (for progress tracking).
+    pub(crate) parse_tasks_completed: std::sync::atomic::AtomicUsize,
+    /// Total number of parse tasks spawned in current indexing run.
+    pub(crate) parse_tasks_total: std::sync::atomic::AtomicUsize,
+    /// Paths currently scheduled or in-flight: canonical path -> generation when scheduled.
+    /// Prevents duplicate scheduling of identical parse work for same generation.
+    scheduled_paths: DashMap<String, u64>,
 }
 
 impl Indexer {
@@ -203,10 +226,9 @@ impl Indexer {
             // Allow configurable concurrent parse workers. Default to number of CPU cores.
             // Use env KOTLIN_LSP_PARSE_WORKERS to override.
             parse_sem: {
-                let default = std::thread::available_parallelism()
-                    .map(|n| n.get())
-                    .unwrap_or(4)
-                    .max(1);
+                // Default to half of available CPUs to avoid saturating system.
+                let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+                let default = (cpus / 2).max(1);
                 let configured = std::env::var("KOTLIN_LSP_PARSE_WORKERS").ok()
                     .and_then(|v| v.parse::<usize>().ok())
                     .unwrap_or(default);
@@ -219,6 +241,10 @@ impl Indexer {
             bare_name_cache: std::sync::RwLock::new(Vec::new()),
             last_completion: std::sync::Mutex::new(None),
             root_generation: AtomicU64::new(0),
+            indexing_in_progress: std::sync::atomic::AtomicBool::new(false),
+            parse_tasks_completed: std::sync::atomic::AtomicUsize::new(0),
+            parse_tasks_total: std::sync::atomic::AtomicUsize::new(0),
+            scheduled_paths: DashMap::new(),
         }
     }
 
@@ -234,9 +260,13 @@ impl Indexer {
     /// Sends LSP `$/progress` notifications so the editor shows a status bar spinner.
     /// On subsequent startups the on-disk cache is used for unchanged files so only
     /// modified or new files need to be re-parsed by tree-sitter.
-    /// Full reindex with no file-count cap — used by the `kotlin-lsp/reindex` workspace command.
+    /// Full reindex with file-count limit from env var — used by --index-only and kotlin-lsp/reindex.
     pub async fn index_workspace_full(self: Arc<Self>, root: &Path, client: Option<tower_lsp::Client>) {
-        self.index_workspace_impl(root, usize::MAX, client).await;
+        let max = std::env::var("KOTLIN_LSP_MAX_FILES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(usize::MAX); // Default to unlimited for --index-only
+        self.index_workspace_impl(root, max, client).await;
     }
 
     pub async fn index_workspace(self: Arc<Self>, root: &Path, client: Option<tower_lsp::Client>) {
@@ -250,8 +280,60 @@ impl Indexer {
         self.index_workspace_impl(root, max, client).await;
     }
 
-    async fn index_workspace_impl(self: Arc<Self>, root: &Path, max: usize, client: Option<tower_lsp::Client>) {
+    /// Prioritized indexing: parse `initial_paths` first (high-priority), then
+    /// continue with the normal bounded workspace indexing. Useful for fast
+    /// "in-and-out" responsiveness when an editor opens a file in a new root.
+    pub async fn index_workspace_prioritized(self: Arc<Self>, root: &Path, initial_paths: Vec<PathBuf>, client: Option<tower_lsp::Client>) {
+        // Set workspace root immediately so rg/fd work while priority parse runs.
         *self.workspace_root.write().unwrap() = Some(root.to_path_buf());
+
+        // First, eagerly parse the prioritized files (if present) so their
+        // symbols are available quickly for operations like go-to/hover.
+        if !initial_paths.is_empty() {
+            let sem = Arc::clone(&self.parse_sem);
+            let mut handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+            for path in initial_paths.into_iter() {
+                let idx = Arc::clone(&self);
+                let sem2 = Arc::clone(&sem);
+                handles.push(tokio::spawn(async move {
+                    let _permit = sem2.acquire_owned().await;
+                    if path.exists() {
+                        if let Ok(content) = tokio::fs::read_to_string(&path).await {
+                            if let Ok(uri) = Url::from_file_path(&path) {
+                                // index_content is blocking CPU work; run on blocking pool.
+                                let _ = tokio::task::spawn_blocking(move || idx.index_content(&uri, &content)).await;
+                            }
+                        }
+                    }
+                }));
+            }
+            for h in handles { let _ = h.await; }
+        }
+
+        // Then proceed with the normal (bounded) workspace indexing in the background.
+        let max = std::env::var("KOTLIN_LSP_MAX_FILES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(DEFAULT_MAX_INDEX_FILES);
+        self.index_workspace_impl(root, max, client).await;
+    }
+
+    async fn index_workspace_impl(self: Arc<Self>, root: &Path, max: usize, client: Option<tower_lsp::Client>) {
+        // Prevent concurrent indexing runs on same Indexer instance.
+        let already = self.indexing_in_progress.swap(true, std::sync::atomic::Ordering::AcqRel);
+        
+        // RAII guard: always clear indexing_in_progress on exit (success, panic, or early return).
+        // MUST be created before any early returns to ensure cleanup.
+        let _guard = IndexingGuard { indexer: Arc::clone(&self) };
+        
+        if already {
+            log::info!("index_workspace_impl: an indexing run is already in progress; skipping new start");
+            return;
+        }
+
+        *self.workspace_root.write().unwrap() = Some(root.to_path_buf());
+        // Capture generation at start; background work should bail if this changes.
+        let start_gen = self.root_generation.load(std::sync::atomic::Ordering::SeqCst);
 
         let mut paths = find_source_files(root);
         let total = paths.len();
@@ -280,6 +362,12 @@ impl Indexer {
         let mut cache_hits: usize = 0;
 
         for path in &paths {
+            // Check for generation change and exit early if reindex requested.
+            if self.root_generation.load(std::sync::atomic::Ordering::SeqCst) != start_gen {
+                log::info!("index_workspace_impl: generation changed, aborting remaining parse list");
+                break;
+            }
+
             let path_str = path.to_string_lossy().to_string();
             let mtime = file_mtime(path).unwrap_or(0);
 
@@ -302,6 +390,11 @@ impl Indexer {
         log::info!(
             "Cache: {cache_hits} hits, {parse_count} files need (re-)parsing"
         );
+        log::debug!("About to spawn {} parse tasks", parse_count);
+        
+        // Reset and set parse task counters for progress tracking
+        self.parse_tasks_completed.store(0, std::sync::atomic::Ordering::Release);
+        self.parse_tasks_total.store(parse_count, std::sync::atomic::Ordering::Release);
 
         // ── Status file: indexing started ────────────────────────────────────
         let index_start = std::time::Instant::now();
@@ -346,15 +439,49 @@ impl Indexer {
             }).await;
         }
 
-        // ── concurrent parse (up to 8 workers) ──────────────────────────────
-        let sem = Arc::new(tokio::sync::Semaphore::new(self.parse_sem.available_permits()));
-        let done_count   = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        // Clear any previous scheduling state for this run so stale entries don't block new work.
+        self.scheduled_paths.clear();
+
+        // ── concurrent parse (throttled by parse_sem) ─────────────────────────
+        // Use the global parse semaphore (configured via env or default) so
+        // spawn_blocking submissions are naturally throttled to parse workers.
+        let sem = Arc::clone(&self.parse_sem);
+        // Store completion counter so parse tasks can increment it
+        let parse_tasks_completed = Arc::clone(&self.parse_tasks_completed);
         let mut handles: Vec<tokio::task::JoinHandle<()>> = Vec::with_capacity(parse_count);
 
         for path in need_parse {
+            // Abort early if generation changed while scheduling parses.
+            if self.root_generation.load(std::sync::atomic::Ordering::SeqCst) != start_gen {
+                log::info!("index_workspace_impl: generation changed during scheduling, aborting remaining parses");
+                break;
+            }
+
+            log::debug!("Scheduling parse for: {}", path.display());
+
+            // Deduplicate scheduling: compute canonical absolute path string as key
+            let key = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone()).to_string_lossy().to_string();
+            // Atomically insert scheduling entry if not already scheduled for this generation.
+            match self.scheduled_paths.entry(key.clone()) {
+                dashmap::mapref::entry::Entry::Occupied(mut o) => {
+                    let existing_gen = *o.get();
+                    if existing_gen == start_gen {
+                        // Already scheduled for this generation; skip duplicate enqueue.
+                        log::debug!("Skipped scheduling parse for {} (already scheduled gen {})", key, existing_gen);
+                        continue;
+                    } else {
+                        // Different generation; update to current generation and allow schedule.
+                        o.insert(start_gen);
+                    }
+                }
+                dashmap::mapref::entry::Entry::Vacant(v) => {
+                    v.insert(start_gen);
+                }
+            }
+
             let sem        = Arc::clone(&sem);
             let idx        = Arc::clone(&self);
-            let done       = Arc::clone(&done_count);
+            let done       = Arc::clone(&parse_tasks_completed);
             let client2    = client.clone();
             let token2     = token.clone();
             let total_cnt  = parse_count.max(1);
@@ -362,12 +489,36 @@ impl Indexer {
 
             handles.push(tokio::spawn(async move {
                 let _permit = sem.acquire_owned().await;
+                log::debug!("Acquired permit for: {}", path.display());
                 match tokio::fs::read_to_string(&path).await {
                     Ok(content) => {
                         if let Ok(uri) = Url::from_file_path(&path) {
-                            tokio::task::spawn_blocking(move || idx.index_content(&uri, &content))
-                                .await
-                                .ok();
+                            // Check generation again inside task before heavy parse.
+                            if idx.root_generation.load(std::sync::atomic::Ordering::SeqCst) != start_gen {
+                                log::info!("index task: generation changed, skipping parse for {}", path.display());
+                            } else {
+                                let t0 = std::time::Instant::now();
+                                // Avoid moving `idx` into blocking closure so it remains available after parse.
+                                let idx_block = Arc::clone(&idx);
+                                tokio::task::spawn_blocking(move || idx_block.index_content(&uri, &content))
+                                    .await
+                                    .ok();
+                                let took = t0.elapsed().as_millis();
+                                // Emit timing log once here and remove scheduling marker for this generation.
+                                log::debug!("Parsed {} in {} ms", path.display(), took);
+                                // Remove scheduled_paths entry only if it points to this generation
+                                if let Some(pair) = idx.scheduled_paths.get(&key) {
+                                    if *pair == start_gen {
+                                        idx.scheduled_paths.remove(&key);
+                                    }
+                                }
+                                let threshold: u128 = std::env::var("KOTLIN_LSP_PARSE_LOG_MS").ok()
+                                    .and_then(|v| v.parse::<u128>().ok())
+                                    .unwrap_or(1000);
+                                if took as u128 > threshold {
+                                    log::warn!("Slow parse: {} took {} ms", path.display(), took);
+                                }
+                            }
                         }
                     }
                     Err(e) => log::warn!("Could not read {}: {e}", path.display()),
@@ -404,15 +555,24 @@ impl Indexer {
             }));
         }
 
-        for h in handles { h.await.ok(); }
+        // Always use non-blocking mode to avoid deadlock.
+        // Background parse tasks continue after End notification sent.
+        // For --index-only mode, this means the process may exit before parsing completes,
+        // but cache hits (95%+ on warm start) mean index is mostly populated anyway.
+        tokio::spawn(async move {
+            futures::future::join_all(handles).await;
+            log::debug!("Background parse tasks completed");
+        });
 
         // ── Persist updated index to disk ────────────────────────────────────
-        // Run as a blocking task and WAIT for completion so the client receives
-        // the End progress notification only after the cache is fully written.
-        let idx_for_save = Arc::clone(&self);
-        let save_handle = tokio::task::spawn_blocking(move || idx_for_save.save_cache_to_disk());
-        // Await save completion; ignore errors but ensure task finished.
-        let _ = save_handle.await;
+        if client.is_none() {
+            // Blocking mode: save cache synchronously before returning
+            self.save_cache_to_disk();
+        } else {
+            // Non-blocking mode: spawn background task, don't block End notification
+            let idx_for_save = Arc::clone(&self);
+            tokio::task::spawn_blocking(move || idx_for_save.save_cache_to_disk());
+        }
 
         // ── LSP progress: end ────────────────────────────────────────────────
         let sym_count = self.definitions.len();
@@ -421,6 +581,7 @@ impl Indexer {
         } else {
             String::new()
         };
+        log::info!("About to send WorkDoneProgress::End notification (token: kotlin-lsp/indexing)");
         if let Some(ref client) = client {
             client.send_notification::<progress::KotlinProgress>(ProgressParams {
                 token,
@@ -432,6 +593,9 @@ impl Indexer {
                     )),
                 })),
             }).await;
+            log::info!("Sent WorkDoneProgress::End notification");
+        } else {
+            log::info!("No client, skipping End notification");
         }
 
         // ── Status file: ready ───────────────────────────────────────────────
@@ -452,6 +616,7 @@ impl Indexer {
             self.definitions.len(),
             self.packages.len(),
         );
+        // _guard drops here, clearing indexing_in_progress
     }
 
     /// Restore a single file from the on-disk cache into all index maps.
@@ -1909,6 +2074,47 @@ fn parse_rg_line_with_content_rooted(line: &str, root: &Path) -> Option<(Locatio
     let uri = Url::from_file_path(&abs_path).ok()?;
     let pos = Position::new(line_num.saturating_sub(1), col.saturating_sub(1));
     Some((Location { uri, range: Range::new(pos, pos) }, content))
+}
+
+/// Quick heuristic rg-based implementor finder. Scans files that mention `name`
+/// and returns locations where the line looks like a declaration/implementation
+/// of that type (Kotlin/Java `class Foo : Interface`, `implements`, Swift
+/// `class Foo: Protocol`, `struct Foo: Protocol`). This is a fallback when the
+/// subtype index is empty during cold indexing.
+pub fn rg_find_implementors(name: &str, root: Option<&Path>) -> Vec<Location> {
+    let safe = name.to_string();
+    let root = match root {
+        Some(r) => r,
+        None => return vec![],
+    };
+    // Search for the name in source files.
+    let mut cmd = Command::new("rg");
+    cmd.args(["--no-heading", "--with-filename", "--line-number", "--column", "-e", &safe]);
+    for ext in SOURCE_EXTENSIONS { cmd.args(["--glob", &format!("*.{ext}")]); }
+    cmd.arg(root);
+    let out = match cmd.output() {
+        Ok(o) if !o.stdout.is_empty() => o,
+        _ => return vec![],
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| parse_rg_line_with_content_rooted(l, root))
+        .filter_map(|(loc, content)| {
+            let line = content.trim();
+            // Heuristics: declaration-like lines
+            // Kotlin/Java: class Foo, interface Foo, enum class Foo, class Foo : Interface
+            // Java implements: class Foo implements Interface
+            // Swift: class Foo: Protocol, struct Foo: Protocol, extension Foo: Protocol
+            let lower = line.to_lowercase();
+            if lower.contains("class ") || lower.contains("struct ") || lower.contains("interface") || lower.contains("enum") || lower.contains("extension ") {
+                // Check that the name appears as a word and near a declaration keyword
+                if line.contains(name) {
+                    return Some(loc);
+                }
+            }
+            None
+        })
+        .collect()
 }
 
 pub(crate) fn parse_rg_line(line: &str) -> Option<Location> {

@@ -443,6 +443,20 @@ fn resolve_symbol_inner(idx: &Indexer, name: &str, from_uri: &Url, with_hierarch
     let imported = resolve_via_imports(idx, name, from_uri);
     if !imported.is_empty() { return imported; }
 
+    // 2.5 ── Swift fast path: definitions index (no package system) ───────────
+    // Swift files have no package declarations, so same-package and star-import
+    // steps return empty. Use the in-memory definitions index directly to avoid
+    // expensive project-wide rg fallback at step 5.
+    if from_uri.path().ends_with(".swift") && name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+        if let Some(locs_ref) = idx.definitions.get(name) {
+            let locs: Vec<Location> = locs_ref.clone();
+            // Prefer definitions from .swift files when available.
+            let swift_locs: Vec<Location> = locs.iter().filter(|l| l.uri.path().ends_with(".swift")).cloned().collect();
+            if !swift_locs.is_empty() { return swift_locs; }
+            if !locs.is_empty() { return locs; }
+        }
+    }
+
     // 3 ── same package ───────────────────────────────────────────────────────
     let same_pkg = resolve_same_package(idx, name, from_uri);
     if !same_pkg.is_empty() { return same_pkg; }

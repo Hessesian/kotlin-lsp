@@ -84,7 +84,8 @@ impl LanguageServer for Backend {
             let client  = self.client.clone();
             // Background task — server is usable before indexing finishes.
             tokio::spawn(async move {
-                indexer.index_workspace(&path, Some(client)).await;
+                // No specific open-file priorities at initialize.
+                indexer.index_workspace_prioritized(&path, Vec::new(), Some(client)).await;
             });
         }
 
@@ -217,7 +218,8 @@ impl LanguageServer for Backend {
             let client = self.client.clone();
             let new_root2 = new_root.clone();
             tokio::spawn(async move {
-                idx.index_workspace(&new_root2, Some(client)).await;
+                // Preserve existing behavior but prefer prioritized startup (no initial files here).
+                idx.index_workspace_prioritized(&new_root2, Vec::new(), Some(client)).await;
             });
             self.client.show_message(MessageType::INFO,
                 format!("kotlin-lsp: switching root to {}…", new_root.display())).await;
@@ -275,7 +277,9 @@ impl LanguageServer for Backend {
         // If workspace_root not set, infer from opened file: look for common project markers
         // (.git, build.gradle, settings.gradle, build.gradle.kts, Cargo.toml, Package.swift) walking up.
         let mut need_root_switch: Option<std::path::PathBuf> = None;
-        if let Ok(path) = uri.to_file_path() {
+        // Keep the opened file path (if available) so prioritized indexing can seed it.
+        let opened_path_opt = uri.to_file_path().ok();
+        if let Some(ref path) = opened_path_opt {
             // Compute candidate root for the opened file
             let mut cur = path.parent().map(|p| p.to_path_buf());
             let mut found: Option<std::path::PathBuf> = None;
@@ -317,8 +321,14 @@ impl LanguageServer for Backend {
             let idx = Arc::clone(&self.indexer);
             let client = self.client.clone();
             let root2 = root.clone();
+            // Prefer prioritized indexing seeded with the just-opened file for fast responsiveness.
+            let opened = opened_path_opt.clone();
             tokio::spawn(async move {
-                idx.index_workspace(&root2, Some(client)).await;
+                if let Some(op) = opened {
+                    idx.index_workspace_prioritized(&root2, vec![op], Some(client)).await;
+                } else {
+                    idx.index_workspace_prioritized(&root2, Vec::new(), Some(client)).await;
+                }
             });
         }
 
@@ -506,6 +516,23 @@ impl LanguageServer for Backend {
             .get(&word)
             .map(|v| v.clone())
             .unwrap_or_default();
+
+        // If index is empty for this symbol (cold start), try rg-based heuristic
+        // to find implementors quickly to avoid client timeouts in large projects.
+        if locs.is_empty() {
+            let root_opt = { self.indexer.workspace_root.read().unwrap().clone() };
+            let word_clone = word.clone();
+            let rg_impls = tokio::task::spawn_blocking(move || {
+                crate::indexer::rg_find_implementors(&word_clone, root_opt.as_deref())
+            }).await.unwrap_or_default();
+            if !rg_impls.is_empty() {
+                // Return early with rg results.
+                return Ok(match rg_impls.len() {
+                    1 => Some(GotoDefinitionResponse::Scalar(rg_impls.into_iter().next().unwrap())),
+                    _ => Some(GotoDefinitionResponse::Array(rg_impls)),
+                });
+            }
+        }
 
         // Also collect transitive subtypes (BFS, depth-limited).
         let mut queue: Vec<String> = locs.iter()

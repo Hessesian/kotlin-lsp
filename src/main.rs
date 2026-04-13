@@ -35,9 +35,41 @@ async fn main() {
                 let root = pb.canonicalize().unwrap_or(pb);
                 println!("Indexing workspace: {}", root.display());
                 let root_clone = root.clone();
+                let idx_clone = std::sync::Arc::clone(&idx);
                 // Already inside #[tokio::main] runtime — await directly.
                 idx.index_workspace_full(&root_clone, None).await;
-                println!("Indexing complete: {}", root.display());
+                
+                // index_workspace_full returns immediately (non-blocking parse).
+                // The indexing_in_progress flag clears when index_workspace_impl returns,
+                // but background parse tasks continue running. Poll definitions count instead.
+                println!("Waiting for background parse tasks to complete...");
+                let mut last_count = 0;
+                let mut stable_iterations = 0;
+                loop {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+                    let count = idx_clone.definitions.len();
+                    if count == last_count {
+                        stable_iterations += 1;
+                        if stable_iterations >= 30 {
+                            // Symbol count stable for 30 seconds, assume done
+                            break;
+                        }
+                    } else {
+                        stable_iterations = 0;
+                        if count % 100 < last_count % 100 || count - last_count >= 100 {
+                            println!("Indexing... ({} symbols so far)", count);
+                        }
+                    }
+                    last_count = count;
+                }
+                
+                // Give background tasks time to finalize
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                
+                // Save cache now that parsing is complete
+                idx_clone.save_cache_to_disk();
+                
+                println!("Indexing complete: {} symbols", idx_clone.definitions.len());
                 std::process::exit(0);
             }
         }
