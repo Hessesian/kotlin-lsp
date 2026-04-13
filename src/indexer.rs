@@ -22,7 +22,7 @@ mod progress {
 }
 
 use crate::parser;
-use crate::types::{FileData, SymbolEntry};
+use crate::types::{FileData, SymbolEntry, FileIndexResult, WorkspaceIndexResult, IndexStats};
 
 // ─── RAII guard for indexing_in_progress flag ─────────────────────────────────
 
@@ -446,8 +446,6 @@ impl Indexer {
         // Use the global parse semaphore (configured via env or default) so
         // spawn_blocking submissions are naturally throttled to parse workers.
         let sem = Arc::clone(&self.parse_sem);
-        // Store completion counter so parse tasks can increment it
-        let parse_tasks_completed = Arc::clone(&self.parse_tasks_completed);
         let mut handles: Vec<tokio::task::JoinHandle<()>> = Vec::with_capacity(parse_count);
 
         for path in need_parse {
@@ -481,7 +479,6 @@ impl Indexer {
 
             let sem        = Arc::clone(&sem);
             let idx        = Arc::clone(&self);
-            let done       = Arc::clone(&parse_tasks_completed);
             let client2    = client.clone();
             let token2     = token.clone();
             let total_cnt  = parse_count.max(1);
@@ -524,7 +521,7 @@ impl Indexer {
                     Err(e) => log::warn!("Could not read {}: {e}", path.display()),
                 }
 
-                let n = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                let n = idx.parse_tasks_completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                 // Report progress every ~5% (but at least every 50 files).
                 // Never send percentage=100 here — some editors (Helix) treat that
                 // as "done" and clear the spinner before the End notification fires.
@@ -731,6 +728,132 @@ impl Indexer {
         }
     }
 
+    // ────────────────────────────────────────────────────────────────────────
+    // Pure Parsing Functions (SOLID refactoring - no side effects)
+    // ────────────────────────────────────────────────────────────────────────
+
+    /// Parse a single file and return structured result data (pure function).
+    /// 
+    /// This is the testable, side-effect-free core of indexing.
+    /// It takes content and returns data without mutating any shared state.
+    /// 
+    /// Use `apply_file_result()` to merge the result into the index.
+    pub fn parse_file(uri: &Url, content: &str) -> FileIndexResult {
+        let data = parser::parse_by_extension(uri.path(), content);
+        let hash = hash_str(content);
+        
+        // Extract supertype relationships for goToImplementation
+        let mut supertypes = Vec::new();
+        let class_kinds = [
+            SymbolKind::CLASS, SymbolKind::INTERFACE, SymbolKind::STRUCT,
+            SymbolKind::ENUM, SymbolKind::OBJECT,
+        ];
+        
+        for sym in &data.symbols {
+            if !class_kinds.contains(&sym.kind) { continue; }
+            let start = sym.selection_range.start.line as usize;
+            let limit = (start + 10).min(data.lines.len());
+            let mut decl_lines: Vec<String> = Vec::new();
+            for line in &data.lines[start..limit] {
+                decl_lines.push(line.clone());
+                if line.contains('{') { break; }
+            }
+            let supers = crate::resolver::extract_supers_from_lines(&decl_lines);
+            let class_loc = Location { uri: uri.clone(), range: sym.selection_range };
+            for super_name in supers {
+                supertypes.push((super_name, class_loc.clone()));
+            }
+        }
+        
+        FileIndexResult {
+            uri: uri.clone(),
+            data,
+            supertypes,
+            content_hash: hash,
+            error: None,
+        }
+    }
+
+    /// Apply a file parse result to the index (mutates shared state).
+    /// 
+    /// This is where all DashMap updates happen. Separated from parsing
+    /// so parsing can be pure and testable.
+    pub fn apply_file_result(&self, result: &FileIndexResult) {
+        let uri_str = result.uri.to_string();
+        
+        // Update content hash
+        self.content_hashes.insert(uri_str.clone(), result.content_hash);
+        
+        // ── Remove stale entries for this URI ─────────────────────────────────
+        if let Some(old) = self.files.get(&uri_str) {
+            for sym in &old.symbols {
+                if let Some(mut locs) = self.definitions.get_mut(&sym.name) {
+                    locs.retain(|l| l.uri.as_str() != result.uri.as_str());
+                }
+                if let Some(ref pkg) = old.package {
+                    self.qualified.remove(&format!("{pkg}.{}", sym.name));
+                }
+            }
+            if let Some(ref pkg) = old.package {
+                if let Some(mut uris) = self.packages.get_mut(pkg) {
+                    uris.retain(|u| u != &uri_str);
+                }
+            }
+            // Remove stale subtype entries for this URI.
+            for mut entry in self.subtypes.iter_mut() {
+                entry.value_mut().retain(|l| l.uri.as_str() != result.uri.as_str());
+            }
+        }
+
+        // ── Register fresh definitions ────────────────────────────────────────
+        let file_stem: Option<String> = result.uri.to_file_path().ok()
+            .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()));
+
+        for sym in &result.data.symbols {
+            let loc = Location { uri: result.uri.clone(), range: sym.selection_range };
+
+            // short-name index (guarded against duplicates)
+            let mut locs = self.definitions.entry(sym.name.clone()).or_default();
+            if !locs.iter().any(|l| l.uri == loc.uri && l.range == loc.range) {
+                locs.push(loc.clone());
+            }
+            drop(locs);
+
+            // qualified index: "com.example.Foo" → Location
+            if let Some(ref pkg) = result.data.package {
+                self.qualified.insert(format!("{pkg}.{}", sym.name), loc.clone());
+                if let Some(ref stem) = file_stem {
+                    if *stem != sym.name {
+                        self.qualified.insert(format!("{pkg}.{stem}.{}", sym.name), loc);
+                    }
+                }
+            }
+        }
+
+        // ── Package membership ────────────────────────────────────────────────
+        if let Some(ref pkg) = result.data.package {
+            let mut uris = self.packages.entry(pkg.clone()).or_default();
+            if !uris.contains(&uri_str) {
+                uris.push(uri_str.clone());
+            }
+        }
+
+        // ── Subtypes index ────────────────────────────────────────────────────
+        for (super_name, class_loc) in &result.supertypes {
+            let mut locs = self.subtypes.entry(super_name.clone()).or_default();
+            if !locs.iter().any(|l| l.uri == class_loc.uri && l.range == class_loc.range) {
+                locs.push(class_loc.clone());
+            }
+        }
+
+        // ── Store file data ───────────────────────────────────────────────────
+        self.files.insert(uri_str, Arc::new(result.data.clone()));
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // Legacy index_content (to be deprecated after full refactoring)
+    // ────────────────────────────────────────────────────────────────────────
+
     /// (Re-)parse and index a single file's content in-place.
     /// Returns immediately (no-op) when content is identical to the last indexed version.
     /// Parse and index a single file.  Returns `Some(data)` when the file was
@@ -744,114 +867,21 @@ impl Indexer {
         if self.content_hashes.get(&uri_str).map(|h| *h == hash).unwrap_or(false) {
             return None;
         }
-        self.content_hashes.insert(uri_str.clone(), hash);
+        
         self.parse_count.fetch_add(1, Ordering::Relaxed);
         // Invalidate cached completion items — the file is changing.
         self.completion_cache.remove(&uri_str);
-        let data = parser::parse_by_extension(uri.path(), content);
-
-
-
-        // ── Remove stale entries for this URI ─────────────────────────────────
-        if let Some(old) = self.files.get(&uri_str) {
-            for sym in &old.symbols {
-                if let Some(mut locs) = self.definitions.get_mut(&sym.name) {
-                    locs.retain(|l| l.uri.as_str() != uri.as_str());
-                }
-                if let Some(ref pkg) = old.package {
-                    self.qualified.remove(&format!("{pkg}.{}", sym.name));
-                }
-            }
-            if let Some(ref pkg) = old.package {
-                if let Some(mut uris) = self.packages.get_mut(pkg) {
-                    uris.retain(|u| u != &uri_str);
-                }
-            }
-            // Remove stale subtype entries for this URI.
-            for mut entry in self.subtypes.iter_mut() {
-                entry.value_mut().retain(|l| l.uri.as_str() != uri.as_str());
-            }
-        }
-
-        // ── Register fresh definitions ────────────────────────────────────────
-        // Derive the file stem (e.g. "AccountContract" from "AccountContract.kt")
-        // so we can also store nested-class qualified keys like
-        // "com.example.AccountContract.State" in addition to "com.example.State".
-        let file_stem: Option<String> = uri.to_file_path().ok()
-            .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()));
-
-        for sym in &data.symbols {
-            let loc = Location { uri: uri.clone(), range: sym.selection_range };
-
-            // short-name index (guarded against duplicates)
-            let mut locs = self.definitions.entry(sym.name.clone()).or_default();
-            if !locs.iter().any(|l| l.uri == loc.uri && l.range == loc.range) {
-                locs.push(loc.clone());
-            }
-            drop(locs);
-
-            // qualified index: "com.example.Foo" → Location
-            if let Some(ref pkg) = data.package {
-                // Primary key: pkg.SymbolName
-                self.qualified.insert(format!("{pkg}.{}", sym.name), loc.clone());
-
-                // Secondary key: pkg.FileStem.SymbolName — covers nested/inner classes
-                // whose import path includes the outer class name, e.g.
-                // `import com.example.AccountContract.State` where State is nested
-                // inside AccountContract.kt.
-                if let Some(ref stem) = file_stem {
-                    if *stem != sym.name {
-                        self.qualified.insert(format!("{pkg}.{stem}.{}", sym.name), loc);
-                    }
-                }
-            }
-        }
-
-        // ── Package membership ────────────────────────────────────────────────
-        if let Some(ref pkg) = data.package {
-            let mut uris = self.packages.entry(pkg.clone()).or_default();
-            if !uris.contains(&uri_str) {
-                uris.push(uri_str.clone());
-            }
-        }
-
-        // ── Subtypes index: supertype name → implementing class locations ────
-        // For each class/interface/object symbol, extract its supertypes from
-        // the declaration header lines and register the reverse mapping.
-        let class_kinds = [
-            SymbolKind::CLASS, SymbolKind::INTERFACE, SymbolKind::STRUCT,
-            SymbolKind::ENUM, SymbolKind::OBJECT,
-        ];
-        for sym in &data.symbols {
-            if !class_kinds.contains(&sym.kind) { continue; }
-            // Start from the selection_range (identifier line), not range.start
-            // which may include annotation lines that contain `{}` characters
-            // (e.g. @Provides({Foo::class})) and would prematurely stop collection.
-            let start = sym.selection_range.start.line as usize;
-            // Collect declaration header lines until we hit the body opener `{`.
-            let limit = (start + 10).min(data.lines.len());
-            let mut decl_lines: Vec<String> = Vec::new();
-            for line in &data.lines[start..limit] {
-                decl_lines.push(line.clone());
-                if line.contains('{') { break; }
-            }
-            let supers = crate::resolver::extract_supers_from_lines(&decl_lines);
-            let class_loc = Location { uri: uri.clone(), range: sym.selection_range };
-            for super_name in supers {
-                let mut locs = self.subtypes.entry(super_name).or_default();
-                if !locs.iter().any(|l| l.uri == class_loc.uri && l.range == class_loc.range) {
-                    locs.push(class_loc.clone());
-                }
-            }
-        }
-
-        let data = Arc::new(data);
-        self.files.insert(uri_str, Arc::clone(&data));
-
+        
+        // Use pure parse function
+        let result = Self::parse_file(uri, content);
+        
+        // Apply result to index
+        self.apply_file_result(&result);
+        
         // Rebuild bare-name cache so complete_bare doesn't iterate definitions.
         self.rebuild_bare_name_cache();
 
-        Some(data)
+        Some(Arc::new(result.data))
     }
 
     fn rebuild_bare_name_cache(&self) {
@@ -3483,6 +3513,80 @@ mod tests {
         let idx = Indexer::new();
         idx.index_content(&u, src);
         (u, idx)
+    }
+
+    // ── Pure parsing (SOLID refactoring tests) ──────────────────────────────
+
+    #[test]
+    fn parse_file_returns_symbols() {
+        let src = r#"
+package com.example
+
+class Foo {
+    fun bar(): String = "test"
+}
+"#;
+        let u = uri("/Foo.kt");
+        let result = Indexer::parse_file(&u, src);
+        
+        assert_eq!(result.uri, u);
+        assert_eq!(result.data.package, Some("com.example".to_string()));
+        assert_eq!(result.data.symbols.len(), 2); // class + fun
+        assert!(result.data.symbols.iter().any(|s| s.name == "Foo"));
+        assert!(result.data.symbols.iter().any(|s| s.name == "bar"));
+        assert!(result.error.is_none());
+    }
+
+    #[test]
+    fn parse_file_extracts_supertypes() {
+        let src = r#"
+interface Base
+class Child : Base
+"#;
+        let u = uri("/Child.kt");
+        let result = Indexer::parse_file(&u, src);
+        
+        // Debug: print what we found
+        eprintln!("Supertypes found: {:?}", result.supertypes);
+        
+        // Should find Child implements Base (interface Base has no supertypes)
+        assert!(result.supertypes.iter().any(|(name, _)| name == "Base"));
+    }
+
+    #[test]
+    fn apply_file_result_updates_index() {
+        let src = "class TestClass";
+        let u = uri("/Test.kt");
+        let result = Indexer::parse_file(&u, src);
+        
+        let idx = Indexer::new();
+        idx.apply_file_result(&result);
+        
+        // Verify symbol indexed
+        assert!(idx.definitions.contains_key("TestClass"));
+        let locs = idx.definitions.get("TestClass").unwrap();
+        assert_eq!(locs.len(), 1);
+        assert_eq!(locs[0].uri, u);
+    }
+
+    #[test]
+    fn apply_file_result_clears_stale_entries() {
+        let u = uri("/Test.kt");
+        
+        // First parse: class OldName
+        let result1 = Indexer::parse_file(&u, "class OldName");
+        let idx = Indexer::new();
+        idx.apply_file_result(&result1);
+        assert!(idx.definitions.contains_key("OldName"));
+        
+        // Second parse: class NewName (same file)
+        let result2 = Indexer::parse_file(&u, "class NewName");
+        idx.apply_file_result(&result2);
+        
+        // OldName should be gone
+        assert!(!idx.definitions.contains_key("OldName") || 
+                idx.definitions.get("OldName").unwrap().is_empty());
+        assert!(idx.definitions.contains_key("NewName"));
     }
 
     // ── word_at ──────────────────────────────────────────────────────────────

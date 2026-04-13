@@ -72,3 +72,53 @@ pub struct FileData {
     #[serde(skip)]
     pub syntax_errors: Vec<SyntaxError>,
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Indexing Result Types (for SOLID refactoring)
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Result of parsing a single file. Pure data, no side effects.
+/// This is what index_content will return instead of mutating DashMaps.
+#[derive(Debug, Clone)]
+pub struct FileIndexResult {
+    /// File URI that was parsed.
+    pub uri: tower_lsp::lsp_types::Url,
+    /// Parsed file data (symbols, imports, package, lines).
+    pub data: FileData,
+    /// Supertype relationships discovered in this file.
+    /// Format: (supertype_name, implementing_class_location)
+    pub supertypes: Vec<(String, tower_lsp::lsp_types::Location)>,
+    /// Content hash for cache invalidation.
+    pub content_hash: u64,
+    /// Parse error if tree-sitter failed.
+    pub error: Option<String>,
+}
+
+/// Statistics about an indexing run.
+#[derive(Debug, Clone, Default)]
+pub struct IndexStats {
+    /// Total files discovered.
+    pub files_discovered: usize,
+    /// Files loaded from cache (mtime unchanged).
+    pub cache_hits: usize,
+    /// Files actually parsed by tree-sitter.
+    pub files_parsed: usize,
+    /// Total symbols extracted.
+    pub symbols_extracted: usize,
+    /// Total packages found.
+    pub packages_found: usize,
+    /// Parse errors encountered.
+    pub errors: usize,
+}
+
+/// Result of indexing an entire workspace. Pure data, no side effects.
+/// This is what index_workspace will return instead of mutating state.
+#[derive(Debug, Clone)]
+pub struct WorkspaceIndexResult {
+    /// All successfully parsed files.
+    pub files: Vec<FileIndexResult>,
+    /// Statistics about the indexing run.
+    pub stats: IndexStats,
+    /// Workspace root that was indexed.
+    pub workspace_root: std::path::PathBuf,
+}
