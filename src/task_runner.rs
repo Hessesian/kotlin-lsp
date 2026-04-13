@@ -32,13 +32,18 @@ where
     let worker = Arc::new(worker);
     let mut handles = Vec::with_capacity(items.len());
     
+    // CRITICAL FIX: Acquire permit BEFORE spawning task to prevent spawn_blocking pool exhaustion.
+    // Old behavior: spawn all tasks → each acquires permit inside → all call spawn_blocking → deadlock.
+    // New behavior: acquire permit → spawn task → task calls spawn_blocking with guarantee of execution.
     for item in items {
         let sem = Arc::clone(&semaphore);
+        let sem_for_worker = Arc::clone(&sem);
+        let permit = sem.acquire_owned().await.unwrap();
         let worker = Arc::clone(&worker);
         
         handles.push(tokio::spawn(async move {
-            let _permit = sem.acquire().await.unwrap();
-            worker(item, Arc::clone(&sem)).await
+            let _permit = permit; // Hold permit for task lifetime
+            worker(item, sem_for_worker).await
         }));
     }
     
