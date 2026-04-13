@@ -1,5 +1,8 @@
 // kotlin-lsp-extension.mjs
 import { execFile } from "node:child_process";
+import { promises as fs } from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { joinSession } from "@github/copilot-sdk/extension";
 
 const README_PATH = ".github/extensions/kotlin-lsp/README.md";
@@ -111,6 +114,18 @@ function looksLikeFreeText(text) {
   return FREE_TEXT_TRIGGER.test(text);
 }
 
+// ── shell helper for tools ───────────────────────────────────────────
+
+function runShell(cmd, timeout = 8000) {
+  return new Promise((resolve) => {
+    execFile("/bin/sh", ["-c", cmd], { maxBuffer: 1024 * 256, timeout }, (err, stdout, stderr) => {
+      resolve({ code: err?.code ?? 0, stdout: stdout || "", stderr: stderr || "" });
+    });
+  });
+}
+
+const WORKSPACE_CONFIG = path.join(os.homedir(), ".config", "kotlin-lsp", "workspace");
+
 // ── rg helper for tools ──────────────────────────────────────────────
 
 function runRg(args, cwd, timeout = 10000) {
@@ -208,6 +223,97 @@ const session = await joinSession({
           pattern, cwd,
         ];
         return await runRg(rgArgs, cwd);
+      },
+    },
+    {
+      name: "kotlin_lsp_status",
+      description: [
+        "Check kotlin-lsp server status: whether it's running, which workspace is configured,",
+        "and roughly how many source files the workspace contains.",
+        "Call before workspaceSymbol when uncertain if indexing has completed.",
+        "If no server is running, the next LSP tool call will auto-start it.",
+      ].join(" "),
+      parameters: { type: "object", properties: {}, required: [] },
+      handler: async () => {
+        const lines = [];
+
+        // 1. Configured workspace
+        let configuredRoot = "(not set)";
+        try {
+          configuredRoot = (await fs.readFile(WORKSPACE_CONFIG, "utf8")).trim();
+        } catch { /* file missing */ }
+        lines.push(`Configured workspace: ${configuredRoot}`);
+
+        // 2. Server process
+        const { stdout: pids } = await runShell("pgrep -x kotlin-lsp 2>/dev/null || true");
+        const pidList = pids.trim();
+        lines.push(pidList ? `Server running: yes (PID ${pidList.replace(/\n/g, ", ")})` : "Server running: no");
+
+        // 3. Approximate source file count in configured workspace
+        if (configuredRoot !== "(not set)") {
+          const { stdout: countOut } = await runShell(
+            `fd --type f -e kt -e kts -e java -e swift . '${configuredRoot}' 2>/dev/null | wc -l`
+          );
+          const count = countOut.trim();
+          lines.push(`Source files in workspace: ~${count}`);
+        }
+
+        lines.push("");
+        lines.push("Note: workspaceSymbol requires full indexing. Open any file first (lsp documentSymbol) to trigger it, then wait for progress to finish.");
+        return lines.join("\n");
+      },
+    },
+    {
+      name: "kotlin_lsp_set_workspace",
+      description: [
+        "Switch kotlin-lsp to a different workspace directory.",
+        "Writes the path to ~/.config/kotlin-lsp/workspace and kills the current server process.",
+        "The server will auto-restart on next LSP tool call and re-index the new workspace.",
+        "Always call this (not manual config edits) when switching between projects.",
+      ].join(" "),
+      parameters: {
+        type: "object",
+        properties: {
+          workspacePath: {
+            type: "string",
+            description: "Absolute path to the workspace root directory (e.g. /home/user/Work/MyProject/android)",
+          },
+        },
+        required: ["workspacePath"],
+      },
+      handler: async (args) => {
+        const workspacePath = path.resolve(args.workspacePath);
+
+        // Validate directory exists
+        try {
+          const stat = await fs.stat(workspacePath);
+          if (!stat.isDirectory()) {
+            return `Error: '${workspacePath}' is not a directory.`;
+          }
+        } catch {
+          return `Error: '${workspacePath}' does not exist.`;
+        }
+
+        // Write config
+        await fs.mkdir(path.dirname(WORKSPACE_CONFIG), { recursive: true });
+        await fs.writeFile(WORKSPACE_CONFIG, workspacePath + "\n", "utf8");
+
+        // Kill server
+        const { stdout: pids } = await runShell("pgrep -x kotlin-lsp 2>/dev/null || true");
+        const pidList = pids.trim().split("\n").filter(Boolean);
+        for (const pid of pidList) {
+          await runShell(`kill ${pid} 2>/dev/null || true`);
+        }
+
+        const killed = pidList.length > 0
+          ? `Killed PID ${pidList.join(", ")}.`
+          : "No running server found (will auto-start on next LSP call).";
+
+        return [
+          `Workspace set to: ${workspacePath}`,
+          killed,
+          "Open any file with `lsp documentSymbol` to start indexing, then wait for progress to complete before using workspaceSymbol.",
+        ].join("\n");
       },
     },
   ],
