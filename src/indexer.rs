@@ -266,7 +266,9 @@ impl Indexer {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(usize::MAX); // Default to unlimited for --index-only
-        self.index_workspace_impl(root, max, client).await;
+        let result = Arc::clone(&self).index_workspace_impl(root, max, client).await;
+        self.apply_workspace_result(&result);
+        self.save_cache_to_disk();
     }
 
     pub async fn index_workspace(self: Arc<Self>, root: &Path, client: Option<tower_lsp::Client>) {
@@ -277,7 +279,9 @@ impl Indexer {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(DEFAULT_MAX_INDEX_FILES);
-        self.index_workspace_impl(root, max, client).await;
+        let result = Arc::clone(&self).index_workspace_impl(root, max, client).await;
+        self.apply_workspace_result(&result);
+        self.save_cache_to_disk();
     }
 
     /// Prioritized indexing: parse `initial_paths` first (high-priority), then
@@ -315,10 +319,12 @@ impl Indexer {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(DEFAULT_MAX_INDEX_FILES);
-        self.index_workspace_impl(root, max, client).await;
+        let result = Arc::clone(&self).index_workspace_impl(root, max, client).await;
+        self.apply_workspace_result(&result);
+        self.save_cache_to_disk();
     }
 
-    async fn index_workspace_impl(self: Arc<Self>, root: &Path, max: usize, client: Option<tower_lsp::Client>) {
+    async fn index_workspace_impl(self: Arc<Self>, root: &Path, max: usize, client: Option<tower_lsp::Client>) -> WorkspaceIndexResult {
         // Prevent concurrent indexing runs on same Indexer instance.
         let already = self.indexing_in_progress.swap(true, std::sync::atomic::Ordering::AcqRel);
         
@@ -328,7 +334,11 @@ impl Indexer {
         
         if already {
             log::info!("index_workspace_impl: an indexing run is already in progress; skipping new start");
-            return;
+            return WorkspaceIndexResult {
+                files: Vec::new(),
+                stats: IndexStats::default(),
+                workspace_root: root.to_path_buf(),
+            };
         }
 
         *self.workspace_root.write().unwrap() = Some(root.to_path_buf());
@@ -446,7 +456,7 @@ impl Indexer {
         // Use the global parse semaphore (configured via env or default) so
         // spawn_blocking submissions are naturally throttled to parse workers.
         let sem = Arc::clone(&self.parse_sem);
-        let mut handles: Vec<tokio::task::JoinHandle<()>> = Vec::with_capacity(parse_count);
+        let mut handles: Vec<tokio::task::JoinHandle<Option<FileIndexResult>>> = Vec::with_capacity(parse_count);
 
         for path in need_parse {
             // Abort early if generation changed while scheduling parses.
@@ -487,21 +497,21 @@ impl Indexer {
             handles.push(tokio::spawn(async move {
                 let _permit = sem.acquire_owned().await;
                 log::debug!("Acquired permit for: {}", path.display());
-                match tokio::fs::read_to_string(&path).await {
+                let result = match tokio::fs::read_to_string(&path).await {
                     Ok(content) => {
                         if let Ok(uri) = Url::from_file_path(&path) {
                             // Check generation again inside task before heavy parse.
                             if idx.root_generation.load(std::sync::atomic::Ordering::SeqCst) != start_gen {
                                 log::info!("index task: generation changed, skipping parse for {}", path.display());
+                                None
                             } else {
                                 let t0 = std::time::Instant::now();
-                                // Avoid moving `idx` into blocking closure so it remains available after parse.
-                                let idx_block = Arc::clone(&idx);
-                                tokio::task::spawn_blocking(move || idx_block.index_content(&uri, &content))
-                                    .await
-                                    .ok();
+                                // Pure parse in blocking task
+                                let parse_result = tokio::task::spawn_blocking(move || {
+                                    Indexer::parse_file(&uri, &content)
+                                }).await.ok();
+                                
                                 let took = t0.elapsed().as_millis();
-                                // Emit timing log once here and remove scheduling marker for this generation.
                                 log::debug!("Parsed {} in {} ms", path.display(), took);
                                 // Remove scheduled_paths entry only if it points to this generation
                                 if let Some(pair) = idx.scheduled_paths.get(&key) {
@@ -515,11 +525,17 @@ impl Indexer {
                                 if took as u128 > threshold {
                                     log::warn!("Slow parse: {} took {} ms", path.display(), took);
                                 }
+                                parse_result
                             }
+                        } else {
+                            None
                         }
                     }
-                    Err(e) => log::warn!("Could not read {}: {e}", path.display()),
-                }
+                    Err(e) => {
+                        log::warn!("Could not read {}: {e}", path.display());
+                        None
+                    }
+                };
 
                 let n = idx.parse_tasks_completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                 // Report progress every ~5% (but at least every 50 files).
@@ -549,71 +565,49 @@ impl Indexer {
                         r#"{{"phase":"indexing","workspace":"{root_str2}","indexed":{n},"total":{total_cnt},"cache_hits":{cache_hits},"symbols":0,"started_at":{started_unix},"elapsed_secs":{elapsed:.0},"estimated_remaining_secs":{estimated_remaining:.0}}}"#
                     ));
                 }
+                
+                result
             }));
         }
 
-        // Always use non-blocking mode to avoid deadlock.
-        // Background parse tasks continue after End notification sent.
-        // For --index-only mode, this means the process may exit before parsing completes,
-        // but cache hits (95%+ on warm start) mean index is mostly populated anyway.
-        tokio::spawn(async move {
-            futures::future::join_all(handles).await;
-            log::debug!("Background parse tasks completed");
-        });
-
-        // ── Persist updated index to disk ────────────────────────────────────
-        if client.is_none() {
-            // Blocking mode: save cache synchronously before returning
-            self.save_cache_to_disk();
-        } else {
-            // Non-blocking mode: spawn background task, don't block End notification
-            let idx_for_save = Arc::clone(&self);
-            tokio::task::spawn_blocking(move || idx_for_save.save_cache_to_disk());
+        // BLOCKING mode: await ALL handles to collect results
+        // This is the key fix — function doesn't return until all work completes
+        log::info!("Awaiting completion of {} parse tasks", handles.len());
+        let results = futures::future::join_all(handles).await;
+        log::info!("All parse tasks completed");
+        
+        // Collect successful results
+        let mut file_results: Vec<FileIndexResult> = Vec::new();
+        let mut parse_errors = 0;
+        for join_result in results {
+            match join_result {
+                Ok(Some(file_result)) => file_results.push(file_result),
+                Ok(None) => parse_errors += 1,
+                Err(e) => {
+                    log::warn!("Parse task panicked: {}", e);
+                    parse_errors += 1;
+                }
+            }
         }
-
-        // ── LSP progress: end ────────────────────────────────────────────────
-        let sym_count = self.definitions.len();
-        let cache_note = if cache_hits > 0 {
-            format!(", {cache_hits} from cache")
-        } else {
-            String::new()
-        };
-        log::info!("About to send WorkDoneProgress::End notification (token: kotlin-lsp/indexing)");
-        if let Some(ref client) = client {
-            client.send_notification::<progress::KotlinProgress>(ProgressParams {
-                token,
-                value: ProgressParamsValue::WorkDone(WorkDoneProgress::End(WorkDoneProgressEnd {
-                    message: Some(format!(
-                        "Indexed {} files, {} symbols{}{}",
-                        self.files.len(), sym_count, cache_note,
-                        if truncated { format!(" (+{} lazy)", total - indexed_count) } else { String::new() }
-                    )),
-                })),
-            }).await;
-            log::info!("Sent WorkDoneProgress::End notification");
-        } else {
-            log::info!("No client, skipping End notification");
-        }
-
-        // ── Status file: ready ───────────────────────────────────────────────
-        let elapsed = index_start.elapsed().as_secs_f64();
-        let completed_unix = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        write_status_file(&format!(
-            r#"{{"phase":"ready","workspace":"{root_str}","indexed":{files},"total":{files},"cache_hits":{cache_hits},"symbols":{sym_count},"started_at":{started_unix},"elapsed_secs":{elapsed:.0},"completed_at":{completed_unix}}}"#,
-            files = self.files.len(),
-        ));
-
-        log::info!(
-            "Done — {} files indexed ({} cached), {} distinct symbols, {} packages",
-            self.files.len(),
+        
+        // Build stats
+        let stats = IndexStats {
+            files_discovered: total,
             cache_hits,
-            self.definitions.len(),
-            self.packages.len(),
-        );
-        // _guard drops here, clearing indexing_in_progress
+            files_parsed: file_results.len(),
+            symbols_extracted: file_results.iter().map(|f| f.data.symbols.len()).sum(),
+            packages_found: file_results.iter().filter_map(|f| f.data.package.as_ref()).count(),
+            errors: parse_errors,
+        };
+        
+        log::info!("Workspace indexing complete: {} files parsed, {} cache hits, {} errors",
+            stats.files_parsed, stats.cache_hits, stats.errors);
+        
+        WorkspaceIndexResult {
+            files: file_results,
+            stats,
+            workspace_root: root.to_path_buf(),
+        }
     }
 
     /// Restore a single file from the on-disk cache into all index maps.
@@ -848,6 +842,26 @@ impl Indexer {
 
         // ── Store file data ───────────────────────────────────────────────────
         self.files.insert(uri_str, Arc::new(result.data.clone()));
+    }
+
+    /// Apply workspace indexing results to the index (mutates shared state).
+    /// 
+    /// This merges all parse results into the index and rebuilds derived caches.
+    /// Called after index_workspace_impl returns its result.
+    pub fn apply_workspace_result(&self, result: &WorkspaceIndexResult) {
+        log::info!("Applying workspace results: {} files, {} cache hits",
+            result.stats.files_parsed, result.stats.cache_hits);
+        
+        // Apply each file result
+        for file_result in &result.files {
+            self.apply_file_result(file_result);
+        }
+        
+        // Rebuild derived caches
+        self.rebuild_bare_name_cache();
+        
+        log::info!("Applied {} files to index, {} total symbols now",
+            result.files.len(), self.definitions.len());
     }
 
     // ────────────────────────────────────────────────────────────────────────
