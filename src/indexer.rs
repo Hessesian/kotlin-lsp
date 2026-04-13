@@ -363,6 +363,9 @@ pub struct Indexer {
     /// Paths currently scheduled or in-flight: canonical path -> generation when scheduled.
     /// Prevents duplicate scheduling of identical parse work for same generation.
     scheduled_paths: DashMap<String, u64>,
+    /// Set when workspace was explicitly configured (env var, config file, or changeRoot command).
+    /// When true, `did_open` auto-detection will NOT override the workspace.
+    pub(crate) workspace_pinned: std::sync::atomic::AtomicBool,
 }
 
 impl Indexer {
@@ -400,6 +403,7 @@ impl Indexer {
             parse_tasks_completed: std::sync::atomic::AtomicUsize::new(0),
             parse_tasks_total: std::sync::atomic::AtomicUsize::new(0),
             scheduled_paths: DashMap::new(),
+            workspace_pinned: std::sync::atomic::AtomicBool::new(false),
         }
     }
 

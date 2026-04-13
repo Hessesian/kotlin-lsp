@@ -72,6 +72,7 @@ impl LanguageServer for Backend {
                     .filter(|p| p.is_dir())
             });
 
+        let workspace_pinned = workspace_override.is_some();
         let resolved_root = workspace_override.or_else(|| {
             root_uri.as_ref().and_then(|uri| uri.to_file_path().ok())
         });
@@ -80,6 +81,10 @@ impl LanguageServer for Backend {
             // Set workspace_root immediately so rg/fd calls work even before
             // indexing finishes (the background task can be slow on large projects).
             *self.indexer.workspace_root.write().unwrap() = Some(path.clone());
+            if workspace_pinned {
+                // Explicitly configured — prevent did_open auto-detection from overriding.
+                self.indexer.workspace_pinned.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
             let indexer = Arc::clone(&self.indexer);
             let client  = self.client.clone();
             // Background task — server is usable before indexing finishes.
@@ -203,6 +208,8 @@ impl LanguageServer for Backend {
             // Swap root and wipe stale index data.
             let prev_root = self.indexer.workspace_root.read().unwrap().clone();
             *self.indexer.workspace_root.write().unwrap() = Some(new_root.clone());
+            // Pin workspace so did_open auto-detection won't override it.
+            self.indexer.workspace_pinned.store(true, std::sync::atomic::Ordering::Relaxed);
             // Increment generation so in-flight background tasks can detect staleness.
             self.indexer.root_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             // Clear all index maps for the new root.
@@ -270,9 +277,12 @@ impl LanguageServer for Backend {
 
         // If workspace_root not set, infer from opened file: look for common project markers
         // (.git, build.gradle, settings.gradle, build.gradle.kts, Cargo.toml, Package.swift) walking up.
+        // Skip auto-detection when workspace was explicitly configured (env var / config file / changeRoot).
         let mut need_root_switch: Option<std::path::PathBuf> = None;
         // Keep the opened file path (if available) so prioritized indexing can seed it.
         let opened_path_opt = uri.to_file_path().ok();
+        let pinned = self.indexer.workspace_pinned.load(std::sync::atomic::Ordering::Relaxed);
+        if !pinned {
         if let Some(ref path) = opened_path_opt {
             // Compute candidate root for the opened file.
             //
@@ -321,6 +331,7 @@ impl LanguageServer for Backend {
                 }
             }
         }
+        } // end if !pinned
 
         if let Some(root) = need_root_switch {
             // Perform root swap similar to changeRoot: bump generation, clear maps, spawn index.
