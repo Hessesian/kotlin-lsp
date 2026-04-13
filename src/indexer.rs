@@ -1231,7 +1231,18 @@ impl Indexer {
         if let Some(live) = self.live_lines.get(uri.as_str()) {
             return Some(live.clone());
         }
-        self.files.get(uri.as_str()).map(|f| f.lines.clone())
+        if let Some(f) = self.files.get(uri.as_str()) {
+            return Some(f.lines.clone());
+        }
+        // File not indexed yet (cold start / indexing in progress) — read from disk
+        // so that word_at / word_and_qualifier_at work and rg fallbacks can fire.
+        if let Ok(path) = uri.to_file_path() {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                let lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+                return Some(Arc::new(lines));
+            }
+        }
+        None
     }
 
     /// Returns true if `name` has at least one definition location inside `uri`.
