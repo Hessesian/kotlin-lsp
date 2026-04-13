@@ -228,8 +228,8 @@ const session = await joinSession({
     {
       name: "kotlin_lsp_status",
       description: [
-        "Check kotlin-lsp server status: whether it's running, which workspace is configured,",
-        "and roughly how many source files the workspace contains.",
+        "Check kotlin-lsp server status: active workspace, indexing phase, symbol count.",
+        "Reads live status from ~/.cache/kotlin-lsp/status.json written by the server.",
         "Call before workspaceSymbol when uncertain if indexing has completed.",
         "If no server is running, the next LSP tool call will auto-start it.",
       ].join(" "),
@@ -237,29 +237,36 @@ const session = await joinSession({
       handler: async () => {
         const lines = [];
 
-        // 1. Configured workspace
-        let configuredRoot = "(not set)";
+        // 1. Live server status from status.json
+        const statusPath = path.join(os.homedir(), ".cache", "kotlin-lsp", "status.json");
         try {
-          configuredRoot = (await fs.readFile(WORKSPACE_CONFIG, "utf8")).trim();
-        } catch { /* file missing */ }
-        lines.push(`Configured workspace: ${configuredRoot}`);
-
-        // 2. Server process
-        const { stdout: pids } = await runShell("pgrep -x kotlin-lsp 2>/dev/null || true");
-        const pidList = pids.trim();
-        lines.push(pidList ? `Server running: yes (PID ${pidList.replace(/\n/g, ", ")})` : "Server running: no");
-
-        // 3. Approximate source file count in configured workspace
-        if (configuredRoot !== "(not set)") {
-          const { stdout: countOut } = await runShell(
-            `fd --type f -e kt -e kts -e java -e swift . '${configuredRoot}' 2>/dev/null | wc -l`
-          );
-          const count = countOut.trim();
-          lines.push(`Source files in workspace: ~${count}`);
+          const raw = await fs.readFile(statusPath, "utf8");
+          const s = JSON.parse(raw);
+          lines.push(`Active workspace: ${s.workspace ?? "(unknown)"}`);
+          lines.push(`Indexing phase:   ${s.phase ?? "unknown"}`);
+          if (s.phase === "indexing") {
+            const pct = s.total > 0 ? Math.round((s.indexed / s.total) * 100) : 0;
+            lines.push(`Progress:         ${s.indexed}/${s.total} files (${pct}%, ${s.cache_hits ?? 0} cached)`);
+          } else if (s.phase === "done") {
+            lines.push(`Indexed:          ${s.total} files, ${s.symbols ?? 0} symbols`);
+          }
+        } catch {
+          lines.push("Active workspace: (status.json not found — server not started yet)");
         }
 
+        // 2. Config override (if set, this wins over rootUri at startup)
+        try {
+          const override_ = (await fs.readFile(WORKSPACE_CONFIG, "utf8")).trim();
+          lines.push(`Config override:  ${override_}`);
+        } catch { /* not set */ }
+
+        // 3. Server process
+        const { stdout: pids } = await runShell("pgrep -x kotlin-lsp 2>/dev/null || true");
+        const pidList = pids.trim();
+        lines.push(pidList ? `Server running:   yes (PID ${pidList.replace(/\n/g, ", ")})` : "Server running:   no");
+
         lines.push("");
-        lines.push("Note: workspaceSymbol requires full indexing. Open any file first (lsp documentSymbol) to trigger it, then wait for progress to finish.");
+        lines.push("Note: workspaceSymbol needs phase=done. Open any file (lsp documentSymbol) to trigger indexing.");
         return lines.join("\n");
       },
     },

@@ -121,7 +121,7 @@ impl LanguageServer for Backend {
                 }),
                 workspace_symbol_provider: Some(OneOf::Left(true)),
                 execute_command_provider: Some(ExecuteCommandOptions {
-                    commands: vec!["kotlin-lsp/reindex".into(), "kotlin-lsp/changeRoot".into()],
+                    commands: vec!["kotlin-lsp/reindex".into(), "kotlin-lsp/clearCache".into()],
                     ..Default::default()
                 }),
                 rename_provider: Some(OneOf::Right(RenameOptions {
@@ -190,40 +190,6 @@ impl LanguageServer for Backend {
                 idx.index_workspace(&root, Some(client)).await;
             });
             self.client.show_message(MessageType::INFO, "kotlin-lsp: reindexing workspace…").await;
-        } else if params.command == "kotlin-lsp/changeRoot" {
-            // Expected argument: a single JSON string with the new workspace root path.
-            let new_root = params.arguments.first()
-                .and_then(|v| v.as_str())
-                .map(std::path::PathBuf::from);
-            let Some(new_root) = new_root else {
-                self.client.show_message(MessageType::WARNING,
-                    "kotlin-lsp/changeRoot: expected one string argument (path)").await;
-                return Ok(None);
-            };
-            if !new_root.is_dir() {
-                self.client.show_message(MessageType::WARNING,
-                    format!("kotlin-lsp/changeRoot: not a directory: {}", new_root.display())).await;
-                return Ok(None);
-            }
-            // Swap root and wipe stale index data.
-            let prev_root = self.indexer.workspace_root.read().unwrap().clone();
-            *self.indexer.workspace_root.write().unwrap() = Some(new_root.clone());
-            // Pin workspace so did_open auto-detection won't override it.
-            self.indexer.workspace_pinned.store(true, std::sync::atomic::Ordering::Relaxed);
-            // Increment generation so in-flight background tasks can detect staleness.
-            self.indexer.root_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            // Clear all index maps for the new root.
-            self.indexer.reset_index_state();
-            log::info!("Root switched; preserving on-disk caches for other roots");
-            let idx    = Arc::clone(&self.indexer);
-            let client = self.client.clone();
-            let new_root2 = new_root.clone();
-            tokio::spawn(async move {
-                // Preserve existing behavior but prefer prioritized startup (no initial files here).
-                idx.index_workspace_prioritized(&new_root2, Vec::new(), Some(client)).await;
-            });
-            self.client.show_message(MessageType::INFO,
-                format!("kotlin-lsp: switching root to {}…", new_root.display())).await;
         } else if params.command == "kotlin-lsp/clearCache" {
             // Optional arg: path to workspace root. If absent, clear current root's cache.
             let arg = params.arguments.first().and_then(|v| v.as_str()).map(|s| s.to_string());
@@ -275,75 +241,70 @@ impl LanguageServer for Backend {
         let uri  = params.text_document.uri;
         let text = params.text_document.text;
 
-        // If workspace_root not set, infer from opened file: look for common project markers
-        // (.git, build.gradle, settings.gradle, build.gradle.kts, Cargo.toml, Package.swift) walking up.
-        // Skip auto-detection when workspace was explicitly configured (env var / config file / changeRoot).
-        let mut need_root_switch: Option<std::path::PathBuf> = None;
         // Keep the opened file path (if available) so prioritized indexing can seed it.
         let opened_path_opt = uri.to_file_path().ok();
+
+        // Auto-detect workspace root from the opened file when workspace is not yet pinned
+        // (i.e. no explicit env var / config file override was set at initialize).
+        // Marker tiers (highest → lowest priority):
+        //   1. Strong project markers (build.gradle.kts, settings.gradle, pom.xml, Cargo.toml)
+        //      — typically appear exactly once at the project root. Nearest wins over .git.
+        //   2. .git — repo root; wins over weak markers like Package.swift.
+        //   3. Weak markers (Package.swift) — present at every Swift module; last resort.
+        //
+        // This correctly handles mono-repos where .git is at the parent of a subproject
+        // (e.g. Moneta/.git with Moneta/android/settings.gradle.kts) and Swift mono-repos
+        // where ios/.git is the right root but ios/Modules/*/Package.swift should be ignored.
         let pinned = self.indexer.workspace_pinned.load(std::sync::atomic::Ordering::Relaxed);
+        let mut need_root_switch: Option<std::path::PathBuf> = None;
+
         if !pinned {
-        if let Some(ref path) = opened_path_opt {
-            // Compute candidate root for the opened file.
-            //
-            // Marker tiers (highest → lowest priority):
-            //   1. Strong project markers (build.gradle.kts, settings.gradle, pom.xml, Cargo.toml)
-            //      — typically appear exactly once at the project root. Nearest wins over .git.
-            //   2. .git — repo root; wins over weak markers like Package.swift.
-            //   3. Weak markers (Package.swift) — present at every Swift module; last resort.
-            //
-            // This correctly handles mono-repos where .git is at the parent of a subproject
-            // (e.g. Moneta/.git with Moneta/android/settings.gradle.kts) and Swift mono-repos
-            // where ios/.git is the right root but ios/Modules/*/Package.swift should be ignored.
-            let strong_markers = [
-                "build.gradle", "settings.gradle", "build.gradle.kts",
-                "Cargo.toml", "pom.xml", "settings.gradle.kts",
-            ];
-            let weak_markers = ["Package.swift"];
-            let mut cur = path.parent().map(|p| p.to_path_buf());
-            let mut nearest_strong: Option<std::path::PathBuf> = None;
-            let mut git_root:        Option<std::path::PathBuf> = None;
-            let mut nearest_weak:    Option<std::path::PathBuf> = None;
-            while let Some(ref dir) = cur {
-                if nearest_strong.is_none() && strong_markers.iter().any(|m| dir.join(m).exists()) {
-                    nearest_strong = Some(dir.clone());
+            if let Some(ref path) = opened_path_opt {
+                let strong_markers = [
+                    "build.gradle", "settings.gradle", "build.gradle.kts",
+                    "Cargo.toml", "pom.xml", "settings.gradle.kts",
+                ];
+                let weak_markers = ["Package.swift"];
+                let mut cur = path.parent().map(|p| p.to_path_buf());
+                let mut nearest_strong: Option<std::path::PathBuf> = None;
+                let mut git_root:        Option<std::path::PathBuf> = None;
+                let mut nearest_weak:    Option<std::path::PathBuf> = None;
+                while let Some(ref dir) = cur {
+                    if nearest_strong.is_none() && strong_markers.iter().any(|m| dir.join(m).exists()) {
+                        nearest_strong = Some(dir.clone());
+                    }
+                    if dir.join(".git").exists() {
+                        git_root = Some(dir.clone());
+                        break;
+                    }
+                    if nearest_weak.is_none() && weak_markers.iter().any(|m| dir.join(m).exists()) {
+                        nearest_weak = Some(dir.clone());
+                    }
+                    cur = dir.parent().map(|p| p.to_path_buf());
                 }
-                if dir.join(".git").exists() {
-                    git_root = Some(dir.clone());
-                    break; // no need to walk above .git
-                }
-                if nearest_weak.is_none() && weak_markers.iter().any(|m| dir.join(m).exists()) {
-                    nearest_weak = Some(dir.clone());
-                }
-                cur = dir.parent().map(|p| p.to_path_buf());
-            }
-            let found = nearest_strong.or(git_root).or(nearest_weak);
-            let chosen = found.or_else(|| path.parent().map(|p| p.to_path_buf()));
-            if let Some(candidate_root) = chosen {
-                let current_root = self.indexer.workspace_root.read().unwrap().clone();
-                // If no root set, or file is outside current root, schedule switch
-                let should_switch = match current_root {
-                    None => true,
-                    Some(ref r) => !path.starts_with(r),
-                };
-                if should_switch {
-                    need_root_switch = Some(candidate_root);
+                let found = nearest_strong.or(git_root).or(nearest_weak);
+                let chosen = found.or_else(|| path.parent().map(|p| p.to_path_buf()));
+                if let Some(candidate_root) = chosen {
+                    let current_root = self.indexer.workspace_root.read().unwrap().clone();
+                    let should_switch = match current_root {
+                        None => true,
+                        Some(ref r) => !path.starts_with(r),
+                    };
+                    if should_switch {
+                        need_root_switch = Some(candidate_root);
+                    }
                 }
             }
         }
-        } // end if !pinned
 
         if let Some(root) = need_root_switch {
-            // Perform root swap similar to changeRoot: bump generation, clear maps, spawn index.
-            let prev_root = self.indexer.workspace_root.read().unwrap().clone();
             *self.indexer.workspace_root.write().unwrap() = Some(root.clone());
             self.indexer.root_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.indexer.reset_index_state();
-            log::info!("Preserving on-disk caches after auto root detection");
+            log::info!("Auto-detected workspace root: {}", root.display());
             let idx = Arc::clone(&self.indexer);
             let client = self.client.clone();
             let root2 = root.clone();
-            // Prefer prioritized indexing seeded with the just-opened file for fast responsiveness.
             let opened = opened_path_opt.clone();
             tokio::spawn(async move {
                 if let Some(op) = opened {
@@ -352,6 +313,22 @@ impl LanguageServer for Backend {
                     idx.index_workspace_prioritized(&root2, Vec::new(), Some(client)).await;
                 }
             });
+        }
+
+        // Skip workspace-wide indexing for files outside the current workspace root.
+        // These are typically files from another project re-opened by the LSP client on
+        // restart. Hover/goToDefinition still work via on-demand indexing in the resolver.
+        // This prevents outside-project symbols from polluting workspaceSymbol results.
+        if pinned {
+            if let (Some(ref path), Some(root)) = (
+                &opened_path_opt,
+                self.indexer.workspace_root.read().unwrap().clone(),
+            ) {
+                if !path.starts_with(&root) {
+                    log::info!("Skipping workspace index for outside-root file: {}", path.display());
+                    return;
+                }
+            }
         }
 
         let idx  = Arc::clone(&self.indexer);
@@ -383,6 +360,7 @@ impl LanguageServer for Backend {
             client.publish_diagnostics(uri2, diags, None).await;
         });
     }
+
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         if let Some(change) = params.content_changes.into_iter().last() {
