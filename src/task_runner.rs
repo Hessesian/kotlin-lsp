@@ -99,4 +99,46 @@ mod tests {
         assert!(max_concurrent.load(Ordering::SeqCst) <= 2, 
             "Max concurrent was {}, expected <= 2", max_concurrent.load(Ordering::SeqCst));
     }
+    
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_async_io_plus_spawn_blocking() {
+        // Simulate real indexing pattern: async I/O (all parallel) + spawn_blocking (throttled)
+        let items: Vec<usize> = (0..20).collect();
+        let sem = Arc::new(Semaphore::new(4)); // Throttle spawn_blocking to 4
+        let blocking_active = Arc::new(AtomicUsize::new(0));
+        let max_blocking = Arc::new(AtomicUsize::new(0));
+        
+        let blocking_clone = Arc::clone(&blocking_active);
+        let max_clone = Arc::clone(&max_blocking);
+        
+        let results = run_concurrent(items, sem, move |n, sem| {
+            let blocking = Arc::clone(&blocking_clone);
+            let max_concurrent = Arc::clone(&max_clone);
+            async move {
+                // Simulate async I/O (file read) - all 20 happen in parallel
+                tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+                
+                // Acquire permit before spawn_blocking (like real parsing)
+                let _permit = sem.acquire().await.unwrap();
+                
+                // Simulate CPU-bound work in spawn_blocking
+                let result = tokio::task::spawn_blocking(move || {
+                    let current = blocking.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_concurrent.fetch_max(current, Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    blocking.fetch_sub(1, Ordering::SeqCst);
+                    n * 2
+                }).await.unwrap();
+                
+                result
+            }
+        }).await;
+        
+        assert_eq!(results.len(), 20);
+        // Verify spawn_blocking was throttled to max 4 concurrent
+        let max = max_blocking.load(Ordering::SeqCst);
+        assert!(max <= 4, "Max concurrent spawn_blocking was {}, expected <= 4", max);
+        // Should have some parallelism (not serialized to 1)
+        assert!(max >= 2, "Max concurrent spawn_blocking was {}, expected >= 2", max);
+    }
 }
