@@ -267,18 +267,9 @@ impl Indexer {
             .and_then(|v| v.parse().ok())
             .unwrap_or(usize::MAX); // Default to unlimited for --index-only
         
-        // For --index-only mode (client.is_none()), use synchronous sequential parsing
-        // to avoid async/blocking pool exhaustion deadlock
-        if client.is_none() {
-            log::info!("--index-only mode: using synchronous sequential parsing");
-            let result = self.index_workspace_sync(root, max);
-            self.apply_workspace_result(&result);
-            self.save_cache_to_disk();
-        } else {
-            let result = Arc::clone(&self).index_workspace_impl(root, max, client).await;
-            self.apply_workspace_result(&result);
-            self.save_cache_to_disk();
-        }
+        let result = Arc::clone(&self).index_workspace_impl(root, max, client).await;
+        self.apply_workspace_result(&result);
+        self.save_cache_to_disk();
     }
     
     /// Synchronous workspace indexing for --index-only mode.
@@ -629,11 +620,12 @@ impl Indexer {
                     
                     log::debug!("Parsed {} in {} ms", item.path.display(), took);
                     
-                    // Remove scheduling marker
-                    if let Some(pair) = idx.scheduled_paths.get(&item.key) {
-                        if *pair == item.start_gen {
-                            idx.scheduled_paths.remove(&item.key);
-                        }
+                    // Remove scheduling marker - check then drop guard before remove
+                    let should_remove = idx.scheduled_paths.get(&item.key)
+                        .map(|gen| *gen == item.start_gen)
+                        .unwrap_or(false);
+                    if should_remove {
+                        idx.scheduled_paths.remove(&item.key);
                     }
                     
                     // Log slow parses
