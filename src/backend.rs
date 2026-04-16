@@ -480,6 +480,64 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
 
+        // Special case: `super` keyword — navigate to the enclosing class's first supertype.
+        if qualifier.is_none() && word == "super" {
+            if let Some(class_name) = self.indexer.enclosing_class_at(uri, position.line) {
+                let locs = self.indexer.definitions
+                    .get(&class_name)
+                    .map(|v| v.clone())
+                    .unwrap_or_default();
+                // Collect supertypes from the class declaration.
+                let mut super_names: Vec<String> = vec![];
+                for loc in &locs {
+                    if let Some(file) = self.indexer.files.get(loc.uri.as_str()) {
+                        let start = loc.range.start.line as usize;
+                        let end = (start + 10).min(file.lines.len());
+                        let mut decl_lines: Vec<String> = vec![];
+                        for line in &file.lines[start..end] {
+                            decl_lines.push(line.clone());
+                            if line.contains('{') { break; }
+                        }
+                        super_names = crate::resolver::extract_supers_from_lines(&decl_lines);
+                        if !super_names.is_empty() { break; }
+                    }
+                }
+                // Also scan live_lines if definitions weren't found (file just opened).
+                if super_names.is_empty() {
+                    if let Some(lines) = self.indexer.live_lines.get(uri.as_str()) {
+                        super_names = crate::resolver::extract_supers_from_lines(&lines);
+                    }
+                }
+                for super_name in &super_names {
+                    // Try index first, then rg fallback.
+                    let sup_locs = self.indexer.find_definition_qualified(super_name, None, uri);
+                    if !sup_locs.is_empty() {
+                        return Ok(match sup_locs.len() {
+                            1 => Some(GotoDefinitionResponse::Scalar(sup_locs.into_iter().next().unwrap())),
+                            _ => Some(GotoDefinitionResponse::Array(sup_locs)),
+                        });
+                    }
+                    // rg fallback — supertype may not be indexed yet.
+                    let name_clone = super_name.clone();
+                    let file_path = uri.to_file_path().ok();
+                    let root_opt = {
+                        let wr = self.indexer.workspace_root.read().unwrap().clone();
+                        crate::indexer::effective_rg_root(wr.as_deref(), file_path.as_deref())
+                    };
+                    let rg_locs = tokio::task::spawn_blocking(move || {
+                        crate::indexer::rg_find_definition(&name_clone, root_opt.as_deref())
+                    }).await.unwrap_or_default();
+                    if !rg_locs.is_empty() {
+                        return Ok(match rg_locs.len() {
+                            1 => Some(GotoDefinitionResponse::Scalar(rg_locs.into_iter().next().unwrap())),
+                            _ => Some(GotoDefinitionResponse::Array(rg_locs)),
+                        });
+                    }
+                }
+            }
+            return Ok(None);
+        }
+
         // Special case: `it` or a named lambda parameter — resolve to the
         // inferred element/receiver type class instead of trying a text search.
         if qualifier.is_none() && (word == "it" || word.chars().next().map(|c| c.is_lowercase()).unwrap_or(true)) {

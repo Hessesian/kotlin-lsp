@@ -466,10 +466,38 @@ impl Indexer {
 
         // First, eagerly parse the prioritized files (if present) so their
         // symbols are available quickly for operations like go-to/hover.
+        // Also expand priority set to include supertypes of each opened file so
+        // that cross-class navigation (super, override resolution) works immediately.
         if !initial_paths.is_empty() {
             let sem = Arc::clone(&self.parse_sem);
+
+            // Collect file contents first so we can extract supertypes synchronously.
+            let mut priority_paths: Vec<PathBuf> = Vec::new();
+            for path in initial_paths {
+                if !path.exists() { continue; }
+                let content = match tokio::fs::read_to_string(&path).await {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+                // Extract supertypes declared in this file and find their source files
+                // in the workspace root so they are indexed before the full scan.
+                let lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+                let supers = crate::resolver::extract_supers_from_lines(&lines);
+                if !supers.is_empty() {
+                    let super_paths = find_files_for_types(&supers, root);
+                    for sp in super_paths {
+                        if !priority_paths.contains(&sp) {
+                            priority_paths.push(sp);
+                        }
+                    }
+                }
+                priority_paths.push(path);
+            }
+            // Deduplicate while preserving order (supertypes first).
+            priority_paths.dedup();
+
             let mut handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
-            for path in initial_paths.into_iter() {
+            for path in priority_paths {
                 let idx = Arc::clone(&self);
                 let sem2 = Arc::clone(&sem);
                 handles.push(tokio::spawn(async move {
@@ -1777,6 +1805,23 @@ impl Indexer {
                 if let Some(name) = extract_class_decl_name(t) {
                     return Some(name);
                 }
+                // The `{` may be on a different line than the `class` keyword, e.g.:
+                //   line N:   class Foo @Inject constructor(
+                //   ...params...
+                //   line i:   ) : Bar() {
+                // Scan up to 15 lines backward from `i` to find the class keyword.
+                let scan_up = i.saturating_sub(15);
+                for j in (scan_up..i).rev() {
+                    if let Some(prev) = file.lines.get(j) {
+                        if let Some(name) = extract_class_decl_name(prev.trim()) {
+                            return Some(name);
+                        }
+                        // Stop if we hit a line that is clearly a different scope
+                        // (another `}` or a function/lambda body closer).
+                        let pt = prev.trim();
+                        if pt.starts_with('}') || pt.ends_with('}') { break; }
+                    }
+                }
                 // Opening brace belongs to a function/lambda — keep searching.
                 depth = 0;
             }
@@ -2087,6 +2132,35 @@ fn walk_to_git_root(file: &Path) -> Option<std::path::PathBuf> {
         }
         cur = cur.parent()?;
     }
+}
+
+/// Given a list of type names (e.g. `["MviViewModel", "ViewModel"]`), find the
+/// source files in `root` that declare them using a fast `rg` search.
+/// Returns deduplicated, existing paths (at most one file per type).
+fn find_files_for_types(names: &[String], root: &Path) -> Vec<PathBuf> {
+    if names.is_empty() { return vec![]; }
+    // Build a single alternation pattern: `(class|abstract class|...) (TypeA|TypeB)`
+    let alts = names.iter()
+        .map(|n| regex_escape(n))
+        .collect::<Vec<_>>()
+        .join("|");
+    let pattern = format!(
+        r"(?:abstract\s+class|open\s+class|class|interface|object|struct|protocol)\s+(?:{alts})\b"
+    );
+    let mut cmd = Command::new("rg");
+    cmd.args(["--no-heading", "--with-filename", "-l"]);
+    for ext in SOURCE_EXTENSIONS { cmd.args(["--glob", &format!("*.{ext}")]); }
+    cmd.args(["-e", &pattern]);
+    cmd.arg(root);
+    let out = match cmd.output() {
+        Ok(o) if !o.stdout.is_empty() => o,
+        _ => return vec![],
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(PathBuf::from)
+        .filter(|p| p.exists())
+        .collect()
 }
 
 /// Return the best search root for rg/fd fallbacks given:
@@ -3283,6 +3357,16 @@ fn last_fun_param_type_str(params_text: &str) -> Option<String> {
 ///   `() -> Unit`                 → `None`
 fn lambda_type_first_input(ty: &str) -> Option<String> {
     let ty = ty.trim();
+    // Receiver lambda: `State.() -> State` or `State.(Param) -> R`
+    // The implicit receiver is the `it`/`this`-equivalent inside the lambda.
+    if let Some(dot_paren) = ty.find(".(") {
+        let receiver = ty[..dot_paren].trim();
+        let base: String = receiver.chars().take_while(|&c| is_id_char(c) || c == '.').collect();
+        let base = base.trim_end_matches('.');
+        if !base.is_empty() && base.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+            return Some(base.to_owned());
+        }
+    }
     // Must start with `(` to be a function type.
     if !ty.starts_with('(') { return None; }
     // Find matching `)` (respecting nested `<>`)
@@ -4358,6 +4442,66 @@ class Outer {
         let (u, idx) = indexed("/Outer.kt", src);
         // Line 2 = "        data object Loading..." → enclosing = Inner (closer one)
         assert_eq!(idx.enclosing_class_at(&u, 2), Some("Inner".into()));
+    }
+
+    #[test]
+    fn enclosing_class_multiline_constructor() {
+        // Simulates DashboardProductsViewModel: `class` keyword on line 0,
+        // closing `)` + `{` on line 3. Cursor at line 5 (inside the body).
+        let src = "\
+class Foo @Inject constructor(
+  private val a: A,
+  private val b: B,
+) : Bar() {
+  override fun doIt() {
+    super.doIt()
+  }
+}";
+        let (u, idx) = indexed("/Foo.kt", src);
+        // Line 5 = "    super.doIt()" → enclosing class = Foo
+        assert_eq!(idx.enclosing_class_at(&u, 5), Some("Foo".into()));
+    }
+
+    #[test]
+    fn super_resolution_chain() {
+        // Full super-resolution chain: two files with same package,
+        // enclosing class found from multi-line constructor, supertypes extracted.
+        let bar_src = "package com.example\nopen class Bar {\n  open fun doIt() {}\n}\n";
+        let foo_src = "\
+package com.example
+class Foo @Inject constructor(
+  private val a: A,
+  private val b: B,
+) : Bar() {
+  override fun doIt() {
+    super.doIt()
+  }
+}";
+        let (_, idx) = indexed("/Bar.kt", bar_src);
+        let foo_uri = uri("/Foo.kt");
+        idx.index_content(&foo_uri, foo_src);
+
+        // 1. enclosing_class_at at line 6 ("    super.doIt()") → "Foo"
+        let class_name = idx.enclosing_class_at(&foo_uri, 6);
+        assert_eq!(class_name.as_deref(), Some("Foo"), "enclosing class");
+
+        // 2. Find Foo's definition and extract supertypes
+        let locs = idx.definitions.get("Foo").map(|v| v.clone()).unwrap_or_default();
+        assert!(!locs.is_empty(), "Foo must be in definitions");
+        let file = idx.files.get(locs[0].uri.as_str()).unwrap();
+        let start = locs[0].range.start.line as usize;
+        let end = (start + 10).min(file.lines.len());
+        let mut decl_lines: Vec<String> = vec![];
+        for line in &file.lines[start..end] {
+            decl_lines.push(line.clone());
+            if line.contains('{') { break; }
+        }
+        let supers = crate::resolver::extract_supers_from_lines(&decl_lines);
+        assert!(supers.contains(&"Bar".to_string()), "supers={supers:?}");
+
+        // 3. find_definition_qualified finds Bar (same package)
+        let bar_locs = idx.find_definition_qualified("Bar", None, &foo_uri);
+        assert!(!bar_locs.is_empty(), "Bar must resolve via same-package");
     }
 
     #[test]
@@ -5831,5 +5975,17 @@ internal class ContactAddressInteractor @Inject constructor(
         assert!(idx.definitions.contains_key("ParsedClass"),
             "ParsedClass (freshly parsed) should be in index");
         assert_eq!(idx.files.len(), 2, "exactly 2 files in index");
+    }
+
+    #[test]
+    fn debug_super_chain() {
+        let bar_src = "package com.example\nopen class Bar {\n  open fun doIt() {}\n}\n";
+        let foo_src = "package com.example\nimport com.example.Bar\nclass Foo : Bar() {\n  override fun doIt() {\n    super.doIt()\n  }\n}";
+        let (_, idx) = indexed("/Bar.kt", bar_src);
+        let foo_uri = uri("/Foo.kt");
+        idx.index_content(&foo_uri, foo_src);
+        
+        let bar_locs = idx.find_definition_qualified("Bar", None, &foo_uri);
+        assert!(!bar_locs.is_empty(), "Bar should resolve via same-package or import");
     }
 }
