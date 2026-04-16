@@ -56,26 +56,48 @@ impl LanguageServer for Backend {
                 .map(|f| f.uri.clone())
         });
 
-        // KOTLIN_LSP_WORKSPACE_ROOT env var or ~/.config/kotlin-lsp/workspace file
-        // overrides whatever root the LSP client sends.
-        // Useful when the LSP client (e.g. Copilot CLI) is started from a different directory.
-        let workspace_override = std::env::var("KOTLIN_LSP_WORKSPACE_ROOT")
+        // Priority:
+        //   1. KOTLIN_LSP_WORKSPACE_ROOT env var  — explicit override, always wins
+        //   2. LSP client rootUri / workspaceFolders — editor knows best when present
+        //   3. ~/.config/kotlin-lsp/workspace file — fallback for clients that send no root
+        //      (e.g. Copilot CLI agentic use)
+        let env_override = std::env::var("KOTLIN_LSP_WORKSPACE_ROOT")
             .ok()
             .map(std::path::PathBuf::from)
+            .filter(|p| p.is_dir());
+
+        let client_root = root_uri.as_ref().and_then(|uri| uri.to_file_path().ok())
             .filter(|p| p.is_dir())
-            .or_else(|| {
-                // Fall back to ~/.config/kotlin-lsp/workspace file
-                let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-                let config_file = std::path::Path::new(&home).join(".config/kotlin-lsp/workspace");
-                std::fs::read_to_string(&config_file).ok()
-                    .map(|s| std::path::PathBuf::from(s.trim()))
-                    .filter(|p| p.is_dir())
+            .map(|p| {
+                // Walk up to the nearest .git root so that opening a sub-module
+                // (e.g. ios/Modules/ScenesCommon) still indexes the whole repo.
+                // This is critical for cross-module go-to-definition.
+                let mut cur = p.as_path();
+                loop {
+                    if cur.join(".git").exists() {
+                        return cur.to_path_buf();
+                    }
+                    match cur.parent() {
+                        Some(p) => cur = p,
+                        None    => return p.clone(),
+                    }
+                }
             });
 
-        let workspace_pinned = workspace_override.is_some();
-        let resolved_root = workspace_override.or_else(|| {
-            root_uri.as_ref().and_then(|uri| uri.to_file_path().ok())
-        });
+        let config_fallback = || -> Option<std::path::PathBuf> {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+            let config_file = std::path::Path::new(&home).join(".config/kotlin-lsp/workspace");
+            std::fs::read_to_string(&config_file).ok()
+                .map(|s| std::path::PathBuf::from(s.trim()))
+                .filter(|p| p.is_dir())
+        };
+
+        // env var pins the workspace (disables did_open auto-detection).
+        // config file is a passive fallback — never pins.
+        let workspace_pinned = env_override.is_some();
+        let resolved_root = env_override
+            .or(client_root)
+            .or_else(config_fallback);
 
         if let Some(path) = resolved_root {
             // Set workspace_root immediately so rg/fd calls work even before
@@ -171,8 +193,9 @@ impl LanguageServer for Backend {
 
     async fn shutdown(&self) -> Result<()> {
         // Persist the index cache so the next startup can skip unchanged files.
+        // Awaited to ensure the write completes before the process exits.
         let idx = Arc::clone(&self.indexer);
-        tokio::task::spawn_blocking(move || idx.save_cache_to_disk());
+        let _ = tokio::task::spawn_blocking(move || idx.save_cache_to_disk()).await;
         Ok(())
     }
 
@@ -315,20 +338,30 @@ impl LanguageServer for Backend {
             });
         }
 
-        // Skip workspace-wide indexing for files outside the current workspace root.
-        // These are typically files from another project re-opened by the LSP client on
-        // restart. Hover/goToDefinition still work via on-demand indexing in the resolver.
-        // This prevents outside-project symbols from polluting workspaceSymbol results.
-        if pinned {
-            if let (Some(ref path), Some(root)) = (
-                &opened_path_opt,
-                self.indexer.workspace_root.read().unwrap().clone(),
-            ) {
-                if !path.starts_with(&root) {
-                    log::info!("Skipping workspace index for outside-root file: {}", path.display());
-                    return;
-                }
-            }
+        // For files outside the current workspace root (e.g. agent opened a file from
+        // another project): still index the file itself so hover/go-to-def work on it,
+        // but skip workspace-wide re-indexing to avoid polluting workspaceSymbol results.
+        let outside_root = pinned && {
+            matches!(
+                (opened_path_opt.as_ref(), self.indexer.workspace_root.read().unwrap().clone()),
+                (Some(path), Some(root)) if !path.starts_with(&root)
+            )
+        };
+        if outside_root {
+            log::info!(
+                "Outside-root file — indexing content only: {}",
+                opened_path_opt.as_deref().map(|p| p.display().to_string()).unwrap_or_default()
+            );
+            // Index just this file so hover/go-to-def work, then return.
+            let idx = Arc::clone(&self.indexer);
+            let sem = idx.parse_sem();
+            tokio::task::spawn(async move {
+                tokio::task::spawn_blocking(move || {
+                    let _permit = sem.try_acquire_owned();
+                    idx.index_content(&uri, &text);
+                }).await.ok();
+            });
+            return;
         }
 
         let idx  = Arc::clone(&self.indexer);
@@ -482,7 +515,13 @@ impl LanguageServer for Backend {
         }
 
         // Index miss (symbol not indexed or indexing in progress) → rg fallback.
-        let root_opt = { self.indexer.workspace_root.read().unwrap().clone() };
+        // Use effective_rg_root so searches use the open file's project root
+        // when workspace_root points to a different project (e.g. android vs ios).
+        let file_path = uri.to_file_path().ok();
+        let root_opt = {
+            let wr = self.indexer.workspace_root.read().unwrap().clone();
+            crate::indexer::effective_rg_root(wr.as_deref(), file_path.as_deref())
+        };
         let name_clone = word.clone();
         let rg_locs = tokio::task::spawn_blocking(move || {
             crate::indexer::rg_find_definition(&name_clone, root_opt.as_deref())
@@ -517,7 +556,11 @@ impl LanguageServer for Backend {
         // If index is empty for this symbol (cold start), try rg-based heuristic
         // to find implementors quickly to avoid client timeouts in large projects.
         if locs.is_empty() {
-            let root_opt = { self.indexer.workspace_root.read().unwrap().clone() };
+            let file_path = uri.to_file_path().ok();
+            let root_opt = {
+                let wr = self.indexer.workspace_root.read().unwrap().clone();
+                crate::indexer::effective_rg_root(wr.as_deref(), file_path.as_deref())
+            };
             let word_clone = word.clone();
             let rg_impls = tokio::task::spawn_blocking(move || {
                 crate::indexer::rg_find_implementors(&word_clone, root_opt.as_deref())
@@ -645,9 +688,12 @@ impl LanguageServer for Backend {
                 from_index
             } else {
                 // rg fallback: find the declaration even when the index is empty.
-                let root_guard = self.indexer.workspace_root.read().unwrap();
-                let rg_locs = crate::indexer::rg_find_definition(&word, root_guard.as_deref());
-                drop(root_guard);
+                let file_path = uri.to_file_path().ok();
+                let rg_root = {
+                    let wr = self.indexer.workspace_root.read().unwrap().clone();
+                    crate::indexer::effective_rg_root(wr.as_deref(), file_path.as_deref())
+                };
+                let rg_locs = crate::indexer::rg_find_definition(&word, rg_root.as_deref());
                 rg_locs.first().and_then(|loc| self.indexer.hover_info_at_location(loc, &word))
             }
         };

@@ -76,7 +76,10 @@ All features work immediately — `rg` fallback handles symbols before indexing 
 | `KOTLIN_LSP_MAX_FILES` | `2000` | Max files indexed eagerly. Deeper files resolved on-demand. |
 | `KOTLIN_LSP_WORKSPACE_ROOT` | _(auto)_ | Override workspace root. Default: LSP client's `rootUri` (your CWD). |
 
-The workspace root can also be set via `~/.config/kotlin-lsp/workspace` (lower priority than env var).
+The workspace root resolution order:
+1. `KOTLIN_LSP_WORKSPACE_ROOT` env var — always wins, pins the workspace
+2. LSP client `rootUri` / `workspaceFolders` — used when the editor sends a root (normal Helix/Neovim session)
+3. `~/.config/kotlin-lsp/workspace` file — fallback for clients that send no root (e.g. Copilot CLI agentic use)
 
 ---
 

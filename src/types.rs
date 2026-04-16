@@ -130,4 +130,8 @@ pub struct WorkspaceIndexResult {
     /// Callers must NOT call apply_workspace_result when this is true — doing
     /// so would reset_index_state() and apply only the partial result set.
     pub aborted: bool,
+    /// True when the workspace was fully scanned (not truncated by MAX_INDEX_FILES).
+    /// Written into the on-disk cache so warm-manifest mode is only used when the
+    /// cache is a complete snapshot of the workspace.
+    pub complete_scan: bool,
 }

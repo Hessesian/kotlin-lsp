@@ -3,7 +3,7 @@ members = ["."]
 
 [package]
 name        = "kotlin-lsp"
-version = "0.5.0"
+version = "0.6.0"
 edition     = "2021"
 description = "Fast, low-memory LSP server for Kotlin, Java, and Swift. Instant startup, dot-completion, go-to-definition, hover — no JVM required."
 license     = "MIT"

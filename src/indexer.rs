@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -89,14 +89,16 @@ pub fn resolve_max_files(default: usize) -> usize {
 // ─── Disk cache ──────────────────────────────────────────────────────────────
 
 /// Bump when the serialized format changes; invalidates any older cache files.
-const CACHE_VERSION: u32 = 3;
+const CACHE_VERSION: u32 = 4;
 
 /// Per-file entry stored in the on-disk index cache.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct FileCacheEntry {
-    /// File mtime (seconds since Unix epoch) — cheap cache validity check.
+    /// File mtime (seconds since Unix epoch) — primary cache validity check.
     mtime_secs: u64,
-    /// FNV-1a content hash — secondary guard for mtime collisions / FAT FS.
+    /// File size in bytes — secondary guard for same-second edits (1s mtime resolution).
+    file_size: u64,
+    /// FNV-1a content hash — tertiary guard for mtime collisions / FAT FS.
     content_hash: u64,
     /// Parsed symbol data for this file.
     file_data: FileData,
@@ -106,6 +108,12 @@ pub(crate) struct FileCacheEntry {
 #[derive(Serialize, Deserialize)]
 struct IndexCache {
     version: u32,
+    /// True when this cache was built from a complete (non-truncated) workspace scan.
+    /// Only set to true when `total <= max` at index time.
+    /// When false, the entries may be a partial subset of the workspace — warm-manifest
+    /// mode is disabled to avoid hiding files that were never indexed.
+    #[serde(default)]
+    complete_scan: bool,
     /// Absolute path string → per-file cached data.
     entries: HashMap<String, FileCacheEntry>,
 }
@@ -135,15 +143,6 @@ pub(crate) fn workspace_cache_path(root: &Path) -> PathBuf {
         .join("kotlin-lsp")
         .join(format!("{root_hash:016x}"))
         .join("index.bin")
-}
-
-/// Returns file mtime as seconds since Unix epoch, or `None` on error.
-fn file_mtime(path: &Path) -> Option<u64> {
-    std::fs::metadata(path)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
 }
 
 /// Load and validate the on-disk cache.  Returns `None` if absent / stale / corrupt.
@@ -358,6 +357,10 @@ pub struct Indexer {
     /// Set when workspace was explicitly configured (env var, config file, or changeRoot command).
     /// When true, `did_open` auto-detection will NOT override the workspace.
     pub(crate) workspace_pinned: std::sync::atomic::AtomicBool,
+    /// Set to true after a non-truncated workspace scan; false after a truncated one.
+    /// Drives `complete_scan` on the on-disk cache so warm-manifest mode is only
+    /// used when the cache is known to be a full workspace snapshot.
+    pub(crate) last_scan_complete: std::sync::atomic::AtomicBool,
 }
 
 impl Indexer {
@@ -396,6 +399,7 @@ impl Indexer {
             parse_tasks_total: std::sync::atomic::AtomicUsize::new(0),
             scheduled_paths: DashMap::new(),
             workspace_pinned: std::sync::atomic::AtomicBool::new(false),
+            last_scan_complete: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -436,6 +440,7 @@ impl Indexer {
         let max = resolve_max_files(MAX_FILES_UNLIMITED);
         let result = Arc::clone(&self).index_workspace_impl(root, max, client).await;
         if !result.aborted {
+            self.last_scan_complete.store(result.complete_scan, std::sync::atomic::Ordering::Release);
             self.apply_workspace_result(&result);
             self.save_cache_to_disk();
         }
@@ -446,6 +451,7 @@ impl Indexer {
         let max = resolve_max_files(DEFAULT_MAX_INDEX_FILES);
         let result = Arc::clone(&self).index_workspace_impl(root, max, client).await;
         if !result.aborted {
+            self.last_scan_complete.store(result.complete_scan, std::sync::atomic::Ordering::Release);
             self.apply_workspace_result(&result);
             self.save_cache_to_disk();
         }
@@ -485,6 +491,7 @@ impl Indexer {
         let max = resolve_max_files(DEFAULT_MAX_INDEX_FILES);
         let result = Arc::clone(&self).index_workspace_impl(root, max, client).await;
         if !result.aborted {
+            self.last_scan_complete.store(result.complete_scan, std::sync::atomic::Ordering::Release);
             self.apply_workspace_result(&result);
             self.save_cache_to_disk();
         }
@@ -505,6 +512,7 @@ impl Indexer {
                 stats: IndexStats::default(),
                 workspace_root: root.to_path_buf(),
                 aborted: true,
+                complete_scan: false,
             };
         }
 
@@ -512,7 +520,17 @@ impl Indexer {
         // Capture generation at start; background work should bail if this changes.
         let start_gen = self.root_generation.load(std::sync::atomic::Ordering::SeqCst);
 
-        let mut paths = find_source_files(root);
+        // Load cache first — drives both warm-manifest discovery and the mtime check below.
+        let cache = try_load_cache(root);
+
+        // Warm start: use cache as file manifest to skip the O(total_dirs) fd scan.
+        // Only when the cache was built from a complete (non-truncated) scan — otherwise
+        // the manifest may be a partial subset and we must fall back to the full scan.
+        let mut paths = if cache.as_ref().map(|c| c.complete_scan).unwrap_or(false) {
+            warm_discover_files(root, cache.as_ref().unwrap())
+        } else {
+            find_source_files(root)
+        };
         let total = paths.len();
 
         // Shallower paths first.
@@ -535,7 +553,6 @@ impl Indexer {
         // Pure partition: no DashMap mutations here.
         // Both halves are collected into file_results so apply_workspace_result
         // can do a single authoritative reset + full insert.
-        let cache = try_load_cache(root);
         let mut need_parse: Vec<PathBuf> = Vec::new();
         let mut cached_results: Vec<FileIndexResult> = Vec::new();
         let mut cache_hits: usize = 0;
@@ -550,11 +567,19 @@ impl Indexer {
             }
 
             let path_str = path.to_string_lossy().to_string();
-            let mtime = file_mtime(path).unwrap_or(0);
+            let meta = std::fs::metadata(path);
+            let mtime = meta.as_ref().ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let on_disk_size = meta.map(|m| m.len()).unwrap_or(u64::MAX);
 
             if let Some(ref c) = cache {
                 if let Some(entry) = c.entries.get(&path_str) {
-                    if entry.mtime_secs == mtime {
+                    // Cache hit: mtime AND file size must both match to guard against
+                    // same-second edits (1s mtime resolution on some filesystems).
+                    if entry.mtime_secs == mtime && entry.file_size == on_disk_size {
                         if let Ok(uri) = Url::from_file_path(path) {
                             cached_results.push(cache_entry_to_file_result(&uri, entry));
                         }
@@ -793,6 +818,7 @@ impl Indexer {
                 stats: IndexStats::default(),
                 workspace_root: root.to_path_buf(),
                 aborted: true,
+                complete_scan: false,
             };
         }
 
@@ -846,6 +872,7 @@ impl Indexer {
             stats,
             workspace_root: root.to_path_buf(),
             aborted: false,
+            complete_scan: !truncated,
         }
     }
 
@@ -865,6 +892,7 @@ impl Indexer {
             }
         }
 
+        let complete_scan = self.last_scan_complete.load(std::sync::atomic::Ordering::Acquire);
         let mut entries: HashMap<String, FileCacheEntry> = HashMap::new();
         for file_ref in &self.files {
             let uri_str = file_ref.key();
@@ -872,16 +900,22 @@ impl Indexer {
             let hash    = self.content_hashes.get(uri_str).map(|h| *h).unwrap_or(0);
             if let Ok(url) = uri_str.parse::<Url>() {
                 if let Ok(path) = url.to_file_path() {
-                    let mtime = file_mtime(&path).unwrap_or(0);
+                    let meta = std::fs::metadata(&path);
+                    let mtime = meta.as_ref().ok()
+                        .and_then(|m| m.modified().ok())
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let file_size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
                     entries.insert(
                         path.to_string_lossy().to_string(),
-                        FileCacheEntry { mtime_secs: mtime, content_hash: hash, file_data: (**data).clone() },
+                        FileCacheEntry { mtime_secs: mtime, file_size, content_hash: hash, file_data: (**data).clone() },
                     );
                 }
             }
         }
 
-        let cache = IndexCache { version: CACHE_VERSION, entries };
+        let cache = IndexCache { version: CACHE_VERSION, complete_scan, entries };
         match bincode::serialize(&cache) {
             Ok(bytes) => {
                 match std::fs::write(&cache_path, &bytes) {
@@ -1881,6 +1915,7 @@ fn find_source_files(root: &Path) -> Vec<std::path::PathBuf> {
         "--exclude", ".gradle",
         "--exclude", ".build",       // SwiftPM
         "--exclude", "DerivedData",  // Xcode
+        "--exclude", "Generated",    // SwiftGen / R.swift codegen output
         ".",
     ]);
     fd_args.push(root_str.as_ref());
@@ -1907,6 +1942,9 @@ fn find_source_files(root: &Path) -> Vec<std::path::PathBuf> {
 
 fn walkdir_find(root: &Path) -> Vec<std::path::PathBuf> {
     // Use `ignore` crate's WalkBuilder which respects .gitignore and global git excludes.
+    const EXCLUDED_DIRS: &[&str] = &[
+        ".git", "build", "target", ".gradle", ".build", "DerivedData", "Generated",
+    ];
     let mut paths: Vec<std::path::PathBuf> = Vec::new();
     let mut builder = ignore::WalkBuilder::new(root);
     builder
@@ -1917,6 +1955,14 @@ fn walkdir_find(root: &Path) -> Vec<std::path::PathBuf> {
     for result in walker {
         if let Ok(entry) = result {
             let path = entry.path();
+            // Skip excluded directories.
+            if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                if let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) {
+                    if EXCLUDED_DIRS.contains(&dir_name) {
+                        continue;
+                    }
+                }
+            }
             if path.is_file() {
                 if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
                     if SOURCE_EXTENSIONS.contains(&ext) {
@@ -1926,6 +1972,94 @@ fn walkdir_find(root: &Path) -> Vec<std::path::PathBuf> {
             }
         }
     }
+    paths
+}
+
+/// Find source files changed within the last `elapsed_secs` seconds.
+/// Used for the warm-start incremental scan to discover new/modified files.
+/// Falls back to empty list if fd is unavailable (warm start still works via cache manifest).
+fn find_source_files_newer_than(root: &Path, elapsed_secs: u64) -> Vec<PathBuf> {
+    let root_str = root.to_string_lossy();
+    let window = format!("{}s", elapsed_secs);
+    let mut fd_args: Vec<&str> = vec!["--type", "f", "--changed-within", window.as_str()];
+    for ext in SOURCE_EXTENSIONS {
+        fd_args.push("--extension");
+        fd_args.push(ext);
+    }
+    fd_args.extend_from_slice(&[
+        "--absolute-path",
+        "--exclude", ".git",
+        "--exclude", "build",
+        "--exclude", "target",
+        "--exclude", ".gradle",
+        "--exclude", ".build",
+        "--exclude", "DerivedData",
+        "--exclude", "Generated",
+        ".",
+        root_str.as_ref(),
+    ]);
+    match Command::new("fd").args(&fd_args).output() {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(PathBuf::from)
+            .collect(),
+        _ => vec![],
+    }
+}
+
+/// Discover source files using a warm-start optimisation when a cache exists.
+///
+/// Cold start (no cache): full `fd`/walkdir scan — same as before.
+///
+/// Warm start (cache present): use the cache's file manifest to avoid
+/// the O(total_dirs) `fd` scan.  Only runs an incremental `fd --changed-within`
+/// pass to catch files added or modified since the cache was last saved.
+/// This is inspired by the rust-analyzer VFS and gopls file-manifest patterns.
+fn warm_discover_files(root: &Path, cache: &IndexCache) -> Vec<PathBuf> {
+    let cache_path = workspace_cache_path(root);
+
+    // Compute how many seconds ago the cache was saved.
+    let elapsed_secs = std::fs::metadata(&cache_path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| {
+            std::time::SystemTime::now().duration_since(t).ok()
+        })
+        .map(|d| d.as_secs().saturating_add(2)) // +2 for clock skew / rounding
+        .unwrap_or(u64::MAX);
+
+    if elapsed_secs == u64::MAX {
+        // Can't read cache mtime — fall back to full scan.
+        log::info!("warm_discover_files: cannot stat cache file, falling back to full scan");
+        return find_source_files(root);
+    }
+
+    // Phase 1: all previously cached files (deleted files are filtered by the
+    // subsequent mtime check in index_workspace_impl — `path.exists()` is not
+    // called here to avoid an extra stat per file).
+    let cached_paths: HashSet<String> = cache.entries.keys().cloned().collect();
+    let mut paths: Vec<PathBuf> = cached_paths.iter().map(PathBuf::from).collect();
+
+    // Phase 2: find files created or modified since the cache was saved.
+    // These are the only files `fd` needs to scan for.
+    let newer = find_source_files_newer_than(root, elapsed_secs);
+    let new_count = newer.iter()
+        .filter(|f| !cached_paths.contains(f.to_string_lossy().as_ref()))
+        .count();
+    for f in newer {
+        // Only add files not already covered by the cache manifest.
+        // Modified files are already in Phase 1; they will fail the mtime check
+        // in index_workspace_impl and be re-parsed.
+        if !cached_paths.contains(f.to_string_lossy().as_ref()) {
+            paths.push(f);
+        }
+    }
+
+    log::info!(
+        "Warm start: {} cached + {} new files (scanned last {}s window)",
+        cached_paths.len(), new_count, elapsed_secs
+    );
     paths
 }
 
@@ -1942,6 +2076,39 @@ fn hash_str(s: &str) -> u64 {
 }
 
 // ─── rg cross-file fallback ──────────────────────────────────────────────────
+
+/// Walk up from `file` until a `.git` directory is found, returning that
+/// ancestor as the project root.  Returns `None` if no `.git` is found.
+fn walk_to_git_root(file: &Path) -> Option<std::path::PathBuf> {
+    let mut cur = file.parent()?;
+    loop {
+        if cur.join(".git").exists() {
+            return Some(cur.to_path_buf());
+        }
+        cur = cur.parent()?;
+    }
+}
+
+/// Return the best search root for rg/fd fallbacks given:
+/// - `workspace_root` — the globally configured root (may point to a different project)
+/// - `open_file`      — the file the user has open right now
+///
+/// If `open_file` lives inside `workspace_root`, use `workspace_root`.
+/// Otherwise walk up from `open_file` to find a `.git` root and use that,
+/// so rg searches the *actual* project even when the workspace config is stale.
+pub(crate) fn effective_rg_root(
+    workspace_root: Option<&Path>,
+    open_file:      Option<&Path>,
+) -> Option<std::path::PathBuf> {
+    match (workspace_root, open_file) {
+        (Some(root), Some(fp)) if fp.starts_with(root) => Some(root.to_path_buf()),
+        (_, Some(fp)) => walk_to_git_root(fp)
+            .or_else(|| fp.parent().map(|p| p.to_path_buf()))
+            .or_else(|| std::env::current_dir().ok()),
+        (Some(root), None) => Some(root.to_path_buf()),
+        (None, None) => std::env::current_dir().ok(),
+    }
+}
 
 /// Run `rg` to find definition sites for `name`, scoped to `root`.
 ///
@@ -5260,6 +5427,7 @@ class FooModule : BaseModule() {
         let idx2 = Indexer::new();
         let entry = FileCacheEntry {
             mtime_secs: 0,
+            file_size: 0,
             content_hash: 42,
             file_data: (*data).clone(),
         };
@@ -5560,6 +5728,7 @@ internal class ContactAddressInteractor @Inject constructor(
 
         let entry = FileCacheEntry {
             mtime_secs: 100,
+            file_size: 0,
             content_hash: 42,
             file_data: data,
         };
@@ -5579,6 +5748,7 @@ internal class ContactAddressInteractor @Inject constructor(
         let parsed = Indexer::parse_file(&u, "class CachedClass");
         let entry = FileCacheEntry {
             mtime_secs: 0,
+            file_size: 0,
             content_hash: 0,
             file_data: parsed.data.clone(),
         };
@@ -5589,6 +5759,7 @@ internal class ContactAddressInteractor @Inject constructor(
             stats: IndexStats { cache_hits: 1, ..Default::default() },
             workspace_root: std::path::PathBuf::from("/"),
             aborted: false,
+            complete_scan: true,
         };
 
         let idx = Indexer::new();
@@ -5612,6 +5783,7 @@ internal class ContactAddressInteractor @Inject constructor(
             stats: IndexStats::default(),
             workspace_root: std::path::PathBuf::from("/workspace_a"),
             aborted: false,
+            complete_scan: true,
         });
         assert!(idx.definitions.contains_key("ClassA"), "ClassA should be present after first apply");
 
@@ -5621,6 +5793,7 @@ internal class ContactAddressInteractor @Inject constructor(
             stats: IndexStats::default(),
             workspace_root: std::path::PathBuf::from("/workspace_b"),
             aborted: false,
+            complete_scan: true,
         });
 
         assert!(!idx.definitions.contains_key("ClassA"),
@@ -5638,7 +5811,7 @@ internal class ContactAddressInteractor @Inject constructor(
 
         let cached_parse = Indexer::parse_file(&u_cached, "class CachedClass");
         let entry = FileCacheEntry {
-            mtime_secs: 0, content_hash: 0, file_data: cached_parse.data.clone()
+            mtime_secs: 0, file_size: 0, content_hash: 0, file_data: cached_parse.data.clone()
         };
         let cached_result = super::cache_entry_to_file_result(&u_cached, &entry);
 
@@ -5650,6 +5823,7 @@ internal class ContactAddressInteractor @Inject constructor(
             stats: IndexStats { cache_hits: 1, files_parsed: 1, ..Default::default() },
             workspace_root: std::path::PathBuf::from("/"),
             aborted: false,
+            complete_scan: true,
         });
 
         assert!(idx.definitions.contains_key("CachedClass"),
