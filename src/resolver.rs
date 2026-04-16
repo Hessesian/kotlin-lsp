@@ -52,9 +52,60 @@ pub fn complete_symbol(
     complete_bare(idx, prefix, from_uri, snippets)
 }
 
+/// Completion for `super.` — gather all members from the parent hierarchy.
+fn complete_super(idx: &Indexer, from_uri: &Url, snippets: bool) -> Vec<CompletionItem> {
+    let lines: Arc<Vec<String>> = match idx.files.get(from_uri.as_str()) {
+        Some(f) => f.lines.clone(),
+        None => return vec![],
+    };
+    let mut items: Vec<CompletionItem> = Vec::new();
+    let mut visited: Vec<String> = vec![from_uri.as_str().to_owned()];
+    collect_hierarchy_completions(idx, from_uri, &lines, &mut visited, 0, &mut items, snippets);
+    items.sort_by_key(|i| kind_sort_rank(i.kind));
+    items.dedup_by_key(|i| i.label.clone());
+    items
+}
+
+fn collect_hierarchy_completions(
+    idx: &Indexer,
+    from_uri: &Url,
+    lines: &[String],
+    visited: &mut Vec<String>,
+    depth: u8,
+    out: &mut Vec<CompletionItem>,
+    snippets: bool,
+) {
+    const MAX_DEPTH: u8 = 4;
+    if depth >= MAX_DEPTH { return; }
+
+    for super_name in extract_supers_from_lines(lines) {
+        let super_locs = resolve_symbol_inner(idx, &super_name, from_uri, false);
+        for super_loc in &super_locs {
+            let uri_str = super_loc.uri.as_str();
+            if visited.contains(&uri_str.to_owned()) { continue; }
+            visited.push(uri_str.to_owned());
+            let mut new_items = symbols_from_uri_as_completions(idx, uri_str);
+            if !snippets {
+                for item in &mut new_items { item.insert_text = None; item.insert_text_format = None; }
+            }
+            out.extend(new_items);
+            // Recurse into grandparent hierarchy.
+            if let Some(f) = idx.files.get(uri_str) {
+                let sub_lines = f.lines.clone();
+                collect_hierarchy_completions(idx, &super_loc.uri, &sub_lines, visited, depth + 1, out, snippets);
+            }
+        }
+    }
+}
+
 /// Dot-completion: return all members of the receiver's inferred type,
 /// sorted: methods first, then fields/vars, then class-level names last.
 fn complete_dot(idx: &Indexer, receiver: &str, from_uri: &Url, snippets: bool) -> Vec<CompletionItem> {
+    // `super.` — collect all members from the parent class hierarchy.
+    if receiver == "super" {
+        return complete_super(idx, from_uri, snippets);
+    }
+
     // Infer type from variable annotation.
     let type_name = match infer_variable_type(idx, receiver, from_uri) {
         Some(t) => t,

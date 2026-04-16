@@ -83,6 +83,9 @@ pub fn parse_kotlin(content: &str) -> FileData {
     // ── package + imports (manual tree walk — avoids query overlap issues) ────
     extract_package_and_imports(root, bytes, &mut data);
 
+    // ── fun interface (tree-sitter parses these as ERROR + lambda_literal) ───
+    extract_fun_interfaces(root, bytes, &mut data);
+
     // ── declared_names: scan lines once for `ident:` patterns ───────────────
     data.declared_names = extract_declared_names(&data.lines);
 
@@ -350,6 +353,154 @@ fn ts_to_lsp(r: tree_sitter::Range) -> Range {
 /// but deduplicates by `(start_line, start_col)` and caps at `MAX_ERRORS`.
 const MAX_SYNTAX_ERRORS: usize = 20;
 
+/// Returns true if this ERROR node is actually a valid `fun interface` declaration
+/// that tree-sitter-kotlin just doesn't parse correctly.
+/// Structure: ERROR { "fun", user_type("interface"), simple_identifier }
+fn is_fun_interface_error(node: &Node, bytes: &[u8]) -> bool {
+    if !node.is_error() { return false; }
+    let mut has_fun = false;
+    let mut has_interface = false;
+    let mut has_name = false;
+    let mut cur = node.walk();
+    for child in node.children(&mut cur) {
+        match child.kind() {
+            "fun" => has_fun = true,
+            "user_type" => {
+                if child.utf8_text(bytes).unwrap_or("") == "interface" {
+                    has_interface = true;
+                }
+            }
+            "simple_identifier" => has_name = true,
+            _ => {}
+        }
+    }
+    has_fun && has_interface && has_name
+}
+
+/// Returns the interface name if this `function_declaration` is actually a misparse
+/// of `[modifiers] fun interface Foo { ... }`.
+///
+/// When a visibility/annotation modifier precedes `fun interface`, tree-sitter
+/// misinterprets it as an extension function on the `interface` type:
+///   `function_declaration { modifiers, "fun", user_type("interface"), simple_identifier("Foo"), ERROR }`
+/// A real extension function would have a `.` between receiver type and name; the
+/// mis-parsed one does not. We detect it by: user_type child = "interface" AND
+/// simple_identifier present after it (directly or as first child of ERROR).
+/// Returns (name_start_byte, name_end_byte, node_range) or None.
+fn fun_interface_name_from_fn_decl(node: &Node, bytes: &[u8]) -> Option<(usize, usize, tree_sitter::Range)> {
+    if node.kind() != "function_declaration" { return None; }
+    if !node.has_error() { return None; }
+    let mut after_interface = false;
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if after_interface {
+            // Direct simple_identifier child (@annotation case: "simple_identifier Factory")
+            if child.kind() == "simple_identifier" {
+                return Some((child.start_byte(), child.end_byte(), child.range()));
+            }
+            // ERROR child containing simple_identifier as first meaningful child
+            // (internal case: ERROR { simple_identifier("IPairCodeParser"), "{", "fun", ... })
+            if child.is_error() {
+                let mut ec = child.walk();
+                for ec_child in child.children(&mut ec) {
+                    if ec_child.kind() == "simple_identifier" {
+                        return Some((ec_child.start_byte(), ec_child.end_byte(), ec_child.range()));
+                    }
+                    break; // Only look at the first child
+                }
+            }
+        }
+        if child.kind() == "user_type" && child.utf8_text(bytes).unwrap_or("") == "interface" {
+            after_interface = true;
+        }
+    }
+    None
+}
+
+/// Walk the parse tree and emit INTERFACE symbols for every `fun interface Foo` declaration.
+///
+/// Tree-sitter produces two different misparsings depending on whether modifiers precede:
+/// - No modifiers: ERROR("fun", user_type("interface"), simple_identifier("Foo"))
+/// - With modifiers: function_declaration(modifiers, "fun", user_type("interface"),
+///                                        simple_identifier("Foo"), ERROR(...))
+fn extract_fun_interfaces(root: Node, bytes: &[u8], data: &mut FileData) {
+    if !root.has_error() { return; }
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        // Case 1: no-modifier `fun interface` → ERROR node
+        if node.is_error() && is_fun_interface_error(&node, bytes) {
+            let mut cur = node.walk();
+            for child in node.children(&mut cur) {
+                if child.kind() == "simple_identifier" {
+                    if let Ok(name) = child.utf8_text(bytes) {
+                        let visibility = visibility_at_line(&data.lines, node.range().start_point.row);
+                        let range      = ts_to_lsp(node.range());
+                        let sel        = ts_to_lsp(child.range());
+                        let detail     = extract_detail(&data.lines, range.start.line, range.end.line);
+                        data.symbols.push(SymbolEntry {
+                            name: name.to_owned(),
+                            kind: SymbolKind::INTERFACE,
+                            visibility,
+                            range,
+                            selection_range: sel,
+                            detail,
+                        });
+                    }
+                    break;
+                }
+            }
+            // Don't recurse further into ERROR children.
+            continue;
+        }
+        // Case 2: modifier-prefixed `fun interface` → misparse as function_declaration
+        if let Some((name_start, name_end, name_ts_range)) = fun_interface_name_from_fn_decl(&node, bytes) {
+            if let Ok(name) = std::str::from_utf8(&bytes[name_start..name_end]) {
+                let visibility = visibility_at_line(&data.lines, node.range().start_point.row);
+                let range      = ts_to_lsp(node.range());
+                let sel        = ts_to_lsp(name_ts_range);
+                let detail     = extract_detail(&data.lines, range.start.line, range.end.line);
+                // Remove the incorrectly-added function/method symbol (same name, same line).
+                data.symbols.retain(|s| {
+                    !(s.name == name && s.selection_range.start.line == sel.start.line
+                      && matches!(s.kind, SymbolKind::FUNCTION | SymbolKind::METHOD))
+                });
+                data.symbols.push(SymbolEntry {
+                    name: name.to_owned(),
+                    kind: SymbolKind::INTERFACE,
+                    visibility,
+                    range,
+                    selection_range: sel,
+                    detail,
+                });
+            }
+            // Still recurse into children to find nested fun interfaces.
+        }
+        // Recurse only into subtrees that contain errors.
+        if node.has_error() || node.is_error() {
+            let mut cur = node.walk();
+            for child in node.children(&mut cur) {
+                stack.push(child);
+            }
+        }
+    }
+}
+
+/// Returns true if `node` or any of its (error-containing) descendants is a
+/// `fun interface` misparse — either the ERROR shape or the function_declaration shape.
+/// Prunes clean subtrees (`!has_error()`) for efficiency.
+fn has_fun_interface_descendant(node: &Node, bytes: &[u8]) -> bool {
+    if fun_interface_name_from_fn_decl(node, bytes).is_some()
+        || is_fun_interface_error(node, bytes)
+    {
+        return true;
+    }
+    if !node.has_error() { return false; }
+    let mut cursor = node.walk();
+    let children: Vec<_> = node.children(&mut cursor).collect();
+    drop(cursor);
+    children.iter().any(|c| has_fun_interface_descendant(c, bytes))
+}
+
 fn collect_syntax_errors(root: Node, bytes: &[u8]) -> Vec<SyntaxError> {
     if !root.has_error() { return Vec::new(); }
 
@@ -371,6 +522,10 @@ fn collect_syntax_errors(root: Node, bytes: &[u8]) -> Vec<SyntaxError> {
                 });
             }
         } else if node.is_error() {
+            // Skip errors that are actually valid `fun interface` declarations.
+            if is_fun_interface_error(&node, bytes) {
+                continue;
+            }
             let range = ts_to_lsp(node.range());
             let key = (range.start.line, range.start.character);
             if seen.insert(key) {
@@ -394,9 +549,22 @@ fn collect_syntax_errors(root: Node, bytes: &[u8]) -> Vec<SyntaxError> {
                 stack.push(child);
             }
         } else if node.has_error() {
+            // Skip recursing into function_declarations that are misparse of `fun interface`.
+            if fun_interface_name_from_fn_decl(&node, bytes).is_some() {
+                continue;
+            }
             // Only recurse into subtrees that contain errors.
             let mut cursor = node.walk();
-            for child in node.children(&mut cursor) {
+            let children: Vec<_> = node.children(&mut cursor).collect();
+            // If any sibling contains a fun-interface misparse, lone `}` ERROR nodes are
+            // cascading false positives from that misparse — suppress them.
+            let has_fun_iface_sibling = children.iter()
+                .any(|c| has_fun_interface_descendant(c, bytes));
+            for child in children {
+                if has_fun_iface_sibling && child.is_error() {
+                    let text = child.utf8_text(bytes).unwrap_or("").trim();
+                    if text == "}" { continue; }
+                }
                 stack.push(child);
             }
         }
@@ -693,9 +861,81 @@ mod tests {
 
     #[test] fn class()        { assert_eq!(sym(&parse_kotlin("class Foo"),        "Foo").unwrap().kind, SymbolKind::CLASS); }
     #[test] fn interface()    { assert_eq!(sym(&parse_kotlin("interface Bar"),     "Bar").unwrap().kind, SymbolKind::INTERFACE); }
+    #[test] fn fun_interface() {
+        let data = parse_kotlin("fun interface Action {\n    fun invoke(value: String)\n}");
+        assert_eq!(sym(&data, "Action").unwrap().kind, SymbolKind::INTERFACE,
+            "fun interface should be indexed as INTERFACE");
+    }
+    #[test] fn fun_interface_internal() {
+        let data = parse_kotlin("internal fun interface IPairCodeParser {\n    fun parse(input: String): String\n}");
+        assert_eq!(sym(&data, "IPairCodeParser").unwrap().kind, SymbolKind::INTERFACE,
+            "internal fun interface should be indexed as INTERFACE");
+    }
+    #[test] fn fun_interface_generic() {
+        let data = parse_kotlin("fun interface Router<Effect> {\n    fun route(effect: Effect)\n}");
+        assert_eq!(sym(&data, "Router").unwrap().kind, SymbolKind::INTERFACE,
+            "generic fun interface should be indexed as INTERFACE");
+    }
+    #[test] fn fun_interface_nested() {
+        let data = parse_kotlin("class LoanReducer {\n    @AssistedFactory\n    fun interface Factory {\n        fun create(x: Int): String\n    }\n}");
+        assert_eq!(sym(&data, "Factory").unwrap().kind, SymbolKind::INTERFACE,
+            "nested fun interface should be indexed as INTERFACE");
+    }
     #[test] fn object_decl()  { assert_eq!(sym(&parse_kotlin("object Obj"),        "Obj").unwrap().kind, SymbolKind::OBJECT); }
     #[test] fn data_class()   { assert_eq!(sym(&parse_kotlin("data class D(val x: Int)"), "D").unwrap().kind, SymbolKind::STRUCT); }
     #[test] fn enum_class()   { assert_eq!(sym(&parse_kotlin("enum class Color { RED }"), "Color").unwrap().kind, SymbolKind::ENUM); }
+
+    #[test]
+    fn dump_fun_interface_tree() {
+        let content = "fun interface Action {\n    fun invoke(value: String)\n}";
+        let lang = tree_sitter_kotlin::language();
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&lang).unwrap();
+        let tree = parser.parse(content, None).unwrap();
+        fn walk(node: tree_sitter::Node<'_>, src: &[u8], depth: usize) {
+            let snippet = &src[node.start_byte()..node.end_byte().min(node.start_byte()+40)];
+            eprintln!("{}{} {:?}", "  ".repeat(depth), node.kind(), String::from_utf8_lossy(snippet));
+            for i in 0..node.child_count() {
+                walk(node.child(i).unwrap(), src, depth+1);
+            }
+        }
+        walk(tree.root_node(), content.as_bytes(), 0);
+        // This test just dumps — it always passes. Check stderr output.
+    }
+
+    #[test]
+    fn dump_fun_interface_internal_tree() {
+        let content = "internal fun interface IPairCodeParser {\n    fun parse(input: String): String\n}";
+        let lang = tree_sitter_kotlin::language();
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&lang).unwrap();
+        let tree = parser.parse(content, None).unwrap();
+        fn walk(node: tree_sitter::Node<'_>, src: &[u8], depth: usize) {
+            let snippet = &src[node.start_byte()..node.end_byte().min(node.start_byte()+40)];
+            eprintln!("{}{} {:?}", "  ".repeat(depth), node.kind(), String::from_utf8_lossy(snippet));
+            for i in 0..node.child_count() {
+                walk(node.child(i).unwrap(), src, depth+1);
+            }
+        }
+        walk(tree.root_node(), content.as_bytes(), 0);
+    }
+
+    #[test]
+    fn dump_fun_interface_nested_tree() {
+        let content = "class LoanReducer {\n    @AssistedFactory\n    fun interface Factory {\n        fun create(x: Int): String\n    }\n}";
+        let lang = tree_sitter_kotlin::language();
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&lang).unwrap();
+        let tree = parser.parse(content, None).unwrap();
+        fn walk(node: tree_sitter::Node<'_>, src: &[u8], depth: usize) {
+            let snippet = &src[node.start_byte()..node.end_byte().min(node.start_byte()+40)];
+            eprintln!("{}{} {:?}", "  ".repeat(depth), node.kind(), String::from_utf8_lossy(snippet));
+            for i in 0..node.child_count() {
+                walk(node.child(i).unwrap(), src, depth+1);
+            }
+        }
+        walk(tree.root_node(), content.as_bytes(), 0);
+    }
     #[test] fn enum_entries() {
         let data = parse_kotlin("enum class Screen { DETAIL, LIST, SETTINGS }");
         assert_eq!(sym(&data, "DETAIL").unwrap().kind,   SymbolKind::ENUM_MEMBER);
@@ -1157,5 +1397,26 @@ mod tests {
         assert!(sym(&kt, "Foo").is_some());
         assert!(sym(&java, "Foo").is_some());
         assert!(sym(&swift, "Foo").is_some());
+    }
+
+    #[test]
+    fn loan_reducer_no_false_errors() {
+        // @AssistedFactory fun interface Factory inside a class should not
+        // produce a false "missing bracket" syntax error.
+        let src = r#"
+class LoanReducer {
+  @AssistedFactory
+  fun interface Factory {
+    fun create(
+      reloadAction: (loanId: String, isWustenrot: Boolean) -> Unit,
+      mapSheet: (LoanDetail) -> ProductDetailSheetModel,
+    ): LoanReducer
+  }
+}
+"#;
+        let data = parse_kotlin(src);
+        eprintln!("ERRORS: {:?}", data.syntax_errors);
+        assert!(data.syntax_errors.is_empty(),
+            "Expected no syntax errors, got: {:?}", data.syntax_errors);
     }
 }

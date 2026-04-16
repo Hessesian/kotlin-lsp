@@ -1423,8 +1423,18 @@ impl Indexer {
 
         if name == "it" || name == "this" {
             let col = position.character as usize;
-            let lambda_type = find_it_element_type_in_lines(&lines, line_no, col, self, uri);
+            let lambda_type = if name == "this" {
+                find_this_element_type_in_lines(&lines, line_no, col, self, uri)
+            } else {
+                find_it_element_type_in_lines(&lines, line_no, col, self, uri)
+            };
             if lambda_type.is_some() { return lambda_type; }
+            // Type-directed fallback: if `it`/`this` is a call argument (named or
+            // positional), look up the expected parameter type from the function signature.
+            // Mimics Kotlin's type-directed implicit-receiver / lambda-param resolution.
+            if let Some(ty) = find_as_call_arg_type(&lines, line_no, col, self, uri) {
+                return Some(ty);
+            }
             // Fallback for `this` in a regular class method body (not a lambda):
             // scan backward for the enclosing class/object declaration.
             if name == "this" {
@@ -1644,7 +1654,7 @@ impl Indexer {
                 let elem_type = if recv == "it" || recv == "this" {
                     // Try single-line first (fast path: `obj.run { this. }` on same line).
                     let t = find_it_element_type(before, self, uri);
-                    if t.is_some() {
+                    if t.is_some() && recv == "it" {
                         t
                     } else {
                         // Multi-line fallback: lambda opened on a previous line.
@@ -1652,7 +1662,11 @@ impl Indexer {
                             .map(|ll| ll.clone())
                             .or_else(|| self.files.get(uri.as_str()).map(|f| f.lines.clone()));
                         let ml = lines.and_then(|ls| {
-                            find_it_element_type_in_lines(&ls, cursor_line, cursor_col, self, uri)
+                            if recv == "this" {
+                                find_this_element_type_in_lines(&ls, cursor_line, cursor_col, self, uri)
+                            } else {
+                                find_it_element_type_in_lines(&ls, cursor_line, cursor_col, self, uri)
+                            }
                         });
                         if ml.is_some() {
                             ml
@@ -1666,7 +1680,20 @@ impl Indexer {
                     find_named_lambda_param_type(before, recv, self, uri, position.line as usize)
                 };
                 if let Some(elem_type) = elem_type {
-                    return crate::resolver::complete_symbol(self, &prefix, Some(&elem_type), uri, snippets);
+                    let items = crate::resolver::complete_symbol(self, &prefix, Some(&elem_type), uri, snippets);
+                    if items.is_empty() {
+                        // Type name known (e.g. generic param `T`, `StateType`) but not
+                        // indexed — show a single hint item so the user sees the inferred type.
+                        use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind};
+                        return vec![CompletionItem {
+                            label: format!("{recv}: {elem_type}"),
+                            kind: Some(CompletionItemKind::TYPE_PARAMETER),
+                            detail: Some(format!("Inferred type: {elem_type}")),
+                            sort_text: Some("~hint".into()),
+                            ..Default::default()
+                        }];
+                    }
+                    return items;
                 }
                 // Recognised lambda param but type unresolvable — return empty to
                 // avoid showing members of a completely unrelated type.
@@ -2557,6 +2584,27 @@ fn find_it_element_type_in_lines(
     idx:         &Indexer,
     uri:         &Url,
 ) -> Option<String> {
+    find_it_element_type_in_lines_impl(lines, cursor_line, cursor_col, idx, uri, false)
+}
+
+fn find_this_element_type_in_lines(
+    lines:       &[String],
+    cursor_line: usize,
+    cursor_col:  usize,
+    idx:         &Indexer,
+    uri:         &Url,
+) -> Option<String> {
+    find_it_element_type_in_lines_impl(lines, cursor_line, cursor_col, idx, uri, true)
+}
+
+fn find_it_element_type_in_lines_impl(
+    lines:       &[String],
+    cursor_line: usize,
+    cursor_col:  usize,
+    idx:         &Indexer,
+    uri:         &Url,
+    for_this:    bool,
+) -> Option<String> {
     // Scan right-to-left tracking brace depth.
     // Convention: depth starts at 0. `}` increments, `{` decrements.
     // When depth goes < 0, we've found the `{` that opens our enclosing lambda.
@@ -2596,6 +2644,10 @@ fn find_it_element_type_in_lines(
                         if has_named_params_not_it(after_brace) {
                             depth = 0; continue;
                         }
+                        if for_this {
+                            // `this` only gets a hint from receiver lambdas (`T.() -> R`).
+                            return lambda_receiver_this_type_from_context(before_brace, idx, uri);
+                        }
                         let result = lambda_receiver_type_from_context(before_brace, idx, uri)
                             .or_else(|| lambda_receiver_type_named_arg_ml(
                                 before_brace, 0, lines, ln, idx, uri,
@@ -2609,6 +2661,7 @@ fn find_it_element_type_in_lines(
     }
     None
 }
+
 
 
 /// Returns true if `line` contains a lambda declaration that names `param_name`
@@ -2801,11 +2854,24 @@ pub(crate) fn lambda_receiver_type_from_context(
             .collect::<String>()
             .chars().rev()
             .collect();
+        // Extract method name (everything after the dot up to the first non-id char).
+        let method: String = callee[dot_pos + 1..].trim_start()
+            .chars().take_while(|&c| is_id_char(c))
+            .collect();
 
         if !receiver_var.is_empty() {
             if let Some(raw) = crate::resolver::infer_variable_type_raw(idx, &receiver_var, uri) {
                 if let Some(elem) = crate::resolver::extract_collection_element_type(&raw) {
                     return Some(elem);
+                }
+                // Non-collection receiver: prefer the method's own lambda param type when
+                // the method is indexed (e.g. `flow.collectIn { it }` → T from `collectIn`'s
+                // `block: suspend (T) -> Unit`).  Fall back to receiver type when the method
+                // is not found (e.g. stdlib `run`, `apply`, `let` → receiver type is correct).
+                if !method.is_empty() {
+                    if let Some(ty) = fun_trailing_lambda_it_type(&method, idx, uri) {
+                        return Some(ty);
+                    }
                 }
                 let base: String = raw.chars().take_while(|&c| is_id_char(c)).collect();
                 if !base.is_empty() && base.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
@@ -2819,11 +2885,18 @@ pub(crate) fn lambda_receiver_type_from_context(
     }
 
     // ── Case B: plain trailing lambda — `fnName(args) { it/this }` ─────────
-    // After stripping args, `callee` is just the bare function identifier.
-    if !callee.is_empty() && callee.chars().all(|c| is_id_char(c)) {
+    // Extract the trailing identifier from callee — handles cases where callee
+    // is prefixed by outer-lambda context like `{ setState` (the `{` belongs
+    // to an enclosing lambda, not this call).
+    let trailing_fn: String = callee.chars().rev()
+        .take_while(|&c| is_id_char(c))
+        .collect::<String>()
+        .chars().rev()
+        .collect();
+    if !trailing_fn.is_empty() {
         // Known stdlib scope function `with(receiver) { this }` — extract the
         // first argument as the receiver and infer its type directly.
-        if callee == "with" {
+        if trailing_fn == "with" {
             if let Some(recv_name) = extract_first_arg(trimmed) {
                 if let Some(raw) = crate::resolver::infer_variable_type_raw(idx, recv_name, uri) {
                     let base: String = raw.chars().take_while(|&c| is_id_char(c)).collect();
@@ -2836,7 +2909,7 @@ pub(crate) fn lambda_receiver_type_from_context(
                 }
             }
         }
-        if let Some(ty) = fun_trailing_lambda_it_type(callee, idx, uri) {
+        if let Some(ty) = fun_trailing_lambda_it_type(&trailing_fn, idx, uri) {
             return Some(ty);
         }
     }
@@ -2847,7 +2920,188 @@ pub(crate) fn lambda_receiver_type_from_context(
     inline_lambda_param_type(trimmed, idx, uri)
 }
 
-/// Try to resolve the lambda receiver type when `before_brace` is a named-arg
+
+/// Type-directed inference for `it` or `this` used as a call argument.
+///
+/// When `it`/`this` appears as an argument to a function — either as a **named arg**
+/// (`param = it`) or as a **positional arg** (`fn(a, it)`) — look up the expected
+/// parameter type and return it as the hint.
+///
+/// This mimics Kotlin's implicit-receiver / lambda-param resolution by type:
+/// the compiler picks the in-scope `it` or `this` whose type satisfies the
+/// expected parameter type.
+///
+/// Examples:
+///   `.send(channel = this)` → `channel: SendChannel<...>` → `SendChannel`
+///   `process(it)`           → first param of `process` → e.g. `Item`
+///   `fn(a, it)`             → second param of `fn` → e.g. `String`
+fn find_as_call_arg_type(
+    lines:       &[String],
+    cursor_line: usize,
+    cursor_col:  usize,
+    idx:         &Indexer,
+    uri:         &Url,
+) -> Option<String> {
+    let line = lines.get(cursor_line)?;
+    // Slice the line up to (but not including) the cursor position.
+    let before_cursor = {
+        let mut byte_end = line.len();
+        let mut utf16 = 0usize;
+        for (bi, ch) in line.char_indices() {
+            if utf16 >= cursor_col { byte_end = bi; break; }
+            utf16 += ch.len_utf16();
+        }
+        &line[..byte_end]
+    };
+    let col = before_cursor.chars().count();
+
+    // ── Named arg: `param = ` just before cursor ─────────────────────────────
+    let s = before_cursor.trim_end();
+    if let Some(s) = s.strip_suffix('=') {
+        if !s.ends_with(|c: char| "!<>=".contains(c)) {
+            let s = s.trim_end();
+            let ident_start = s.rfind(|c: char| !c.is_alphanumeric() && c != '_')
+                .map(|i| i + 1).unwrap_or(0);
+            let named_arg = &s[ident_start..];
+            if !named_arg.is_empty()
+                && named_arg.chars().next().map(|c| !c.is_uppercase()).unwrap_or(false)
+            {
+                let preceding = s[..ident_start].trim_end().chars().last();
+                if matches!(preceding, Some('(') | Some(',')) {
+                    if let Some(fn_full) = find_enclosing_call_name(lines, cursor_line, col) {
+                        if let Some(fn_name) = fn_full.split('.').last().filter(|n| !n.is_empty()) {
+                            if let Some(sig) = find_fun_signature_full(fn_name, idx, uri) {
+                                if let Some(param_type) = find_named_param_type_in_sig(&sig, named_arg) {
+                                    let base: String = param_type.trim()
+                                        .chars().take_while(|&c| is_id_char(c)).collect();
+                                    if !base.is_empty() { return Some(base); }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Positional arg: `fn(a, keyword)` ────────────────────────────────────
+    // Scan backward tracking paren/bracket depth; count top-level commas to
+    // determine which argument position the cursor is in.
+    let mut depth: i32 = 0;
+    let mut arg_pos: usize = 0;
+    let scan_start = cursor_line.saturating_sub(20);
+
+    for ln in (scan_start..=cursor_line).rev() {
+        let chars: Vec<char> = lines[ln].chars().collect();
+        let scan_to = if ln == cursor_line { col.min(chars.len()) } else { chars.len() };
+
+        for i in (0..scan_to).rev() {
+            match chars[i] {
+                ')' | ']' => depth += 1,
+                '(' | '[' => {
+                    depth -= 1;
+                    if depth < 0 {
+                        if i == 0 { return None; }
+                        // Extract function name (possibly dotted) before `(`.
+                        let mut end = i;
+                        while end > 0 && (is_id_char(chars[end - 1]) || chars[end - 1] == '.') {
+                            end -= 1;
+                        }
+                        if end >= i { return None; }
+                        let full_name: String = chars[end..i].iter().collect();
+                        let fn_name = full_name.trim_matches('.')
+                            .split('.').last().filter(|n| !n.is_empty())?;
+                        let sig = find_fun_signature_full(fn_name, idx, uri)?;
+                        let param_type = nth_fun_param_type_str(&sig, arg_pos)?;
+                        let base: String = param_type.trim()
+                            .chars().take_while(|&c| is_id_char(c)).collect();
+                        return if base.is_empty() { None } else { Some(base) };
+                    }
+                }
+                ',' if depth == 0 => arg_pos += 1,
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+
+///
+/// `this` in Kotlin refers to the implicit receiver only inside a **receiver lambda**
+/// (`T.() -> R`).  In a regular lambda (`(T) -> R`) `this` is the enclosing class —
+/// we must NOT emit a hint from the lambda in that case.
+///
+/// Rules:
+///  - Case A `receiver.method { this }`: check if `method` has a receiver-lambda last
+///    param (`T.() -> R`) — if so return `T`.  If method not indexed but is a known
+///    stdlib scope function (`run`, `apply`, `also`, `let`), return the receiver type.
+///  - Case B `with(receiver) { this }`: return the receiver's type (special-cased).
+///  - Everything else: return `None` (don't hint `this` from the lambda).
+fn lambda_receiver_this_type_from_context(
+    before_brace: &str,
+    idx:          &Indexer,
+    uri:          &Url,
+) -> Option<String> {
+    let trimmed = before_brace.trim_end();
+    let callee_raw = strip_trailing_call_args(trimmed).replace("?.", ".");
+    let callee = callee_raw.trim();
+
+    // ── Case A: `receiver.method` ────────────────────────────────────────────
+    if let Some(dot_pos) = find_last_dot_at_depth_zero(callee) {
+        let receiver_expr = callee[..dot_pos].trim_end();
+        let receiver_var: String = receiver_expr
+            .chars().rev()
+            .take_while(|&c| is_id_char(c))
+            .collect::<String>()
+            .chars().rev()
+            .collect();
+        let method: String = callee[dot_pos + 1..].trim_start()
+            .chars().take_while(|&c| is_id_char(c))
+            .collect();
+
+        if !receiver_var.is_empty() && !method.is_empty() {
+            // Prefer the method's own receiver-lambda type (only for indexed fns).
+            if let Some(ty) = fun_trailing_lambda_this_type(&method, idx, uri) {
+                return Some(ty);
+            }
+            // Stdlib scope functions are receiver lambdas but not indexed.
+            if SCOPE_FUNCTIONS.contains(&method.as_str()) {
+                if let Some(raw) = crate::resolver::infer_variable_type_raw(idx, &receiver_var, uri) {
+                    let base: String = raw.chars().take_while(|&c| is_id_char(c)).collect();
+                    if !base.is_empty() { return Some(base); }
+                }
+                if receiver_var.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                    return Some(receiver_var);
+                }
+            }
+        }
+        return None; // Non-scope, non-receiver-lambda: `this` is enclosing class.
+    }
+
+    // ── Case B: `with(receiver) { this }` ───────────────────────────────────
+    let trailing_fn: String = callee.chars().rev()
+        .take_while(|&c| is_id_char(c))
+        .collect::<String>()
+        .chars().rev()
+        .collect();
+    if trailing_fn == "with" {
+        if let Some(recv_name) = extract_first_arg(trimmed) {
+            if let Some(raw) = crate::resolver::infer_variable_type_raw(idx, recv_name, uri) {
+                let base: String = raw.chars().take_while(|&c| is_id_char(c)).collect();
+                if !base.is_empty() { return Some(base); }
+            }
+            let base: String = recv_name.chars().take_while(|&c| is_id_char(c)).collect();
+            if base.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                return Some(base);
+            }
+        }
+    }
+
+    None
+}
+
+
 /// opener like `  buildingSavings = ` or `  loan = ` spread across multiple
 /// lines (the enclosing `(` is on a previous line).
 ///
@@ -2992,20 +3246,34 @@ fn find_named_param_type_in_sig(sig: &str, param_name: &str) -> Option<String> {
 /// `lambda_type_nth_input("() -> Unit", 0)` → `None`
 fn lambda_type_nth_input(ty: &str, n: usize) -> Option<String> {
     let ty = ty.trim();
+    // Strip `suspend` keyword — Kotlin allows `suspend (T) -> Unit` as a type.
+    let ty = strip_suspend(ty);
     if !ty.starts_with('(') { return None; }
-    // Find matching `)`.
-    let mut depth: i32 = 0;
+    // Find matching `)` using separate paren/angle depth so `>` in `->` is
+    // never mistaken for a closing angle bracket.
+    let mut paren_depth: i32 = 0;
+    let mut _angle_depth: i32 = 0;
     let mut close = None;
     for (i, ch) in ty.char_indices() {
         match ch {
-            '(' | '<' => depth += 1,
-            ')' | '>' => { depth -= 1; if depth == 0 { close = Some(i); break; } }
+            '(' => paren_depth += 1,
+            ')' => { paren_depth -= 1; if paren_depth == 0 { close = Some(i); break; } }
+            '<' => _angle_depth += 1,
+            '>' => _angle_depth -= 1,
             _ => {}
         }
     }
     let close = close?;
     let inner = ty[1..close].trim();
     if inner.is_empty() { return None; }
+
+    // If `inner` is itself a function type (outer parens were just wrapping:
+    // `((T) -> R)` → inner = `(T) -> R`), recurse into it.
+    if inner.starts_with('(') && inner.contains("->") {
+        if let Some(t) = lambda_type_nth_input(inner, n) {
+            return Some(t);
+        }
+    }
 
     // Split inner by comma at depth 0.
     let mut args: Vec<&str> = Vec::new();
@@ -3024,6 +3292,8 @@ fn lambda_type_nth_input(ty: &str, n: usize) -> Option<String> {
     let arg = args.get(n).map(|s| s.trim())?;
     // Strip named-param prefix `name:`.
     let arg = if let Some(c) = arg.find(':') { arg[c + 1..].trim() } else { arg };
+    // Strip `suspend` keyword from function-type args like `suspend (T) -> Unit`.
+    let arg = strip_suspend(arg);
     // Allow dots for qualified types like `CreditCardDashboardInteractor.CardProduct`.
     let base: String = arg.chars().take_while(|&c| is_id_char(c) || c == '.').collect();
     // Trim any trailing dots.
@@ -3178,6 +3448,34 @@ fn fun_trailing_lambda_it_type(fn_name: &str, idx: &Indexer, uri: &Url) -> Optio
     let sig = find_fun_signature_full(fn_name, idx, uri)?;
     let last_type = last_fun_param_type_str(&sig)?;
     lambda_type_first_input(&last_type)
+}
+
+/// Kotlin stdlib scope functions whose lambda parameter is a receiver lambda `T.() -> R`.
+/// For these, `this` inside the lambda refers to `T` (the receiver), so a type hint is valid.
+const SCOPE_FUNCTIONS: &[&str] = &["run", "apply", "also", "let"];
+
+/// Given a Kotlin function/lambda type, extracts the receiver type if it is a **receiver
+/// lambda** (`T.() -> R` or `T.(Params) -> R`).  Returns `None` for regular lambdas
+/// (`(T) -> R`) since `this` in those refers to the enclosing class, not the param.
+fn lambda_type_receiver(ty: &str) -> Option<String> {
+    let ty = strip_suspend(ty.trim());
+    if let Some(dot_paren) = ty.find(".(") {
+        let receiver = ty[..dot_paren].trim();
+        let base: String = receiver.chars().take_while(|&c| is_id_char(c) || c == '.').collect();
+        let base = base.trim_end_matches('.');
+        if !base.is_empty() {
+            return Some(base.to_owned());
+        }
+    }
+    None
+}
+
+/// Like `fun_trailing_lambda_it_type` but for `this`: only returns a type when
+/// the trailing lambda parameter is a **receiver lambda** `T.() -> R`.
+fn fun_trailing_lambda_this_type(fn_name: &str, idx: &Indexer, uri: &Url) -> Option<String> {
+    let sig = find_fun_signature_full(fn_name, idx, uri)?;
+    let last_type = last_fun_param_type_str(&sig)?;
+    lambda_type_receiver(&last_type)
 }
 
 /// Collect the full parameter-list text for a function named `fn_name`.
@@ -3352,11 +3650,14 @@ fn last_fun_param_type_str(params_text: &str) -> Option<String> {
 /// of the first input type `A`.  Returns `None` for `() -> Unit` (no `it`).
 ///
 /// Examples:
-///   `(ResultState<T>) -> Model`  → `Some("ResultState")`
-///   `(String, Int) -> Unit`      → `Some("String")`
-///   `() -> Unit`                 → `None`
+///   `(ResultState<T>) -> Model`         → `Some("ResultState")`
+///   `(String, Int) -> Unit`             → `Some("String")`
+///   `() -> Unit`                        → `None`
+///   `((T) -> ProductDetailSheetModel)`  → `Some("T")`  (strips outer wrapping parens)
 fn lambda_type_first_input(ty: &str) -> Option<String> {
     let ty = ty.trim();
+    // Strip `suspend` keyword — Kotlin allows `suspend (T) -> Unit` as a type.
+    let ty = strip_suspend(ty);
     // Receiver lambda: `State.() -> State` or `State.(Param) -> R`
     // The implicit receiver is the `it`/`this`-equivalent inside the lambda.
     if let Some(dot_paren) = ty.find(".(") {
@@ -3369,22 +3670,31 @@ fn lambda_type_first_input(ty: &str) -> Option<String> {
     }
     // Must start with `(` to be a function type.
     if !ty.starts_with('(') { return None; }
-    // Find matching `)` (respecting nested `<>`)
-    let mut depth: i32 = 0;
+    // Find matching `)` using separate paren/angle depth counters so `>` in `->`
+    // is never mistaken for a closing angle bracket.
+    let mut paren_depth: i32 = 0;
+    let mut _angle_depth: i32 = 0;
     let mut close = None;
     for (i, ch) in ty.char_indices() {
         match ch {
-            '(' | '<' => depth += 1,
-            ')' | '>' => {
-                depth -= 1;
-                if depth == 0 { close = Some(i); break; }
-            }
+            '(' => paren_depth += 1,
+            ')' => { paren_depth -= 1; if paren_depth == 0 { close = Some(i); break; } }
+            '<' => _angle_depth += 1,
+            '>' => _angle_depth -= 1,
             _ => {}
         }
     }
     let close = close?;
     let inner = ty[1..close].trim();
-    if inner.is_empty() { return None; }  // `() -> Unit` has no `it`
+    if inner.is_empty() { return None; }
+
+    // If `inner` is itself a function type (outer parens were just wrapping:
+    // `((T) -> R)` → inner = `(T) -> R`), recurse into it.
+    if inner.starts_with('(') && inner.contains("->") {
+        if let Some(t) = lambda_type_first_input(inner) {
+            return Some(t);
+        }
+    }
 
     // Take the first type argument (before the first `,` at depth 0).
     let mut first = inner;
@@ -3412,6 +3722,17 @@ fn lambda_type_first_input(ty: &str) -> Option<String> {
         return None;
     }
     Some(base.to_owned())
+}
+
+/// Strip a leading `suspend` keyword from a Kotlin function type string.
+/// `"suspend (T) -> Unit"` → `"(T) -> Unit"`;  anything else unchanged.
+/// Only strips when followed by `(` or `.` (receiver lambdas like `suspend T.() -> R`).
+#[inline]
+fn strip_suspend(ty: &str) -> &str {
+    let rest = ty.strip_prefix("suspend").unwrap_or(ty);
+    if rest.len() == ty.len() { return ty; } // no prefix stripped
+    let rest = rest.trim_start();
+    if rest.starts_with('(') || rest.starts_with('.') { rest } else { ty }
 }
 
 /// Strip a balanced trailing `(…)` argument list from the end of `s`.
@@ -4388,6 +4709,33 @@ class Child : Base
     }
 
     #[test]
+    fn generic_it_type_shows_hint_completion() {
+        // `map: ((T) -> ProductDetailSheetModel)` — `it` resolves to generic `T`.
+        // Completion of `it.` should return a hint item showing the inferred type name.
+        let src = "package com.example
+fun lazyLoad(map: ((T) -> Model)) {}
+class Model
+";
+        let (u, idx) = indexed("/t.kt", src);
+        idx.set_live_lines(&u, src);
+        // Simulate: cursor on `it.` inside `lazyLoad { it. }`
+        let src_with_call = "package com.example
+fun lazyLoad(map: ((T) -> Model)) {}
+class Model
+fun use() { lazyLoad { it. } }
+";
+        let (u2, idx2) = indexed("/u.kt", src_with_call);
+        idx2.set_live_lines(&u2, src_with_call);
+        let line = "fun use() { lazyLoad { it. } }";
+        let col = (line.find("it.").unwrap() + "it.".len()) as u32;
+        let items = idx2.completions(&u2, Position::new(3, col), false);
+        // Must include a hint item labelled `it: T`
+        let hint = items.iter().find(|i| i.label.contains("it:") && i.label.contains('T'));
+        assert!(hint.is_some(), "expected `it: T` hint item; got: {:?}", items.iter().map(|i| &i.label).collect::<Vec<_>>());
+        let _ = (u, idx); // suppress unused warning
+    }
+
+    #[test]
     fn nested_class_qualified_key() {
         // AccountContract.kt defines a sealed class State nested inside it.
         // The qualified index should store BOTH:
@@ -4805,6 +5153,35 @@ class Account(val name: String)"#;
         assert_eq!(lambda_type_first_input("(String, Int) -> Unit"), Some("String".into()));
         assert_eq!(lambda_type_first_input("() -> Unit"), None);
         assert_eq!(lambda_type_first_input("(id: String, scan: String) -> Unit"), Some("String".into()));
+        // Double-wrapped parens (Kotlin allows `((T) -> R)` as a type annotation):
+        assert_eq!(lambda_type_first_input("((T) -> ProductDetailSheetModel)"), Some("T".into()));
+        assert_eq!(lambda_type_first_input("((LoanDetail) -> Model)"), Some("LoanDetail".into()));
+        // `->` arrow must not confuse angle-bracket depth tracking:
+        assert_eq!(lambda_type_first_input("(Flow<T>) -> Unit"), Some("Flow".into()));
+        // `suspend` prefix — Kotlin suspend function types like `suspend (T) -> Unit`:
+        assert_eq!(lambda_type_first_input("suspend (T) -> Unit"), Some("T".into()));
+        assert_eq!(lambda_type_first_input("suspend (value: LoanDetail) -> Unit"), Some("LoanDetail".into()));
+        assert_eq!(lambda_type_first_input("suspend (String, Int) -> Unit"), Some("String".into()));
+        assert_eq!(lambda_type_first_input("suspend () -> Unit"), None);
+    }
+
+    #[test]
+    fn nested_lambda_it_type_resolved_through_outer_brace() {
+        // `setState` takes a lambda whose `it` is State.
+        // When `setState { it }` is nested inside an outer lambda body like
+        // `collectState({ setState { it } }, ...)`, the `before_brace` seen by
+        // lambda_receiver_type_from_context is `"    { setState "` — callee has
+        // a leading `{` from the outer lambda.  Must still resolve to State.
+        let src = "package com.example
+fun setState(reducer: (State) -> State) {}
+class State
+";
+        let (u, idx) = indexed("/t.kt", src);
+        // before_brace as it arrives from the nested-lambda context
+        let before = "    { setState ";
+        let result = lambda_receiver_type_from_context(before, &idx, &u);
+        assert_eq!(result.as_deref(), Some("State"),
+            "it inside nested setState lambda should resolve to State, got: {result:?}");
     }
 
     // ── inline-lambda param type (Case C) ────────────────────────────────────
@@ -5000,6 +5377,111 @@ class Account(val name: String)"#;
     }
 
     #[test]
+    fn this_as_named_arg_resolves_param_type() {
+        // `.send(channel = this)` — `this` used as a named-arg value.
+        // Should resolve to the expected parameter type: `SendChannel`.
+        let src = concat!(
+            "fun send(channel: SendChannel): Unit = TODO()\n",
+            "fun go() {\n",
+            "    something.send(channel = this)\n",  // line 2, `this` at col 28
+            "}\n",
+        );
+        let (u, idx) = indexed("/t.kt", src);
+        let col = "    something.send(channel = ".len() as u32;
+        let result = idx.infer_lambda_param_type_at("this", &u, Position::new(2, col));
+        assert_eq!(result.as_deref(), Some("SendChannel"),
+            "this as named arg should hint param type, got: {result:?}");
+    }
+
+    #[test]
+    fn it_as_positional_arg_resolves_param_type() {
+        // `process(it)` — `it` as positional arg 0.
+        let src = concat!(
+            "fun process(value: Item): Unit = TODO()\n",
+            "fun go() {\n",
+            "    list.forEach { process(it) }\n",  // line 2, `it` at col 26
+            "}\n",
+        );
+        let (u, idx) = indexed("/t.kt", src);
+        let col = "    list.forEach { process(".len() as u32;
+        let result = idx.infer_lambda_param_type_at("it", &u, Position::new(2, col));
+        // Lambda inference for `list.forEach` fails (list not typed).
+        // Positional arg fallback: `process(it)` → param 0 = `Item`.
+        assert_eq!(result.as_deref(), Some("Item"),
+            "it as positional arg should hint param type, got: {result:?}");
+    }
+
+    #[test]
+    fn it_as_named_arg_resolves_param_type() {
+        // `fn(value = it)` — `it` as named arg.
+        let src = concat!(
+            "fun process(value: Widget): Unit = TODO()\n",
+            "fun go() {\n",
+            "    process(value = it)\n",  // line 2, `it` at col 20
+            "}\n",
+        );
+        let (u, idx) = indexed("/t.kt", src);
+        let col = "    process(value = ".len() as u32;
+        let result = idx.infer_lambda_param_type_at("it", &u, Position::new(2, col));
+        assert_eq!(result.as_deref(), Some("Widget"),
+            "it as named arg should hint param type, got: {result:?}");
+    }
+
+    #[test]
+    fn it_positional_second_arg() {
+        // `fn(first, it)` — `it` as positional arg 1.
+        let src = concat!(
+            "fun pair(a: String, b: Number): Unit = TODO()\n",
+            "fun go() {\n",
+            "    pair(\"x\", it)\n",  // line 2, `it` at col 14
+            "}\n",
+        );
+        let (u, idx) = indexed("/t.kt", src);
+        let col = "    pair(\"x\", ".len() as u32;
+        let result = idx.infer_lambda_param_type_at("it", &u, Position::new(2, col));
+        assert_eq!(result.as_deref(), Some("Number"),
+            "it as second positional arg should be Number, got: {result:?}");
+    }
+
+
+    #[test]
+    fn this_in_regular_lambda_no_lambda_hint() {
+        // `this` inside a regular lambda `(T) -> R` should NOT get a lambda hint.
+        // It refers to the enclosing class, not the lambda param.
+        let src = concat!(
+            "class Reducer {\n",
+            "    fun reduce(event: String, block: (String) -> String): Unit = TODO()\n",
+            "    fun go(event: String) {\n",
+            "        reduce(event) { this }\n",  // line 3, `this` at col 24
+            "    }\n",
+            "}\n",
+        );
+        let (u, idx) = indexed("/t.kt", src);
+        let col = "        reduce(event) { ".len() as u32;
+        let result = idx.infer_lambda_param_type_at("this", &u, Position::new(3, col));
+        // `this` inside regular (T)->R lambda must NOT get a lambda-param hint.
+        // Falls through to enclosing_class_at → returns enclosing class.
+        assert_eq!(result.as_deref(), Some("Reducer"),
+            "this in regular lambda should be enclosing class, got: {result:?}");
+    }
+
+    #[test]
+    fn this_in_receiver_lambda_indexed_function() {
+        // `this` inside a receiver lambda `T.() -> R` from an indexed function (concrete type).
+        let src = concat!(
+            "class Ctx\n",
+            "fun withCtx(block: Ctx.() -> Unit): Unit = TODO()\n",
+            "val ctx: Ctx = Ctx()\n",
+            "val _ = ctx.withCtx { this }\n",  // line 3, `this` after `{ `
+        );
+        let (u, idx) = indexed("/t.kt", src);
+        let col = "val _ = ctx.withCtx { ".len() as u32;
+        let result = idx.infer_lambda_param_type_at("this", &u, Position::new(3, col));
+        assert_eq!(result.as_deref(), Some("Ctx"),
+            "this inside receiver lambda withCtx should be Ctx, got: {result:?}");
+    }
+
+    #[test]
     fn named_arg_lambda_it_type_multiline() {
         // `SheetReloadActions(buildingSavings = { setEvent(it) })` — lambda on new line
         // after the constructor call. `it` should resolve to the first input type
@@ -5066,12 +5548,160 @@ class Account(val name: String)"#;
         assert_eq!(super::extract_named_arg_name("fn(x, isRefresh = "),   None);
     }
 
+    // ── LoanReducer-style patterns ────────────────────────────────────────────
+
+    #[test]
+    fn named_arg_lambda_extension_function_callee() {
+        // Mirrors LoanReducer: `flow.lazyLoadProductBottomSheet(map = { mapSheet(it) })`
+        // Extension function callee + double-paren `((T) -> R)` param type.
+        // `it` inside `map = {` should resolve to the first input of `((LoanDetail) -> Sheet)`.
+        let src = concat!(
+            "class LoanDetail\n",                                                 // line 0
+            "class ProductDetailSheetModel\n",                                    // line 1
+            "class Flow\n",                                                       // line 2
+            "fun Flow.lazyLoadProductBottomSheet(\n",                             // line 3
+            "  reloadAction: () -> Unit,\n",                                      // line 4
+            "  map: ((LoanDetail) -> ProductDetailSheetModel),\n",                // line 5
+            ") {}\n",                                                             // line 6
+            "fun use(flow: Flow) {\n",                                            // line 7
+            "  flow.lazyLoadProductBottomSheet(\n",                               // line 8
+            "    reloadAction = { },\n",                                          // line 9
+            "    map = { it },\n",                                                // line 10
+            "  )\n",                                                              // line 11
+            "}\n",                                                                // line 12
+        );
+        let (u, idx) = indexed("/LoanReducer.kt", src);
+        // `it` on line 10, col inside the lambda body
+        let result = idx.infer_lambda_param_type_at("it", &u, Position::new(10, 13));
+        assert_eq!(result.as_deref(), Some("LoanDetail"),
+            "it inside map lambda should be LoanDetail, got: {result:?}");
+    }
+
+    #[test]
+    fn named_arg_reload_action_no_it() {
+        // `reloadAction: () -> Unit` — lambda has no params, `it` should not resolve.
+        let src = concat!(
+            "class Flow\n",                                              // line 0
+            "fun Flow.lazyLoadProductBottomSheet(\n",                   // line 1
+            "  reloadAction: () -> Unit,\n",                            // line 2
+            ") {}\n",                                                    // line 3
+            "fun use(flow: Flow) {\n",                                  // line 4
+            "  flow.lazyLoadProductBottomSheet(\n",                     // line 5
+            "    reloadAction = { it },\n",                             // line 6
+            "  )\n",                                                     // line 7
+            "}\n",                                                       // line 8
+        );
+        let (u, idx) = indexed("/t.kt", src);
+        let result = idx.infer_lambda_param_type_at("it", &u, Position::new(6, 21));
+        assert_eq!(result, None,
+            "it inside reloadAction lambda should not resolve (no params), got: {result:?}");
+    }
+
+    #[test]
+    fn named_arg_lambda_double_paren_function_type() {
+        // Double-paren `((T) -> R)` type — should still extract T as first input.
+        let src = concat!(
+            "class Item\n",                                              // line 0
+            "fun process(\n",                                            // line 1
+            "  mapper: ((Item) -> String),\n",                          // line 2
+            ") {}\n",                                                    // line 3
+            "fun use() {\n",                                             // line 4
+            "  process(\n",                                              // line 5
+            "    mapper = { it },\n",                                    // line 6
+            "  )\n",                                                     // line 7
+            "}\n",                                                       // line 8
+        );
+        let (u, idx) = indexed("/t.kt", src);
+        let result = idx.infer_lambda_param_type_at("it", &u, Position::new(6, 16));
+        assert_eq!(result.as_deref(), Some("Item"),
+            "it inside double-paren type lambda should be Item, got: {result:?}");
+    }
+
+    // ── Full LoanReducer integration ─────────────────────────────────────────
+
+    // Mirrors the real structure:
+    //   flow.lazyLoadProductBottomSheet(
+    //     state = state(),
+    //     reloadAction = { reloadAction(...) },
+    //     map = { mapSheet(it) },            ← it: T (generic param)
+    //   ).collect { bottomSheetState ->       ← bottomSheetState: T (Flow element)
+    fn loan_reducer_src() -> &'static str {
+        concat!(
+            "class LoanDetail\n",                                                // 0
+            "class ProductDetailSheetModel\n",                                   // 1
+            "class Flow\n",                                                      // 2
+            "class BottomSheetState\n",                                          // 3
+            "fun <T> Flow.lazyLoadProductBottomSheet(\n",                        // 4
+            "  state: BottomSheetState,\n",                                      // 5
+            "  reloadAction: () -> Unit,\n",                                     // 6
+            "  map: ((T) -> ProductDetailSheetModel),\n",                        // 7
+            "): Flow {}\n",                                                      // 8
+            "fun <T> Flow.collect(action: (T) -> Unit) {}\n",                    // 9
+            "fun use(flow: Flow) {\n",                                           // 10
+            "  flow.lazyLoadProductBottomSheet(\n",                              // 11
+            "    state = flow,\n",                                               // 12
+            "    reloadAction = { },\n",                                         // 13
+            "    map = { mapSheet(it) },\n",                                     // 14
+            "  ).collect { bottomSheetState ->\n",                               // 15
+            "    use(bottomSheetState)\n",                                       // 16
+            "  }\n",                                                             // 17
+            "}\n",                                                               // 18
+        )
+    }
+
+    #[test]
+    fn loan_reducer_map_it_resolves_to_T() {
+        let (u, idx) = indexed("/LoanReducer.kt", loan_reducer_src());
+        // `it` in `map = { mapSheet(it) }` — line 14, col inside lambda body
+        let result = idx.infer_lambda_param_type_at("it", &u, Position::new(14, 20));
+        assert_eq!(result.as_deref(), Some("T"),
+            "it in map lambda should be T (generic param), got: {result:?}");
+    }
+
+    #[test]
+    fn loan_reducer_reload_action_no_it() {
+        let (u, idx) = indexed("/LoanReducer.kt", loan_reducer_src());
+        // `reloadAction: () -> Unit` — empty param type, no `it`
+        let result = idx.infer_lambda_param_type_at("it", &u, Position::new(13, 21));
+        assert_eq!(result, None,
+            "it in reloadAction lambda should be None (no params), got: {result:?}");
+    }
+
+    #[test]
+    fn loan_reducer_collect_bottomsheetstate_resolves_to_T() {
+        let (u, idx) = indexed("/LoanReducer.kt", loan_reducer_src());
+        // `bottomSheetState` in `.collect { bottomSheetState -> ... }` — line 15
+        let result = idx.infer_lambda_param_type_at("bottomSheetState", &u, Position::new(16, 8));
+        assert_eq!(result.as_deref(), Some("T"),
+            "bottomSheetState in collect lambda should be T, got: {result:?}");
+    }
+
+    #[test]
+    fn suspend_param_type_resolves_it() {
+        // `collectIn` has `block: suspend (T) -> Unit` — `suspend` prefix must not block inference.
+        let src = concat!(
+            "class Flow\n",                                          // 0
+            "fun <T> Flow.collectIn(block: suspend (T) -> Unit) {}\n", // 1
+            "fun use(flow: Flow) {\n",                               // 2
+            "  flow.collectIn { it.doSomething() }\n",               // 3  col 19 = 'it'
+            "}\n",                                                   // 4
+        );
+        let (u, idx) = indexed("/t.kt", src);
+        let result = idx.infer_lambda_param_type_at("it", &u, Position::new(3, 19));
+        assert_eq!(result.as_deref(), Some("T"),
+            "it in suspend-param collectIn lambda should be T, got: {result:?}");
+    }
+
     #[test]
     fn lambda_type_nth_input_test() {
         assert_eq!(super::lambda_type_nth_input("(String, Boolean) -> Unit", 0), Some("String".into()));
         assert_eq!(super::lambda_type_nth_input("(String, Boolean) -> Unit", 1), Some("Boolean".into()));
         assert_eq!(super::lambda_type_nth_input("() -> Unit", 0), None);
         assert_eq!(super::lambda_type_nth_input("(SaveInfo) -> Unit", 0), Some("SaveInfo".into()));
+        // suspend function type as whole outer type:
+        assert_eq!(super::lambda_type_nth_input("suspend (T) -> Unit", 0), Some("T".into()));
+        assert_eq!(super::lambda_type_nth_input("suspend (LoanDetail) -> Unit", 0), Some("LoanDetail".into()));
+        assert_eq!(super::lambda_type_nth_input("suspend () -> Unit", 0), None);
     }
 
     #[test]
@@ -6078,3 +6708,5 @@ class Foo @Inject constructor(
         assert_eq!(locs[0].uri, bar_uri, "should resolve to Bar.kt");
     }
 }
+
+
