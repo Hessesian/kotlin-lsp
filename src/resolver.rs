@@ -398,8 +398,13 @@ pub fn resolve_symbol(idx: &Indexer, name: &str, qualifier: Option<&str>, from_u
     // 0. Qualified access: `AccountPickerMapper.Content` — cursor on `Content`.
     //    Resolve the qualifier to a file, then search that file for `name`.
     if let Some(qual) = qualifier {
+        // For `super` and `this`, never fall through to the unqualified chain:
+        // `super.method` must only look in the parent hierarchy, never via rg/index
+        // of the current file (which would return the override).
+        let is_keyword_qual = qual == "super" || qual == "this";
         let locs = resolve_qualified(idx, name, qual, from_uri);
         if !locs.is_empty() { return locs; }
+        if is_keyword_qual { return vec![]; }
         // If qualifier resolution failed (e.g. it's a package name, not a class),
         // fall through to the normal chain.
     }
@@ -568,7 +573,7 @@ fn resolve_qualified(idx: &Indexer, name: &str, qualifier: &str, from_uri: &Url)
 
     // ── `super.member` — search superclass hierarchy only ────────────────────
     if root == "super" {
-        let mut visited = vec![from_uri.as_str().to_owned()]; // skip current file
+        let mut visited = vec![];
         return resolve_from_class_hierarchy(idx, name, from_uri, 0, &mut visited);
     }
 

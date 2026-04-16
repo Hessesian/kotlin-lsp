@@ -480,60 +480,29 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
 
+        // Special case: `this` keyword — navigate to the enclosing class definition.
+        if qualifier.is_none() && word == "this" {
+            if let Some(class_name) = self.indexer.enclosing_class_at(uri, position.line) {
+                let locs = self.indexer.find_definition_qualified(&class_name, None, uri);
+                if !locs.is_empty() {
+                    return Ok(Some(locs_to_response(locs)));
+                }
+            }
+            return Ok(None);
+        }
+
         // Special case: `super` keyword — navigate to the enclosing class's first supertype.
         if qualifier.is_none() && word == "super" {
-            if let Some(class_name) = self.indexer.enclosing_class_at(uri, position.line) {
-                let locs = self.indexer.definitions
-                    .get(&class_name)
-                    .map(|v| v.clone())
-                    .unwrap_or_default();
-                // Collect supertypes from the class declaration.
-                let mut super_names: Vec<String> = vec![];
-                for loc in &locs {
-                    if let Some(file) = self.indexer.files.get(loc.uri.as_str()) {
-                        let start = loc.range.start.line as usize;
-                        let end = (start + 10).min(file.lines.len());
-                        let mut decl_lines: Vec<String> = vec![];
-                        for line in &file.lines[start..end] {
-                            decl_lines.push(line.clone());
-                            if line.contains('{') { break; }
-                        }
-                        super_names = crate::resolver::extract_supers_from_lines(&decl_lines);
-                        if !super_names.is_empty() { break; }
-                    }
-                }
-                // Also scan live_lines if definitions weren't found (file just opened).
-                if super_names.is_empty() {
-                    if let Some(lines) = self.indexer.live_lines.get(uri.as_str()) {
-                        super_names = crate::resolver::extract_supers_from_lines(&lines);
-                    }
-                }
-                for super_name in &super_names {
-                    // Try index first, then rg fallback.
-                    let sup_locs = self.indexer.find_definition_qualified(super_name, None, uri);
-                    if !sup_locs.is_empty() {
-                        return Ok(match sup_locs.len() {
-                            1 => Some(GotoDefinitionResponse::Scalar(sup_locs.into_iter().next().unwrap())),
-                            _ => Some(GotoDefinitionResponse::Array(sup_locs)),
-                        });
-                    }
-                    // rg fallback — supertype may not be indexed yet.
-                    let name_clone = super_name.clone();
-                    let file_path = uri.to_file_path().ok();
-                    let root_opt = {
-                        let wr = self.indexer.workspace_root.read().unwrap().clone();
-                        crate::indexer::effective_rg_root(wr.as_deref(), file_path.as_deref())
-                    };
-                    let rg_locs = tokio::task::spawn_blocking(move || {
-                        crate::indexer::rg_find_definition(&name_clone, root_opt.as_deref())
-                    }).await.unwrap_or_default();
-                    if !rg_locs.is_empty() {
-                        return Ok(match rg_locs.len() {
-                            1 => Some(GotoDefinitionResponse::Scalar(rg_locs.into_iter().next().unwrap())),
-                            _ => Some(GotoDefinitionResponse::Array(rg_locs)),
-                        });
-                    }
-                }
+            if let Some(result) = self.goto_super_class(uri, position.line).await {
+                return Ok(Some(result));
+            }
+            return Ok(None);
+        }
+
+        // Special case: `super.method(...)` — resolve `method` in the parent class.
+        if qualifier.as_deref() == Some("super") {
+            if let Some(result) = self.goto_super_method(uri, position.line, &word).await {
+                return Ok(Some(result));
             }
             return Ok(None);
         }
@@ -1614,6 +1583,85 @@ impl LanguageServer for Backend {
         }
 
         Ok(if actions.is_empty() { None } else { Some(actions) })
+    }
+}
+
+// ── super / this helpers (non-trait impl) ────────────────────────────────────
+
+impl Backend {
+    /// Collect the parent class names for the class enclosing `row` in `uri`.
+    fn super_names_at(&self, uri: &Url, row: u32) -> Vec<String> {
+        let class_name = match self.indexer.enclosing_class_at(uri, row) {
+            Some(n) => n,
+            None => return vec![],
+        };
+        let locs = self.indexer.definitions
+            .get(&class_name)
+            .map(|v| v.clone())
+            .unwrap_or_default();
+        for loc in &locs {
+            if let Some(file) = self.indexer.files.get(loc.uri.as_str()) {
+                let start = loc.range.start.line as usize;
+                let end = (start + 15).min(file.lines.len());
+                let mut decl_lines: Vec<String> = vec![];
+                for line in &file.lines[start..end] {
+                    decl_lines.push(line.clone());
+                    if line.contains('{') { break; }
+                }
+                let names = crate::resolver::extract_supers_from_lines(&decl_lines);
+                if !names.is_empty() { return names; }
+            }
+        }
+        // Fallback: scan live_lines for the open file itself.
+        if let Some(lines) = self.indexer.live_lines.get(uri.as_str()) {
+            let names = crate::resolver::extract_supers_from_lines(&lines);
+            if !names.is_empty() { return names; }
+        }
+        vec![]
+    }
+
+    async fn rg_resolve(&self, uri: &Url, name: &str) -> Vec<Location> {
+        let name_clone = name.to_string();
+        let file_path = uri.to_file_path().ok();
+        let root_opt = {
+            let wr = self.indexer.workspace_root.read().unwrap().clone();
+            crate::indexer::effective_rg_root(wr.as_deref(), file_path.as_deref())
+        };
+        tokio::task::spawn_blocking(move || {
+            crate::indexer::rg_find_definition(&name_clone, root_opt.as_deref())
+        }).await.unwrap_or_default()
+    }
+
+    async fn goto_super_class(&self, uri: &Url, row: u32) -> Option<GotoDefinitionResponse> {
+        for super_name in &self.super_names_at(uri, row) {
+            let locs = self.indexer.find_definition_qualified(super_name, None, uri);
+            if !locs.is_empty() {
+                return Some(locs_to_response(locs));
+            }
+            let rg_locs = self.rg_resolve(uri, super_name).await;
+            if !rg_locs.is_empty() {
+                return Some(locs_to_response(rg_locs));
+            }
+        }
+        None
+    }
+
+    async fn goto_super_method(&self, uri: &Url, row: u32, method: &str) -> Option<GotoDefinitionResponse> {
+        // resolve_qualified already handles root=="super" via resolve_from_class_hierarchy.
+        let locs = self.indexer.find_definition_qualified(method, Some("super"), uri);
+        if !locs.is_empty() {
+            return Some(locs_to_response(locs));
+        }
+        // Method not found in indexed hierarchy (e.g. Android SDK parent).
+        // Fall back to navigating to the parent class itself.
+        self.goto_super_class(uri, row).await
+    }
+}
+
+fn locs_to_response(locs: Vec<Location>) -> GotoDefinitionResponse {
+    match locs.len() {
+        1 => GotoDefinitionResponse::Scalar(locs.into_iter().next().unwrap()),
+        _ => GotoDefinitionResponse::Array(locs),
     }
 }
 

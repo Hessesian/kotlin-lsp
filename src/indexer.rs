@@ -5988,4 +5988,93 @@ internal class ContactAddressInteractor @Inject constructor(
         let bar_locs = idx.find_definition_qualified("Bar", None, &foo_uri);
         assert!(!bar_locs.is_empty(), "Bar should resolve via same-package or import");
     }
+
+    // ── super / this go-to-def TDD tests ──────────────────────────────────────
+
+    fn two_file_idx(a_path: &str, a_src: &str, b_path: &str, b_src: &str) -> (Url, Url, Indexer) {
+        let (_, idx) = indexed(a_path, a_src);
+        let b_uri = uri(b_path);
+        idx.index_content(&b_uri, b_src);
+        (uri(a_path), b_uri, idx)
+    }
+
+    /// `super` (standalone) resolves to the parent class declaration.
+    #[test]
+    fn goto_super_resolves_to_parent_class() {
+        let bar_src = "package com.example\nopen class Bar\n";
+        let foo_src = "package com.example\nclass Foo : Bar() {\n  fun test() {\n    super.toString()\n  }\n}";
+        let (bar_uri, foo_uri, idx) = two_file_idx("/Bar.kt", bar_src, "/Foo.kt", foo_src);
+
+        // Simulate `super` keyword lookup: find parent type names, then resolve them.
+        let enclosing = idx.enclosing_class_at(&foo_uri, 3);
+        assert_eq!(enclosing.as_deref(), Some("Foo"), "enclosing class");
+
+        let locs = idx.find_definition_qualified("Bar", None, &foo_uri);
+        assert!(!locs.is_empty(), "super should resolve to Bar");
+        assert_eq!(locs[0].uri, bar_uri, "resolved to wrong file");
+    }
+
+    /// `super.method` resolves to the method in the parent class file.
+    #[test]
+    fn goto_super_method_resolves_in_parent() {
+        let bar_src = "package com.example\nopen class Bar {\n  open fun onCleared() {}\n}\n";
+        let foo_src = "package com.example\nclass Foo : Bar() {\n  override fun onCleared() {\n    super.onCleared()\n  }\n}";
+        let (bar_uri, foo_uri, idx) = two_file_idx("/Bar.kt", bar_src, "/Foo.kt", foo_src);
+
+        // `super.onCleared` → resolve_qualified("onCleared", "super", foo_uri)
+        // should find onCleared defined in Bar.kt, NOT Foo.kt.
+        let locs = idx.find_definition_qualified("onCleared", Some("super"), &foo_uri);
+        assert!(!locs.is_empty(), "super.onCleared should resolve");
+        assert_eq!(locs[0].uri, bar_uri, "super.onCleared should resolve to Bar.kt, not Foo.kt");
+    }
+
+    /// `this` (standalone) resolves to the enclosing class definition.
+    #[test]
+    fn goto_this_resolves_to_enclosing_class() {
+        let src = "package com.example\nclass MyClass {\n  fun test() {\n    this.toString()\n  }\n}";
+        let (u, idx) = indexed("/MyClass.kt", src);
+
+        let enclosing = idx.enclosing_class_at(&u, 3);
+        assert_eq!(enclosing.as_deref(), Some("MyClass"), "enclosing class for this");
+
+        let locs = idx.find_definition_qualified("MyClass", None, &u);
+        assert!(!locs.is_empty(), "this should resolve to MyClass");
+        assert_eq!(locs[0].uri, u);
+    }
+
+    /// `super.method` where parent is not indexed must NOT resolve to the current
+    /// class's override (which would be wrong). Should return empty or parent class.
+    #[test]
+    fn goto_super_method_no_fallthrough_to_override() {
+        // Foo overrides doWork, but Base is NOT indexed.
+        // super.doWork should NOT resolve to Foo.kt's override.
+        let foo_src = "package com.example\nclass Foo : Base() {\n  override fun doWork() {\n    super.doWork()\n  }\n}";
+        let (foo_uri, idx) = indexed("/Foo.kt", foo_src);
+
+        // With super qualifier, result must NOT be in Foo.kt
+        let locs = idx.find_definition_qualified("doWork", Some("super"), &foo_uri);
+        for loc in &locs {
+            assert_ne!(loc.uri, foo_uri, "super.doWork must not resolve to overriding file");
+        }
+    }
+
+    /// `super.method` with multi-line constructor still resolves correctly.
+    #[test]
+    fn goto_super_method_multiline_constructor() {
+        let bar_src = "package com.example\nopen class Bar {\n  open fun doWork() {}\n}\n";
+        let foo_src = "package com.example
+class Foo @Inject constructor(
+  private val dep: String,
+) : Bar() {
+  override fun doWork() {
+    super.doWork()
+  }
+}";
+        let (bar_uri, foo_uri, idx) = two_file_idx("/Bar.kt", bar_src, "/Foo.kt", foo_src);
+
+        // super.doWork at line 5 → should resolve to Bar.kt
+        let locs = idx.find_definition_qualified("doWork", Some("super"), &foo_uri);
+        assert!(!locs.is_empty(), "super.doWork should resolve");
+        assert_eq!(locs[0].uri, bar_uri, "should resolve to Bar.kt");
+    }
 }
