@@ -125,41 +125,15 @@ They can coexist — use kotlin-lsp for fast navigation, the official one for di
 
 ## Changelog
 
-### 0.5.0
+### 0.7.0
 
-- **Workspace pinning** — workspace set once at `initialize` from env var / `~/.config/kotlin-lsp/workspace` / `rootUri`; never overridden at runtime by `did_open`
-- **Removed `changeRoot` command** — one LSP instance per workspace; restart to switch projects
-- **Outside-root file isolation** — files opened by the LSP client outside the workspace root are skipped for workspace-wide indexing (prevents `workspaceSymbol` pollution)
-- **Tiered root auto-detection** — strong project markers (`settings.gradle.kts`, `Cargo.toml`) > `.git` > `Package.swift`; correctly handles mono-repos (iOS + Android)
-- **Cold-start navigation** — `hover`, `goToDefinition`, `documentSymbol` work immediately on first file open via on-demand `index_content`; no waiting for full workspace index
-- **`rg` fallback at cold start** — `lines_for` reads from disk when file not yet indexed
-- **Live indexing progress** — `WorkDoneProgress::Report` notifications every 500ms with percentage
-- **`kotlin-lsp/clearCache`** — now advertised in `execute_command_provider` (was hidden)
-- **Extension tools** — `kotlin_lsp_status` (reads live `status.json`), `kotlin_lsp_set_workspace`
+- **`it`/`this` type-directed inference** — when `it` or `this` is a call argument (named or positional), the expected parameter type is inferred from the function signature
+- **`this` in receiver vs regular lambdas** — correctly hints enclosing class in `(T) -> R`, receiver type in `T.() -> R` and scope functions
+- **`fun interface` recognition** — fix tree-sitter not recognising `fun interface` declarations
+- **Suspend lambda type inference** — correct type inference for `suspend` lambda parameters
+- **Copilot extension** — remove overly restrictive `kotlin_rg` pre-hook
 
-### 0.4.1
-
-- **SOLID refactoring** — pure functions, coordinator pattern, `WorkspaceIndexResult` pipeline
-- **Async indexing** — concurrent file parsing with semaphore-guarded `spawn_blocking`
-- **iOS indexing fixes** — non-blocking parse, deadlock prevention
-- **Cache versioning** — `CACHE_VERSION` bump invalidates stale on-disk indexes
-- **`--index-only` CLI mode** — headless one-shot indexing for CI/tooling
-
-### 0.4.0
-
-- **Swift support** — full structural indexing of `.swift` files with all LSP features. SwiftPM `.build` and Xcode `DerivedData` directories excluded automatically.
-- **Centralized parser dispatch** — `parse_by_extension()` routes `.kt`/`.java`/`.swift` to the correct tree-sitter parser
-- **Dynamic file discovery** — `fd`/`rg` glob patterns and file watchers automatically include all supported extensions
-
-### 0.3.13
-
-- **Inlay hints** — type hints for lambda `it`, named params, `this`, untyped `val`/`var`
-- **Go-to-implementation** — transitive subtype lookup via BFS
-- **Syntax diagnostics** — tree-sitter ERROR/MISSING nodes
-- **Cross-file lambda resolution** — named-arg lambdas resolve parameter types from constructor signatures
-- **Instant feature availability** — all features work immediately via `rg` fallback
-- **Race condition fix** — semaphore permit held through `spawn_blocking`
-- **Workspace symbol** — dot-qualified queries for extension functions
+[Full changelog →](CHANGELOG.md)
 
 ---
 
