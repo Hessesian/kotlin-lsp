@@ -12,7 +12,7 @@ kotlin-lsp integrates with the [GitHub Copilot CLI](https://githubnext.com/proje
 {
   "lspServers": {
     "kotlin-lsp": {
-      "command": "/path/to/kotlin-lsp",
+      "command": "/home/user/.cargo/bin/kotlin-lsp",
       "args": [],
       "env": {
         "KOTLIN_LSP_MAX_FILES": "20000"
@@ -27,6 +27,9 @@ kotlin-lsp integrates with the [GitHub Copilot CLI](https://githubnext.com/proje
   }
 }
 ```
+
+> **Note:** `command` must be an **absolute path** — Copilot does not expand `~` or use your shell's `PATH`.  
+> The default cargo install location is `~/.cargo/bin/kotlin-lsp`; substitute your actual home directory (or run `which kotlin-lsp` to confirm).
 
 **2. (Optional) Install the Copilot skill extension** for a richer agent experience — it injects indexing status context automatically and provides `kotlin_lsp_status` and `kotlin_lsp_set_workspace` tools:
 

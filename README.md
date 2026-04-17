@@ -11,6 +11,12 @@ Built with [tower-lsp](https://github.com/ebkalderon/tower-lsp) and [tree-sitter
 cargo install kotlin-lsp
 ```
 
+> **Rust/Cargo not installed?** Get it via [rustup](https://rustup.rs):
+> ```bash
+> curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+> ```
+> After install, `kotlin-lsp` lands in `~/.cargo/bin/` — make sure it's on your `PATH`.
+
 > **Runtime dependencies** — `fd` and `rg` (ripgrep) must be on your `PATH`:  
 > macOS: `brew install fd ripgrep`  
 > Debian/Ubuntu: `apt install fd-find ripgrep`
