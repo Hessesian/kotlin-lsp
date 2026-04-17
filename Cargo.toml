@@ -3,7 +3,7 @@ members = ["."]
 
 [package]
 name        = "kotlin-lsp"
-version = "0.7.0"
+version = "0.7.1"
 edition     = "2021"
 description = "Fast, low-memory LSP server for Kotlin, Java, and Swift. Instant startup, dot-completion, go-to-definition, hover — no JVM required."
 license     = "MIT"
@@ -41,6 +41,7 @@ env_logger = "0.11"
 # File discovery fallback
 walkdir = "2"
 ignore = "0.4"
+globset = "0.4"
 
 # Index cache serialization
 serde      = { version = "1", features = ["derive", "rc"] }

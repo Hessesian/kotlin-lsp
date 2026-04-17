@@ -7,7 +7,7 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{async_trait, Client, LanguageServer};
 
-use crate::indexer::Indexer;
+use crate::indexer::{Indexer, IgnoreMatcher};
 
 pub struct Backend {
     client:  Client,
@@ -107,6 +107,26 @@ impl LanguageServer for Backend {
                 // Explicitly configured — prevent did_open auto-detection from overriding.
                 self.indexer.workspace_pinned.store(true, std::sync::atomic::Ordering::Relaxed);
             }
+
+            // Parse ignore patterns from initializationOptions.indexingOptions.ignorePatterns.
+            if let Some(opts) = params.initialization_options.as_ref() {
+                if let Some(patterns) = opts
+                    .get("indexingOptions")
+                    .and_then(|o| o.get("ignorePatterns"))
+                    .and_then(|v| v.as_array())
+                {
+                    let pats: Vec<String> = patterns
+                        .iter()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect();
+                    if !pats.is_empty() {
+                        log::info!("ignorePatterns: {:?}", pats);
+                        *self.indexer.ignore_matcher.write().unwrap() =
+                            Some(std::sync::Arc::new(IgnoreMatcher::new(pats, &path)));
+                    }
+                }
+            }
+
             let indexer = Arc::clone(&self.indexer);
             let client  = self.client.clone();
             // Background task — server is usable before indexing finishes.

@@ -633,12 +633,13 @@ dependencies = [
 
 [[package]]
 name = "kotlin-lsp"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "bincode",
  "dashmap",
  "env_logger",
  "futures",
+ "globset",
  "ignore",
  "log",
  "serde",

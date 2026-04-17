@@ -87,6 +87,32 @@ The workspace root resolution order:
 2. LSP client `rootUri` / `workspaceFolders` — used when the editor sends a root (normal Helix/Neovim session)
 3. `~/.config/kotlin-lsp/workspace` file — fallback for clients that send no root (e.g. Copilot CLI agentic use)
 
+### Ignore patterns
+
+Exclude directories or files from indexing using `initializationOptions`:
+
+```toml
+# ~/.config/helix/languages.toml
+[language-server.kotlin-lsp.config.indexingOptions]
+ignorePatterns = [
+  "bazel-bin/**",   # Bazel output tree (symlinked — avoids double-indexing)
+  "bazel-out/**",
+  "bazel-*",        # any bazel-* dir at any depth (bare pattern)
+  "third-party/**",
+  "build/**",
+]
+```
+
+Pattern semantics follow gitignore glob rules:
+
+| Pattern | Matches |
+|---|---|
+| `bazel-*` | Any dir/file named `bazel-*` at **any depth** |
+| `third-party/**` | Everything inside `third-party/` relative to workspace root |
+| `/abs/path/**` | Absolute path — normalized to relative before matching |
+
+Patterns are applied to both `fd` (fast path) and the `walkdir` fallback, and also filter the warm-start cached manifest so newly added patterns take effect without clearing the cache.
+
 ---
 
 ## Limitations
@@ -124,6 +150,11 @@ They can coexist — use kotlin-lsp for fast navigation, the official one for di
 ---
 
 ## Changelog
+
+### 0.7.1
+
+- **`ignorePatterns` configuration** — exclude directories/files from indexing via `initializationOptions` (gitignore-style globs, any depth, warm-start aware)
+- **Swift hover keyword fix** — Swift functions now show `func` instead of `fun` in hover code blocks
 
 ### 0.7.0
 

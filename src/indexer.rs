@@ -24,6 +24,73 @@ mod progress {
 use crate::parser;
 use crate::types::{FileData, SymbolEntry, FileIndexResult, WorkspaceIndexResult, IndexStats};
 
+// ─── Ignore pattern matcher ───────────────────────────────────────────────────
+
+/// Compiled workspace-level ignore patterns from `initializationOptions`.
+///
+/// Patterns follow gitignore glob semantics:
+/// - A bare pattern with no `/` (e.g. `bazel-*`) matches at any depth.
+/// - A pattern containing `/` (e.g. `build/**`) matches relative to the workspace root.
+/// - Absolute paths under the workspace root are normalized to relative before matching.
+pub(crate) struct IgnoreMatcher {
+    /// Original patterns as provided by the client (passed to `fd --exclude` as-is).
+    pub patterns: Vec<String>,
+    /// Arc-wrapped so the compiled set can be shared into `filter_entry` closures.
+    glob_set: Arc<globset::GlobSet>,
+}
+
+impl IgnoreMatcher {
+    /// Build an `IgnoreMatcher` from raw client patterns against `root`.
+    pub fn new(patterns: Vec<String>, root: &Path) -> Self {
+        let mut builder = globset::GlobSetBuilder::new();
+        for pat in &patterns {
+            // Normalize absolute paths that fall under the workspace root.
+            let normalized = if Path::new(pat.as_str()).is_absolute() {
+                match Path::new(pat.as_str()).strip_prefix(root) {
+                    Ok(rel) => rel.to_string_lossy().into_owned(),
+                    Err(_) => {
+                        log::warn!("ignorePatterns: absolute path {:?} is not under workspace root, skipping", pat);
+                        continue;
+                    }
+                }
+            } else {
+                pat.clone()
+            };
+
+            // Bare patterns (no `/`) match at any depth — prepend `**/` for that.
+            let glob_pat = if !normalized.contains('/') {
+                format!("**/{}", normalized)
+            } else {
+                normalized
+            };
+
+            match globset::Glob::new(&glob_pat) {
+                Ok(g) => { builder.add(g); }
+                Err(e) => { log::warn!("ignorePatterns: invalid pattern {:?}: {}", pat, e); }
+            }
+        }
+        let glob_set = builder.build().unwrap_or_else(|e| {
+            log::warn!("ignorePatterns: failed to build glob set: {}", e);
+            globset::GlobSetBuilder::new().build().unwrap()
+        });
+        Self { patterns, glob_set: Arc::new(glob_set) }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.patterns.is_empty()
+    }
+
+    /// Returns `true` if `rel_path` (relative to workspace root) should be excluded.
+    pub fn matches(&self, rel_path: &Path) -> bool {
+        self.glob_set.is_match(rel_path)
+    }
+
+    /// Clone the Arc-wrapped glob set for use in `filter_entry` closures.
+    pub fn glob_set(&self) -> Arc<globset::GlobSet> {
+        Arc::clone(&self.glob_set)
+    }
+}
+
 // ─── RAII guard for indexing_in_progress flag ─────────────────────────────────
 
 /// RAII guard that clears `indexing_in_progress` on drop (success, panic, or early return).
@@ -361,6 +428,9 @@ pub struct Indexer {
     /// Drives `complete_scan` on the on-disk cache so warm-manifest mode is only
     /// used when the cache is known to be a full workspace snapshot.
     pub(crate) last_scan_complete: std::sync::atomic::AtomicBool,
+    /// User-configured ignore patterns from LSP `initializationOptions`.
+    /// Applied during file discovery to exclude matching paths.
+    pub(crate) ignore_matcher: RwLock<Option<Arc<IgnoreMatcher>>>,
 }
 
 impl Indexer {
@@ -400,6 +470,7 @@ impl Indexer {
             scheduled_paths: DashMap::new(),
             workspace_pinned: std::sync::atomic::AtomicBool::new(false),
             last_scan_complete: std::sync::atomic::AtomicBool::new(false),
+            ignore_matcher: RwLock::new(None),
         }
     }
 
@@ -551,13 +622,17 @@ impl Indexer {
         // Load cache first — drives both warm-manifest discovery and the mtime check below.
         let cache = try_load_cache(root);
 
+        // Snapshot ignore matcher for this indexing run.
+        let matcher: Option<Arc<IgnoreMatcher>> = self.ignore_matcher.read().unwrap().clone();
+        let matcher_ref: Option<&IgnoreMatcher> = matcher.as_deref();
+
         // Warm start: use cache as file manifest to skip the O(total_dirs) fd scan.
         // Only when the cache was built from a complete (non-truncated) scan — otherwise
         // the manifest may be a partial subset and we must fall back to the full scan.
         let mut paths = if cache.as_ref().map(|c| c.complete_scan).unwrap_or(false) {
-            warm_discover_files(root, cache.as_ref().unwrap())
+            warm_discover_files(root, cache.as_ref().unwrap(), matcher_ref)
         } else {
-            find_source_files(root)
+            find_source_files(root, matcher_ref)
         };
         let total = paths.len();
 
@@ -1777,7 +1852,7 @@ impl Indexer {
                    else { "java" };
 
         let code_block = if sig.is_empty() {
-            format!("```{}\n{} {}\n```", lang, symbol_kw(sym.kind), name)
+            format!("```{}\n{} {}\n```", lang, symbol_kw_for_lang(sym.kind, lang), name)
         } else {
             format!("```{}\n{}\n```", lang, sig)
         };
@@ -1970,16 +2045,16 @@ fn extract_class_decl_name(line: &str) -> Option<String> {
 
 // ─── file discovery ──────────────────────────────────────────────────────────
 
-fn find_source_files(root: &Path) -> Vec<std::path::PathBuf> {
+fn find_source_files(root: &Path, matcher: Option<&IgnoreMatcher>) -> Vec<std::path::PathBuf> {
     let root_str = root.to_string_lossy();
 
     // Build --extension args dynamically from SOURCE_EXTENSIONS.
-    let mut fd_args: Vec<&str> = vec!["--type", "f"];
+    let mut fd_args: Vec<String> = vec!["--type".into(), "f".into()];
     for ext in SOURCE_EXTENSIONS {
-        fd_args.push("--extension");
-        fd_args.push(ext);
+        fd_args.push("--extension".into());
+        fd_args.push(ext.to_string());
     }
-    fd_args.extend_from_slice(&[
+    let hardcoded: &[&str] = &[
         "--absolute-path",
         "--exclude", ".git",
         "--exclude", "build",
@@ -1988,9 +2063,19 @@ fn find_source_files(root: &Path) -> Vec<std::path::PathBuf> {
         "--exclude", ".build",       // SwiftPM
         "--exclude", "DerivedData",  // Xcode
         "--exclude", "Generated",    // SwiftGen / R.swift codegen output
-        ".",
-    ]);
-    fd_args.push(root_str.as_ref());
+    ];
+    for a in hardcoded {
+        fd_args.push(a.to_string());
+    }
+    // User-configured patterns.
+    if let Some(m) = matcher {
+        for pat in &m.patterns {
+            fd_args.push("--exclude".into());
+            fd_args.push(pat.clone());
+        }
+    }
+    fd_args.push(".".into());
+    fd_args.push(root_str.to_string());
 
     // Prefer `fd` — order of magnitude faster for large trees.
     let fd_result = Command::new("fd").args(&fd_args).output();
@@ -2009,10 +2094,10 @@ fn find_source_files(root: &Path) -> Vec<std::path::PathBuf> {
     }
 
     log::info!("fd not available or found nothing; falling back to walkdir");
-    walkdir_find(root)
+    walkdir_find(root, matcher)
 }
 
-fn walkdir_find(root: &Path) -> Vec<std::path::PathBuf> {
+fn walkdir_find(root: &Path, matcher: Option<&IgnoreMatcher>) -> Vec<std::path::PathBuf> {
     // Use `ignore` crate's WalkBuilder which respects .gitignore and global git excludes.
     const EXCLUDED_DIRS: &[&str] = &[
         ".git", "build", "target", ".gradle", ".build", "DerivedData", "Generated",
@@ -2023,21 +2108,55 @@ fn walkdir_find(root: &Path) -> Vec<std::path::PathBuf> {
         .standard_filters(true) // respects .gitignore, .git/info/exclude, and global excludes
         .hidden(false)
         .parents(false);
+
+    // Borrow the Arc'd glob set so the filter_entry closure can own a cheap clone.
+    let root_owned = root.to_path_buf();
+    let user_glob_set: Option<Arc<globset::GlobSet>> =
+        matcher.filter(|m| !m.is_empty()).map(|m| m.glob_set());
+
+    builder.filter_entry(move |entry| {
+        let path = entry.path();
+        if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+            if let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) {
+                if EXCLUDED_DIRS.contains(&dir_name) {
+                    return false;
+                }
+            }
+            if let Some(gs) = &user_glob_set {
+                let rel = path.strip_prefix(&root_owned).unwrap_or(path);
+                if gs.is_match(rel) {
+                    return false;
+                }
+                // Also check bare directory name so `bazel-*` (compiled as `**/bazel-*`)
+                // excludes the dir at any depth without requiring the full relative path.
+                if let Some(name) = path.file_name() {
+                    if gs.is_match(Path::new(name)) {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    });
+
+    let user_glob_set_files: Option<Arc<globset::GlobSet>> =
+        matcher.filter(|m| !m.is_empty()).map(|m| m.glob_set());
+    let root_owned2 = root.to_path_buf();
+
     let walker = builder.build();
     for result in walker {
         if let Ok(entry) = result {
             let path = entry.path();
-            // Skip excluded directories.
-            if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
-                if let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) {
-                    if EXCLUDED_DIRS.contains(&dir_name) {
-                        continue;
-                    }
-                }
-            }
             if path.is_file() {
                 if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
                     if SOURCE_EXTENSIONS.contains(&ext) {
+                        // Filter files against user patterns (covers path-scoped patterns).
+                        if let Some(gs) = &user_glob_set_files {
+                            let rel = path.strip_prefix(&root_owned2).unwrap_or(path);
+                            if gs.is_match(rel) {
+                                continue;
+                            }
+                        }
                         paths.push(path.to_path_buf());
                     }
                 }
@@ -2050,15 +2169,18 @@ fn walkdir_find(root: &Path) -> Vec<std::path::PathBuf> {
 /// Find source files changed within the last `elapsed_secs` seconds.
 /// Used for the warm-start incremental scan to discover new/modified files.
 /// Falls back to empty list if fd is unavailable (warm start still works via cache manifest).
-fn find_source_files_newer_than(root: &Path, elapsed_secs: u64) -> Vec<PathBuf> {
+fn find_source_files_newer_than(root: &Path, elapsed_secs: u64, matcher: Option<&IgnoreMatcher>) -> Vec<PathBuf> {
     let root_str = root.to_string_lossy();
     let window = format!("{}s", elapsed_secs);
-    let mut fd_args: Vec<&str> = vec!["--type", "f", "--changed-within", window.as_str()];
+    let mut fd_args: Vec<String> = vec![
+        "--type".into(), "f".into(),
+        "--changed-within".into(), window.clone(),
+    ];
     for ext in SOURCE_EXTENSIONS {
-        fd_args.push("--extension");
-        fd_args.push(ext);
+        fd_args.push("--extension".into());
+        fd_args.push(ext.to_string());
     }
-    fd_args.extend_from_slice(&[
+    let hardcoded: &[&str] = &[
         "--absolute-path",
         "--exclude", ".git",
         "--exclude", "build",
@@ -2067,9 +2189,19 @@ fn find_source_files_newer_than(root: &Path, elapsed_secs: u64) -> Vec<PathBuf> 
         "--exclude", ".build",
         "--exclude", "DerivedData",
         "--exclude", "Generated",
-        ".",
-        root_str.as_ref(),
-    ]);
+    ];
+    for a in hardcoded {
+        fd_args.push(a.to_string());
+    }
+    if let Some(m) = matcher {
+        for pat in &m.patterns {
+            fd_args.push("--exclude".into());
+            fd_args.push(pat.clone());
+        }
+    }
+    fd_args.push(".".into());
+    fd_args.push(root_str.to_string());
+
     match Command::new("fd").args(&fd_args).output() {
         Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
             .lines()
@@ -2088,7 +2220,7 @@ fn find_source_files_newer_than(root: &Path, elapsed_secs: u64) -> Vec<PathBuf> 
 /// the O(total_dirs) `fd` scan.  Only runs an incremental `fd --changed-within`
 /// pass to catch files added or modified since the cache was last saved.
 /// This is inspired by the rust-analyzer VFS and gopls file-manifest patterns.
-fn warm_discover_files(root: &Path, cache: &IndexCache) -> Vec<PathBuf> {
+fn warm_discover_files(root: &Path, cache: &IndexCache, matcher: Option<&IgnoreMatcher>) -> Vec<PathBuf> {
     let cache_path = workspace_cache_path(root);
 
     // Compute how many seconds ago the cache was saved.
@@ -2104,18 +2236,29 @@ fn warm_discover_files(root: &Path, cache: &IndexCache) -> Vec<PathBuf> {
     if elapsed_secs == u64::MAX {
         // Can't read cache mtime — fall back to full scan.
         log::info!("warm_discover_files: cannot stat cache file, falling back to full scan");
-        return find_source_files(root);
+        return find_source_files(root, matcher);
     }
 
-    // Phase 1: all previously cached files (deleted files are filtered by the
-    // subsequent mtime check in index_workspace_impl — `path.exists()` is not
-    // called here to avoid an extra stat per file).
-    let cached_paths: HashSet<String> = cache.entries.keys().cloned().collect();
+    // Phase 1: all previously cached files, filtered through the current ignore matcher
+    // so that newly-configured ignorePatterns take effect even on a warm start.
+    let cached_paths: HashSet<String> = cache.entries.keys()
+        .filter(|p| {
+            if let Some(m) = matcher {
+                if !m.is_empty() {
+                    let path = Path::new(p.as_str());
+                    let rel = path.strip_prefix(root).unwrap_or(path);
+                    return !m.matches(rel);
+                }
+            }
+            true
+        })
+        .cloned()
+        .collect();
     let mut paths: Vec<PathBuf> = cached_paths.iter().map(PathBuf::from).collect();
 
     // Phase 2: find files created or modified since the cache was saved.
     // These are the only files `fd` needs to scan for.
-    let newer = find_source_files_newer_than(root, elapsed_secs);
+    let newer = find_source_files_newer_than(root, elapsed_secs, matcher);
     let new_count = newer.iter()
         .filter(|f| !cached_paths.contains(f.to_string_lossy().as_ref()))
         .count();
@@ -3848,6 +3991,12 @@ fn symbol_kw(kind: SymbolKind) -> &'static str {
     }
 }
 
+fn symbol_kw_for_lang(kind: SymbolKind, lang: &str) -> &'static str {
+    let kw = symbol_kw(kind);
+    // Swift uses `func`, not `fun`.
+    if lang == "swift" && kw == "fun" { "func" } else { kw }
+}
+
 /// Collect the declaration signature starting at `start_line`, spanning
 /// multiple lines if the declaration continues (e.g. multiline constructor).
 ///
@@ -4201,7 +4350,40 @@ mod tests {
         (u, idx)
     }
 
-    // ── Pure parsing (SOLID refactoring tests) ──────────────────────────────
+    // ── Swift hover uses "func" not "fun" ────────────────────────────────────
+
+    #[test]
+    fn swift_hover_uses_func_keyword() {
+        // Swift function with no signature detail should show "func", not "fun".
+        let src = "func greet() {}";
+        let (u, idx) = indexed("/Greeting.swift", src);
+        let hover = idx.hover_info_at_location(
+            &Location { uri: u.clone(), range: Default::default() },
+            "greet",
+        ).unwrap_or_default();
+        assert!(
+            hover.contains("func"),
+            "Swift hover should say 'func', got: {hover}"
+        );
+        assert!(
+            !hover.contains("```kotlin\nfun ") && !hover.contains("```swift\nfun "),
+            "Swift hover must not emit 'fun', got: {hover}"
+        );
+    }
+
+    #[test]
+    fn kotlin_hover_still_uses_fun_keyword() {
+        let src = "fun greet() {}";
+        let (u, idx) = indexed("/Greeting.kt", src);
+        let hover = idx.hover_info_at_location(
+            &Location { uri: u.clone(), range: Default::default() },
+            "greet",
+        ).unwrap_or_default();
+        assert!(
+            hover.contains("fun"),
+            "Kotlin hover should say 'fun', got: {hover}"
+        );
+    }
 
     #[test]
     fn parse_file_returns_symbols() {
@@ -6706,6 +6888,121 @@ class Foo @Inject constructor(
         let locs = idx.find_definition_qualified("doWork", Some("super"), &foo_uri);
         assert!(!locs.is_empty(), "super.doWork should resolve");
         assert_eq!(locs[0].uri, bar_uri, "should resolve to Bar.kt");
+    }
+
+    // ── IgnoreMatcher ────────────────────────────────────────────────────────
+
+    #[test]
+    fn ignore_matcher_bare_pattern_matches_any_depth() {
+        let root = Path::new("/workspace");
+        let m = IgnoreMatcher::new(vec!["bazel-*".into()], root);
+        assert!(m.matches(Path::new("bazel-bin/foo.kt")));
+        assert!(m.matches(Path::new("sub/bazel-out/bar.kt")));
+        assert!(!m.matches(Path::new("src/main.kt")));
+    }
+
+    #[test]
+    fn ignore_matcher_path_pattern_matches_relative() {
+        let root = Path::new("/workspace");
+        let m = IgnoreMatcher::new(vec!["third-party/**".into()], root);
+        assert!(m.matches(Path::new("third-party/lib/Foo.kt")));
+        assert!(!m.matches(Path::new("src/third-party-util.kt")));
+    }
+
+    #[test]
+    fn ignore_matcher_absolute_path_normalized() {
+        let root = Path::new("/workspace");
+        let m = IgnoreMatcher::new(vec!["/workspace/bazel-bin/**".into()], root);
+        assert!(m.matches(Path::new("bazel-bin/foo.kt")));
+        assert!(!m.matches(Path::new("src/main.kt")));
+    }
+
+    #[test]
+    fn ignore_matcher_absolute_outside_root_skipped() {
+        let root = Path::new("/workspace");
+        // Pattern outside root should be skipped without panic.
+        let m = IgnoreMatcher::new(vec!["/other/path/**".into()], root);
+        assert!(!m.matches(Path::new("src/main.kt")));
+    }
+
+    #[test]
+    fn ignore_matcher_empty_patterns() {
+        let root = Path::new("/workspace");
+        let m = IgnoreMatcher::new(vec![], root);
+        assert!(m.is_empty());
+        assert!(!m.matches(Path::new("src/main.kt")));
+    }
+
+    // ── E2E: ignorePatterns excludes files from the live index ───────────────
+
+    /// Full indexing pipeline: build a real temp workspace, set ignore patterns,
+    /// run `index_workspace_full`, and verify ignored symbols are absent.
+    #[tokio::test]
+    async fn e2e_ignore_patterns_excludes_symbols() {
+        let dir = tempfile::TempDir::new().expect("create tempdir");
+        let root = dir.path();
+
+        // Normal source file.
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/Main.kt"),
+            "package com.example\nclass MainClass {\n    fun hello(): String = \"world\"\n}\n"
+        ).unwrap();
+
+        // File inside a directory that should be ignored.
+        std::fs::create_dir_all(root.join("bazel-bin/src")).unwrap();
+        std::fs::write(root.join("bazel-bin/src/Generated.kt"),
+            "package com.generated\nclass BazelGenerated {\n    fun run(): Int = 42\n}\n"
+        ).unwrap();
+
+        let indexer = Arc::new(Indexer::new());
+        *indexer.ignore_matcher.write().unwrap() = Some(Arc::new(
+            IgnoreMatcher::new(vec!["bazel-bin/**".to_owned()], root),
+        ));
+
+        Arc::clone(&indexer).index_workspace_full(root, None).await;
+
+        assert!(
+            indexer.definitions.contains_key("MainClass"),
+            "MainClass (in src/) must be indexed"
+        );
+        assert!(
+            !indexer.definitions.contains_key("BazelGenerated"),
+            "BazelGenerated (in bazel-bin/) must be excluded by ignorePatterns"
+        );
+    }
+
+    /// Bare pattern without path separator should exclude at any depth.
+    #[tokio::test]
+    async fn e2e_ignore_patterns_bare_pattern_any_depth() {
+        let dir = tempfile::TempDir::new().expect("create tempdir");
+        let root = dir.path();
+
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/Keep.kt"),
+            "package com.example\nclass KeepMe\n"
+        ).unwrap();
+
+        // Bare pattern "third-party" — should match nested dir at any depth.
+        std::fs::create_dir_all(root.join("modules/third-party/lib")).unwrap();
+        std::fs::write(root.join("modules/third-party/lib/Vendor.kt"),
+            "package com.vendor\nclass VendorClass\n"
+        ).unwrap();
+
+        let indexer = Arc::new(Indexer::new());
+        *indexer.ignore_matcher.write().unwrap() = Some(Arc::new(
+            IgnoreMatcher::new(vec!["third-party".to_owned()], root),
+        ));
+
+        Arc::clone(&indexer).index_workspace_full(root, None).await;
+
+        assert!(
+            indexer.definitions.contains_key("KeepMe"),
+            "KeepMe must be indexed"
+        );
+        assert!(
+            !indexer.definitions.contains_key("VendorClass"),
+            "VendorClass (under third-party/) must be excluded"
+        );
     }
 }
 
