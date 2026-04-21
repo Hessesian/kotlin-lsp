@@ -677,7 +677,8 @@ impl Indexer {
         let _guard = IndexingGuard { indexer: Arc::clone(&self) };
         
         if already {
-            log::info!("index_workspace_impl: an indexing run is already in progress; skipping new start");
+            log::warn!("index_workspace_impl: an indexing run is already in progress, skipping. \
+                       This may cause incomplete indexing — trigger 'kotlin-lsp/reindex' to recover.");
             return WorkspaceIndexResult {
                 files: Vec::new(),
                 stats: IndexStats::default(),

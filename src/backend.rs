@@ -92,9 +92,10 @@ impl LanguageServer for Backend {
                 .filter(|p| p.is_dir())
         };
 
-        // env var pins the workspace (disables did_open auto-detection).
+        // env var or explicit client rootUri pins the workspace (disables did_open auto-detection).
         // config file is a passive fallback — never pins.
-        let workspace_pinned = env_override.is_some();
+        // When the editor provides rootUri it knows the project; no auto-detection needed.
+        let workspace_pinned = env_override.is_some() || client_root.is_some();
         let resolved_root = env_override
             .or(client_root)
             .or_else(config_fallback);
@@ -346,9 +347,13 @@ impl LanguageServer for Backend {
                 let chosen = found.or_else(|| path.parent().map(|p| p.to_path_buf()));
                 if let Some(candidate_root) = chosen {
                     let current_root = self.indexer.workspace_root.read().unwrap().clone();
+                    let cand_canon = std::fs::canonicalize(&candidate_root).unwrap_or_else(|_| candidate_root.clone());
                     let should_switch = match current_root {
                         None => true,
-                        Some(ref r) => !path.starts_with(r),
+                        Some(ref r) => {
+                            let cur_canon = std::fs::canonicalize(r).unwrap_or_else(|_| r.clone());
+                            !path.starts_with(r) && cand_canon != cur_canon
+                        },
                     };
                     if should_switch {
                         need_root_switch = Some(candidate_root);
@@ -389,6 +394,7 @@ impl LanguageServer for Backend {
                 "Outside-root file — indexing content only: {}",
                 opened_path_opt.as_deref().map(|p| p.display().to_string()).unwrap_or_default()
             );
+            self.indexer.set_live_lines(&uri, &text);
             // Index just this file so hover/go-to-def work, then return.
             let idx = Arc::clone(&self.indexer);
             let sem = idx.parse_sem();
@@ -400,6 +406,10 @@ impl LanguageServer for Backend {
             });
             return;
         }
+
+        // Set live_lines immediately so completion can read the current file content
+        // even before the async index_content task finishes.
+        self.indexer.set_live_lines(&uri, &text);
 
         let idx  = Arc::clone(&self.indexer);
         let sem  = idx.parse_sem();
@@ -683,14 +693,17 @@ impl LanguageServer for Backend {
         let snippets = self.snippet_support.load(Ordering::Relaxed);
 
         let (items, hit_cap) = self.indexer.completions(uri, position, snippets);
-        if items.is_empty() {
+        let still_indexing = self.indexer.indexing_in_progress.load(Ordering::Acquire);
+        if items.is_empty() && !still_indexing {
             return Ok(None);
         }
         // When hit_cap is true the list was truncated — tell the client to
         // re-request completions on every keystroke so the list stays tight
         // as the user types more characters.
+        // Also mark incomplete while the workspace is still being indexed so
+        // the client keeps re-querying instead of caching a partial result.
         Ok(Some(CompletionResponse::List(CompletionList {
-            is_incomplete: hit_cap,
+            is_incomplete: hit_cap || still_indexing,
             items,
         })))
     }
