@@ -4,7 +4,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use serde::{Deserialize, Serialize};
 use tower_lsp::lsp_types::*;
 
@@ -37,6 +37,8 @@ pub(crate) struct IgnoreMatcher {
     pub patterns: Vec<String>,
     /// Arc-wrapped so the compiled set can be shared into `filter_entry` closures.
     glob_set: Arc<globset::GlobSet>,
+    /// Workspace root this matcher was built for — used to relativize absolute paths.
+    root: std::path::PathBuf,
 }
 
 impl IgnoreMatcher {
@@ -57,23 +59,32 @@ impl IgnoreMatcher {
                 pat.clone()
             };
 
-            // Bare patterns (no `/`) match at any depth — prepend `**/` for that.
-            let glob_pat = if !normalized.contains('/') {
-                format!("**/{}", normalized)
+            // Bare patterns (no `/`) match at any depth.
+            // Compile two variants:
+            //   `**/pattern`    — matches the directory entry itself (used in walkdir filter_entry)
+            //   `**/pattern/**` — matches all files inside a matching directory (used in filter_locs)
+            let glob_pats: Vec<String> = if !normalized.contains('/') {
+                vec![
+                    format!("**/{}", normalized),
+                    format!("**/{}/", normalized),   // trailing / for dir match
+                    format!("**/{normalized}/**"),
+                ]
             } else {
-                normalized
+                vec![normalized]
             };
 
-            match globset::Glob::new(&glob_pat) {
-                Ok(g) => { builder.add(g); }
-                Err(e) => { log::warn!("ignorePatterns: invalid pattern {:?}: {}", pat, e); }
+            for glob_pat in glob_pats {
+                match globset::Glob::new(&glob_pat) {
+                    Ok(g) => { builder.add(g); }
+                    Err(e) => { log::warn!("ignorePatterns: invalid pattern {:?}: {}", pat, e); }
+                }
             }
         }
         let glob_set = builder.build().unwrap_or_else(|e| {
             log::warn!("ignorePatterns: failed to build glob set: {}", e);
             globset::GlobSetBuilder::new().build().unwrap()
         });
-        Self { patterns, glob_set: Arc::new(glob_set) }
+        Self { patterns, glob_set: Arc::new(glob_set), root: root.to_path_buf() }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -88,6 +99,44 @@ impl IgnoreMatcher {
     /// Clone the Arc-wrapped glob set for use in `filter_entry` closures.
     pub fn glob_set(&self) -> Arc<globset::GlobSet> {
         Arc::clone(&self.glob_set)
+    }
+
+    /// Remove locations whose file path is inside an ignored directory.
+    /// Paths are relativized against the workspace root this matcher was built for.
+    pub fn filter_locs(&self, locs: Vec<Location>) -> Vec<Location> {
+        locs.into_iter()
+            .filter(|loc| {
+                if let Ok(path) = loc.uri.to_file_path() {
+                    let rel = path.strip_prefix(&self.root).unwrap_or(&path);
+                    !self.matches(rel)
+                } else {
+                    true
+                }
+            })
+            .collect()
+    }
+
+    /// Remove file paths (absolute strings) that fall inside an ignored directory.
+    pub fn filter_file_strings(&self, files: Vec<String>) -> Vec<String> {
+        files
+            .into_iter()
+            .filter(|f| {
+                let path = Path::new(f);
+                let rel = path.strip_prefix(&self.root).unwrap_or(path);
+                !self.matches(rel)
+            })
+            .collect()
+    }
+
+    /// Remove `PathBuf` entries that fall inside an ignored directory.
+    pub fn filter_paths(&self, paths: Vec<std::path::PathBuf>) -> Vec<std::path::PathBuf> {
+        paths
+            .into_iter()
+            .filter(|p| {
+                let rel = p.strip_prefix(&self.root).unwrap_or(p);
+                !self.matches(rel)
+            })
+            .collect()
     }
 }
 
@@ -431,6 +480,18 @@ pub struct Indexer {
     /// User-configured ignore patterns from LSP `initializationOptions`.
     /// Applied during file discovery to exclude matching paths.
     pub(crate) ignore_matcher: RwLock<Option<Arc<IgnoreMatcher>>>,
+    /// Raw source paths from `initializationOptions.indexingOptions.sourcePaths`.
+    /// Stored unresolved; resolved against workspace root at indexing time.
+    pub(crate) source_paths_raw: RwLock<Vec<String>>,
+    /// URIs of files indexed from `sourcePaths` that lie outside the workspace root.
+    /// These are treated as library sources: available for hover/definition/autocomplete
+    /// but excluded from findReferences and rename.
+    pub(crate) library_uris: DashSet<String>,
+    /// Simple name → sorted vec of importable FQNs.
+    /// e.g. "Composable" → ["androidx.compose.runtime.Composable"]
+    /// Built from top-level symbols only (no synthetic file-stem keys).
+    /// Rebuilt in rebuild_bare_name_cache(); used by complete_bare for auto-import edits.
+    pub(crate) importable_fqns: std::sync::RwLock<std::collections::HashMap<String, Vec<String>>>,
 }
 
 impl Indexer {
@@ -471,6 +532,9 @@ impl Indexer {
             workspace_pinned: std::sync::atomic::AtomicBool::new(false),
             last_scan_complete: std::sync::atomic::AtomicBool::new(false),
             ignore_matcher: RwLock::new(None),
+            source_paths_raw: RwLock::new(Vec::new()),
+            library_uris: DashSet::new(),
+            importable_fqns: std::sync::RwLock::new(std::collections::HashMap::new()),
         }
     }
 
@@ -486,8 +550,12 @@ impl Indexer {
         self.subtypes.clear();
         self.content_hashes.clear();
         self.completion_cache.clear();
+        self.library_uris.clear();
         if let Ok(mut cache) = self.bare_name_cache.write() {
             cache.clear();
+        }
+        if let Ok(mut map) = self.importable_fqns.write() {
+            map.clear();
         }
         if let Ok(mut last) = self.last_completion.lock() {
             *last = None;
@@ -513,6 +581,7 @@ impl Indexer {
         if !result.aborted {
             self.last_scan_complete.store(result.complete_scan, std::sync::atomic::Ordering::Release);
             self.apply_workspace_result(&result);
+            Arc::clone(&self).index_source_paths(root.to_path_buf()).await;
             self.save_cache_to_disk();
         }
     }
@@ -524,6 +593,7 @@ impl Indexer {
         if !result.aborted {
             self.last_scan_complete.store(result.complete_scan, std::sync::atomic::Ordering::Release);
             self.apply_workspace_result(&result);
+            Arc::clone(&self).index_source_paths(root.to_path_buf()).await;
             self.save_cache_to_disk();
         }
     }
@@ -555,7 +625,8 @@ impl Indexer {
                 let lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
                 let supers = crate::resolver::extract_supers_from_lines(&lines);
                 if !supers.is_empty() {
-                    let super_paths = find_files_for_types(&supers, root);
+                    let m = self.ignore_matcher.read().unwrap().clone();
+                    let super_paths = find_files_for_types(&supers, root, m.as_deref());
                     for sp in super_paths {
                         if !priority_paths.contains(&sp) {
                             priority_paths.push(sp);
@@ -592,6 +663,7 @@ impl Indexer {
         if !result.aborted {
             self.last_scan_complete.store(result.complete_scan, std::sync::atomic::Ordering::Release);
             self.apply_workspace_result(&result);
+            Arc::clone(&self).index_source_paths(root.to_path_buf()).await;
             self.save_cache_to_disk();
         }
     }
@@ -629,19 +701,30 @@ impl Indexer {
         // Warm start: use cache as file manifest to skip the O(total_dirs) fd scan.
         // Only when the cache was built from a complete (non-truncated) scan — otherwise
         // the manifest may be a partial subset and we must fall back to the full scan.
-        let mut paths = if cache.as_ref().map(|c| c.complete_scan).unwrap_or(false) {
+        let warm_start = cache.as_ref().map(|c| c.complete_scan).unwrap_or(false);
+        let mut paths = if warm_start {
             warm_discover_files(root, cache.as_ref().unwrap(), matcher_ref)
         } else {
             find_source_files(root, matcher_ref)
         };
         let total = paths.len();
 
+        // On warm start all selected paths are cache hits — pure deserialization with no
+        // parse overhead — so bypass the file-count cap.  The cap was designed to bound
+        // cold-start parse time, not cache-restore time.  An explicit KOTLIN_LSP_MAX_FILES
+        // env var still wins (it overrides the default 2000 with a real limit).
+        let effective_max = if warm_start && max == DEFAULT_MAX_INDEX_FILES {
+            MAX_FILES_UNLIMITED
+        } else {
+            max
+        };
+
         // Shallower paths first.
         paths.sort_by_key(|p| p.components().count());
-        let paths: Vec<_> = paths.into_iter().take(max).collect();
+        let paths: Vec<_> = paths.into_iter().take(effective_max).collect();
         let indexed_count = paths.len();
 
-        let truncated = total > max && max != MAX_FILES_UNLIMITED;
+        let truncated = total > effective_max && effective_max != MAX_FILES_UNLIMITED;
         if truncated {
             log::warn!(
                 "Large project: eagerly indexing {indexed_count}/{total} files \
@@ -999,6 +1082,8 @@ impl Indexer {
         let mut entries: HashMap<String, FileCacheEntry> = HashMap::new();
         for file_ref in &self.files {
             let uri_str = file_ref.key();
+            // Skip library-source files — they are re-indexed from sourcePaths on each startup.
+            if self.library_uris.contains(uri_str) { continue; }
             let data    = file_ref.value();
             let hash    = self.content_hashes.get(uri_str).map(|h| *h).unwrap_or(0);
             if let Ok(url) = uri_str.parse::<Url>() {
@@ -1021,6 +1106,21 @@ impl Indexer {
         let cache = IndexCache { version: CACHE_VERSION, complete_scan, entries };
         match bincode::serialize(&cache) {
             Ok(bytes) => {
+                // Don't overwrite a complete cache with an incomplete one.
+                // This prevents editor servers (which may load only part of the
+                // workspace) from truncating a cache built by --index-only.
+                if !complete_scan {
+                    if let Ok(meta) = std::fs::metadata(&cache_path) {
+                        if meta.len() > bytes.len() as u64 {
+                            log::info!(
+                                "Cache save skipped: existing cache ({} KB) is larger than \
+                                 incomplete new cache ({} KB)",
+                                meta.len() / 1024, bytes.len() / 1024
+                            );
+                            return;
+                        }
+                    }
+                }
                 match std::fs::write(&cache_path, &bytes) {
                     Ok(()) => log::info!(
                         "Cache saved ({} files, {} KB) → {}",
@@ -1139,6 +1239,94 @@ impl Indexer {
         );
     }
 
+    /// Index all configured `sourcePaths` additively — without clearing the workspace index.
+    ///
+    /// Files outside the workspace root are marked as library sources in `library_uris`:
+    /// they contribute to hover, definition, and autocomplete but are excluded from
+    /// findReferences and rename. Files inside the workspace root are indexed but not
+    /// marked as library (they are already covered by the workspace scan; sourcePaths
+    /// can override ignorePatterns for those).
+    ///
+    /// Generation-safe: captures `root_generation` at the start and discards results
+    /// if it changes during async I/O (root switch / explicit reindex).
+    pub async fn index_source_paths(self: Arc<Self>, workspace_root: PathBuf) {
+        let raw_paths = self.source_paths_raw.read().unwrap().clone();
+        if raw_paths.is_empty() { return; }
+
+        let gen = self.root_generation.load(Ordering::SeqCst);
+
+        // Resolve raw paths against workspace root at call time.
+        let source_paths: Vec<PathBuf> = raw_paths.iter().map(|s| {
+            let p = PathBuf::from(s);
+            if p.is_absolute() { p } else { workspace_root.join(s) }
+        }).collect();
+
+        let sem = Arc::clone(&self.parse_sem);
+        let mut new_library_uris: Vec<String> = Vec::new();
+        let mut all_results: Vec<FileIndexResult> = Vec::new();
+
+        for source_path in &source_paths {
+            if !source_path.exists() {
+                log::warn!("sourcePaths: {:?} does not exist, skipping", source_path);
+                continue;
+            }
+            log::info!("Indexing source path: {}", source_path.display());
+
+            let files = find_source_files_unconstrained(source_path);
+            log::info!("  Found {} source files in {}", files.len(), source_path.display());
+
+            let mut tasks = Vec::new();
+            for path in files {
+                let uri = match Url::from_file_path(&path) {
+                    Ok(u) => u,
+                    Err(_) => continue,
+                };
+                let uri_str = uri.to_string();
+                // Only tag as library if the file is OUTSIDE the workspace root.
+                // Files inside the workspace are already in the main index; sourcePaths
+                // can be used to un-ignore them without misclassifying them as libraries.
+                if !path.starts_with(&workspace_root) {
+                    new_library_uris.push(uri_str.clone());
+                }
+                let sem2 = Arc::clone(&sem);
+                let task: tokio::task::JoinHandle<Option<FileIndexResult>> = tokio::spawn(async move {
+                    let _permit = sem2.acquire_owned().await.ok()?;
+                    let content = tokio::fs::read_to_string(&path).await.ok()?;
+                    Some(Indexer::parse_file(&uri, &content))
+                });
+                tasks.push(task);
+            }
+
+            for task in tasks {
+                if let Ok(Some(result)) = task.await {
+                    all_results.push(result);
+                }
+            }
+        }
+
+        // Bail if workspace switched during async I/O.
+        if self.root_generation.load(Ordering::SeqCst) != gen {
+            log::info!("index_source_paths: generation changed during async I/O, discarding results");
+            return;
+        }
+
+        // Apply results additively (no reset_index_state).
+        for result in all_results {
+            let contrib = file_contributions(&result);
+            self.apply_contributions(contrib);
+        }
+
+        for uri in new_library_uris {
+            self.library_uris.insert(uri);
+        }
+
+        self.rebuild_bare_name_cache();
+        log::info!(
+            "Source paths indexed: {} library files, {} total indexed files",
+            self.library_uris.len(), self.files.len()
+        );
+    }
+
     /// Primitive: drain a `FileContributions` into the DashMaps.
     /// Deduplicates before inserting (same behaviour as before).
     fn apply_contributions(&self, contrib: FileContributions) {
@@ -1185,6 +1373,43 @@ impl Indexer {
         if let Ok(mut cache) = self.bare_name_cache.write() {
             *cache = build_bare_names(&self.definitions);
         }
+        self.rebuild_importable_fqns();
+    }
+
+    /// Build importable_fqns: simple_name → [FQN, …] from real top-level symbols.
+    /// Uses files+package rather than the `qualified` map to avoid synthetic FileStem keys.
+    fn rebuild_importable_fqns(&self) {
+        let mut map: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+        for file_entry in self.files.iter() {
+            let data = file_entry.value();
+            let pkg = match &data.package {
+                Some(p) if !p.is_empty() => p.clone(),
+                _ => continue,
+            };
+            // Detect top-level symbols: a symbol is top-level if its range is not
+            // wholly contained within any other symbol's range in the same file.
+            let syms = &data.symbols;
+            for (i, sym) in syms.iter().enumerate() {
+                let is_nested = syms.iter().enumerate().any(|(j, other)| {
+                    j != i
+                        && other.range.start.line <= sym.range.start.line
+                        && other.range.end.line >= sym.range.end.line
+                        && !(other.range.start.line == sym.range.start.line
+                            && other.range.end.line == sym.range.end.line)
+                });
+                if !is_nested {
+                    let fqn = format!("{}.{}", pkg, sym.name);
+                    map.entry(sym.name.clone()).or_default().push(fqn);
+                }
+            }
+        }
+        for fqns in map.values_mut() {
+            fqns.sort_unstable();
+            fqns.dedup();
+        }
+        if let Ok(mut guard) = self.importable_fqns.write() {
+            *guard = map;
+        }
     }
 
     /// (Re-)parse and index a single file's content in-place.
@@ -1204,6 +1429,9 @@ impl Indexer {
         self.parse_count.fetch_add(1, Ordering::Relaxed);
         // Invalidate cached completion items — the file is changing.
         self.completion_cache.remove(&uri_str);
+        if let Ok(mut last) = self.last_completion.lock() {
+            *last = None;
+        }
         
         // Use pure parse function
         let result = Self::parse_file(uri, content);
@@ -1639,7 +1867,7 @@ impl Indexer {
     ///
     /// Uses `live_lines` (updated synchronously on every keystroke) for the
     /// current file's line text, falling back to indexed lines or disk.
-    pub fn completions(&self, uri: &Url, position: Position, snippets: bool) -> Vec<CompletionItem> {
+    pub fn completions(&self, uri: &Url, position: Position, snippets: bool) -> (Vec<CompletionItem>, bool) {
         // Ensure the file is indexed — on first open, did_open's spawn_blocking
         // may not have finished by the time the first completion request arrives.
         if !self.files.contains_key(uri.as_str()) {
@@ -1657,13 +1885,13 @@ impl Indexer {
             if let Some(l) = ll.get(position.line as usize) {
                 line_owned = l.clone();
                 &line_owned
-            } else { return vec![]; }
+            } else { return (vec![], false); }
         } else if let Some(data) = self.files.get(uri.as_str()) {
             if let Some(l) = data.lines.get(position.line as usize) {
                 line_owned = l.clone();
                 &line_owned
-            } else { return vec![]; }
-        } else { return vec![]; };
+            } else { return (vec![], false); }
+        } else { return (vec![], false); };
 
         // Slice line up to cursor (UTF-16 aware).
         let target = position.character as usize;
@@ -1688,15 +1916,22 @@ impl Indexer {
         let before_prefix = &before[..before.len() - prefix.len()];
 
         // ── completion result cache ──────────────────────────────────────────
-        // The candidate list only changes when the structural context changes
-        // (different dot receiver, different enclosing call, different line).
-        // Typing more characters in the same word doesn't change the candidates —
-        // the client filters them. Cache keyed on (uri, before_prefix, line).
-        let cache_key = format!("{}|{}|{}", uri.as_str(), before_prefix, position.line);
+        // Dot-completion: all members of a type are returned regardless of what
+        // the user has typed after the dot — the client fuzzy-filters them.
+        // Cache key omits prefix so repeated keystrokes after "." are fast.
+        //
+        // Bare-word completion: results are scored/capped by prefix. Including
+        // prefix in the key forces a fresh, precise query for each keystroke and
+        // avoids serving a stale "C"-query cap when the user types "ChildDash".
+        let cache_key = if before_prefix.ends_with('.') {
+            format!("{}|{}|{}", uri.as_str(), before_prefix, position.line)
+        } else {
+            format!("{}|{}|{}|{}", uri.as_str(), before_prefix, position.line, prefix)
+        };
         if let Ok(guard) = self.last_completion.lock() {
             if let Some((ref k, _, ref cached)) = *guard {
                 if k == &cache_key {
-                    return cached.clone();
+                    return (cached.clone(), false);
                 }
             }
         }
@@ -1755,39 +1990,36 @@ impl Indexer {
                     find_named_lambda_param_type(before, recv, self, uri, position.line as usize)
                 };
                 if let Some(elem_type) = elem_type {
-                    let items = crate::resolver::complete_symbol(self, &prefix, Some(&elem_type), uri, snippets);
+                    let (items, _) = crate::resolver::complete_symbol(self, &prefix, Some(&elem_type), uri, snippets);
                     if items.is_empty() {
                         // Type name known (e.g. generic param `T`, `StateType`) but not
                         // indexed — show a single hint item so the user sees the inferred type.
                         use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind};
-                        return vec![CompletionItem {
+                        return (vec![CompletionItem {
                             label: format!("{recv}: {elem_type}"),
                             kind: Some(CompletionItemKind::TYPE_PARAMETER),
                             detail: Some(format!("Inferred type: {elem_type}")),
                             sort_text: Some("~hint".into()),
                             ..Default::default()
-                        }];
+                        }], false);
                     }
-                    return items;
+                    return (items, false);
                 }
-                // Recognised lambda param but type unresolvable — return empty to
-                // avoid showing members of a completely unrelated type.
-                // For `this` we also return empty (don't fall through to unrelated symbols).
-                return vec![];
+                // Recognised lambda param but type unresolvable — return empty.
+                return (vec![], false);
             }
         }
 
-        let mut items = crate::resolver::complete_symbol(
-            self,
-            &prefix,
-            dot_receiver.as_deref(),
-            uri,
-            snippets,
-        );
+        let (mut items, hit_cap) = {
+            // Detect @AnnotationName context — suppress functions/variables.
+            let annotation_only = dot_receiver.is_none()
+                && crate::resolver::is_annotation_context(before, &prefix);
+            crate::resolver::complete_symbol_with_context(
+                self, &prefix, dot_receiver.as_deref(), uri, snippets, annotation_only,
+            )
+        };
 
         // Add scope-aware lambda parameter names (bare-word completion only).
-        // Uses brace-depth backward scan so only in-scope params appear —
-        // a closed sibling lambda's params are never included.
         if dot_receiver.is_none() {
             let prefix_lower = prefix.to_lowercase();
             for param in self.lambda_params_at(uri, position.line as usize) {
@@ -1797,7 +2029,7 @@ impl Indexer {
                         items.push(CompletionItem {
                             label:     param.clone(),
                             kind:      Some(CompletionItemKind::VARIABLE),
-                            sort_text: Some(format!("1.5:{param}")),
+                            sort_text: Some(format!("005:{param}")),
                             ..Default::default()
                         });
                     }
@@ -1810,7 +2042,7 @@ impl Indexer {
             *guard = Some((cache_key, prefix.clone(), items.clone()));
         }
 
-        items
+        (items, hit_cap)
     }
 
     /// Build a Markdown hover snippet for a symbol name.
@@ -2166,7 +2398,55 @@ fn walkdir_find(root: &Path, matcher: Option<&IgnoreMatcher>) -> Vec<std::path::
     paths
 }
 
-/// Find source files changed within the last `elapsed_secs` seconds.
+/// Discover source files under `root` without any hardcoded directory exclusions.
+/// Used for explicit `sourcePaths` entries — the user chose the directory deliberately,
+/// so we trust their intent and don't skip dirs like `build`, `.gradle`, etc.
+fn find_source_files_unconstrained(root: &Path) -> Vec<PathBuf> {
+    let root_str = root.to_string_lossy();
+    let mut fd_args: Vec<String> = vec!["--type".into(), "f".into()];
+    for ext in SOURCE_EXTENSIONS {
+        fd_args.push("--extension".into());
+        fd_args.push(ext.to_string());
+    }
+    fd_args.push("--absolute-path".into());
+    fd_args.push(".".into());
+    fd_args.push(root_str.to_string());
+
+    let fd_result = Command::new("fd").args(&fd_args).output();
+    if let Ok(out) = fd_result {
+        if out.status.success() {
+            let paths: Vec<_> = String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter(|l| !l.is_empty())
+                .map(PathBuf::from)
+                .collect();
+            if !paths.is_empty() {
+                return paths;
+            }
+        }
+    }
+
+    log::info!("fd not available; falling back to walkdir for source path {}", root.display());
+    // Walk without hardcoded dir filters or standard-filter rules.
+    let mut paths = Vec::new();
+    let mut builder = ignore::WalkBuilder::new(root);
+    builder.standard_filters(false).hidden(false).parents(false);
+    for result in builder.build() {
+        if let Ok(entry) = result {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+                    if SOURCE_EXTENSIONS.contains(&ext) {
+                        paths.push(path.to_path_buf());
+                    }
+                }
+            }
+        }
+    }
+    paths
+}
+
+
 /// Used for the warm-start incremental scan to discover new/modified files.
 /// Falls back to empty list if fd is unavailable (warm start still works via cache manifest).
 fn find_source_files_newer_than(root: &Path, elapsed_secs: u64, matcher: Option<&IgnoreMatcher>) -> Vec<PathBuf> {
@@ -2307,7 +2587,7 @@ fn walk_to_git_root(file: &Path) -> Option<std::path::PathBuf> {
 /// Given a list of type names (e.g. `["MviViewModel", "ViewModel"]`), find the
 /// source files in `root` that declare them using a fast `rg` search.
 /// Returns deduplicated, existing paths (at most one file per type).
-fn find_files_for_types(names: &[String], root: &Path) -> Vec<PathBuf> {
+fn find_files_for_types(names: &[String], root: &Path, matcher: Option<&IgnoreMatcher>) -> Vec<PathBuf> {
     if names.is_empty() { return vec![]; }
     // Build a single alternation pattern: `(class|abstract class|...) (TypeA|TypeB)`
     let alts = names.iter()
@@ -2326,11 +2606,12 @@ fn find_files_for_types(names: &[String], root: &Path) -> Vec<PathBuf> {
         Ok(o) if !o.stdout.is_empty() => o,
         _ => return vec![],
     };
-    String::from_utf8_lossy(&out.stdout)
+    let paths: Vec<PathBuf> = String::from_utf8_lossy(&out.stdout)
         .lines()
         .map(PathBuf::from)
         .filter(|p| p.exists())
-        .collect()
+        .collect();
+    matcher.map_or(paths.clone(), |m| m.filter_paths(paths))
 }
 
 /// Return the best search root for rg/fd fallbacks given:
@@ -2359,7 +2640,9 @@ pub(crate) fn effective_rg_root(
 /// When `root` is an absolute path, rg outputs absolute paths in results.
 /// Passing workspace root here is essential; without it rg would search
 /// from CWD which may not be the project when spawned by the editor.
-pub(crate) fn rg_find_definition(name: &str, root: Option<&Path>) -> Vec<Location> {
+///
+/// Results in directories matched by `matcher` are filtered out.
+pub(crate) fn rg_find_definition(name: &str, root: Option<&Path>, matcher: Option<&IgnoreMatcher>) -> Vec<Location> {
     let pattern = crate::resolver::build_rg_pattern(name);
 
     // Use the provided root, or fall back to CWD (which editors like Helix
@@ -2389,10 +2672,12 @@ pub(crate) fn rg_find_definition(name: &str, root: Option<&Path>) -> Vec<Locatio
         _ => return vec![],
     };
 
-    String::from_utf8_lossy(&out.stdout)
+    let locs: Vec<Location> = String::from_utf8_lossy(&out.stdout)
         .lines()
         .filter_map(|l| parse_rg_line_with_content_rooted(l, &search_root).map(|(loc, _)| loc))
-        .collect()
+        .collect();
+
+    matcher.map_or(locs.clone(), |m| m.filter_locs(locs))
 }
 
 /// Run `rg` to find all *usages* of `name` in the project.
@@ -2402,6 +2687,8 @@ pub(crate) fn rg_find_definition(name: &str, root: Option<&Path>) -> Vec<Locatio
 /// excluding lines that contain declaration keywords before `name`.
 /// If `from_uri` is provided, the source file is excluded when
 /// `include_decl` is false (the definition is already known).
+///
+/// Results in directories matched by `matcher` are filtered out.
 pub fn rg_find_references(
     name:         &str,
     parent_class: Option<&str>,
@@ -2413,6 +2700,7 @@ pub fn rg_find_references(
     // search so the declaration site itself is never missed (it uses bare `Name`,
     // not the qualified `Parent.Name` form that Pass A searches for).
     decl_files:   &[String],
+    matcher:      Option<&IgnoreMatcher>,
 ) -> Vec<Location> {
     let search_root: std::borrow::Cow<Path> = match root {
         Some(r) => std::borrow::Cow::Borrowed(r),
@@ -2439,7 +2727,7 @@ pub fn rg_find_references(
         Some(loc)
     };
 
-    if let Some(parent) = parent_class {
+    let result = if let Some(parent) = parent_class {
         // ── Scoped references: parent class is known ──────────────────────────
         //
         // Pass A: qualified form `ParentClass.Name` — works in any file.
@@ -2470,6 +2758,9 @@ pub fn rg_find_references(
             safe_parent, safe_name
         );
         let candidate_files = rg_files_with_matches(&direct_import_pat, &search_root);
+        // Filter candidate files against ignore patterns before searching them.
+        let candidate_files = matcher
+            .map_or(candidate_files.clone(), |m| m.filter_file_strings(candidate_files));
 
         // Step B2 — files in the same package as the parent class declaration.
         // NOTE: for inner classes, same-package files use the QUALIFIED form
@@ -2514,6 +2805,9 @@ pub fn rg_find_references(
         for f in rg_files_with_matches(&pkg_pat, &search_root) {
             if !candidate_files.contains(&f) { candidate_files.push(f); }
         }
+        // Filter candidate files against ignore patterns before searching them.
+        let candidate_files = matcher
+            .map_or(candidate_files.clone(), |m| m.filter_file_strings(candidate_files));
 
         if candidate_files.is_empty() {
             return vec![];
@@ -2545,7 +2839,9 @@ pub fn rg_find_references(
             .filter_map(|l| parse_rg_line_with_content_rooted(l, &search_root))
             .filter_map(filter)
             .collect()
-    }
+    };
+
+    if let Some(m) = matcher { m.filter_locs(result) } else { result }
 }
 
 fn regex_escape(s: &str) -> String {
@@ -2640,7 +2936,9 @@ fn parse_rg_line_with_content_rooted(line: &str, root: &Path) -> Option<(Locatio
 /// of that type (Kotlin/Java `class Foo : Interface`, `implements`, Swift
 /// `class Foo: Protocol`, `struct Foo: Protocol`). This is a fallback when the
 /// subtype index is empty during cold indexing.
-pub fn rg_find_implementors(name: &str, root: Option<&Path>) -> Vec<Location> {
+///
+/// Results in directories matched by `matcher` are filtered out.
+pub fn rg_find_implementors(name: &str, root: Option<&Path>, matcher: Option<&IgnoreMatcher>) -> Vec<Location> {
     let safe = name.to_string();
     let root = match root {
         Some(r) => r,
@@ -2655,7 +2953,7 @@ pub fn rg_find_implementors(name: &str, root: Option<&Path>) -> Vec<Location> {
         Ok(o) if !o.stdout.is_empty() => o,
         _ => return vec![],
     };
-    String::from_utf8_lossy(&out.stdout)
+    let locs: Vec<Location> = String::from_utf8_lossy(&out.stdout)
         .lines()
         .filter_map(|l| parse_rg_line_with_content_rooted(l, root))
         .filter_map(|(loc, content)| {
@@ -2673,7 +2971,8 @@ pub fn rg_find_implementors(name: &str, root: Option<&Path>) -> Vec<Location> {
             }
             None
         })
-        .collect()
+        .collect();
+    matcher.map_or(locs.clone(), |m| m.filter_locs(locs))
 }
 
 pub(crate) fn parse_rg_line(line: &str) -> Option<Location> {
@@ -3280,8 +3579,10 @@ fn lambda_receiver_type_named_arg_ml(
             locs.first().map(|l| l.uri.to_string())
                 .or_else(|| {
                     // On-demand: use rg to find and index the outer class.
+                    let root = idx.workspace_root.read().unwrap().clone();
+                    let matcher = idx.ignore_matcher.read().unwrap().clone();
                     let rg_locs = rg_find_definition(
-                        outer, idx.workspace_root.read().unwrap().as_deref()
+                        outer, root.as_deref(), matcher.as_deref()
                     );
                     for loc in &rg_locs {
                         if !idx.files.contains_key(loc.uri.as_str()) {
@@ -3657,7 +3958,9 @@ fn find_fun_signature_full(fn_name: &str, idx: &Indexer, uri: &Url) -> Option<St
         return Some(sig);
     }
     // Slow path: rg to locate the definition, index on-demand.
-    let locs = rg_find_definition(fn_name, idx.workspace_root.read().unwrap().as_deref());
+    let root = idx.workspace_root.read().unwrap().clone();
+    let matcher = idx.ignore_matcher.read().unwrap().clone();
+    let locs = rg_find_definition(fn_name, root.as_deref(), matcher.as_deref());
     for loc in &locs {
         let file_uri_str = loc.uri.as_str();
         if !idx.files.contains_key(file_uri_str) {
@@ -4867,7 +5170,7 @@ class Child : Base
         // Position after the dot on line 4
         let line = "  fun load() { return repo. }";
         let dot_col = (line.find("repo.").unwrap() + "repo.".len()) as u32;
-        let items = idx.completions(&vm_uri, Position::new(4, dot_col), true);
+        let (items, _) = idx.completions(&vm_uri, Position::new(4, dot_col), true);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(labels.contains(&"findById"), "findById missing; got: {labels:?}");
         assert!(labels.contains(&"save"),     "save missing; got: {labels:?}");
@@ -4885,7 +5188,7 @@ class Child : Base
 
         let line = "  fun run() { repo.fin }";
         let col = (line.find("repo.fin").unwrap() + "repo.fin".len()) as u32;
-        let items = idx.completions(&vm_uri, Position::new(4, col), true);
+        let (items, _) = idx.completions(&vm_uri, Position::new(4, col), true);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(labels.contains(&"findAll"), "findAll missing; got: {labels:?}");
     }
@@ -4910,7 +5213,7 @@ fun use() { lazyLoad { it. } }
         idx2.set_live_lines(&u2, src_with_call);
         let line = "fun use() { lazyLoad { it. } }";
         let col = (line.find("it.").unwrap() + "it.".len()) as u32;
-        let items = idx2.completions(&u2, Position::new(3, col), false);
+        let (items, _) = idx2.completions(&u2, Position::new(3, col), false);
         // Must include a hint item labelled `it: T`
         let hint = items.iter().find(|i| i.label.contains("it:") && i.label.contains('T'));
         assert!(hint.is_some(), "expected `it: T` hint item; got: {:?}", items.iter().map(|i| &i.label).collect::<Vec<_>>());
@@ -6005,6 +6308,7 @@ class State
             true,  // include_declaration
             &activate_uri,
             &[activate_decl],
+            None,  // no ignore patterns in this test
         );
 
         let hit_files: std::collections::HashSet<String> = locs.iter()
@@ -6068,6 +6372,7 @@ class State
             true,
             &other_vm_uri,
             &[other_decl],
+            None,
         );
 
         let hit_files: std::collections::HashSet<String> = locs.iter()
@@ -6134,6 +6439,7 @@ class State
             true,
             &dashboard_uri,
             &[dashboard_decl],  // NOT including VisitBranchContract.kt
+            None,
         );
 
         let hit_files: std::collections::HashSet<String> = locs.iter()
@@ -7003,6 +7309,75 @@ class Foo @Inject constructor(
             !indexer.definitions.contains_key("VendorClass"),
             "VendorClass (under third-party/) must be excluded"
         );
+    }
+
+    /// `rg_find_definition` must not return results from ignored directories.
+    #[test]
+    fn rg_find_definition_filters_ignored_dirs() {
+        let dir = tempfile::TempDir::new().expect("create tempdir");
+        let root = dir.path();
+
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/Real.kt"),
+            "package com.example\nclass MyClass\n"
+        ).unwrap();
+
+        std::fs::create_dir_all(root.join("buildSrc/generated")).unwrap();
+        std::fs::write(root.join("buildSrc/generated/MyClass.kt"),
+            "package com.example\nclass MyClass\n"
+        ).unwrap();
+
+        let matcher = IgnoreMatcher::new(vec!["buildSrc".to_owned()], root);
+        let locs = super::rg_find_definition("MyClass", Some(root), Some(&matcher));
+        let files: Vec<String> = locs.iter()
+            .map(|l| l.uri.to_file_path().unwrap().to_string_lossy().into_owned())
+            .collect();
+
+        assert!(files.iter().any(|f| f.contains("src/Real.kt")),
+            "must include real source; got: {files:?}");
+        assert!(!files.iter().any(|f| f.contains("buildSrc")),
+            "must not include buildSrc results; got: {files:?}");
+    }
+
+    /// `rg_find_references` must exclude candidate files from ignored directories.
+    #[test]
+    fn rg_find_references_filters_ignored_dirs() {
+        let dir = tempfile::TempDir::new().expect("create tempdir");
+        let root = dir.path();
+
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/Contract.kt"),
+            "package com.example\nclass Contract {\n  class Event\n}\n"
+        ).unwrap();
+        std::fs::write(root.join("src/User.kt"),
+            "package com.example\nimport com.example.Contract.Event\nfun use(e: Event) {}\n"
+        ).unwrap();
+
+        std::fs::create_dir_all(root.join("buildSrc")).unwrap();
+        std::fs::write(root.join("buildSrc/Contract.kt"),
+            "package com.example\nclass Contract {\n  class Event\n}\n"
+        ).unwrap();
+
+        let uri = Url::from_file_path(root.join("src/Contract.kt")).unwrap();
+        let decl = root.join("src/Contract.kt").to_str().unwrap().to_owned();
+        let matcher = IgnoreMatcher::new(vec!["buildSrc".to_owned()], root);
+
+        let locs = super::rg_find_references(
+            "Event",
+            Some("Contract"),
+            Some("com.example"),
+            Some(root),
+            true,
+            &uri,
+            &[decl],
+            Some(&matcher),
+        );
+        let files: Vec<String> = locs.iter()
+            .map(|l| l.uri.to_file_path().unwrap().to_string_lossy().into_owned())
+            .collect();
+
+        assert!(!files.iter().any(|f| f.contains("buildSrc")),
+            "must not include buildSrc in references; got: {files:?}");
     }
 }
 

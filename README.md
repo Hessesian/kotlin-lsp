@@ -51,7 +51,7 @@ More editors: [Neovim, VS Code, Zed →](docs/editors.md)
 |---|---|
 | **Go-to-definition** | Index → superclass hierarchy → `rg` fallback. Multi-hop chains, lambda params, `this`/`super` |
 | **Hover** | Declaration signature, lambda param types, Kotlin stdlib docs |
-| **Completion** | Dot-completion with type resolution, bare-word, stdlib entries, visibility filtering |
+| **Completion** | Dot-completion with type resolution, bare-word, auto-import, scored ranking, stdlib entries, visibility filtering |
 | **References** | Project-wide `rg --word-regexp` + open buffers |
 | **Document/workspace symbol** | Outline view, fuzzy search, dot-qualified extension function queries |
 | **Rename** | Project-wide via `WorkspaceEdit` |
@@ -112,6 +112,89 @@ Pattern semantics follow gitignore glob rules:
 | `/abs/path/**` | Absolute path — normalized to relative before matching |
 
 Patterns are applied to both `fd` (fast path) and the `walkdir` fallback, and also filter the warm-start cached manifest so newly added patterns take effect without clearing the cache.
+
+### Source paths
+
+Index extra directories (like library sources or generated stubs) for hover, go-to-definition and autocomplete — while keeping them out of `findReferences` and rename results:
+
+```toml
+# ~/.config/helix/languages.toml
+[language-server.kotlin-lsp.config.indexingOptions]
+sourcePaths = [
+  "~/.kotlin-lsp/sources",  # extracted Gradle library sources (see below)
+  "buildSrc/src",           # relative to workspace root
+]
+```
+
+| Behaviour | `sourcePaths` files |
+|---|---|
+| Hover / go-to-definition | ✓ |
+| Autocomplete | ✓ |
+| `findReferences` | ✗ (excluded) |
+| `rename` | ✗ (excluded) |
+
+- Paths can be absolute (including `~/…`), or relative to the workspace root.
+- Unlike `ignorePatterns`, hardcoded directory excludes (`.gradle`, `build`, `target`, …) are **not** applied — the full path is trusted.
+- Files that happen to overlap with the workspace root are indexed but **not** excluded from findReferences (they are workspace files, not library sources).
+
+#### Extracting Gradle library sources
+
+Use the included script to unpack `*-sources.jar` files from your Gradle cache:
+
+```bash
+# Extract all androidx.compose sources (latest version of each artifact)
+python3 contrib/extract-sources.py androidx.compose
+
+# Multiple filters
+python3 contrib/extract-sources.py androidx.compose org.jetbrains.kotlinx
+
+# Extract everything (can be large)
+python3 contrib/extract-sources.py
+
+# Preview without writing files
+python3 contrib/extract-sources.py --dry-run androidx.compose
+
+# Custom Gradle home / output dir
+python3 contrib/extract-sources.py --gradle-home ~/work/.gradle --output ~/my-sources androidx.compose
+```
+
+Sources are extracted to `~/.kotlin-lsp/sources/<group>.<artifact>/`. Re-run the script after `./gradlew build` to pick up new dependencies. The script deduplicates by keeping only the latest downloaded version of each artifact.
+
+Then add the output directory to your LSP config (printed at the end of each run):
+
+```toml
+[language-server.kotlin-lsp.config.indexingOptions]
+sourcePaths = ["~/.kotlin-lsp/sources"]
+```
+
+### Auto-import
+
+When completing an unimported symbol (class, interface, object), kotlin-lsp automatically adds the import statement:
+
+- Start typing a class name (uppercase, ≥ 2 chars) → completion shows candidates from all indexed files including `sourcePaths`
+- Select a candidate → the symbol is inserted **and** `import pkg.ClassName` is added at the correct position
+- If two classes share the same name (e.g. `Button` from `material` and `material3`), both appear with their package shown in the detail column — pick the right one
+- Already-imported symbols appear without a duplicate edit
+- Same-package symbols appear without any import edit
+- Star imports (`import pkg.*`) are respected — no redundant explicit import added
+
+### Completion ranking
+
+Completions are scored by match quality so the most relevant items appear first:
+
+| Score | Match type | Example |
+|---|---|---|
+| 0 | Exact prefix (case-insensitive) | `Col` → **Col**umn |
+| 1 | CamelCase acronym | `CB` → **C**olumn**B**utton, `mSF` → **m**y**S**tate**F**low |
+| 2 | Substring (same-file/package only) | `View` → RecyclerView |
+
+Results are capped at 150 items. When the cap is hit, `isIncomplete: true` is returned so the client re-queries on every keystroke — the list tightens naturally as you type more characters.
+
+**Context-aware filtering:**
+- Lowercase prefix → only functions, vars, params (no classes)
+- Uppercase prefix → only classes, objects, types (no functions)
+- `@` prefix → only annotation/class kinds (no functions or variables)
+- Cross-package symbols require prefix ≥ 2 characters to prevent noise
 
 ---
 

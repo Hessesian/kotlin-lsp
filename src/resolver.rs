@@ -23,15 +23,152 @@ use std::process::Command;
 use std::sync::Arc;
 
 use tower_lsp::lsp_types::{
-    CompletionItem, CompletionItemKind, InsertTextFormat, Location, Position, Range, SymbolKind, Url,
+    CompletionItem, CompletionItemKind, InsertTextFormat, Location, Position, Range, SymbolKind,
+    TextEdit, Url,
 };
 
 use crate::indexer::{parse_rg_line, rg_find_definition, Indexer};
-use crate::types::Visibility;
+use crate::types::{ImportEntry, Visibility};
+
+// ─── auto-import helpers ──────────────────────────────────────────────────────
+
+/// Return all importable FQNs for a simple symbol name (e.g. "Composable").
+pub(crate) fn fqns_for_name(idx: &Indexer, name: &str) -> Vec<String> {
+    idx.importable_fqns.read()
+        .map(|m| m.get(name).cloned().unwrap_or_default())
+        .unwrap_or_default()
+}
+
+/// True if `fqn` is already usable in the file without an additional import:
+/// - exact non-alias import: `import pkg.Name` where local_name == last segment
+/// - star import covering the package: `import pkg.*`
+pub(crate) fn already_imported(fqn: &str, imports: &[ImportEntry]) -> bool {
+    let last_seg = fqn.rsplit('.').next().unwrap_or(fqn);
+    let pkg = match fqn.rfind('.') {
+        Some(i) => &fqn[..i],
+        None => "",
+    };
+    imports.iter().any(|imp| {
+        if imp.is_star {
+            imp.full_path == pkg
+        } else {
+            // Only count as "already imported" when not aliased to a different name.
+            imp.full_path == fqn && imp.local_name == last_seg
+        }
+    })
+}
+
+/// Find the line number after which to insert a new import statement.
+/// Returns the 0-based line index of the *new* import line (the line we'll insert before).
+/// Priority: after the last existing `import` line; else after the `package` line; else line 0.
+pub(crate) fn import_insertion_line(lines: &[String]) -> u32 {
+    // Find the last import line.
+    let last_import = lines.iter().enumerate().rev()
+        .find(|(_, l)| l.trim_start().starts_with("import "))
+        .map(|(i, _)| i);
+    if let Some(i) = last_import {
+        return (i + 1) as u32;
+    }
+    // No imports — insert after package declaration (with a blank line gap).
+    let pkg_line = lines.iter().enumerate()
+        .find(|(_, l)| l.trim_start().starts_with("package "))
+        .map(|(i, _)| i);
+    if let Some(i) = pkg_line {
+        return (i + 1) as u32;
+    }
+    0
+}
+
+/// Build a TextEdit that inserts `import {fqn}\n` at the correct position.
+pub(crate) fn make_import_edit(fqn: &str, lines: &[String]) -> TextEdit {
+    let line = import_insertion_line(lines);
+    // When inserting right after the package line (no existing imports), add a blank line.
+    let needs_blank = line > 0
+        && lines.get((line - 1) as usize)
+            .map(|l| l.trim_start().starts_with("package "))
+            .unwrap_or(false)
+        && lines.get(line as usize).map(|l| !l.trim().is_empty()).unwrap_or(false);
+    let new_text = if needs_blank {
+        format!("\nimport {fqn}\n")
+    } else {
+        format!("import {fqn}\n")
+    };
+    TextEdit {
+        range: Range {
+            start: tower_lsp::lsp_types::Position { line, character: 0 },
+            end:   tower_lsp::lsp_types::Position { line, character: 0 },
+        },
+        new_text,
+    }
+}
+
+// ─── match scoring ────────────────────────────────────────────────────────────
+
+/// Score how well `name` matches `prefix`. Lower = better.
+///
+/// - `0` — `name` starts with `prefix` (case-insensitive, fastest/best)
+/// - `1` — camelCase acronym: every character in `prefix` (uppercase-as-given)
+///          matches the first letter of successive CamelCase/underscore word
+///          segments in `name` (e.g. `CB` → `ColumnButton`, `mSF` → `myStateFlow`)
+/// - `2` — `name` contains `prefix` as a case-insensitive substring
+/// - `None` — no match; exclude this symbol
+pub(crate) fn match_score(name: &str, prefix: &str) -> Option<u8> {
+    if prefix.is_empty() { return Some(0); }
+    let name_lower  = name.to_lowercase();
+    let prefix_lower = prefix.to_lowercase();
+    if name_lower.starts_with(&prefix_lower)        { return Some(0); }
+    if camel_acronym_match(name, prefix)            { return Some(1); }
+    if name_lower.contains(&prefix_lower)           { return Some(2); }
+    None
+}
+
+/// True if every character in `prefix` matches the first character of a successive
+/// CamelCase or underscore-delimited word in `name`.
+///
+/// Examples:
+///   `CB`  vs `ColumnButton`    → true  (C=Column, B=Button)
+///   `mSF` vs `myStateFlow`     → true  (m=my, S=State, F=Flow)
+///   `CB`  vs `CoolBar`         → false (C=C ok, B must start next word, 'oolBar' has no word start at 'B')
+///   `CB`  vs `coolBar`         → false (first prefix char is 'C' but name's first char is lowercase 'c')
+fn camel_acronym_match(name: &str, prefix: &str) -> bool {
+    // Collect the first character of each CamelCase / underscore segment.
+    let mut word_starts: Vec<char> = Vec::new();
+    let chars: Vec<char> = name.chars().collect();
+    for (i, &c) in chars.iter().enumerate() {
+        let is_word_start = i == 0
+            || c == '_'
+            || (c.is_uppercase() && i > 0 && chars[i - 1].is_lowercase())
+            || (c.is_uppercase() && i > 0 && chars[i - 1].is_uppercase()
+                && i + 1 < chars.len() && chars[i + 1].is_lowercase());
+        if is_word_start && c != '_' {
+            word_starts.push(c.to_lowercase().next().unwrap_or(c));
+        }
+    }
+
+    // Every prefix char must match successive word starts (in order, not necessarily consecutive).
+    let prefix_chars: Vec<char> = prefix.to_lowercase().chars().collect();
+    let mut wi = 0;
+    for &pc in &prefix_chars {
+        loop {
+            if wi >= word_starts.len() { return false; }
+            if word_starts[wi] == pc   { wi += 1; break; }
+            wi += 1;
+        }
+    }
+    true
+}
 
 // ─── completion entry point ───────────────────────────────────────────────────
 
+/// Maximum completion items returned per response.
+/// When capped, `is_incomplete` should be set so the client re-queries.
+pub(crate) const COMPLETION_CAP: usize = 150;
+
 /// Provide completion candidates for `prefix` at the current position.
+///
+/// Returns `(items, hit_cap)` — when `hit_cap` is true the caller should set
+/// `CompletionList.is_incomplete = true` so the client re-requests completions
+/// as the user types more characters.
 ///
 /// Two modes:
 /// - **Dot-completion** (`dot_receiver = Some("obj")`): infer the receiver's type
@@ -45,11 +182,31 @@ pub fn complete_symbol(
     dot_receiver: Option<&str>,
     from_uri: &Url,
     snippets: bool,
-) -> Vec<CompletionItem> {
+) -> (Vec<CompletionItem>, bool) {
+    complete_symbol_with_context(idx, prefix, dot_receiver, from_uri, snippets, false)
+}
+
+/// Like `complete_symbol` but with explicit annotation context flag.
+/// Called from `indexer::completions` after detecting a `@` trigger.
+pub fn complete_symbol_with_context(
+    idx: &Indexer,
+    prefix: &str,
+    dot_receiver: Option<&str>,
+    from_uri: &Url,
+    snippets: bool,
+    annotation_only: bool,
+) -> (Vec<CompletionItem>, bool) {
     if let Some(receiver) = dot_receiver {
-        return complete_dot(idx, receiver, from_uri, snippets);
+        return (complete_dot(idx, receiver, from_uri, snippets), false);
     }
-    complete_bare(idx, prefix, from_uri, snippets)
+    complete_bare(idx, prefix, from_uri, snippets, annotation_only)
+}
+
+/// Detect whether the character immediately before `prefix` in `line` is `@`.
+/// Used to restrict completions to annotation/class kinds only.
+pub(crate) fn is_annotation_context(line: &str, prefix: &str) -> bool {
+    let trim = line.len().saturating_sub(prefix.len());
+    line[..trim].ends_with('@')
 }
 
 /// Completion for `super.` — gather all members from the parent hierarchy.
@@ -255,55 +412,77 @@ fn vis_tag(vis: Visibility) -> &'static str {
     }
 }
 
-/// Bare-word completion: prefix-filter across local file + same-package + index.
+/// Bare-word completion: match-scored across local file + same-package + index.
 ///
 /// Case heuristic:
 /// - **Lowercase prefix** → only return symbols whose name starts with a
 ///   lowercase letter (local vars, params, fields, fun names).  Class names are
 ///   excluded because they are rarely what the user wants when typing `acc…`.
 /// - **Uppercase prefix or empty** → return everything (class names + members).
-fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippets: bool) -> Vec<CompletionItem> {
-    let prefix_lower = prefix.to_lowercase();
-    let lowercase_mode = prefix.chars().next().map(|c| c.is_lowercase()).unwrap_or(false);
+///
+/// Returns `(items, hit_cap)` — callers should propagate `hit_cap` to
+/// `CompletionList.is_incomplete` so the client re-queries each keystroke.
+fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippets: bool, annotation_only: bool)
+    -> (Vec<CompletionItem>, bool)
+{
+    let first_char = prefix.chars().next();
+    let lowercase_mode = first_char.map(|c| c.is_lowercase()).unwrap_or(false);
+    // Symmetric to lowercase_mode: user is deliberately typing a CamelCase name.
+    let uppercase_mode = first_char.map(|c| c.is_uppercase()).unwrap_or(false);
     let mut seen = std::collections::HashSet::new();
-    let mut items = Vec::new();
+    let mut items: Vec<CompletionItem> = Vec::new();
 
-    // `tier` controls sort order: 0 = same file, 1 = same pkg, 2 = cross-pkg, 3 = stdlib.
-    let mut add = |name: &str, kind: CompletionItemKind, tier: u8| {
-        // Case gate: in lowercase mode skip CamelCase symbols.
+    // `src_tier` encodes symbol origin (0=same file, 1=same pkg, 2=cross-pkg, 3=stdlib).
+    // Full sort_text: "{src_tier}{match_score}:{name_lower}" so that
+    //   same-file exact match ("000:column") beats same-file acronym ("001:columnbutton")
+    //   which beats same-pkg exact ("010:column"), etc.
+    let mut add = |name: &str, kind: CompletionItemKind, src_tier: u8, max_score: u8| {
+        // In annotation context (@Foo), only emit class/interface/type items.
+        if annotation_only && matches!(kind,
+            CompletionItemKind::FUNCTION | CompletionItemKind::METHOD |
+            CompletionItemKind::VARIABLE | CompletionItemKind::FIELD  |
+            CompletionItemKind::PROPERTY)
+        {
+            return;
+        }
+        // Case gates: match user intent by the capitalisation of what they typed.
         if lowercase_mode && name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
             return;
         }
-        if name.to_lowercase().starts_with(&prefix_lower) && seen.insert(name.to_string()) {
-            let is_fn = snippets && matches!(kind, CompletionItemKind::FUNCTION | CompletionItemKind::METHOD);
-            items.push(CompletionItem {
-                label:              name.to_string(),
-                kind:               Some(kind),
-                // filter_text must match the label so clients that use sort_text
-                // for fuzzy filtering (e.g. Helix) still find the item correctly.
-                filter_text:        Some(name.to_string()),
-                sort_text:          Some(format!("{}:{}", tier, name.to_lowercase())),
-                insert_text:        if is_fn { Some(format!("{}($1)", name)) } else { None },
-                insert_text_format: if is_fn { Some(InsertTextFormat::SNIPPET) } else { None },
-                ..Default::default()
-            });
+        if uppercase_mode && name.chars().next().map(|c| c.is_lowercase()).unwrap_or(false) {
+            return;
         }
+        let score = match match_score(name, prefix) {
+            Some(s) if s <= max_score => s,
+            _ => return,
+        };
+        if !seen.insert(name.to_string()) { return; }
+        let is_fn = snippets && matches!(kind, CompletionItemKind::FUNCTION | CompletionItemKind::METHOD);
+        items.push(CompletionItem {
+            label:              name.to_string(),
+            kind:               Some(kind),
+            filter_text:        Some(name.to_string()),
+            sort_text:          Some(format!("{}{}{}", src_tier, score, name.to_lowercase())),
+            insert_text:        if is_fn { Some(format!("{}($1)", name)) } else { None },
+            insert_text_format: if is_fn { Some(InsertTextFormat::SNIPPET) } else { None },
+            ..Default::default()
+        });
     };
 
-    // 1. Local file symbols — tier 0 (highest priority).
+    // 1. Local file symbols — src_tier 0, allow substring fallback (max_score=2).
     if let Some(f) = idx.files.get(from_uri.as_str()) {
         for sym in &f.symbols {
-            add(&sym.name, symbol_kind_to_completion(sym.kind), 0);
+            add(&sym.name, symbol_kind_to_completion(sym.kind), 0, 2);
         }
-        // Surface constructor params / local vars from cached declared_names.
+        // Constructor params / local vars from declared_names (lowercase only).
         if lowercase_mode {
             for name in &f.declared_names {
-                add(name, CompletionItemKind::VARIABLE, 0);
+                add(name, CompletionItemKind::VARIABLE, 0, 2);
             }
         }
     }
 
-    // 2. Same-package symbols — tier 1.
+    // 2. Same-package symbols — src_tier 1, allow substring fallback (max_score=2).
     let pkg = idx.files.get(from_uri.as_str())
         .and_then(|f| f.package.clone())
         .unwrap_or_default();
@@ -313,35 +492,105 @@ fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippets: bool) ->
                 if uri_str == from_uri.as_str() { continue; }
                 if let Some(f) = idx.files.get(uri_str.as_str()) {
                     for sym in &f.symbols {
-                        add(&sym.name, symbol_kind_to_completion(sym.kind), 1);
+                        add(&sym.name, symbol_kind_to_completion(sym.kind), 1, 2);
                     }
                 }
             }
         }
     }
 
-    // 3. Cross-package class index — tier 2, only in uppercase mode to avoid noise.
-    if !lowercase_mode {
+    // 3. Cross-package symbols — src_tier 2, uppercase mode only, prefix ≥ 2 chars,
+    //    prefix/acronym matches only (max_score=1) — no substring flood.
+    // Emits one CompletionItem per distinct FQN, with additionalTextEdits for auto-import.
+    if !lowercase_mode && prefix.len() >= 2 {
+        let (cur_imports, cur_pkg, cur_lines) = idx.files.get(from_uri.as_str())
+            .map(|f| (f.imports.clone(), f.package.clone().unwrap_or_default(), f.lines.clone()))
+            .unwrap_or_default();
+
         if let Ok(cache) = idx.bare_name_cache.read() {
             for name in cache.iter() {
-                add(name, CompletionItemKind::CLASS, 2);
+                // Case gate + match quality gate (prefix or acronym only).
+                if name.chars().next().map(|c| c.is_lowercase()).unwrap_or(false) { continue; }
+                let score = match match_score(name, prefix) {
+                    Some(s) if s <= 1 => s,
+                    _ => continue,
+                };
+
+                // Already visible via tier-0 or tier-1 — skip, no import needed.
+                if seen.contains(name.as_str()) { continue; }
+
+                let fqns = fqns_for_name(idx, name);
+
+                if fqns.is_empty() {
+                    if seen.insert(name.clone()) {
+                        items.push(CompletionItem {
+                            label:       name.clone(),
+                            kind:        Some(CompletionItemKind::CLASS),
+                            filter_text: Some(name.clone()),
+                            sort_text:   Some(format!("2{}:{}", score, name.to_lowercase())),
+                            ..Default::default()
+                        });
+                    }
+                    continue;
+                }
+
+                for fqn in &fqns {
+                    let pkg_of_fqn = match fqn.rfind('.') {
+                        Some(i) => &fqn[..i],
+                        None => "",
+                    };
+
+                    let needs_import = !already_imported(fqn, &cur_imports)
+                        && !cur_imports.iter().any(|imp| imp.is_star && imp.full_path == pkg_of_fqn)
+                        && pkg_of_fqn != cur_pkg;
+
+                    let item_key = format!("{}:{}", name, fqn);
+                    if !seen.insert(item_key) { continue; }
+
+                    let import_edit = if needs_import {
+                        Some(vec![make_import_edit(fqn, &cur_lines)])
+                    } else {
+                        None
+                    };
+                    let detail = if needs_import { Some(pkg_of_fqn.to_string()) } else { None };
+
+                    items.push(CompletionItem {
+                        label:                name.clone(),
+                        kind:                 Some(CompletionItemKind::CLASS),
+                        filter_text:          Some(name.clone()),
+                        sort_text:            Some(format!("2{}:{}", score, name.to_lowercase())),
+                        detail,
+                        additional_text_edits: import_edit,
+                        ..Default::default()
+                    });
+                }
             }
         }
     }
 
-    // 4. Stdlib top-level / scope functions (listOf, println, run, with, …) — tier 3.
+    // 4. Stdlib top-level / scope functions — src_tier 3.
     for mut item in crate::stdlib::bare_completions(snippets) {
-        if lowercase_mode && item.label.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+        let label = item.label.clone();
+        if lowercase_mode && label.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
             continue;
         }
-        if item.label.to_lowercase().starts_with(&prefix_lower) && seen.insert(item.label.clone()) {
-            item.filter_text = Some(item.label.clone());
-            item.sort_text = Some(format!("3:{}", item.label.to_lowercase()));
+        let score = match match_score(&label, prefix) {
+            Some(s) if s <= 2 => s,
+            _ => continue,
+        };
+        if seen.insert(label.clone()) {
+            item.filter_text = Some(label.clone());
+            item.sort_text   = Some(format!("3{}:{}", score, label.to_lowercase()));
             items.push(item);
         }
     }
 
-    items
+    // Sort by computed sort_text so the best matches are first even before capping.
+    items.sort_by(|a, b| a.sort_text.cmp(&b.sort_text));
+
+    let hit_cap = items.len() > COMPLETION_CAP;
+    items.truncate(COMPLETION_CAP);
+    (items, hit_cap)
 }
 
 /// Collect all symbols from a file URI as completion items.
@@ -540,8 +789,9 @@ fn resolve_symbol_inner(idx: &Indexer, name: &str, from_uri: &Url, with_hierarch
     }
 
     // 5 ── project-wide rg ───────────────────────────────────────────────────
-    let root_guard = idx.workspace_root.read().unwrap();
-    rg_find_definition(name, root_guard.as_deref())
+    let root = idx.workspace_root.read().unwrap().clone();
+    let matcher = idx.ignore_matcher.read().unwrap().clone();
+    rg_find_definition(name, root.as_deref(), matcher.as_deref())
 }
 
 /// Index-only resolver for use in completion paths.
@@ -758,7 +1008,8 @@ fn resolve_via_imports(idx: &Indexer, name: &str, uri: &Url) -> Vec<Location> {
         // iii) on-demand fd + parse (indexing race or file never opened).
         let root_guard = idx.workspace_root.read().unwrap();
         let root = root_guard.as_deref();
-        let locs = fd_find_and_parse(name, &imp.full_path, root);
+        let matcher = idx.ignore_matcher.read().unwrap().clone();
+        let locs = fd_find_and_parse(name, &imp.full_path, root, matcher.as_deref());
         if !locs.is_empty() { return locs; }
     }
     vec![]
@@ -799,7 +1050,7 @@ fn import_file_stems(import_path: &str) -> Vec<String> {
 ///      extremely precise; handles multi-module projects where files live in
 ///      subdirs like `app/src/main/java/cz/moneta/…/EProductScreen.java`
 ///   2. Fallback: global fd by filename only (handles non-standard layouts)
-fn fd_find_and_parse(symbol_name: &str, full_import_path: &str, root: Option<&Path>) -> Vec<Location> {
+fn fd_find_and_parse(symbol_name: &str, full_import_path: &str, root: Option<&Path>, matcher: Option<&crate::indexer::IgnoreMatcher>) -> Vec<Location> {
     let pkg = package_prefix(full_import_path);
     let expected_pkg = if pkg.is_empty() { None } else { Some(pkg.as_str()) };
     let pkg_dir = pkg.replace('.', "/");
@@ -815,12 +1066,14 @@ fn fd_find_and_parse(symbol_name: &str, full_import_path: &str, root: Option<&Pa
                 format!(r".*/{pkg_dir}/{stem}\.({ext_alt})$")
             };
             let locs = fd_search_by_full_path_pattern(&pat, symbol_name, expected_pkg, root);
+            let locs = matcher.map_or(locs.clone(), |m| m.filter_locs(locs));
             if !locs.is_empty() { return locs; }
         }
 
         // Strategy 2: global filename-only search (fallback for flat / non-standard layouts).
         for ext in crate::indexer::SOURCE_EXTENSIONS {
             let locs = fd_search_file(&format!("{stem}.{ext}"), symbol_name, expected_pkg, root);
+            let locs = matcher.map_or(locs.clone(), |m| m.filter_locs(locs));
             if !locs.is_empty() { return locs; }
         }
     }
@@ -960,7 +1213,8 @@ fn resolve_star_imports(idx: &Indexer, name: &str, uri: &Url) -> Vec<Location> {
         // b) rg scoped to the package directory for unindexed files
         let root_guard = idx.workspace_root.read().unwrap();
         let root = root_guard.as_deref();
-        let locs = rg_in_package_dir(name, &pkg, root);
+        let matcher = idx.ignore_matcher.read().unwrap().clone();
+        let locs = rg_in_package_dir(name, &pkg, root, matcher.as_deref());
         if !locs.is_empty() { return locs; }
     }
     vec![]
@@ -1171,7 +1425,7 @@ fn split_top_level_commas(text: &str) -> Vec<&str> {
 /// Package `com.example.ui` → globs `**/com/example/ui/*.{kt,java,swift}`.
 /// This handles the common case where the package structure mirrors the
 /// directory tree (standard Kotlin / Maven / Gradle convention).
-fn rg_in_package_dir(name: &str, package: &str, root: Option<&Path>) -> Vec<Location> {
+fn rg_in_package_dir(name: &str, package: &str, root: Option<&Path>, matcher: Option<&crate::indexer::IgnoreMatcher>) -> Vec<Location> {
     let pkg_path = package.replace('.', "/");
     let pattern   = build_rg_pattern(name);
 
@@ -1185,6 +1439,8 @@ fn rg_in_package_dir(name: &str, package: &str, root: Option<&Path>) -> Vec<Loca
         "--no-heading", "--with-filename", "--line-number", "--column",
     ]);
     for ext in crate::indexer::SOURCE_EXTENSIONS {
+        // Positive globs first — negative globs must come after to avoid being
+        // overridden by later positive globs (rg: last matching glob wins).
         cmd.args(["--glob", &format!("**/{pkg_path}/*.{ext}")]);
     }
     cmd.args(["-e", &pattern]);
@@ -1195,10 +1451,11 @@ fn rg_in_package_dir(name: &str, package: &str, root: Option<&Path>) -> Vec<Loca
         _ => return vec![],
     };
 
-    String::from_utf8_lossy(&out.stdout)
+    let locs: Vec<Location> = String::from_utf8_lossy(&out.stdout)
         .lines()
         .filter_map(parse_rg_line)
-        .collect()
+        .collect();
+    matcher.map_or(locs.clone(), |m| m.filter_locs(locs))
 }
 
 // ─── shared helpers ───────────────────────────────────────────────────────────
@@ -2343,7 +2600,7 @@ data class State(
         // same-package file has "pkgBar"
         idx.index_content(&other_uri, "package a\nfun pkgBar() {}");
 
-        let items = complete_bare(&idx, "", &local_uri, false);
+        let (items, _) = complete_bare(&idx, "", &local_uri, false, false);
 
         let local_pos = items.iter().position(|i| i.label == "localFoo");
         let pkg_pos   = items.iter().position(|i| i.label == "pkgBar");
@@ -2431,5 +2688,293 @@ data class State(
         ];
         let supers = extract_supers_from_lines(&lines);
         assert_eq!(supers, vec!["BaseModule"]);
+    }
+
+    // ── auto-import helpers ───────────────────────────────────────────────────
+
+    fn make_import_entry(full_path: &str, local_name: &str, is_star: bool) -> crate::types::ImportEntry {
+        crate::types::ImportEntry {
+            full_path: full_path.to_string(),
+            local_name: local_name.to_string(),
+            is_star,
+        }
+    }
+
+    #[test]
+    fn already_imported_exact() {
+        let imports = vec![make_import_entry("com.example.Foo", "Foo", false)];
+        assert!(already_imported("com.example.Foo", &imports));
+    }
+
+    #[test]
+    fn already_imported_alias_not_counted() {
+        // `import com.example.Foo as Bar` — Foo is not usable as Foo
+        let imports = vec![make_import_entry("com.example.Foo", "Bar", false)];
+        assert!(!already_imported("com.example.Foo", &imports));
+    }
+
+    #[test]
+    fn already_imported_star() {
+        let imports = vec![make_import_entry("com.example", "*", true)];
+        assert!(already_imported("com.example.Foo", &imports));
+    }
+
+    #[test]
+    fn already_imported_star_wrong_pkg() {
+        let imports = vec![make_import_entry("com.other", "*", true)];
+        assert!(!already_imported("com.example.Foo", &imports));
+    }
+
+    #[test]
+    fn import_insertion_after_last_import() {
+        let lines = vec![
+            "package com.example".to_string(),
+            "".to_string(),
+            "import com.example.Bar".to_string(),
+            "import com.example.Baz".to_string(),
+            "".to_string(),
+            "class Foo {}".to_string(),
+        ];
+        assert_eq!(import_insertion_line(&lines), 4); // line after last import
+    }
+
+    #[test]
+    fn import_insertion_after_package_no_imports() {
+        let lines = vec![
+            "package com.example".to_string(),
+            "".to_string(),
+            "class Foo {}".to_string(),
+        ];
+        assert_eq!(import_insertion_line(&lines), 1); // line after package
+    }
+
+    #[test]
+    fn import_insertion_at_top_no_package_no_imports() {
+        let lines = vec!["class Foo {}".to_string()];
+        assert_eq!(import_insertion_line(&lines), 0);
+    }
+
+    #[test]
+    fn auto_import_completion_adds_edit() {
+        let idx = Indexer::new();
+        // Library file in a different package.
+        let lib_uri = uri("/lib/Composable.kt");
+        idx.index_content(&lib_uri, "package androidx.compose.runtime\nannotation class Composable");
+        // Current file — different package, no imports.
+        let cur_uri = uri("/app/Screen.kt");
+        idx.index_content(&cur_uri, "package com.example.app\n\nfun Screen() {\n    Comp\n}");
+
+        let (items, _) = complete_symbol(&idx, "Comp", None, &cur_uri, false);
+        let import_item = items.iter().find(|i| i.label == "Composable");
+        assert!(import_item.is_some(), "Composable should appear in completions");
+        let edits = import_item.unwrap().additional_text_edits.as_ref();
+        assert!(edits.is_some(), "additionalTextEdits should be present");
+        let edit_text = &edits.unwrap()[0].new_text;
+        assert!(edit_text.contains("import androidx.compose.runtime.Composable"), 
+            "edit should add correct import, got: {edit_text}");
+    }
+
+    #[test]
+    fn auto_import_skipped_when_already_imported() {
+        let idx = Indexer::new();
+        let lib_uri = uri("/lib/Foo.kt");
+        idx.index_content(&lib_uri, "package com.lib\nclass Foo");
+        let cur_uri = uri("/app/Bar.kt");
+        // Already imports com.lib.Foo.
+        idx.index_content(&cur_uri, "package com.app\nimport com.lib.Foo\nclass Bar { val f: Foo = Foo() }");
+
+        let (items, _) = complete_symbol(&idx, "Foo", None, &cur_uri, false);
+        let foo_items: Vec<_> = items.iter().filter(|i| i.label == "Foo").collect();
+        // May appear (from tier-0/1 or tier-2 without edit) but must not have an import edit.
+        for item in &foo_items {
+            assert!(item.additional_text_edits.is_none() 
+                || item.additional_text_edits.as_ref().unwrap().is_empty(),
+                "already-imported symbol must not carry an import edit");
+        }
+    }
+
+    #[test]
+    fn auto_import_skipped_same_package() {
+        let idx = Indexer::new();
+        let lib_uri = uri("/app/Foo.kt");
+        idx.index_content(&lib_uri, "package com.example\nclass Foo");
+        let cur_uri = uri("/app/Bar.kt");
+        idx.index_content(&cur_uri, "package com.example\nclass Bar");
+
+        let (items, _) = complete_symbol(&idx, "Foo", None, &cur_uri, false);
+        // Foo is in the same package — any completion item for it must have no import edit.
+        for item in items.iter().filter(|i| i.label == "Foo") {
+            assert!(item.additional_text_edits.is_none()
+                || item.additional_text_edits.as_ref().unwrap().is_empty(),
+                "same-package symbol must not carry an import edit");
+        }
+    }
+
+    #[test]
+    fn auto_import_two_packages_two_items() {
+        let idx = Indexer::new();
+        idx.index_content(&uri("/m3/Button.kt"), "package androidx.compose.material3\nclass Button");
+        idx.index_content(&uri("/m1/Button.kt"), "package androidx.compose.material\nclass Button");
+        let cur_uri = uri("/app/Screen.kt");
+        idx.index_content(&cur_uri, "package com.example\nfun screen() {}");
+
+        let (items, _) = complete_symbol(&idx, "Button", None, &cur_uri, false);
+        let button_items: Vec<_> = items.iter().filter(|i| i.label == "Button").collect();
+        assert_eq!(button_items.len(), 2, "Two Button symbols from different packages should yield two items");
+        let details: Vec<_> = button_items.iter().filter_map(|i| i.detail.as_deref()).collect();
+        assert!(details.iter().any(|d| d.contains("material3")), "One item should mention material3");
+        assert!(details.iter().any(|d| d.contains("material") && !d.contains("material3")), "One item should mention material");
+    }
+
+    #[test]
+    fn caps_mode_hides_lowercase_functions() {
+        let idx = Indexer::new();
+        let cur_uri = uri("/app/Screen.kt");
+        // File with both a class and a lowercase function.
+        idx.index_content(&cur_uri, "package com.example\nclass Column\nfun collectAsState() {}");
+
+        let (items, _) = complete_symbol(&idx, "Col", None, &cur_uri, false);
+        // Column (uppercase) should appear.
+        assert!(items.iter().any(|i| i.label == "Column"), "Column should appear in caps mode");
+        // collectAsState (lowercase) should NOT appear when typing uppercase prefix.
+        assert!(!items.iter().any(|i| i.label == "collectAsState"),
+            "lowercase function must not appear when typing uppercase prefix");
+    }
+
+    #[test]
+    fn lowercase_mode_hides_classes() {
+        let idx = Indexer::new();
+        let cur_uri = uri("/app/Screen.kt");
+        idx.index_content(&cur_uri, "package com.example\nclass Column\nfun collectAsState() {}");
+
+        let (items, _) = complete_symbol(&idx, "col", None, &cur_uri, false);
+        // collectAsState (lowercase) should appear.
+        assert!(items.iter().any(|i| i.label == "collectAsState"), "lowercase function should appear in lowercase mode");
+        // Column (uppercase) should NOT appear when typing lowercase prefix.
+        assert!(!items.iter().any(|i| i.label == "Column"),
+            "CamelCase class must not appear when typing lowercase prefix");
+    }
+
+    #[test]
+    fn tier2_suppressed_when_name_visible_in_current_file() {
+        let idx = Indexer::new();
+        idx.index_content(&uri("/lib/Foo.kt"), "package com.lib\nclass Foo");
+        let cur_uri = uri("/app/Bar.kt");
+        idx.index_content(&cur_uri, "package com.example\nclass Foo");
+
+        let (items, _) = complete_symbol(&idx, "Foo", None, &cur_uri, false);
+        let foo_items: Vec<_> = items.iter().filter(|i| i.label == "Foo").collect();
+        assert_eq!(foo_items.len(), 1, "Foo defined in current file must not generate a duplicate tier-2 item");
+        assert!(foo_items[0].additional_text_edits.is_none()
+            || foo_items[0].additional_text_edits.as_ref().unwrap().is_empty(),
+            "tier-0 item must not carry an import edit");
+    }
+
+    // ── match_score ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn match_score_prefix_is_best() {
+        assert_eq!(match_score("Column", "Col"), Some(0));
+        assert_eq!(match_score("column", "col"), Some(0));
+    }
+
+    #[test]
+    fn match_score_acronym_is_second() {
+        // CB → ColumnButton (C=Column, B=Button)
+        assert_eq!(match_score("ColumnButton", "CB"), Some(1));
+        // mSF → myStateFlow
+        assert_eq!(match_score("myStateFlow", "mSF"), Some(1));
+    }
+
+    #[test]
+    fn match_score_substring_is_third() {
+        assert_eq!(match_score("RecyclerView", "View"), Some(2));
+    }
+
+    #[test]
+    fn match_score_no_match_returns_none() {
+        assert_eq!(match_score("Column", "xyz"), None);
+    }
+
+    #[test]
+    fn match_score_prefix_beats_acronym_in_sort() {
+        let idx = Indexer::new();
+        let cur_uri = uri("/app/Screen.kt");
+        // Column → prefix match for "Col"; ColumnButton → acronym for "CB" but prefix for "Col"
+        idx.index_content(&cur_uri, "package com.example\nclass Column\nclass ColumnButton");
+
+        let (items, _) = complete_symbol(&idx, "Col", None, &cur_uri, false);
+        let col_pos    = items.iter().position(|i| i.label == "Column").unwrap();
+        let colbtn_pos = items.iter().position(|i| i.label == "ColumnButton").unwrap();
+        // Both are prefix matches; Column (shorter) should sort before ColumnButton lexicographically.
+        assert!(col_pos < colbtn_pos || {
+            // Accept either order — both are score-0, lexicographic tie-break.
+            let a = items[col_pos].sort_text.as_deref().unwrap_or("");
+            let b = items[colbtn_pos].sort_text.as_deref().unwrap_or("");
+            a <= b
+        }, "Column should sort ≤ ColumnButton for prefix 'Col'");
+    }
+
+    #[test]
+    fn tier2_requires_prefix_length_2() {
+        let idx = Indexer::new();
+        idx.index_content(&uri("/lib/Foo.kt"), "package com.lib\nclass Column");
+        let cur_uri = uri("/app/Bar.kt");
+        idx.index_content(&cur_uri, "package com.example\n");
+
+        // Single char 'C' — tier-2 should NOT fire, so Column (cross-pkg) not returned.
+        let (items, _) = complete_symbol(&idx, "C", None, &cur_uri, false);
+        assert!(!items.iter().any(|i| i.label == "Column" && i.additional_text_edits.is_some()),
+            "tier-2 must not fire for single-char prefix");
+
+        // Two chars 'Co' — tier-2 SHOULD fire.
+        let (items, _) = complete_symbol(&idx, "Co", None, &cur_uri, false);
+        assert!(items.iter().any(|i| i.label == "Column"),
+            "tier-2 must fire for prefix length >= 2");
+    }
+
+    #[test]
+    fn result_cap_sets_hit_cap() {
+        let idx = Indexer::new();
+        let cur_uri = uri("/app/Screen.kt");
+        // Generate 200 unique class names → exceeds COMPLETION_CAP (150).
+        let src = (0..200)
+            .map(|i| format!("class Cls{i:03}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        idx.index_content(&cur_uri, &format!("package com.example\n{src}"));
+
+        let (items, hit_cap) = complete_symbol(&idx, "Cls", None, &cur_uri, false);
+        assert!(hit_cap, "hit_cap should be true when result count exceeds COMPLETION_CAP");
+        assert_eq!(items.len(), crate::resolver::COMPLETION_CAP, "items must be truncated to cap");
+    }
+
+    #[test]
+    fn annotation_context_hides_functions() {
+        let idx = Indexer::new();
+        let cur_uri = uri("/app/Screen.kt");
+        idx.index_content(&cur_uri,
+            "package com.example\nannotation class Composable\nfun composable() {}");
+
+        let line = "@Composable";
+        let prefix = "Composable";
+        let annotation_only = is_annotation_context(line, prefix);
+        assert!(annotation_only, "should detect annotation context");
+
+        let (items, _) = complete_symbol_with_context(&idx, prefix, None, &cur_uri, false, true);
+        // Annotation class should appear.
+        assert!(items.iter().any(|i| i.label == "Composable"),
+            "annotation class Composable must appear");
+        // Lowercase function should not appear.
+        assert!(!items.iter().any(|i| i.label == "composable"),
+            "function composable must not appear in annotation context");
+    }
+
+    #[test]
+    fn is_annotation_context_detection() {
+        assert!(is_annotation_context("@Composable", "Composable"));
+        assert!(is_annotation_context("  @Comp", "Comp"));
+        assert!(!is_annotation_context("Composable", "Composable")); // no @
+        // "x@Comp" — technically matches, real code won't have identifiers directly before @
     }
 }

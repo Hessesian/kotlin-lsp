@@ -125,6 +125,23 @@ impl LanguageServer for Backend {
                             Some(std::sync::Arc::new(IgnoreMatcher::new(pats, &path)));
                     }
                 }
+
+                // Parse sourcePaths — extra directories to index for hover/definition/autocomplete.
+                // Stored as raw strings; resolved against workspace root when indexing starts.
+                if let Some(source_paths) = opts
+                    .get("indexingOptions")
+                    .and_then(|o| o.get("sourcePaths"))
+                    .and_then(|v| v.as_array())
+                {
+                    let paths_raw: Vec<String> = source_paths
+                        .iter()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect();
+                    if !paths_raw.is_empty() {
+                        log::info!("sourcePaths: {:?}", paths_raw);
+                        *self.indexer.source_paths_raw.write().unwrap() = paths_raw;
+                    }
+                }
             }
 
             let indexer = Arc::clone(&self.indexer);
@@ -565,13 +582,14 @@ impl LanguageServer for Backend {
         // Use effective_rg_root so searches use the open file's project root
         // when workspace_root points to a different project (e.g. android vs ios).
         let file_path = uri.to_file_path().ok();
-        let root_opt = {
+        let (root_opt, matcher) = {
             let wr = self.indexer.workspace_root.read().unwrap().clone();
-            crate::indexer::effective_rg_root(wr.as_deref(), file_path.as_deref())
+            let m = self.indexer.ignore_matcher.read().unwrap().clone();
+            (crate::indexer::effective_rg_root(wr.as_deref(), file_path.as_deref()), m)
         };
         let name_clone = word.clone();
         let rg_locs = tokio::task::spawn_blocking(move || {
-            crate::indexer::rg_find_definition(&name_clone, root_opt.as_deref())
+            crate::indexer::rg_find_definition(&name_clone, root_opt.as_deref(), matcher.as_deref())
         }).await.unwrap_or_default();
         Ok(match rg_locs.len() {
             0 => None,
@@ -604,13 +622,14 @@ impl LanguageServer for Backend {
         // to find implementors quickly to avoid client timeouts in large projects.
         if locs.is_empty() {
             let file_path = uri.to_file_path().ok();
-            let root_opt = {
+            let (root_opt, matcher) = {
                 let wr = self.indexer.workspace_root.read().unwrap().clone();
-                crate::indexer::effective_rg_root(wr.as_deref(), file_path.as_deref())
+                let m = self.indexer.ignore_matcher.read().unwrap().clone();
+                (crate::indexer::effective_rg_root(wr.as_deref(), file_path.as_deref()), m)
             };
             let word_clone = word.clone();
             let rg_impls = tokio::task::spawn_blocking(move || {
-                crate::indexer::rg_find_implementors(&word_clone, root_opt.as_deref())
+                crate::indexer::rg_find_implementors(&word_clone, root_opt.as_deref(), matcher.as_deref())
             }).await.unwrap_or_default();
             if !rg_impls.is_empty() {
                 // Return early with rg results.
@@ -663,15 +682,15 @@ impl LanguageServer for Backend {
         let position = pp.position;
         let snippets = self.snippet_support.load(Ordering::Relaxed);
 
-        let items = self.indexer.completions(uri, position, snippets);
+        let (items, hit_cap) = self.indexer.completions(uri, position, snippets);
         if items.is_empty() {
             return Ok(None);
         }
-        // `is_incomplete: false` tells the client the list is complete for the
-        // current context — it can filter by prefix client-side without re-requesting
-        // on every subsequent keystroke. This dramatically reduces server CPU.
+        // When hit_cap is true the list was truncated — tell the client to
+        // re-request completions on every keystroke so the list stays tight
+        // as the user types more characters.
         Ok(Some(CompletionResponse::List(CompletionList {
-            is_incomplete: false,
+            is_incomplete: hit_cap,
             items,
         })))
     }
@@ -736,11 +755,12 @@ impl LanguageServer for Backend {
             } else {
                 // rg fallback: find the declaration even when the index is empty.
                 let file_path = uri.to_file_path().ok();
-                let rg_root = {
+                let (rg_root, matcher) = {
                     let wr = self.indexer.workspace_root.read().unwrap().clone();
-                    crate::indexer::effective_rg_root(wr.as_deref(), file_path.as_deref())
+                    let m = self.indexer.ignore_matcher.read().unwrap().clone();
+                    (crate::indexer::effective_rg_root(wr.as_deref(), file_path.as_deref()), m)
                 };
-                let rg_locs = crate::indexer::rg_find_definition(&word, rg_root.as_deref());
+                let rg_locs = crate::indexer::rg_find_definition(&word, rg_root.as_deref(), matcher.as_deref());
                 rg_locs.first().and_then(|loc| self.indexer.hover_info_at_location(loc, &word))
             }
         };
@@ -817,6 +837,7 @@ impl LanguageServer for Backend {
 
         // Run rg off the async executor to avoid blocking the Tokio runtime.
         let root = self.indexer.workspace_root.read().unwrap().clone();
+        let matcher = self.indexer.ignore_matcher.read().unwrap().clone();
         let uri_clone = uri.clone();
         let name2 = name.clone();
         let parent2 = parent_class.clone();
@@ -830,11 +851,18 @@ impl LanguageServer for Backend {
                 include_decl,
                 &uri_clone,
                 &decl_files,
+                matcher.as_deref(),
             )
         })
         .await
         .unwrap_or_default();
         eprintln!("[refs] rg returned {} locs", locs.len());
+
+        // Filter out library-source locations (from sourcePaths outside workspace root).
+        let lib = &self.indexer.library_uris;
+        if !lib.is_empty() {
+            locs.retain(|loc| !lib.contains(loc.uri.as_str()));
+        }
 
         // Supplement with in-memory scan of the CURRENT file only.
         // This catches unsaved content in the active buffer that rg cannot see on disk.
@@ -996,10 +1024,11 @@ impl LanguageServer for Backend {
 
         // rg fallback when index is empty (indexing in progress or cold start).
         if results.is_empty() && !query.is_empty() && query_qualifier.is_none() {
-            let root_opt = { self.indexer.workspace_root.read().unwrap().clone() };
+            let root_opt = self.indexer.workspace_root.read().unwrap().clone();
+            let matcher = self.indexer.ignore_matcher.read().unwrap().clone();
             let q = query.to_string();
             let rg_locs = tokio::task::spawn_blocking(move || {
-                crate::indexer::rg_find_definition(&q, root_opt.as_deref())
+                crate::indexer::rg_find_definition(&q, root_opt.as_deref(), matcher.as_deref())
             }).await.unwrap_or_default();
             if !rg_locs.is_empty() {
                 let rg_syms: Vec<SymbolInformation> = rg_locs.into_iter().map(|loc| {
@@ -1259,6 +1288,7 @@ impl LanguageServer for Backend {
 
         // ── Find all reference locations (off-thread, same as references handler) ──
         let root = self.indexer.workspace_root.read().unwrap().clone();
+        let matcher = self.indexer.ignore_matcher.read().unwrap().clone();
         let uri_clone = uri.clone();
         let name2 = name.clone();
         let parent2 = parent_class.clone();
@@ -1273,10 +1303,18 @@ impl LanguageServer for Backend {
                 true,
                 &uri_clone,
                 &decl_files,
+                matcher.as_deref(),
             )
         })
         .await
         .unwrap_or_default();
+
+        // Filter out library-source locations — library files are read-only (not user code).
+        let mut ref_locs = ref_locs;
+        let lib = &self.indexer.library_uris;
+        if !lib.is_empty() {
+            ref_locs.retain(|loc| !lib.contains(loc.uri.as_str()));
+        }
 
         if ref_locs.is_empty() { return Ok(None); }
 
@@ -1643,12 +1681,13 @@ impl Backend {
     async fn rg_resolve(&self, uri: &Url, name: &str) -> Vec<Location> {
         let name_clone = name.to_string();
         let file_path = uri.to_file_path().ok();
-        let root_opt = {
+        let (root_opt, matcher) = {
             let wr = self.indexer.workspace_root.read().unwrap().clone();
-            crate::indexer::effective_rg_root(wr.as_deref(), file_path.as_deref())
+            let m = self.indexer.ignore_matcher.read().unwrap().clone();
+            (crate::indexer::effective_rg_root(wr.as_deref(), file_path.as_deref()), m)
         };
         tokio::task::spawn_blocking(move || {
-            crate::indexer::rg_find_definition(&name_clone, root_opt.as_deref())
+            crate::indexer::rg_find_definition(&name_clone, root_opt.as_deref(), matcher.as_deref())
         }).await.unwrap_or_default()
     }
 
