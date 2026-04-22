@@ -1419,4 +1419,17 @@ class LoanReducer {
         assert!(data.syntax_errors.is_empty(),
             "Expected no syntax errors, got: {:?}", data.syntax_errors);
     }
+
+    #[test]
+    fn swift_nested_enum_in_class() {
+        let src = "final class DPSChangeVictoryViewModel: SimpleVictoryViewModel, @unchecked Sendable {\n    let coordinator: DPSCoordinator\n    func update(kind: DPSCoordinator.Kind) {}\n}\n\nclass DPSCoordinator {\n    enum Kind {\n        case victory\n        case defeat\n    }\n}";
+        let data = parse_swift(src);
+        let names: Vec<&str> = data.symbols.iter().map(|s| s.name.as_str()).collect();
+        eprintln!("Symbols: {:?}", names);
+        assert_eq!(sym(&data, "DPSChangeVictoryViewModel").unwrap().kind, SymbolKind::CLASS,
+            "DPSChangeVictoryViewModel should be CLASS");
+        assert!(sym(&data, "Kind").is_some(), "nested Kind enum should be indexed; got: {:?}", names);
+        assert_eq!(sym(&data, "Kind").unwrap().kind, SymbolKind::ENUM, "Kind should be ENUM");
+        assert!(sym(&data, "victory").is_some(), "enum cases should be indexed");
+    }
 }

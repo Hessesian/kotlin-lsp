@@ -1938,8 +1938,13 @@ impl Indexer {
         }
         // (compute below, then store in cache at the end)
         let dot_receiver = if before_prefix.ends_with('.') {
-            // Grab the identifier immediately preceding the dot.
-            let recv: String = before_prefix[..before_prefix.len() - 1]
+            // Grab the expression immediately preceding the dot.
+            // For simple identifiers: `foo.` → "foo"
+            // For qualified nested types: `DPSCoordinator.Kind.` → "DPSCoordinator.Kind"
+            // We walk backwards collecting identifier chars; if we then see a dot followed
+            // by another identifier, include that outer segment too (one level only).
+            let before_dot = &before_prefix[..before_prefix.len() - 1];
+            let inner: String = before_dot
                 .chars()
                 .rev()
                 .take_while(|&c| c.is_alphanumeric() || c == '_')
@@ -1947,7 +1952,33 @@ impl Indexer {
                 .chars()
                 .rev()
                 .collect();
-            if recv.is_empty() { None } else { Some(recv) }
+            if inner.is_empty() {
+                None
+            } else {
+                // Check whether there is an `Outer.` prefix immediately before `inner`.
+                let remaining = &before_dot[..before_dot.len() - inner.len()];
+                if remaining.ends_with('.')
+                    && inner.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+                {
+                    let outer: String = remaining[..remaining.len() - 1]
+                        .chars()
+                        .rev()
+                        .take_while(|&c| c.is_alphanumeric() || c == '_')
+                        .collect::<String>()
+                        .chars()
+                        .rev()
+                        .collect();
+                    if !outer.is_empty()
+                        && outer.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+                    {
+                        Some(format!("{}.{}", outer, inner))
+                    } else {
+                        Some(inner)
+                    }
+                } else {
+                    Some(inner)
+                }
+            }
         } else {
             None
         };
@@ -5192,6 +5223,28 @@ class Child : Base
         let (items, _) = idx.completions(&vm_uri, Position::new(4, col), true);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(labels.contains(&"findAll"), "findAll missing; got: {labels:?}");
+    }
+
+    #[test]
+    fn dot_completion_qualified_nested_type() {
+        // Typing `DPSCoordinator.Kind.` — receiver is "DPSCoordinator.Kind".
+        // Should show enum cases (victory, defeat), NOT members of DPSCoordinator.
+        let coordinator_uri = uri("/DPSCoordinator.swift");
+        let vm_uri = uri("/DPSChangeVictoryViewModel.swift");
+        let idx = Indexer::new();
+        idx.index_content(&coordinator_uri,
+            "class DPSCoordinator {\n    enum Kind {\n        case victory\n        case defeat\n    }\n    func deposit() {}\n    var strategy: String = \"\"\n}");
+        idx.index_content(&vm_uri,
+            "class DPSChangeVictoryViewModel {\n    let coordinator: DPSCoordinator\n    func update() { let k = DPSCoordinator.Kind. }\n}");
+
+        let line = "    func update() { let k = DPSCoordinator.Kind. }";
+        let col = (line.find("DPSCoordinator.Kind.").unwrap() + "DPSCoordinator.Kind.".len()) as u32;
+        let (items, _) = idx.completions(&vm_uri, Position::new(2, col), false);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"victory"), "victory case missing; got: {labels:?}");
+        assert!(labels.contains(&"defeat"),  "defeat case missing; got: {labels:?}");
+        assert!(!labels.contains(&"deposit"),  "deposit (DPSCoordinator method) must NOT appear; got: {labels:?}");
+        assert!(!labels.contains(&"strategy"), "strategy (DPSCoordinator prop) must NOT appear; got: {labels:?}");
     }
 
     #[test]
