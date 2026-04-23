@@ -92,12 +92,16 @@ impl LanguageServer for Backend {
                 .filter(|p| p.is_dir())
         };
 
-        // env var pins the workspace (disables did_open auto-detection).
-        // config file is a passive fallback — never pins.
-        let workspace_pinned = env_override.is_some();
+        // Any resolved workspace root — env var, client rootUri, or config file — pins the
+        // workspace and disables did_open auto-detection.  Without pinning, opening a file from
+        // a second project in the same editor session triggers a spurious root switch that aborts
+        // the in-progress workspace index and discards half its results.
+        // Pure auto-detection (no config at all) still works: workspace_pinned stays false until
+        // did_open fires and a root is detected for the first time.
         let resolved_root = env_override
             .or(client_root)
             .or_else(config_fallback);
+        let workspace_pinned = resolved_root.is_some();
 
         if let Some(path) = resolved_root {
             // Set workspace_root immediately so rg/fd calls work even before
@@ -346,9 +350,14 @@ impl LanguageServer for Backend {
                 let chosen = found.or_else(|| path.parent().map(|p| p.to_path_buf()));
                 if let Some(candidate_root) = chosen {
                     let current_root = self.indexer.workspace_root.read().unwrap().clone();
+                    let cand_canon = std::fs::canonicalize(&candidate_root).unwrap_or_else(|_| candidate_root.clone());
                     let should_switch = match current_root {
                         None => true,
-                        Some(ref r) => !path.starts_with(r),
+                        Some(ref r) => {
+                            let cur_canon = std::fs::canonicalize(r).unwrap_or_else(|_| r.clone());
+                            let path_canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+                            !path_canon.starts_with(&cur_canon) && cand_canon != cur_canon
+                        },
                     };
                     if should_switch {
                         need_root_switch = Some(candidate_root);
@@ -359,9 +368,12 @@ impl LanguageServer for Backend {
 
         if let Some(root) = need_root_switch {
             *self.indexer.workspace_root.write().unwrap() = Some(root.clone());
+            // Pin the workspace after the first auto-detection so that opening a file
+            // from a second project later in the same session doesn't switch again.
+            self.indexer.workspace_pinned.store(true, std::sync::atomic::Ordering::Relaxed);
             self.indexer.root_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.indexer.reset_index_state();
-            log::info!("Auto-detected workspace root: {}", root.display());
+            log::info!("Auto-detected workspace root (now pinned): {}", root.display());
             let idx = Arc::clone(&self.indexer);
             let client = self.client.clone();
             let root2 = root.clone();
@@ -381,7 +393,13 @@ impl LanguageServer for Backend {
         let outside_root = pinned && {
             matches!(
                 (opened_path_opt.as_ref(), self.indexer.workspace_root.read().unwrap().clone()),
-                (Some(path), Some(root)) if !path.starts_with(&root)
+                (Some(path), Some(root)) if {
+                    // Use canonical paths to avoid symlink/path-form mismatches
+                    // (consistent with the root-switch guard above).
+                    let canon_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+                    let canon_root = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
+                    !canon_path.starts_with(&canon_root)
+                }
             )
         };
         if outside_root {
@@ -389,6 +407,7 @@ impl LanguageServer for Backend {
                 "Outside-root file — indexing content only: {}",
                 opened_path_opt.as_deref().map(|p| p.display().to_string()).unwrap_or_default()
             );
+            self.indexer.set_live_lines(&uri, &text);
             // Index just this file so hover/go-to-def work, then return.
             let idx = Arc::clone(&self.indexer);
             let sem = idx.parse_sem();
@@ -400,6 +419,10 @@ impl LanguageServer for Backend {
             });
             return;
         }
+
+        // Set live_lines immediately so completion can read the current file content
+        // even before the async index_content task finishes.
+        self.indexer.set_live_lines(&uri, &text);
 
         let idx  = Arc::clone(&self.indexer);
         let sem  = idx.parse_sem();
@@ -683,14 +706,17 @@ impl LanguageServer for Backend {
         let snippets = self.snippet_support.load(Ordering::Relaxed);
 
         let (items, hit_cap) = self.indexer.completions(uri, position, snippets);
-        if items.is_empty() {
+        let still_indexing = self.indexer.indexing_in_progress.load(Ordering::Acquire);
+        if items.is_empty() && !still_indexing {
             return Ok(None);
         }
         // When hit_cap is true the list was truncated — tell the client to
         // re-request completions on every keystroke so the list stays tight
         // as the user types more characters.
+        // Also mark incomplete while the workspace is still being indexed so
+        // the client keeps re-querying instead of caching a partial result.
         Ok(Some(CompletionResponse::List(CompletionList {
-            is_incomplete: hit_cap,
+            is_incomplete: hit_cap || still_indexing,
             items,
         })))
     }

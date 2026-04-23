@@ -80,7 +80,7 @@ pub(crate) fn import_insertion_line(lines: &[String]) -> u32 {
 }
 
 /// Build a TextEdit that inserts `import {fqn}\n` at the correct position.
-pub(crate) fn make_import_edit(fqn: &str, lines: &[String]) -> TextEdit {
+pub(crate) fn make_import_edit(fqn: &str, lines: &[String], needs_semicolon: bool) -> TextEdit {
     let line = import_insertion_line(lines);
     // When inserting right after the package line (no existing imports), add a blank line.
     let needs_blank = line > 0
@@ -88,10 +88,11 @@ pub(crate) fn make_import_edit(fqn: &str, lines: &[String]) -> TextEdit {
             .map(|l| l.trim_start().starts_with("package "))
             .unwrap_or(false)
         && lines.get(line as usize).map(|l| !l.trim().is_empty()).unwrap_or(false);
+    let stmt = if needs_semicolon { format!("import {fqn};") } else { format!("import {fqn}") };
     let new_text = if needs_blank {
-        format!("\nimport {fqn}\n")
+        format!("\n{stmt}\n")
     } else {
-        format!("import {fqn}\n")
+        format!("{stmt}\n")
     };
     TextEdit {
         range: Range {
@@ -103,6 +104,12 @@ pub(crate) fn make_import_edit(fqn: &str, lines: &[String]) -> TextEdit {
 }
 
 // ─── match scoring ────────────────────────────────────────────────────────────
+
+/// Returns true if `name` is SCREAMING_SNAKE_CASE (all letters are uppercase).
+/// Used to suppress constants/enum variants when the user types a CamelCase prefix.
+fn is_screaming_snake(name: &str) -> bool {
+    name.chars().any(|c| c.is_alphabetic()) && name.chars().all(|c| c.is_uppercase() || c == '_' || c.is_ascii_digit())
+}
 
 /// Score how well `name` matches `prefix`. Lower = better.
 ///
@@ -137,6 +144,7 @@ fn camel_acronym_match(name: &str, prefix: &str) -> bool {
     for (i, &c) in chars.iter().enumerate() {
         let is_word_start = i == 0
             || c == '_'
+            || (i > 0 && chars[i - 1] == '_' && c != '_')  // char immediately after underscore
             || (c.is_uppercase() && i > 0 && chars[i - 1].is_lowercase())
             || (c.is_uppercase() && i > 0 && chars[i - 1].is_uppercase()
                 && i + 1 < chars.len() && chars[i + 1].is_lowercase());
@@ -429,6 +437,15 @@ fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippets: bool, an
     let lowercase_mode = first_char.map(|c| c.is_lowercase()).unwrap_or(false);
     // Symmetric to lowercase_mode: user is deliberately typing a CamelCase name.
     let uppercase_mode = first_char.map(|c| c.is_uppercase()).unwrap_or(false);
+    // True when the prefix is clearly CamelCase (uppercase first char + at least one
+    // lowercase letter), meaning the user cannot be typing a SCREAMING_SNAKE constant.
+    let camel_mode = uppercase_mode && prefix.chars().any(|c| c.is_lowercase());
+    // For longer prefixes the user knows what they want: restrict tier-0/1 to
+    // prefix/acronym matches only (no substring).  This prevents noisy substring
+    // hits from filling the cap and crowding out precise tier-2 cross-package matches
+    // (e.g. typing "ChildDash" must surface ChildDashboardViewModel even if the same
+    // package has many classes that contain "child" as a substring).
+    let local_max_score: u8 = if prefix.len() >= 4 { 1 } else { 2 };
     let mut seen = std::collections::HashSet::new();
     let mut items: Vec<CompletionItem> = Vec::new();
 
@@ -452,6 +469,10 @@ fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippets: bool, an
         if uppercase_mode && name.chars().next().map(|c| c.is_lowercase()).unwrap_or(false) {
             return;
         }
+        // CamelCase prefix → hide SCREAMING_SNAKE_CASE names (constants, enum variants).
+        if camel_mode && is_screaming_snake(name) {
+            return;
+        }
         let score = match match_score(name, prefix) {
             Some(s) if s <= max_score => s,
             _ => return,
@@ -469,20 +490,20 @@ fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippets: bool, an
         });
     };
 
-    // 1. Local file symbols — src_tier 0, allow substring fallback (max_score=2).
+    // 1. Local file symbols — src_tier 0, substring fallback only for short prefixes.
     if let Some(f) = idx.files.get(from_uri.as_str()) {
         for sym in &f.symbols {
-            add(&sym.name, symbol_kind_to_completion(sym.kind), 0, 2);
+            add(&sym.name, symbol_kind_to_completion(sym.kind), 0, local_max_score);
         }
         // Constructor params / local vars from declared_names (lowercase only).
         if lowercase_mode {
             for name in &f.declared_names {
-                add(name, CompletionItemKind::VARIABLE, 0, 2);
+                add(name, CompletionItemKind::VARIABLE, 0, local_max_score);
             }
         }
     }
 
-    // 2. Same-package symbols — src_tier 1, allow substring fallback (max_score=2).
+    // 2. Same-package symbols — src_tier 1, substring fallback only for short prefixes.
     let pkg = idx.files.get(from_uri.as_str())
         .and_then(|f| f.package.clone())
         .unwrap_or_default();
@@ -492,7 +513,7 @@ fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippets: bool, an
                 if uri_str == from_uri.as_str() { continue; }
                 if let Some(f) = idx.files.get(uri_str.as_str()) {
                     for sym in &f.symbols {
-                        add(&sym.name, symbol_kind_to_completion(sym.kind), 1, 2);
+                        add(&sym.name, symbol_kind_to_completion(sym.kind), 1, local_max_score);
                     }
                 }
             }
@@ -503,14 +524,32 @@ fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippets: bool, an
     //    prefix/acronym matches only (max_score=1) — no substring flood.
     // Emits one CompletionItem per distinct FQN, with additionalTextEdits for auto-import.
     if !lowercase_mode && prefix.len() >= 2 {
+        let is_java = from_uri.as_str().ends_with(".java");
+        // Prefer live_lines (updated on every keystroke) over the indexed snapshot so that
+        // import deduplication and insertion position are based on the current buffer state.
+        let live = idx.live_lines.get(from_uri.as_str()).map(|ll| ll.clone());
         let (cur_imports, cur_pkg, cur_lines) = idx.files.get(from_uri.as_str())
-            .map(|f| (f.imports.clone(), f.package.clone().unwrap_or_default(), f.lines.clone()))
-            .unwrap_or_default();
+            .map(|f| {
+                let lines = live.clone().unwrap_or_else(|| f.lines.clone());
+                // Re-scan live lines for imports so we don't use a stale snapshot.
+                let imports = if live.is_some() {
+                    crate::parser::parse_imports_from_lines(&lines)
+                } else {
+                    f.imports.clone()
+                };
+                (imports, f.package.clone().unwrap_or_default(), lines)
+            })
+            .unwrap_or_else(|| {
+                let lines = live.clone().unwrap_or_default();
+                let imports = crate::parser::parse_imports_from_lines(&lines);
+                (imports, String::new(), lines)
+            });
 
         if let Ok(cache) = idx.bare_name_cache.read() {
             for name in cache.iter() {
                 // Case gate + match quality gate (prefix or acronym only).
                 if name.chars().next().map(|c| c.is_lowercase()).unwrap_or(false) { continue; }
+                if camel_mode && is_screaming_snake(name) { continue; }
                 let score = match match_score(name, prefix) {
                     Some(s) if s <= 1 => s,
                     _ => continue,
@@ -548,7 +587,7 @@ fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippets: bool, an
                     if !seen.insert(item_key) { continue; }
 
                     let import_edit = if needs_import {
-                        Some(vec![make_import_edit(fqn, &cur_lines)])
+                        Some(vec![make_import_edit(fqn, &cur_lines, is_java)])
                     } else {
                         None
                     };
@@ -574,6 +613,7 @@ fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippets: bool, an
         if lowercase_mode && label.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
             continue;
         }
+        if camel_mode && is_screaming_snake(&label) { continue; }
         let score = match match_score(&label, prefix) {
             Some(s) if s <= 2 => s,
             _ => continue,
@@ -2884,6 +2924,9 @@ data class State(
         assert_eq!(match_score("ColumnButton", "CB"), Some(1));
         // mSF → myStateFlow
         assert_eq!(match_score("myStateFlow", "mSF"), Some(1));
+        // underscore-prefixed private fields: _ColumnButton, _myStateFlow
+        assert_eq!(match_score("_ColumnButton", "CB"), Some(1));
+        assert_eq!(match_score("_myStateFlow", "mSF"), Some(1));
     }
 
     #[test]
@@ -2968,6 +3011,72 @@ data class State(
         // Lowercase function should not appear.
         assert!(!items.iter().any(|i| i.label == "composable"),
             "function composable must not appear in annotation context");
+    }
+
+    #[test]
+    fn camel_mode_hides_screaming_snake() {
+        let idx = Indexer::new();
+        let cur_uri = uri("/app/Screen.kt");
+        idx.index_content(&cur_uri,
+            "package com.example\nclass ChildDashboardViewModel\nconst val CHILD_DASHBOARD_MAX = 10\nval CHILD_COUNT = 5");
+
+        // Typing CamelCase prefix — SCREAMING_SNAKE constants must not appear.
+        let (items, _) = complete_symbol(&idx, "Child", None, &cur_uri, false);
+        assert!(items.iter().any(|i| i.label == "ChildDashboardViewModel"),
+            "CamelCase class must appear");
+        assert!(!items.iter().any(|i| i.label == "CHILD_DASHBOARD_MAX"),
+            "SCREAMING_SNAKE constant must be hidden in camel_mode");
+        assert!(!items.iter().any(|i| i.label == "CHILD_COUNT"),
+            "SCREAMING_SNAKE val must be hidden in camel_mode");
+
+        // Typing all-uppercase prefix — SCREAMING_SNAKE constants may appear.
+        let (items2, _) = complete_symbol(&idx, "CHILD", None, &cur_uri, false);
+        assert!(items2.iter().any(|i| i.label == "CHILD_DASHBOARD_MAX"),
+            "SCREAMING_SNAKE constant must appear when prefix is uppercase");
+    }
+
+    #[test]
+    fn long_prefix_tier2_not_crowded_out() {
+        // Even when the same-package has many substring-matching symbols,
+        // a cross-package prefix match must survive with a 4+ char prefix.
+        let idx = Indexer::new();
+        let cur_uri  = uri("/app/pkg/Screen.kt");
+        let other_uri = uri("/app/pkg/Other.kt");
+        let cross_uri = uri("/app/other/Cross.kt");
+
+        // 60 same-pkg classes that contain "child" as substring but don't start with it.
+        let same_pkg: String = (0..60)
+            .map(|i| format!("class Something{i}Child"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        idx.index_content(&cur_uri,  "package com.example\n");
+        idx.index_content(&other_uri, &format!("package com.example\n{same_pkg}"));
+        // Cross-package class with prefix match.
+        idx.index_content(&cross_uri, "package com.other\nclass ChildDashboardViewModel");
+
+        // Short prefix (2 chars): substring allowed, cross-pkg fires.
+        let (short, _) = complete_symbol(&idx, "Ch", None, &cur_uri, false);
+        assert!(short.iter().any(|i| i.label == "ChildDashboardViewModel"),
+            "cross-pkg must appear for short prefix");
+
+        // Long prefix (5 chars): substring suppressed for tier-0/1 — cross-pkg prefix match wins.
+        let (long, _) = complete_symbol(&idx, "Child", None, &cur_uri, false);
+        assert!(long.iter().any(|i| i.label == "ChildDashboardViewModel"),
+            "cross-pkg prefix match must survive long prefix even with many same-pkg substring hits");
+        // Same-pkg substring hits (Something*Child) must be absent for long prefix.
+        assert!(!long.iter().any(|i| i.label.ends_with("Child") && i.label.starts_with("Something")),
+            "same-pkg substring matches must be filtered for long prefix");
+    }
+
+    #[test]
+    fn is_screaming_snake_cases() {
+        assert!(is_screaming_snake("MAX_SIZE"));
+        assert!(is_screaming_snake("CHILD_DASHBOARD_MAX"));
+        assert!(is_screaming_snake("A"));
+        assert!(!is_screaming_snake("ChildDashboard"));
+        assert!(!is_screaming_snake("maxSize"));
+        assert!(!is_screaming_snake("_"));      // no letters
+        assert!(!is_screaming_snake("123"));    // no letters
     }
 
     #[test]

@@ -677,7 +677,8 @@ impl Indexer {
         let _guard = IndexingGuard { indexer: Arc::clone(&self) };
         
         if already {
-            log::info!("index_workspace_impl: an indexing run is already in progress; skipping new start");
+            log::warn!("index_workspace_impl: an indexing run is already in progress, skipping. \
+                       This may cause incomplete indexing — trigger 'kotlin-lsp/reindex' to recover.");
             return WorkspaceIndexResult {
                 files: Vec::new(),
                 stats: IndexStats::default(),
@@ -710,10 +711,9 @@ impl Indexer {
         let total = paths.len();
 
         // On warm start all selected paths are cache hits — pure deserialization with no
-        // parse overhead — so bypass the file-count cap.  The cap was designed to bound
-        // cold-start parse time, not cache-restore time.  An explicit KOTLIN_LSP_MAX_FILES
-        // env var still wins (it overrides the default 2000 with a real limit).
-        let effective_max = if warm_start && max == DEFAULT_MAX_INDEX_FILES {
+        // parse overhead — so bypass the file-count cap entirely.  The cap was designed to
+        // bound cold-start parse time; KOTLIN_LSP_MAX_FILES still limits cold-start parses.
+        let effective_max = if warm_start {
             MAX_FILES_UNLIMITED
         } else {
             max
@@ -911,17 +911,30 @@ impl Indexer {
             }
         });
 
+        let gen_skipped   = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let read_failed   = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let url_failed    = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let panic_failed  = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let gen_skipped2  = Arc::clone(&gen_skipped);
+        let read_failed2  = Arc::clone(&read_failed);
+        let url_failed2   = Arc::clone(&url_failed);
+        let panic_failed2 = Arc::clone(&panic_failed);
+
         let results = crate::task_runner::run_concurrent(
             work_items,
             sem,
             move |item, sem| {
                 let idx = Arc::clone(&idx_ref);
+                let gen_skipped   = Arc::clone(&gen_skipped2);
+                let read_failed   = Arc::clone(&read_failed2);
+                let url_failed    = Arc::clone(&url_failed2);
+                let panic_failed  = Arc::clone(&panic_failed2);
                 async move {
                     log::debug!("Parsing: {}", item.path.display());
                     
                     // Check generation before parsing
                     if idx.root_generation.load(std::sync::atomic::Ordering::SeqCst) != item.start_gen {
-                        log::info!("Parse task: generation changed, skipping {}", item.path.display());
+                        gen_skipped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         return None;
                     }
                     
@@ -929,7 +942,10 @@ impl Indexer {
                     let content = match tokio::fs::read_to_string(&item.path).await {
                         Ok(c) => c,
                         Err(e) => {
-                            log::warn!("Could not read {}: {}", item.path.display(), e);
+                            let n = read_failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            if n < 5 {
+                                log::warn!("Could not read {}: {}", item.path.display(), e);
+                            }
                             return None;
                         }
                     };
@@ -938,6 +954,7 @@ impl Indexer {
                     let uri = match Url::from_file_path(&item.path) {
                         Ok(u) => u,
                         Err(_) => {
+                            url_failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             log::warn!("Invalid file path: {}", item.path.display());
                             return None;
                         }
@@ -954,6 +971,7 @@ impl Indexer {
                     }).await {
                         Ok(result) => result,
                         Err(e) => {
+                            panic_failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             log::warn!("Parse task panicked for {}: {}", item.path.display(), e);
                             return None;
                         }
@@ -989,7 +1007,12 @@ impl Indexer {
         // Stop the progress reporter (it may still be sleeping on its interval).
         progress_handle.abort();
 
-        log::info!("All {} parse tasks completed", results.len());
+        let gen_skip_n  = gen_skipped.load(std::sync::atomic::Ordering::Relaxed);
+        let read_fail_n = read_failed.load(std::sync::atomic::Ordering::Relaxed);
+        let url_fail_n  = url_failed.load(std::sync::atomic::Ordering::Relaxed);
+        let panic_n     = panic_failed.load(std::sync::atomic::Ordering::Relaxed);
+        log::info!("All {} parse tasks done: gen_skipped={}, read_failed={}, url_failed={}, panics={}",
+            results.len(), gen_skip_n, read_fail_n, url_fail_n, panic_n);
         
         // If generation changed while parse tasks ran, discard results — the new
         // root's indexing run will populate the index correctly.
@@ -1937,8 +1960,13 @@ impl Indexer {
         }
         // (compute below, then store in cache at the end)
         let dot_receiver = if before_prefix.ends_with('.') {
-            // Grab the identifier immediately preceding the dot.
-            let recv: String = before_prefix[..before_prefix.len() - 1]
+            // Grab the expression immediately preceding the dot.
+            // For simple identifiers: `foo.` → "foo"
+            // For qualified nested types: `DPSCoordinator.Kind.` → "DPSCoordinator.Kind"
+            // We walk backwards collecting identifier chars; if we then see a dot followed
+            // by another identifier, include that outer segment too (one level only).
+            let before_dot = &before_prefix[..before_prefix.len() - 1];
+            let inner: String = before_dot
                 .chars()
                 .rev()
                 .take_while(|&c| c.is_alphanumeric() || c == '_')
@@ -1946,7 +1974,33 @@ impl Indexer {
                 .chars()
                 .rev()
                 .collect();
-            if recv.is_empty() { None } else { Some(recv) }
+            if inner.is_empty() {
+                None
+            } else {
+                // Check whether there is an `Outer.` prefix immediately before `inner`.
+                let remaining = &before_dot[..before_dot.len() - inner.len()];
+                if remaining.ends_with('.')
+                    && inner.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+                {
+                    let outer: String = remaining[..remaining.len() - 1]
+                        .chars()
+                        .rev()
+                        .take_while(|&c| c.is_alphanumeric() || c == '_')
+                        .collect::<String>()
+                        .chars()
+                        .rev()
+                        .collect();
+                    if !outer.is_empty()
+                        && outer.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+                    {
+                        Some(format!("{}.{}", outer, inner))
+                    } else {
+                        Some(inner)
+                    }
+                } else {
+                    Some(inner)
+                }
+            }
         } else {
             None
         };
@@ -2521,20 +2575,26 @@ fn warm_discover_files(root: &Path, cache: &IndexCache, matcher: Option<&IgnoreM
 
     // Phase 1: all previously cached files, filtered through the current ignore matcher
     // so that newly-configured ignorePatterns take effect even on a warm start.
+    // Also skip paths that no longer exist on disk (e.g. files deleted by a branch switch)
+    // to avoid counting them as need_parse and emitting spurious "Could not read" warnings.
     let cached_paths: HashSet<String> = cache.entries.keys()
         .filter(|p| {
             if let Some(m) = matcher {
                 if !m.is_empty() {
                     let path = Path::new(p.as_str());
                     let rel = path.strip_prefix(root).unwrap_or(path);
-                    return !m.matches(rel);
+                    if m.matches(rel) { return false; }
                 }
             }
             true
         })
         .cloned()
         .collect();
-    let mut paths: Vec<PathBuf> = cached_paths.iter().map(PathBuf::from).collect();
+    let mut paths: Vec<PathBuf> = cached_paths.iter()
+        .map(PathBuf::from)
+        .filter(|p| p.exists())
+        .collect();
+    let on_disk_cached_count = paths.len();
 
     // Phase 2: find files created or modified since the cache was saved.
     // These are the only files `fd` needs to scan for.
@@ -2552,8 +2612,8 @@ fn warm_discover_files(root: &Path, cache: &IndexCache, matcher: Option<&IgnoreM
     }
 
     log::info!(
-        "Warm start: {} cached + {} new files (scanned last {}s window)",
-        cached_paths.len(), new_count, elapsed_secs
+        "Warm start: {} cached (on-disk) + {} new files (scanned last {}s window)",
+        on_disk_cached_count, new_count, elapsed_secs
     );
     paths
 }
@@ -5191,6 +5251,28 @@ class Child : Base
         let (items, _) = idx.completions(&vm_uri, Position::new(4, col), true);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(labels.contains(&"findAll"), "findAll missing; got: {labels:?}");
+    }
+
+    #[test]
+    fn dot_completion_qualified_nested_type() {
+        // Typing `DPSCoordinator.Kind.` — receiver is "DPSCoordinator.Kind".
+        // Should show enum cases (victory, defeat), NOT members of DPSCoordinator.
+        let coordinator_uri = uri("/DPSCoordinator.swift");
+        let vm_uri = uri("/DPSChangeVictoryViewModel.swift");
+        let idx = Indexer::new();
+        idx.index_content(&coordinator_uri,
+            "class DPSCoordinator {\n    enum Kind {\n        case victory\n        case defeat\n    }\n    func deposit() {}\n    var strategy: String = \"\"\n}");
+        idx.index_content(&vm_uri,
+            "class DPSChangeVictoryViewModel {\n    let coordinator: DPSCoordinator\n    func update() { let k = DPSCoordinator.Kind. }\n}");
+
+        let line = "    func update() { let k = DPSCoordinator.Kind. }";
+        let col = (line.find("DPSCoordinator.Kind.").unwrap() + "DPSCoordinator.Kind.".len()) as u32;
+        let (items, _) = idx.completions(&vm_uri, Position::new(2, col), false);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"victory"), "victory case missing; got: {labels:?}");
+        assert!(labels.contains(&"defeat"),  "defeat case missing; got: {labels:?}");
+        assert!(!labels.contains(&"deposit"),  "deposit (DPSCoordinator method) must NOT appear; got: {labels:?}");
+        assert!(!labels.contains(&"strategy"), "strategy (DPSCoordinator prop) must NOT appear; got: {labels:?}");
     }
 
     #[test]
