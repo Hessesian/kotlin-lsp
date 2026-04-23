@@ -325,11 +325,14 @@ fn find_it_element_type_in_lines_impl(
         let line = match lines.get(ln) { Some(l) => l, None => continue };
         // On cursor_line restrict to chars at byte positions < cursor_col.
         let scan_slice: &str = if ln == cursor_line {
-            let byte_bound = line.char_indices()
-                .nth(cursor_col)
-                .map(|(b, _)| b)
-                .unwrap_or(line.len());
-            &line[..byte_bound]
+            // cursor_col is a UTF-16 character offset (from LSP); convert to a byte boundary.
+            let mut utf16 = 0usize;
+            let mut byte_end = line.len();
+            for (bi, ch) in line.char_indices() {
+                if utf16 >= cursor_col { byte_end = bi; break; }
+                utf16 += ch.len_utf16();
+            }
+            &line[..byte_end]
         } else {
             line.as_str()
         };
@@ -501,7 +504,7 @@ fn lambda_receiver_type_named_arg_ml(
     let named_arg = extract_named_arg_name(before_brace)?;
 
     // Find the enclosing function/constructor call by scanning backward.
-    let callee_full = find_enclosing_call_name(lines, line_no, before_brace.len())?;
+    let callee_full = find_enclosing_call_name(lines, line_no, before_brace.chars().count())?;
 
     // Use the LAST segment of a dotted callee as the function name to look up.
     // `DashboardProductsReducer.SheetReloadActions` → `SheetReloadActions`

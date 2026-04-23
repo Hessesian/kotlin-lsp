@@ -152,18 +152,21 @@ pub(crate) fn extract_named_arg_name(before_brace: &str) -> Option<&str> {
 /// Handles `val`/`var` prefixes, strips them. Returns the full type string
 /// (may be a functional type like `(String, Boolean) -> Unit`).
 pub(crate) fn find_named_param_type_in_sig(sig: &str, param_name: &str) -> Option<String> {
-    // Split by comma at depth 0 (respecting `()` only — NOT `<>` because `->` contains `>`
-    // which would falsely decrement a `<>` depth counter).
+    // Split by comma at depth 0, tracking `()`, `[]`, and `<>`.
+    // The `>` in `->` must NOT decrement `<>` depth — skip it when prev char is `-`.
     let mut parts: Vec<&str> = Vec::new();
     let mut depth: i32 = 0;
     let mut start = 0;
+    let mut prev = '\0';
     for (i, ch) in sig.char_indices() {
         match ch {
-            '(' | '[' => depth += 1,
+            '(' | '[' | '<' => depth += 1,
             ')' | ']' => depth -= 1,
+            '>' if prev != '-' => depth -= 1,
             ',' if depth == 0 => { parts.push(&sig[start..i]); start = i + 1; }
             _ => {}
         }
+        prev = ch;
     }
     if start < sig.len() { parts.push(&sig[start..]); }
 
@@ -257,14 +260,17 @@ pub(crate) fn extract_first_arg(call_expr: &str) -> Option<&str> {
     let rest = &call_expr[paren + 1..];
     let mut depth: i32 = 0;
     let mut end = rest.len();
+    let mut prev = '\0';
     for (i, ch) in rest.char_indices() {
         match ch {
             '(' | '<' | '[' => depth += 1,
             ')' | ']' => { if depth == 0 { end = i; break; } depth -= 1; }
-            '>' => depth -= 1,
+            // Skip the `>` in `->` (lambda arrow) and never go negative.
+            '>' if prev != '-' && depth > 0 => depth -= 1,
             ',' if depth == 0 => { end = i; break; }
             _ => {}
         }
+        prev = ch;
     }
     let arg = rest[..end].trim();
     if arg.is_empty() { None } else { Some(arg) }

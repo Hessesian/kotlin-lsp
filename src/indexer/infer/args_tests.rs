@@ -156,3 +156,39 @@ fn has_named_params_explicit_it_keyword() {
     // `it` named explicitly in the arrow is treated as the implicit param.
     assert!(!has_named_params_not_it("it -> it.name"));
 }
+
+// ─── Regression: generic types with commas in find_named_param_type_in_sig ───
+
+#[test]
+fn named_param_type_generic_with_comma() {
+    // `Map<String, Int>` — the comma inside `<>` must NOT split the type.
+    let sig = "key: String, map: Map<String, Int>, flag: Boolean";
+    assert_eq!(
+        find_named_param_type_in_sig(sig, "map"),
+        Some("Map<String, Int>".to_owned())
+    );
+}
+
+#[test]
+fn named_param_type_functional_type() {
+    // `(String) -> Unit` contains `->` — `>` must not decrement `<>` depth.
+    let sig = "name: String, callback: (String) -> Unit";
+    assert_eq!(
+        find_named_param_type_in_sig(sig, "callback"),
+        Some("(String) -> Unit".to_owned())
+    );
+}
+
+// ─── Regression: extract_first_arg with lambda arrow `->` ────────────────────
+
+#[test]
+fn extract_first_arg_with_lambda_arrow() {
+    // `->` inside the arg should not trip up the `>` depth tracking.
+    assert_eq!(extract_first_arg("run({ x -> x.name })"), Some("{ x -> x.name }"));
+}
+
+#[test]
+fn extract_first_arg_generic_type_regression() {
+    // A generic first arg like `listOf<String>()` — `>` closes a generic, not a lambda.
+    assert_eq!(extract_first_arg("fn(listOf<String>(), other)"), Some("listOf<String>()"));
+}

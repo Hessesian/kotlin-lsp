@@ -1,8 +1,10 @@
 //! Pure signature-extraction helpers for the Kotlin indexer.
 //!
-//! All public items are `pub(crate)`.  No hidden state: every function either
-//! takes pure string/slice inputs or accepts an immutable `&Indexer` reference
-//! for index look-ups (reads only).
+//! All public items are `pub(crate)`.  Most functions take pure string/slice
+//! inputs or an immutable `&Indexer` reference for index look-ups.  Note that
+//! `find_fun_signature_full` may trigger on-demand indexing via interior
+//! mutability (`index_content`) and perform disk reads when a symbol is not yet
+//! in the in-memory index.
 
 use tower_lsp::lsp_types::{SymbolKind, Url};
 
