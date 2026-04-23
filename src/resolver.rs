@@ -1107,14 +1107,14 @@ fn fd_find_and_parse(symbol_name: &str, full_import_path: &str, root: Option<&Pa
                 format!(r".*/{pkg_dir}/{stem}\.({ext_alt})$")
             };
             let locs = fd_search_by_full_path_pattern(&pat, symbol_name, expected_pkg, root);
-            let locs = matcher.map_or(locs.clone(), |m| m.filter_locs(locs));
+            let locs = match matcher { Some(m) => m.filter_locs(locs), None => locs };
             if !locs.is_empty() { return locs; }
         }
 
         // Strategy 2: global filename-only search (fallback for flat / non-standard layouts).
         for ext in crate::rg::SOURCE_EXTENSIONS {
             let locs = fd_search_file(&format!("{stem}.{ext}"), symbol_name, expected_pkg, root);
-            let locs = matcher.map_or(locs.clone(), |m| m.filter_locs(locs));
+            let locs = match matcher { Some(m) => m.filter_locs(locs), None => locs };
             if !locs.is_empty() { return locs; }
         }
     }
@@ -1496,7 +1496,7 @@ fn rg_in_package_dir(name: &str, package: &str, root: Option<&Path>, matcher: Op
         .lines()
         .filter_map(parse_rg_line)
         .collect();
-    matcher.map_or(locs.clone(), |m| m.filter_locs(locs))
+    match matcher { Some(m) => m.filter_locs(locs), None => locs }
 }
 
 // ─── shared helpers ───────────────────────────────────────────────────────────

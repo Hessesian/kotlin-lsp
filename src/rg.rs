@@ -319,8 +319,10 @@ pub fn rg_find_references(
         );
         let candidate_files = rg_files_with_matches(&direct_import_pat, &search_root);
         // Filter candidate files against ignore patterns before searching them.
-        let candidate_files = matcher
-            .map_or(candidate_files.clone(), |m| m.filter_file_strings(candidate_files));
+        let candidate_files = match matcher {
+            Some(m) => m.filter_file_strings(candidate_files),
+            None    => candidate_files,
+        };
 
         // Step B2 — files in the same package as the parent class declaration.
         // NOTE: for inner classes, same-package files use the QUALIFIED form
@@ -332,9 +334,12 @@ pub fn rg_find_references(
         // Always include declaration files so the declaration site itself is
         // never missed (it uses bare `Name`, not the qualified `Parent.Name` form).
         let mut all_files: Vec<String> = candidate_files;
-        for f in decl_files {
-            if !all_files.contains(f) { all_files.push(f.clone()); }
-        }
+        // Build new entries first (borrows all_files), then extend after the borrow ends.
+        let new_decl: Vec<&String> = {
+            let existing: std::collections::HashSet<&str> = all_files.iter().map(|s| s.as_str()).collect();
+            decl_files.iter().filter(|f| !existing.contains(f.as_str())).collect()
+        };
+        for f in new_decl { all_files.push(f.clone()); }
 
         if !all_files.is_empty() {
             let bare_hits = rg_word_in_files(&safe_name, &all_files);
@@ -369,8 +374,10 @@ pub fn rg_find_references(
             if !candidate_files.contains(&f) { candidate_files.push(f); }
         }
         // Filter candidate files against ignore patterns before searching them.
-        let candidate_files = matcher
-            .map_or(candidate_files.clone(), |m| m.filter_file_strings(candidate_files));
+        let candidate_files = match matcher {
+            Some(m) => m.filter_file_strings(candidate_files),
+            None    => candidate_files,
+        };
 
         if candidate_files.is_empty() {
             return vec![];
@@ -448,7 +455,10 @@ pub fn rg_find_implementors(name: &str, root: Option<&Path>, matcher: Option<&Ig
             None
         })
         .collect();
-    matcher.map_or(locs.clone(), |m| m.filter_locs(locs))
+    match matcher {
+        Some(m) => m.filter_locs(locs),
+        None    => locs,
+    }
 }
 
 /// Parse one line of `rg --no-heading --with-filename --line-number --column`
