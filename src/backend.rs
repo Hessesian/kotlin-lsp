@@ -92,13 +92,16 @@ impl LanguageServer for Backend {
                 .filter(|p| p.is_dir())
         };
 
-        // env var or explicit client rootUri pins the workspace (disables did_open auto-detection).
-        // config file is a passive fallback — never pins.
-        // When the editor provides rootUri it knows the project; no auto-detection needed.
-        let workspace_pinned = env_override.is_some() || client_root.is_some();
+        // Any resolved workspace root — env var, client rootUri, or config file — pins the
+        // workspace and disables did_open auto-detection.  Without pinning, opening a file from
+        // a second project in the same editor session triggers a spurious root switch that aborts
+        // the in-progress workspace index and discards half its results.
+        // Pure auto-detection (no config at all) still works: workspace_pinned stays false until
+        // did_open fires and a root is detected for the first time.
         let resolved_root = env_override
             .or(client_root)
             .or_else(config_fallback);
+        let workspace_pinned = resolved_root.is_some();
 
         if let Some(path) = resolved_root {
             // Set workspace_root immediately so rg/fd calls work even before
@@ -364,9 +367,12 @@ impl LanguageServer for Backend {
 
         if let Some(root) = need_root_switch {
             *self.indexer.workspace_root.write().unwrap() = Some(root.clone());
+            // Pin the workspace after the first auto-detection so that opening a file
+            // from a second project later in the same session doesn't switch again.
+            self.indexer.workspace_pinned.store(true, std::sync::atomic::Ordering::Relaxed);
             self.indexer.root_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.indexer.reset_index_state();
-            log::info!("Auto-detected workspace root: {}", root.display());
+            log::info!("Auto-detected workspace root (now pinned): {}", root.display());
             let idx = Arc::clone(&self.indexer);
             let client = self.client.clone();
             let root2 = root.clone();
