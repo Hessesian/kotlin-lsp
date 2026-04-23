@@ -147,7 +147,9 @@ pub(crate) fn cache_entry_to_file_result(uri: &Url, entry: &FileCacheEntry) -> F
     for sym in &data.symbols {
         if !class_kinds.contains(&sym.kind) { continue; }
         let start = sym.selection_range.start.line as usize;
+        if start >= data.lines.len() { continue; }
         let limit  = (start + 10).min(data.lines.len());
+        if start >= limit { continue; }
         let mut decl_lines: Vec<String> = Vec::new();
         for line in &data.lines[start..limit] {
             decl_lines.push(line.clone());
@@ -233,12 +235,20 @@ pub(super) fn save_cache(
                     }
                 }
             }
-            match std::fs::write(&cache_path, &bytes) {
-                Ok(()) => log::info!(
+            // Write atomically: write to a sibling `.tmp` file then rename,
+            // so a crash mid-write never leaves a truncated cache behind.
+            let tmp_path = cache_path.with_extension("bin.tmp");
+            let write_ok = std::fs::write(&tmp_path, &bytes)
+                .and_then(|()| std::fs::rename(&tmp_path, &cache_path))
+                .is_ok();
+            if write_ok {
+                log::info!(
                     "Cache saved ({} files, {} KB) → {}",
                     cache.entries.len(), bytes.len() / 1024, cache_path.display()
-                ),
-                Err(e) => log::warn!("Cache write failed: {e}"),
+                );
+            } else {
+                let _ = std::fs::remove_file(&tmp_path);
+                log::warn!("Cache write failed for {}", cache_path.display());
             }
         }
         Err(e) => log::warn!("Cache serialize failed: {e}"),
