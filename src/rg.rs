@@ -298,7 +298,6 @@ pub fn rg_find_references(
             .into_iter()
             .filter_map(filter)
             .collect();
-        eprintln!("[refs] parent={parent:?} Pass-A qualified={} locs", locs.len());
 
         // Pass B: bare `Name` restricted to files that directly import the inner
         // class itself (`import …ParentClass.Name` or `import …ParentClass.*`)
@@ -339,7 +338,6 @@ pub fn rg_find_references(
 
         if !all_files.is_empty() {
             let bare_hits = rg_word_in_files(&safe_name, &all_files);
-            eprintln!("[refs] Pass-B candidate files={} bare_hits={}", all_files.len(), bare_hits.len());
             for (loc, content) in bare_hits {
                 if let Some(loc) = filter((loc, content)) {
                     // Deduplicate against the qualified hits.
