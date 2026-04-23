@@ -234,6 +234,14 @@ They can coexist — use kotlin-lsp for fast navigation, the official one for di
 
 ## Changelog
 
+### 0.8.0
+
+- **Auto-import completion** — selecting an unimported class automatically inserts the `import` statement; multiple same-named classes from different packages appear as separate items showing the package
+- **Completion relevance scoring** — results sorted by match quality: exact prefix → camelCase acronym (e.g. `CB` → `ColumnButton`) → substring; capped at 150 with `isIncomplete: true` so the client re-queries as you type
+- **Cross-package gate** — auto-import symbols require prefix ≥ 2 chars; `@` context restricts completions to class/annotation kinds
+- **Warm-start improvements** — skip branch-deleted cached paths; warm starts always bypass the file-count cap
+- **Java import handling** — `parse_imports_from_lines` strips trailing `;` and `static` prefix; auto-import inserts Java-style `import foo.Bar;` for `.java` files
+
 ### 0.7.1
 
 - **`ignorePatterns` configuration** — exclude directories/files from indexing via `initializationOptions` (gitignore-style globs, any depth, warm-start aware)
