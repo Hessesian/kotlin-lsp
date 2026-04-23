@@ -700,6 +700,39 @@ fn parse_import_header(header: &tree_sitter::Node, bytes: &[u8], data: &mut File
     }
 }
 
+/// Lightweight import scanner for live (unsaved) buffer lines.
+/// Handles: `import pkg.Name`, `import pkg.Name as Alias`, `import pkg.*`
+/// Used by completion to read the current buffer state without a full re-parse.
+pub fn parse_imports_from_lines(lines: &[String]) -> Vec<crate::types::ImportEntry> {
+    let mut imports = Vec::new();
+    for line in lines {
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with("import ") { continue; }
+        let rest = trimmed["import ".len()..].trim();
+        if rest.is_empty() { continue; }
+        let is_star = rest.ends_with(".*");
+        let (path_part, alias) = if let Some(idx) = rest.find(" as ") {
+            (&rest[..idx], Some(rest[idx + 4..].trim().to_owned()))
+        } else {
+            (rest, None)
+        };
+        let full_path = if is_star {
+            path_part[..path_part.len() - 2].to_owned() // strip ".*"
+        } else {
+            path_part.to_owned()
+        };
+        let local_name = if is_star {
+            "*".to_owned()
+        } else {
+            alias.unwrap_or_else(|| {
+                full_path.rsplit('.').next().unwrap_or(&full_path).to_owned()
+            })
+        };
+        imports.push(crate::types::ImportEntry { full_path, local_name, is_star });
+    }
+    imports
+}
+
 // ─── Swift import extraction ─────────────────────────────────────────────────
 
 fn extract_swift_imports(root: tree_sitter::Node, bytes: &[u8], data: &mut FileData) {
@@ -1425,11 +1458,10 @@ class LoanReducer {
         let src = "final class DPSChangeVictoryViewModel: SimpleVictoryViewModel, @unchecked Sendable {\n    let coordinator: DPSCoordinator\n    func update(kind: DPSCoordinator.Kind) {}\n}\n\nclass DPSCoordinator {\n    enum Kind {\n        case victory\n        case defeat\n    }\n}";
         let data = parse_swift(src);
         let names: Vec<&str> = data.symbols.iter().map(|s| s.name.as_str()).collect();
-        eprintln!("Symbols: {:?}", names);
         assert_eq!(sym(&data, "DPSChangeVictoryViewModel").unwrap().kind, SymbolKind::CLASS,
-            "DPSChangeVictoryViewModel should be CLASS");
-        assert!(sym(&data, "Kind").is_some(), "nested Kind enum should be indexed; got: {:?}", names);
+            "DPSChangeVictoryViewModel should be CLASS; symbols: {names:?}");
+        assert!(sym(&data, "Kind").is_some(), "nested Kind enum should be indexed; got: {names:?}");
         assert_eq!(sym(&data, "Kind").unwrap().kind, SymbolKind::ENUM, "Kind should be ENUM");
-        assert!(sym(&data, "victory").is_some(), "enum cases should be indexed");
+        assert!(sym(&data, "victory").is_some(), "enum cases should be indexed; got: {names:?}");
     }
 }

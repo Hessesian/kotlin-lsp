@@ -386,7 +386,13 @@ impl LanguageServer for Backend {
         let outside_root = pinned && {
             matches!(
                 (opened_path_opt.as_ref(), self.indexer.workspace_root.read().unwrap().clone()),
-                (Some(path), Some(root)) if !path.starts_with(&root)
+                (Some(path), Some(root)) if {
+                    // Use canonical paths to avoid symlink/path-form mismatches
+                    // (consistent with the root-switch guard above).
+                    let canon_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+                    let canon_root = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
+                    !canon_path.starts_with(&canon_root)
+                }
             )
         };
         if outside_root {

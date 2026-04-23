@@ -13,8 +13,8 @@ const README_PATH = ".github/extensions/kotlin-lsp/README.md";
 const GREP_TOOLS = new Set(["grep", "kotlin_rg", "kotlin_find_subtypes"]);
 
 // bash commands that are grep-type code navigation
-// Matches: rg/grep/find with *.kt/*.java, OR fd with -e kt/-e java extension flags
-const GREP_BASH_RE = /\b(rg|grep|fd|find)\b.*(-e\s+(?:kt|java)|\.(kt|java))/;
+// Matches: rg/grep/find with *.kt/*.kts/*.java, OR fd with -e kt/-e kts/-e java extension flags
+const GREP_BASH_RE = /\b(rg|grep|fd|find)\b.*(-e\s+(?:kt|kts|java)|\.(kt|kts|java))/;
 
 // glob patterns targeting Kotlin/Java files count as grep-type navigation
 const GLOB_KT_RE = /\.(kt|java|kts)\b/;

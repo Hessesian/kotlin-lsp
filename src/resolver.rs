@@ -523,9 +523,25 @@ fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippets: bool, an
     //    prefix/acronym matches only (max_score=1) — no substring flood.
     // Emits one CompletionItem per distinct FQN, with additionalTextEdits for auto-import.
     if !lowercase_mode && prefix.len() >= 2 {
+        // Prefer live_lines (updated on every keystroke) over the indexed snapshot so that
+        // import deduplication and insertion position are based on the current buffer state.
+        let live = idx.live_lines.get(from_uri.as_str()).map(|ll| ll.clone());
         let (cur_imports, cur_pkg, cur_lines) = idx.files.get(from_uri.as_str())
-            .map(|f| (f.imports.clone(), f.package.clone().unwrap_or_default(), f.lines.clone()))
-            .unwrap_or_default();
+            .map(|f| {
+                let lines = live.clone().unwrap_or_else(|| f.lines.clone());
+                // Re-scan live lines for imports so we don't use a stale snapshot.
+                let imports = if live.is_some() {
+                    crate::parser::parse_imports_from_lines(&lines)
+                } else {
+                    f.imports.clone()
+                };
+                (imports, f.package.clone().unwrap_or_default(), lines)
+            })
+            .unwrap_or_else(|| {
+                let lines = live.clone().unwrap_or_default();
+                let imports = crate::parser::parse_imports_from_lines(&lines);
+                (imports, String::new(), lines)
+            });
 
         if let Ok(cache) = idx.bare_name_cache.read() {
             for name in cache.iter() {
