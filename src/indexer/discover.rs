@@ -149,7 +149,9 @@ pub(super) fn find_source_files_unconstrained(root: &Path) -> Vec<PathBuf> {
                 .filter(|l| !l.is_empty())
                 .map(PathBuf::from)
                 .collect();
-            return paths;
+            if !paths.is_empty() {
+                return paths;
+            }
         }
     }
 

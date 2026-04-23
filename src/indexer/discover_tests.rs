@@ -1,24 +1,9 @@
 //! Unit tests for `indexer::discover`.
 
 use super::{find_source_files, find_source_files_unconstrained, warm_discover_files};
+use crate::indexer::test_helpers::with_xdg_cache;
 use crate::indexer::cache::workspace_cache_path;
 use crate::rg::IgnoreMatcher;
-
-/// Global mutex serialising tests that mutate `XDG_CACHE_HOME`.
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Run `f` with `XDG_CACHE_HOME` temporarily pointing at `dir`.
-fn with_xdg_cache<F: FnOnce()>(dir: &std::path::Path, f: F) {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let prev = std::env::var("XDG_CACHE_HOME").ok();
-    std::env::set_var("XDG_CACHE_HOME", dir);
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-    match prev {
-        Some(v) => std::env::set_var("XDG_CACHE_HOME", v),
-        None    => std::env::remove_var("XDG_CACHE_HOME"),
-    }
-    if let Err(e) = result { std::panic::resume_unwind(e); }
-}
 
 /// `find_source_files` on a directory with no source files returns an empty vec.
 #[test]
@@ -150,7 +135,7 @@ fn warm_discover_files_skips_deleted_files() {
 
         let paths = warm_discover_files(&root, &cache, None);
         assert!(
-            !paths.iter().any(|p| p.file_name().map(|n| n == "Deleted.kt").unwrap_or(false)),
+            !paths.iter().any(|p| p.file_name().and_then(|n| n.to_str()).map(|n| n == "Deleted.kt").unwrap_or(false)),
             "deleted file should not appear in warm_discover_files result"
         );
     });

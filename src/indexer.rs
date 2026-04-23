@@ -71,6 +71,9 @@ pub(crate) use self::cache::workspace_cache_path;
 mod discover;
 use self::discover::{find_source_files, find_source_files_unconstrained, warm_discover_files};
 
+#[cfg(test)]
+pub(crate) mod test_helpers;
+
 // ─── RAII guard for indexing_in_progress flag ─────────────────────────────────
 
 /// RAII guard that clears `indexing_in_progress` on drop (success, panic, or early return).

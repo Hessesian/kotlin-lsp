@@ -10,22 +10,7 @@ fn uri(path: &str) -> Url {
     Url::parse(&format!("file:///test{path}")).unwrap()
 }
 
-/// Global mutex serialising tests that mutate `XDG_CACHE_HOME`.
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Run `f` with `XDG_CACHE_HOME` temporarily pointing at `dir`.
-/// Restores the original value (or removes the var) on exit, even on panic.
-fn with_xdg_cache<F: FnOnce()>(dir: &std::path::Path, f: F) {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let prev = std::env::var("XDG_CACHE_HOME").ok();
-    std::env::set_var("XDG_CACHE_HOME", dir);
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-    match prev {
-        Some(v) => std::env::set_var("XDG_CACHE_HOME", v),
-        None    => std::env::remove_var("XDG_CACHE_HOME"),
-    }
-    if let Err(e) = result { std::panic::resume_unwind(e); }
-}
+use crate::indexer::test_helpers::with_xdg_cache;
 
 /// `cache_entry_to_file_result` must reconstruct supertypes from `FileData.lines`
 /// even when the `FileCacheEntry` was loaded from disk (lines are always cached).
