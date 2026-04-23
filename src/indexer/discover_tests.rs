@@ -1,9 +1,24 @@
 //! Unit tests for `indexer::discover`.
 
-use std::path::Path;
-
 use super::{find_source_files, find_source_files_unconstrained, warm_discover_files};
+use crate::indexer::cache::workspace_cache_path;
 use crate::rg::IgnoreMatcher;
+
+/// Global mutex serialising tests that mutate `XDG_CACHE_HOME`.
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Run `f` with `XDG_CACHE_HOME` temporarily pointing at `dir`.
+fn with_xdg_cache<F: FnOnce()>(dir: &std::path::Path, f: F) {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let prev = std::env::var("XDG_CACHE_HOME").ok();
+    std::env::set_var("XDG_CACHE_HOME", dir);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    match prev {
+        Some(v) => std::env::set_var("XDG_CACHE_HOME", v),
+        None    => std::env::remove_var("XDG_CACHE_HOME"),
+    }
+    if let Err(e) = result { std::panic::resume_unwind(e); }
+}
 
 /// `find_source_files` on a directory with no source files returns an empty vec.
 #[test]
@@ -82,30 +97,30 @@ fn warm_discover_files_returns_cached_existing_files() {
     use crate::types::FileData;
 
     let tmp = tempfile::tempdir().expect("tempdir");
-    let kt = tmp.path().join("Main.kt");
+    let root = tmp.path().join("workspace");
+    std::fs::create_dir(&root).expect("mkdir workspace");
+    let kt = root.join("Main.kt");
     std::fs::write(&kt, "class Main").expect("write");
 
     let mut entries = HashMap::new();
     entries.insert(
         kt.to_string_lossy().to_string(),
-        FileCacheEntry {
-            mtime_secs: 0,
-            file_size: 0,
-            content_hash: 0,
-            file_data: FileData::default(),
-        },
+        FileCacheEntry { mtime_secs: 0, file_size: 0, content_hash: 0, file_data: FileData::default() },
     );
-    let cache = IndexCache {
-        version: CACHE_VERSION,
-        complete_scan: true,
-        entries,
-    };
+    let cache = IndexCache { version: CACHE_VERSION, complete_scan: true, entries };
 
-    let paths = warm_discover_files(tmp.path(), &cache, None);
-    let names: Vec<_> = paths.iter()
-        .filter_map(|p| p.file_name()?.to_str())
-        .collect();
-    assert!(names.contains(&"Main.kt"), "Main.kt should be returned by warm_discover_files");
+    with_xdg_cache(tmp.path(), || {
+        // Create the on-disk cache file so warm_discover_files can stat it.
+        let cache_path = workspace_cache_path(&root);
+        std::fs::create_dir_all(cache_path.parent().unwrap()).expect("mkdir cache dir");
+        std::fs::write(&cache_path, b"").expect("touch cache file");
+
+        let paths = warm_discover_files(&root, &cache, None);
+        let names: Vec<_> = paths.iter()
+            .filter_map(|p| p.file_name()?.to_str())
+            .collect();
+        assert!(names.contains(&"Main.kt"), "Main.kt should be returned by warm_discover_files: {names:?}");
+    });
 }
 
 /// `warm_discover_files` excludes cached files that no longer exist on disk.
@@ -116,28 +131,27 @@ fn warm_discover_files_skips_deleted_files() {
     use crate::types::FileData;
 
     let tmp = tempfile::tempdir().expect("tempdir");
-    let ghost = tmp.path().join("Deleted.kt");
+    let root = tmp.path().join("workspace");
+    std::fs::create_dir(&root).expect("mkdir workspace");
+    let ghost = root.join("Deleted.kt");
     // Do NOT create the file — it's "in the cache" but deleted on disk.
 
     let mut entries = HashMap::new();
     entries.insert(
         ghost.to_string_lossy().to_string(),
-        FileCacheEntry {
-            mtime_secs: 0,
-            file_size: 0,
-            content_hash: 0,
-            file_data: FileData::default(),
-        },
+        FileCacheEntry { mtime_secs: 0, file_size: 0, content_hash: 0, file_data: FileData::default() },
     );
-    let cache = IndexCache {
-        version: CACHE_VERSION,
-        complete_scan: true,
-        entries,
-    };
+    let cache = IndexCache { version: CACHE_VERSION, complete_scan: true, entries };
 
-    let paths = warm_discover_files(tmp.path(), &cache, None);
-    assert!(
-        !paths.iter().any(|p| p.file_name().map(|n| n == "Deleted.kt").unwrap_or(false)),
-        "deleted file should not appear in warm_discover_files result"
-    );
+    with_xdg_cache(tmp.path(), || {
+        let cache_path = workspace_cache_path(&root);
+        std::fs::create_dir_all(cache_path.parent().unwrap()).expect("mkdir cache dir");
+        std::fs::write(&cache_path, b"").expect("touch cache file");
+
+        let paths = warm_discover_files(&root, &cache, None);
+        assert!(
+            !paths.iter().any(|p| p.file_name().map(|n| n == "Deleted.kt").unwrap_or(false)),
+            "deleted file should not appear in warm_discover_files result"
+        );
+    });
 }

@@ -55,13 +55,11 @@ pub(super) fn find_source_files(root: &Path, matcher: Option<&IgnoreMatcher>) ->
                 .filter(|l| !l.is_empty())
                 .map(PathBuf::from)
                 .collect();
-            if !paths.is_empty() {
-                return paths;
-            }
+            return paths;
         }
     }
 
-    log::info!("fd not available or found nothing; falling back to walkdir");
+    log::info!("fd unavailable or failed; falling back to walkdir");
     walkdir_find(root, matcher)
 }
 
@@ -151,13 +149,11 @@ pub(super) fn find_source_files_unconstrained(root: &Path) -> Vec<PathBuf> {
                 .filter(|l| !l.is_empty())
                 .map(PathBuf::from)
                 .collect();
-            if !paths.is_empty() {
-                return paths;
-            }
+            return paths;
         }
     }
 
-    log::info!("fd not available; falling back to walkdir for source path {}", root.display());
+    log::info!("fd unavailable or failed; falling back to walkdir for source path {}", root.display());
     let mut paths = Vec::new();
     let mut builder = ignore::WalkBuilder::new(root);
     builder.standard_filters(false).hidden(false).parents(false);
