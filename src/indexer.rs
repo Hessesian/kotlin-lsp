@@ -29,6 +29,17 @@ pub(crate) use crate::rg::IgnoreMatcher;
 pub use crate::rg::SOURCE_EXTENSIONS;
 use crate::rg::regex_escape;
 
+mod doc;
+use doc::extract_doc_comment;
+
+mod infer;
+use self::infer::{
+    SCOPE_FUNCTIONS,
+    lambda_type_first_input,
+    lambda_type_nth_input,
+    lambda_type_receiver,
+};
+
 // ─── RAII guard for indexing_in_progress flag ─────────────────────────────────
 
 /// RAII guard that clears `indexing_in_progress` on drop (success, panic, or early return).
@@ -3240,71 +3251,6 @@ fn find_named_param_type_in_sig(sig: &str, param_name: &str) -> Option<String> {
     None
 }
 
-/// Return the Nth (0-based) input type from a functional type expression.
-///
-/// `lambda_type_nth_input("(String, Boolean) -> Unit", 0)` → `Some("String")`
-/// `lambda_type_nth_input("(String, Boolean) -> Unit", 1)` → `Some("Boolean")`
-/// `lambda_type_nth_input("() -> Unit", 0)` → `None`
-fn lambda_type_nth_input(ty: &str, n: usize) -> Option<String> {
-    let ty = ty.trim();
-    // Strip `suspend` keyword — Kotlin allows `suspend (T) -> Unit` as a type.
-    let ty = strip_suspend(ty);
-    if !ty.starts_with('(') { return None; }
-    // Find matching `)` using separate paren/angle depth so `>` in `->` is
-    // never mistaken for a closing angle bracket.
-    let mut paren_depth: i32 = 0;
-    let mut _angle_depth: i32 = 0;
-    let mut close = None;
-    for (i, ch) in ty.char_indices() {
-        match ch {
-            '(' => paren_depth += 1,
-            ')' => { paren_depth -= 1; if paren_depth == 0 { close = Some(i); break; } }
-            '<' => _angle_depth += 1,
-            '>' => _angle_depth -= 1,
-            _ => {}
-        }
-    }
-    let close = close?;
-    let inner = ty[1..close].trim();
-    if inner.is_empty() { return None; }
-
-    // If `inner` is itself a function type (outer parens were just wrapping:
-    // `((T) -> R)` → inner = `(T) -> R`), recurse into it.
-    if inner.starts_with('(') && inner.contains("->") {
-        if let Some(t) = lambda_type_nth_input(inner, n) {
-            return Some(t);
-        }
-    }
-
-    // Split inner by comma at depth 0.
-    let mut args: Vec<&str> = Vec::new();
-    let mut start = 0;
-    let mut d: i32 = 0;
-    for (i, ch) in inner.char_indices() {
-        match ch {
-            '(' | '<' | '[' => d += 1,
-            ')' | '>' | ']' => d -= 1,
-            ',' if d == 0 => { args.push(&inner[start..i]); start = i + 1; }
-            _ => {}
-        }
-    }
-    args.push(&inner[start..]);
-
-    let arg = args.get(n).map(|s| s.trim())?;
-    // Strip named-param prefix `name:`.
-    let arg = if let Some(c) = arg.find(':') { arg[c + 1..].trim() } else { arg };
-    // Strip `suspend` keyword from function-type args like `suspend (T) -> Unit`.
-    let arg = strip_suspend(arg);
-    // Allow dots for qualified types like `CreditCardDashboardInteractor.CardProduct`.
-    let base: String = arg.chars().take_while(|&c| is_id_char(c) || c == '.').collect();
-    // Trim any trailing dots.
-    let base = base.trim_end_matches('.');
-    if base.is_empty() || !base.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
-        return None;
-    }
-    Some(base.to_owned())
-}
-
 /// 0-based index of `param_name` in a multi-param lambda opening `{ a, b, c ->`.
 /// Returns 0 for single-param lambdas.
 fn lambda_param_position_on_line(line: &str, param_name: &str) -> usize {
@@ -3449,26 +3395,6 @@ fn fun_trailing_lambda_it_type(fn_name: &str, idx: &Indexer, uri: &Url) -> Optio
     let sig = find_fun_signature_full(fn_name, idx, uri)?;
     let last_type = last_fun_param_type_str(&sig)?;
     lambda_type_first_input(&last_type)
-}
-
-/// Kotlin stdlib scope functions whose lambda parameter is a receiver lambda `T.() -> R`.
-/// For these, `this` inside the lambda refers to `T` (the receiver), so a type hint is valid.
-const SCOPE_FUNCTIONS: &[&str] = &["run", "apply", "also", "let"];
-
-/// Given a Kotlin function/lambda type, extracts the receiver type if it is a **receiver
-/// lambda** (`T.() -> R` or `T.(Params) -> R`).  Returns `None` for regular lambdas
-/// (`(T) -> R`) since `this` in those refers to the enclosing class, not the param.
-fn lambda_type_receiver(ty: &str) -> Option<String> {
-    let ty = strip_suspend(ty.trim());
-    if let Some(dot_paren) = ty.find(".(") {
-        let receiver = ty[..dot_paren].trim();
-        let base: String = receiver.chars().take_while(|&c| is_id_char(c) || c == '.').collect();
-        let base = base.trim_end_matches('.');
-        if !base.is_empty() {
-            return Some(base.to_owned());
-        }
-    }
-    None
 }
 
 /// Like `fun_trailing_lambda_it_type` but for `this`: only returns a type when
@@ -3649,95 +3575,6 @@ fn last_fun_param_type_str(params_text: &str) -> Option<String> {
     nth_fun_param_type_str(params_text, count.saturating_sub(1))
 }
 
-/// Given a Kotlin function/lambda type `(A, B, ...) -> R`, return the base name
-/// of the first input type `A`.  Returns `None` for `() -> Unit` (no `it`).
-///
-/// Examples:
-///   `(ResultState<T>) -> Model`         → `Some("ResultState")`
-///   `(String, Int) -> Unit`             → `Some("String")`
-///   `() -> Unit`                        → `None`
-///   `((T) -> ProductDetailSheetModel)`  → `Some("T")`  (strips outer wrapping parens)
-fn lambda_type_first_input(ty: &str) -> Option<String> {
-    let ty = ty.trim();
-    // Strip `suspend` keyword — Kotlin allows `suspend (T) -> Unit` as a type.
-    let ty = strip_suspend(ty);
-    // Receiver lambda: `State.() -> State` or `State.(Param) -> R`
-    // The implicit receiver is the `it`/`this`-equivalent inside the lambda.
-    if let Some(dot_paren) = ty.find(".(") {
-        let receiver = ty[..dot_paren].trim();
-        let base: String = receiver.chars().take_while(|&c| is_id_char(c) || c == '.').collect();
-        let base = base.trim_end_matches('.');
-        if !base.is_empty() && base.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
-            return Some(base.to_owned());
-        }
-    }
-    // Must start with `(` to be a function type.
-    if !ty.starts_with('(') { return None; }
-    // Find matching `)` using separate paren/angle depth counters so `>` in `->`
-    // is never mistaken for a closing angle bracket.
-    let mut paren_depth: i32 = 0;
-    let mut _angle_depth: i32 = 0;
-    let mut close = None;
-    for (i, ch) in ty.char_indices() {
-        match ch {
-            '(' => paren_depth += 1,
-            ')' => { paren_depth -= 1; if paren_depth == 0 { close = Some(i); break; } }
-            '<' => _angle_depth += 1,
-            '>' => _angle_depth -= 1,
-            _ => {}
-        }
-    }
-    let close = close?;
-    let inner = ty[1..close].trim();
-    if inner.is_empty() { return None; }
-
-    // If `inner` is itself a function type (outer parens were just wrapping:
-    // `((T) -> R)` → inner = `(T) -> R`), recurse into it.
-    if inner.starts_with('(') && inner.contains("->") {
-        if let Some(t) = lambda_type_first_input(inner) {
-            return Some(t);
-        }
-    }
-
-    // Take the first type argument (before the first `,` at depth 0).
-    let mut first = inner;
-    let mut d: i32 = 0;
-    for (i, ch) in inner.char_indices() {
-        match ch {
-            '(' | '<' | '[' => d += 1,
-            ')' | '>' | ']' => d -= 1,
-            ',' if d == 0 => { first = &inner[..i]; break; }
-            _ => {}
-        }
-    }
-
-    // Strip any named-param prefix `name:` (Kotlin allows `(name: Type) -> R`)
-    let first = if let Some(colon) = first.find(':') {
-        first[colon + 1..].trim()
-    } else {
-        first.trim()
-    };
-
-    // Return the base type name (allow qualified names like `Outer.Inner`, strip generics).
-    let base: String = first.chars().take_while(|&c| is_id_char(c) || c == '.').collect();
-    let base = base.trim_end_matches('.');
-    if base.is_empty() || !base.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
-        return None;
-    }
-    Some(base.to_owned())
-}
-
-/// Strip a leading `suspend` keyword from a Kotlin function type string.
-/// `"suspend (T) -> Unit"` → `"(T) -> Unit"`;  anything else unchanged.
-/// Only strips when followed by `(` or `.` (receiver lambdas like `suspend T.() -> R`).
-#[inline]
-fn strip_suspend(ty: &str) -> &str {
-    let rest = ty.strip_prefix("suspend").unwrap_or(ty);
-    if rest.len() == ty.len() { return ty; } // no prefix stripped
-    let rest = rest.trim_start();
-    if rest.starts_with('(') || rest.starts_with('.') { rest } else { ty }
-}
-
 /// Strip a balanced trailing `(…)` argument list from the end of `s`.
 /// `"collection.method(arg1, arg2)"` → `"collection.method"`
 /// `"collection.forEach"`           → `"collection.forEach"`  (unchanged)
@@ -3855,304 +3692,6 @@ fn symbol_kw_for_lang(kind: SymbolKind, lang: &str) -> &'static str {
     let kw = symbol_kw(kind);
     // Swift uses `func`, not `fun`.
     if lang == "swift" && kw == "fun" { "func" } else { kw }
-}
-
-/// Collect the declaration signature starting at `start_line`, spanning
-/// multiple lines if the declaration continues (e.g. multiline constructor).
-///
-/// Walk backward from `decl_line` (exclusive) skipping blank lines, annotations
-/// (`@…`), and visibility/modifier keywords, then collect either a `/** … */`
-/// block-doc comment or a run of `//` line-doc comments.
-///
-/// Returns cleaned Markdown text, or `None` when no doc comment is found.
-///
-/// Handles:
-/// - Kotlin: `/** ... */` (KDoc) and `//` line comments above annotations
-/// - Java:   `/** ... */` (Javadoc)
-/// - Strips leading `*` and `/** ` / ` */` markers
-/// - Converts `@param`, `@return`, `@throws` tags to bold Markdown headings
-/// - Skips `@suppress`, `@hide`, `@internal` — not user-facing
-/// - Strips `[LinkText](url)` Markdown links from KDoc `[Symbol]` references
-fn extract_doc_comment(lines: &[String], decl_line: usize) -> Option<String> {
-    if decl_line == 0 { return None; }
-
-    // Find the end of the doc comment block by scanning backward over
-    // annotations, blank lines, and modifier-only lines.
-    let mut search_end = decl_line;
-    loop {
-        if search_end == 0 { return None; }
-        search_end -= 1;
-        let trimmed = lines[search_end].trim();
-        if trimmed.is_empty()
-            || trimmed.starts_with('@')
-            || is_modifier_line(trimmed)
-        {
-            if search_end == 0 { return None; }
-            continue;
-        }
-        break;
-    }
-
-    let end_line = &lines[search_end];
-    let end_trim = end_line.trim();
-
-    // ── Block doc comment `/** ... */` ───────────────────────────────────────
-    if end_trim.ends_with("*/") {
-        // Find the opening `/**`
-        let mut start = search_end;
-        loop {
-            let t = lines[start].trim();
-            if t.starts_with("/**") || t.starts_with("/*") { break; }
-            if start == 0 { return None; }
-            start -= 1;
-        }
-
-        let raw_lines: Vec<&str> = lines[start..=search_end]
-            .iter()
-            .map(|l| l.as_str())
-            .collect();
-        return Some(render_block_doc(&raw_lines));
-    }
-
-    // ── Line doc comments `// …` ──────────────────────────────────────────────
-    if end_trim.starts_with("//") {
-        let mut start = search_end;
-        while start > 0 && lines[start - 1].trim().starts_with("//") {
-            start -= 1;
-        }
-        let text = lines[start..=search_end]
-            .iter()
-            .map(|l| {
-                let t = l.trim();
-                let stripped = if t.starts_with("/// ") {
-                    &t[4..]
-                } else if t.starts_with("//! ") {
-                    &t[4..]
-                } else if t.starts_with("// ") {
-                    &t[3..]
-                } else if t.starts_with("//") {
-                    &t[2..]
-                } else {
-                    t
-                };
-                stripped.to_owned()
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        let rendered = format_doc_tags(&text);
-        return if rendered.trim().is_empty() { None } else { Some(rendered) };
-    }
-
-    None
-}
-
-/// Returns `true` for lines that contain only Kotlin/Java modifiers/keywords
-/// (e.g. `override`, `public final`) — we skip these when hunting for docs.
-fn is_modifier_line(s: &str) -> bool {
-    const MODIFIERS: &[&str] = &[
-        "public", "private", "protected", "internal", "override", "open",
-        "abstract", "sealed", "final", "static", "inline", "tailrec",
-        "external", "suspend", "operator", "infix", "data", "inner",
-        "companion", "lateinit", "const",
-    ];
-    s.split_whitespace().all(|w| MODIFIERS.contains(&w))
-}
-
-/// Strip `/** … */` markers and leading `*` from each line, then format tags.
-fn render_block_doc(raw_lines: &[&str]) -> String {
-    let mut out: Vec<String> = Vec::new();
-    for line in raw_lines {
-        let t = line.trim();
-        let t = t.strip_prefix("/**").unwrap_or(t);
-        let t = t.strip_suffix("*/").unwrap_or(t);
-        let t = t.strip_prefix("/*").unwrap_or(t);
-        let t = if let Some(rest) = t.strip_prefix('*') { rest } else { t };
-        let t = t.trim();
-        // Skip the lone opening/closing marker lines that become empty
-        if !t.is_empty() {
-            out.push(t.to_owned());
-        }
-    }
-    let joined = out.join("\n");
-    format_doc_tags(&joined)
-}
-
-/// Convert KDoc/Javadoc tags to readable Markdown.
-///
-/// - `@param name desc`   → `**Parameters**\n- \`name\` desc`
-/// - `@return desc`       → `**Returns**\n desc`
-/// - `@throws T desc`     → `**Throws**\n- \`T\` desc`
-/// - `@see ref`           → `**See also:** ref`
-/// - `@since ver`         → `**Since:** ver`
-/// - `[Symbol]` (KDoc)    → `` `Symbol` ``
-/// - `{@code …}` (Java)   → `` `…` ``
-/// - `{@link T}` (Java)   → `` `T` ``
-/// - Suppressed: `@suppress`, `@hide`, `@internal`
-fn format_doc_tags(text: &str) -> String {
-    // Split on Javadoc/KDoc tag boundaries (lines starting with @).
-    // We need to preserve multi-line tag bodies.
-    let mut description: Vec<String> = Vec::new();
-    let mut params:  Vec<(String, String)> = Vec::new();
-    let mut returns: Option<String> = None;
-    let mut throws:  Vec<(String, String)> = Vec::new();
-    let mut see:     Vec<String> = Vec::new();
-    let mut since:   Option<String> = None;
-
-    // Accumulate current tag body across newlines.
-    let mut cur_tag: Option<String>  = None;
-    let mut cur_body: Vec<String>    = Vec::new();
-
-    let flush = |cur_tag: &Option<String>, cur_body: &Vec<String>,
-                  params: &mut Vec<(String, String)>,
-                  returns: &mut Option<String>,
-                  throws: &mut Vec<(String, String)>,
-                  see: &mut Vec<String>,
-                  since: &mut Option<String>| {
-        let body = cur_body.join(" ").trim().to_owned();
-        if let Some(tag) = cur_tag {
-            match tag.as_str() {
-                "param" | "property" => {
-                    let (name, rest) = split_first_word(&body);
-                    params.push((name.to_owned(), rest.trim().to_owned()));
-                }
-                "return" | "returns" => *returns = Some(body),
-                "throws" | "exception" => {
-                    let (name, rest) = split_first_word(&body);
-                    throws.push((name.to_owned(), rest.trim().to_owned()));
-                }
-                "see"   => see.push(body),
-                "since" => *since = Some(body),
-                _ => {} // suppress, hide, internal, author, etc.
-            }
-        }
-    };
-
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix('@') {
-            // Flush previous tag
-            flush(&cur_tag, &cur_body, &mut params, &mut returns,
-                  &mut throws, &mut see, &mut since);
-            cur_body.clear();
-
-            let (tag, body) = split_first_word(rest);
-            cur_tag = Some(tag.to_lowercase());
-            if !body.is_empty() { cur_body.push(body.trim().to_owned()); }
-        } else if cur_tag.is_some() {
-            if !trimmed.is_empty() { cur_body.push(trimmed.to_owned()); }
-        } else {
-            description.push(trimmed.to_owned());
-        }
-    }
-    flush(&cur_tag, &cur_body, &mut params, &mut returns,
-          &mut throws, &mut see, &mut since);
-
-    // Reassemble as Markdown.
-    let mut md = description.join("\n").trim().to_owned();
-
-    // Inline substitutions (KDoc links + Java {@code} / {@link})
-    md = inline_doc_markup(&md);
-
-    if !params.is_empty() {
-        md.push_str("\n\n**Parameters**");
-        for (name, desc) in &params {
-            let desc = inline_doc_markup(desc);
-            if desc.is_empty() {
-                md.push_str(&format!("\n- `{name}`"));
-            } else {
-                md.push_str(&format!("\n- `{name}` — {desc}"));
-            }
-        }
-    }
-    if let Some(ret) = returns {
-        md.push_str(&format!("\n\n**Returns** {}", inline_doc_markup(&ret)));
-    }
-    if !throws.is_empty() {
-        md.push_str("\n\n**Throws**");
-        for (ty, desc) in &throws {
-            let desc = inline_doc_markup(desc);
-            if desc.is_empty() {
-                md.push_str(&format!("\n- `{ty}`"));
-            } else {
-                md.push_str(&format!("\n- `{ty}` — {desc}"));
-            }
-        }
-    }
-    if !see.is_empty() {
-        let refs = see.iter().map(|s| format!("`{}`", s.trim())).collect::<Vec<_>>().join(", ");
-        md.push_str(&format!("\n\n**See also:** {refs}"));
-    }
-    if let Some(s) = since {
-        md.push_str(&format!("\n\n**Since:** {s}"));
-    }
-
-    md.trim().to_owned()
-}
-
-/// Apply inline markup substitutions.
-fn inline_doc_markup(s: &str) -> String {
-    // `{@code expr}` and `{@link Type}` → `expr` / `Type`
-    let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    while let Some(pos) = rest.find('{') {
-        out.push_str(&rest[..pos]);
-        rest = &rest[pos..];
-        if let Some(end) = rest.find('}') {
-            let inner = &rest[1..end]; // strip braces
-            let inner = inner.trim_start_matches("@code").trim_start_matches("@link").trim();
-            out.push('`');
-            out.push_str(inner);
-            out.push('`');
-            rest = &rest[end + 1..];
-        } else {
-            out.push('{');
-            rest = &rest[1..];
-        }
-    }
-    out.push_str(rest);
-
-    // KDoc `[Symbol]` → `Symbol`
-    // Avoid matching Markdown links `[text](url)` — only bare `[Word]`
-    let out = regex_replace_kdoc_links(&out);
-    out
-}
-
-/// Replace KDoc `[SymbolName]` (not followed by `(`) with `` `SymbolName` ``.
-fn regex_replace_kdoc_links(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'[' {
-            // Find the closing `]`
-            if let Some(rel) = bytes[i + 1..].iter().position(|&b| b == b']') {
-                let end = i + 1 + rel;
-                let inner = &s[i + 1..end];
-                // Only treat as KDoc link if inner has no spaces (symbol name)
-                // and is NOT followed by `(` (which would be a Markdown link)
-                let next = bytes.get(end + 1).copied();
-                if !inner.contains(' ') && next != Some(b'(') {
-                    out.push('`');
-                    out.push_str(inner);
-                    out.push('`');
-                    i = end + 1;
-                    continue;
-                }
-            }
-        }
-        out.push(bytes[i] as char);
-        i += 1;
-    }
-    out
-}
-
-/// Split `"word rest of string"` → `("word", "rest of string")`.
-fn split_first_word(s: &str) -> (&str, &str) {
-    let s = s.trim();
-    match s.find(char::is_whitespace) {
-        Some(i) => (&s[..i], &s[i..]),
-        None    => (s, ""),
-    }
 }
 
 /// Rules:
@@ -4959,96 +4498,6 @@ class Foo @Inject constructor(
         assert!(sig.contains("Foo"), "class name must be present");
     }
 
-    // ── KDoc / Javadoc extraction ─────────────────────────────────────────────
-
-    fn lines(src: &str) -> Vec<String> {
-        src.lines().map(String::from).collect()
-    }
-
-    #[test]
-    fn kdoc_simple_block_comment() {
-        let src = r#"
-/**
- * Does something useful.
- */
-fun doThing() {}"#;
-        let ls = lines(src);
-        let decl = ls.iter().position(|l| l.contains("fun doThing")).unwrap();
-        let doc = extract_doc_comment(&ls, decl).unwrap();
-        assert!(doc.contains("Does something useful"), "got: {doc}");
-        // extract_doc_comment returns plain text; no code block here
-        assert!(!doc.contains("```"), "got: {doc}");
-    }
-
-    #[test]
-    fn kdoc_with_params_and_return() {
-        let src = r#"
-/**
- * Fetches the widget.
- *
- * @param id The widget identifier.
- * @param flag Whether to refresh.
- * @return The widget or null.
- */
-fun getWidget(id: Int, flag: Boolean): Widget? = null"#;
-        let ls = lines(src);
-        let decl = ls.iter().position(|l| l.contains("fun getWidget")).unwrap();
-        let doc = extract_doc_comment(&ls, decl).unwrap();
-        assert!(doc.contains("Fetches the widget"), "got: {doc}");
-        assert!(doc.contains("**Parameters**"), "got: {doc}");
-        assert!(doc.contains("`id`"), "got: {doc}");
-        assert!(doc.contains("`flag`"), "got: {doc}");
-        assert!(doc.contains("**Returns**"), "got: {doc}");
-    }
-
-    #[test]
-    fn kdoc_skips_annotations() {
-        let src = r#"
-/**
- * Annotated function.
- */
-@Suppress("unused")
-@JvmStatic
-fun annotated() {}"#;
-        let ls = lines(src);
-        let decl = ls.iter().position(|l| l.contains("fun annotated")).unwrap();
-        let doc = extract_doc_comment(&ls, decl).unwrap();
-        assert!(doc.contains("Annotated function"), "got: {doc}");
-    }
-
-    #[test]
-    fn kdoc_no_comment_returns_none() {
-        let src = "fun plain() {}";
-        let ls = lines(src);
-        assert!(extract_doc_comment(&ls, 0).is_none());
-    }
-
-    #[test]
-    fn kdoc_line_comments() {
-        let src = r#"// Short description.
-// More detail.
-fun withLineDoc() {}"#;
-        let ls = lines(src);
-        let decl = 2;
-        let doc = extract_doc_comment(&ls, decl).unwrap();
-        assert!(doc.contains("Short description"), "got: {doc}");
-        assert!(doc.contains("More detail"), "got: {doc}");
-    }
-
-    #[test]
-    fn kdoc_inline_code_and_links() {
-        let src = r#"
-/**
- * Use {@code Foo.bar()} or [Baz] to achieve this.
- */
-fun example() {}"#;
-        let ls = lines(src);
-        let decl = ls.iter().position(|l| l.contains("fun example")).unwrap();
-        let doc = extract_doc_comment(&ls, decl).unwrap();
-        assert!(doc.contains("`Foo.bar()`"), "got: {doc}");
-        assert!(doc.contains("`Baz`"), "got: {doc}");
-    }
-
     #[test]
     fn hover_includes_kdoc() {
         let src = r#"package com.example
@@ -5191,24 +4640,6 @@ class Account(val name: String)"#;
         let result = lambda_receiver_type_from_context(before, &idx, &u);
         assert_eq!(result.as_deref(), Some("ResultState"),
             "trailing lambda it should resolve to ResultState, got: {result:?}");
-    }
-
-    #[test]
-    fn lambda_type_first_input_parses_correctly() {
-        assert_eq!(lambda_type_first_input("(ResultState<T>) -> Model"), Some("ResultState".into()));
-        assert_eq!(lambda_type_first_input("(String, Int) -> Unit"), Some("String".into()));
-        assert_eq!(lambda_type_first_input("() -> Unit"), None);
-        assert_eq!(lambda_type_first_input("(id: String, scan: String) -> Unit"), Some("String".into()));
-        // Double-wrapped parens (Kotlin allows `((T) -> R)` as a type annotation):
-        assert_eq!(lambda_type_first_input("((T) -> ProductDetailSheetModel)"), Some("T".into()));
-        assert_eq!(lambda_type_first_input("((LoanDetail) -> Model)"), Some("LoanDetail".into()));
-        // `->` arrow must not confuse angle-bracket depth tracking:
-        assert_eq!(lambda_type_first_input("(Flow<T>) -> Unit"), Some("Flow".into()));
-        // `suspend` prefix — Kotlin suspend function types like `suspend (T) -> Unit`:
-        assert_eq!(lambda_type_first_input("suspend (T) -> Unit"), Some("T".into()));
-        assert_eq!(lambda_type_first_input("suspend (value: LoanDetail) -> Unit"), Some("LoanDetail".into()));
-        assert_eq!(lambda_type_first_input("suspend (String, Int) -> Unit"), Some("String".into()));
-        assert_eq!(lambda_type_first_input("suspend () -> Unit"), None);
     }
 
     #[test]
@@ -5736,18 +5167,6 @@ class State
         let result = idx.infer_lambda_param_type_at("it", &u, Position::new(3, 19));
         assert_eq!(result.as_deref(), Some("T"),
             "it in suspend-param collectIn lambda should be T, got: {result:?}");
-    }
-
-    #[test]
-    fn lambda_type_nth_input_test() {
-        assert_eq!(super::lambda_type_nth_input("(String, Boolean) -> Unit", 0), Some("String".into()));
-        assert_eq!(super::lambda_type_nth_input("(String, Boolean) -> Unit", 1), Some("Boolean".into()));
-        assert_eq!(super::lambda_type_nth_input("() -> Unit", 0), None);
-        assert_eq!(super::lambda_type_nth_input("(SaveInfo) -> Unit", 0), Some("SaveInfo".into()));
-        // suspend function type as whole outer type:
-        assert_eq!(super::lambda_type_nth_input("suspend (T) -> Unit", 0), Some("T".into()));
-        assert_eq!(super::lambda_type_nth_input("suspend (LoanDetail) -> Unit", 0), Some("LoanDetail".into()));
-        assert_eq!(super::lambda_type_nth_input("suspend () -> Unit", 0), None);
     }
 
     #[test]
