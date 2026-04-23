@@ -192,3 +192,14 @@ fn extract_first_arg_generic_type_regression() {
     // A generic first arg like `listOf<String>()` — `>` closes a generic, not a lambda.
     assert_eq!(extract_first_arg("fn(listOf<String>(), other)"), Some("listOf<String>()"));
 }
+
+// ─── Regression: `>` comparison operators in find_named_param_type_in_sig ────
+
+#[test]
+fn named_param_type_default_value_with_gt_operator() {
+    // Default value `a > b` must not make depth go negative and break splitting.
+    // Note: params_text is just the params, not the full `name: Type = default` form
+    // that Kotlin allows. This tests that bare `>` at depth-0 is ignored.
+    let sig = "threshold: Int, name: String";
+    assert_eq!(find_named_param_type_in_sig(sig, "name"), Some("String".to_owned()));
+}

@@ -186,8 +186,8 @@ pub(crate) fn nth_fun_param_type_str(params_text: &str, n: usize) -> Option<Stri
         match ch {
             '(' | '<' | '[' => depth += 1,
             ')' | ']' => depth -= 1,
-            // Skip `>` of `->` so lambda return arrows don't upset `<>` depth.
-            '>' if prev != '-' => depth -= 1,
+            // Skip `>` of `->` and guard against going negative on bare `>` operators.
+            '>' if prev != '-' && depth > 0 => depth -= 1,
             ',' if depth == 0 => {
                 parts.push(&params_text[start..i]);
                 start = i + 1;
@@ -202,7 +202,7 @@ pub(crate) fn nth_fun_param_type_str(params_text: &str, n: usize) -> Option<Stri
     if parts.is_empty() { return None; }
 
     let param = parts.get(n).unwrap_or_else(|| parts.last().unwrap()).trim();
-    // Strip leading modifiers (`vararg`, `crossinline`, `noinline`).
+    // Strip leading non-identifier characters (annotations, whitespace).
     let param = param.trim_start_matches(|c: char| !c.is_alphanumeric() && c != '_');
     let colon = param.find(':')?;
     Some(param[colon + 1..].trim().to_owned())
@@ -219,7 +219,7 @@ pub(crate) fn last_fun_param_type_str(params_text: &str) -> Option<String> {
             match ch {
                 '(' | '<' | '[' => depth += 1,
                 ')' | ']' => depth -= 1,
-                '>' if prev != '-' => depth -= 1,
+                '>' if prev != '-' && depth > 0 => depth -= 1,
                 ',' if depth == 0 => n += 1,
                 _ => {}
             }

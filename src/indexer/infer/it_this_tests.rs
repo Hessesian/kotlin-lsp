@@ -77,9 +77,10 @@ fn this_element_type_multiline_scope_fn() {
     // not a scope-function-receiver-lambda in the typical sense, but `run` IS
     // in SCOPE_FUNCTIONS so the base type "List" is returned)
     let result = find_this_element_type_in_lines(&lines, 1, 9, &idx, &u);
-    // We just assert it doesn't panic and returns a value or None consistently.
-    // The exact type depends on resolver; at minimum verify no panic.
-    let _ = result;
+    // `run` is a SCOPE_FUNCTION that passes receiver as `this`;
+    // `items` is `List<String>`, so base type should be "List".
+    assert_eq!(result.as_deref(), Some("List"),
+        "`items.run {{ this }}` should yield List, got: {result:?}");
 }
 
 #[test]

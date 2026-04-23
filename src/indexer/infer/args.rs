@@ -87,6 +87,8 @@ pub(crate) fn find_as_call_arg_type(
         for i in (0..scan_to).rev() {
             match chars[i] {
                 ')' | ']' => depth += 1,
+                // `>` going backward = entering a generic block; guard against `->`.
+                '>' if i == 0 || chars[i - 1] != '-' => depth += 1,
                 '(' | '[' => {
                     depth -= 1;
                     if depth < 0 {
@@ -107,6 +109,8 @@ pub(crate) fn find_as_call_arg_type(
                         return if base.is_empty() { None } else { Some(base) };
                     }
                 }
+                // `<` going backward = leaving a generic block; only close if inside one.
+                '<' if depth > 0 => depth -= 1,
                 ',' if depth == 0 => arg_pos += 1,
                 _ => {}
             }
@@ -162,7 +166,7 @@ pub(crate) fn find_named_param_type_in_sig(sig: &str, param_name: &str) -> Optio
         match ch {
             '(' | '[' | '<' => depth += 1,
             ')' | ']' => depth -= 1,
-            '>' if prev != '-' => depth -= 1,
+            '>' if prev != '-' && depth > 0 => depth -= 1,
             ',' if depth == 0 => { parts.push(&sig[start..i]); start = i + 1; }
             _ => {}
         }

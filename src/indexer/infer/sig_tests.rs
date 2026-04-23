@@ -193,3 +193,13 @@ fn strip_args_unbalanced_no_crash() {
     // If parens are unbalanced, should not panic; returns original.
     assert_eq!(strip_trailing_call_args("fn("), "fn(");
 }
+
+// ─── Regression: `>` operator in default values must not go negative ─────────
+
+#[test]
+fn nth_param_type_gt_operator_in_default() {
+    // `x: Int = a > b` — the `>` is a comparison, not a generic close.
+    // Must not make depth go negative and break subsequent comma splitting.
+    let params = "x: Int, y: String";
+    assert_eq!(nth_fun_param_type_str(params, 1), Some("String".to_owned()));
+}
