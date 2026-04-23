@@ -39,6 +39,23 @@ use self::infer::{
     lambda_type_nth_input,
     lambda_type_receiver,
 };
+// Re-export pure helpers from submodules so existing callers within this file
+// and the inline test module (`use super::*`) continue to resolve them by name.
+pub(crate) use self::infer::{
+    collect_signature,
+    find_fun_signature_full,
+    find_fun_signature_with_receiver,
+    collect_all_fun_params_texts,
+    nth_fun_param_type_str,
+    last_fun_param_type_str,
+    strip_trailing_call_args,
+    find_as_call_arg_type,
+    extract_first_arg,
+    extract_named_arg_name,
+    find_named_param_type_in_sig,
+    lambda_param_position_on_line,
+    has_named_params_not_it,
+};
 
 // ─── RAII guard for indexing_in_progress flag ─────────────────────────────────
 
@@ -1588,38 +1605,6 @@ impl Indexer {
         crate::resolver::resolve_symbol(self, name, qualifier, from_uri)
     }
 
-    /// Signature lookup with optional dot-receiver context.
-    /// When `receiver` is given (e.g. `"oneYearOlderInteractor"`), resolves its
-    /// type, finds that type's file, and looks up `name` there specifically.
-    /// Falls back to the plain name-based search if receiver resolution fails.
-    pub fn find_fun_signature_with_receiver(&self, uri: &Url, name: &str, receiver: Option<&str>) -> String {
-        if let Some(recv) = receiver {
-            // Infer the receiver's type and resolve to its file.
-            if let Some(type_name) = crate::resolver::infer_variable_type_raw(self, recv, uri) {
-                let outer = type_name.split('.').next().unwrap_or(&type_name);
-                let locs = crate::resolver::resolve_symbol(self, outer, None, uri);
-                for loc in &locs {
-                    if let Some(data) = self.files.get(loc.uri.as_str()) {
-                        if let Some(sig) = collect_fun_params_text(name, loc.uri.as_str(), self) {
-                            return sig;
-                        }
-                        // Also search by line range within the type's body.
-                        let type_end = data.symbols.iter()
-                            .find(|s| s.name == outer)
-                            .map(|s| s.range.end.line)
-                            .unwrap_or(u32::MAX);
-                        for sym in data.symbols.iter().filter(|s| s.name == name && s.range.start.line <= type_end) {
-                            if let Some(sig) = collect_params_from_line(&data.lines, sym.range.start.line as usize) {
-                                return sig;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        find_fun_signature_full(name, self, uri).unwrap_or_default()
-    }
-
     /// If `name` at `position` is `it` or a named lambda parameter, return the
     /// inferred element/receiver type name (e.g. `"Product"`, `"User"`).
     ///
@@ -2561,7 +2546,7 @@ fn find_files_for_types(names: &[String], root: &Path, matcher: Option<&IgnoreMa
 
 // ─── misc helpers ────────────────────────────────────────────────────────────
 
-fn is_id_char(c: char) -> bool {
+pub(crate) fn is_id_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
@@ -2931,112 +2916,6 @@ pub(crate) fn lambda_receiver_type_from_context(
 }
 
 
-/// Type-directed inference for `it` or `this` used as a call argument.
-///
-/// When `it`/`this` appears as an argument to a function — either as a **named arg**
-/// (`param = it`) or as a **positional arg** (`fn(a, it)`) — look up the expected
-/// parameter type and return it as the hint.
-///
-/// This mimics Kotlin's implicit-receiver / lambda-param resolution by type:
-/// the compiler picks the in-scope `it` or `this` whose type satisfies the
-/// expected parameter type.
-///
-/// Examples:
-///   `.send(channel = this)` → `channel: SendChannel<...>` → `SendChannel`
-///   `process(it)`           → first param of `process` → e.g. `Item`
-///   `fn(a, it)`             → second param of `fn` → e.g. `String`
-fn find_as_call_arg_type(
-    lines:       &[String],
-    cursor_line: usize,
-    cursor_col:  usize,
-    idx:         &Indexer,
-    uri:         &Url,
-) -> Option<String> {
-    let line = lines.get(cursor_line)?;
-    // Slice the line up to (but not including) the cursor position.
-    let before_cursor = {
-        let mut byte_end = line.len();
-        let mut utf16 = 0usize;
-        for (bi, ch) in line.char_indices() {
-            if utf16 >= cursor_col { byte_end = bi; break; }
-            utf16 += ch.len_utf16();
-        }
-        &line[..byte_end]
-    };
-    let col = before_cursor.chars().count();
-
-    // ── Named arg: `param = ` just before cursor ─────────────────────────────
-    let s = before_cursor.trim_end();
-    if let Some(s) = s.strip_suffix('=') {
-        if !s.ends_with(|c: char| "!<>=".contains(c)) {
-            let s = s.trim_end();
-            let ident_start = s.rfind(|c: char| !c.is_alphanumeric() && c != '_')
-                .map(|i| i + 1).unwrap_or(0);
-            let named_arg = &s[ident_start..];
-            if !named_arg.is_empty()
-                && named_arg.chars().next().map(|c| !c.is_uppercase()).unwrap_or(false)
-            {
-                let preceding = s[..ident_start].trim_end().chars().last();
-                if matches!(preceding, Some('(') | Some(',')) {
-                    if let Some(fn_full) = find_enclosing_call_name(lines, cursor_line, col) {
-                        if let Some(fn_name) = fn_full.split('.').last().filter(|n| !n.is_empty()) {
-                            if let Some(sig) = find_fun_signature_full(fn_name, idx, uri) {
-                                if let Some(param_type) = find_named_param_type_in_sig(&sig, named_arg) {
-                                    let base: String = param_type.trim()
-                                        .chars().take_while(|&c| is_id_char(c)).collect();
-                                    if !base.is_empty() { return Some(base); }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // ── Positional arg: `fn(a, keyword)` ────────────────────────────────────
-    // Scan backward tracking paren/bracket depth; count top-level commas to
-    // determine which argument position the cursor is in.
-    let mut depth: i32 = 0;
-    let mut arg_pos: usize = 0;
-    let scan_start = cursor_line.saturating_sub(20);
-
-    for ln in (scan_start..=cursor_line).rev() {
-        let chars: Vec<char> = lines[ln].chars().collect();
-        let scan_to = if ln == cursor_line { col.min(chars.len()) } else { chars.len() };
-
-        for i in (0..scan_to).rev() {
-            match chars[i] {
-                ')' | ']' => depth += 1,
-                '(' | '[' => {
-                    depth -= 1;
-                    if depth < 0 {
-                        if i == 0 { return None; }
-                        // Extract function name (possibly dotted) before `(`.
-                        let mut end = i;
-                        while end > 0 && (is_id_char(chars[end - 1]) || chars[end - 1] == '.') {
-                            end -= 1;
-                        }
-                        if end >= i { return None; }
-                        let full_name: String = chars[end..i].iter().collect();
-                        let fn_name = full_name.trim_matches('.')
-                            .split('.').last().filter(|n| !n.is_empty())?;
-                        let sig = find_fun_signature_full(fn_name, idx, uri)?;
-                        let param_type = nth_fun_param_type_str(&sig, arg_pos)?;
-                        let base: String = param_type.trim()
-                            .chars().take_while(|&c| is_id_char(c)).collect();
-                        return if base.is_empty() { None } else { Some(base) };
-                    }
-                }
-                ',' if depth == 0 => arg_pos += 1,
-                _ => {}
-            }
-        }
-    }
-    None
-}
-
-
 ///
 /// `this` in Kotlin refers to the implicit receiver only inside a **receiver lambda**
 /// (`T.() -> R`).  In a regular lambda (`(T) -> R`) `this` is the enclosing class —
@@ -3186,151 +3065,6 @@ fn lambda_receiver_type_named_arg_ml(
     lambda_type_nth_input(&param_type, lambda_param_pos)
 }
 
-/// Detect the `IDENT =` named-arg pattern at the end of `before_brace`.
-/// Returns the identifier if found (must be lowercase-first, not `!=`, `<=`, `>=`).
-///
-/// Also requires that the text BEFORE the identifier is only whitespace (or
-/// comma + whitespace for same-line multi-arg calls), so that patterns like
-/// `(isRefresh = { resultState ->` are NOT falsely matched as named args
-/// (the `(` before `isRefresh` disqualifies it).
-fn extract_named_arg_name(before_brace: &str) -> Option<&str> {
-    let s = before_brace.trim_end();
-    let s = s.strip_suffix('=')?;
-    // Guard against `!=`, `<=`, `>=`, `==`
-    if s.ends_with(|c: char| "!<>=".contains(c)) { return None; }
-    let s = s.trim_end();
-    // Extract trailing identifier
-    let ident_start = s.rfind(|c: char| !c.is_alphanumeric() && c != '_')
-        .map(|i| i + 1)
-        .unwrap_or(0);
-    let ident = &s[ident_start..];
-    if ident.is_empty() { return None; }
-    // Named args start with a lowercase letter
-    if ident.chars().next().map(|c| c.is_uppercase()).unwrap_or(true) { return None; }
-    // Require the prefix to be only whitespace (optionally preceded by a comma).
-    // This prevents `(isRefresh = {` from matching — the `(` before `isRefresh`
-    // makes the prefix non-empty after stripping commas and whitespace.
-    let prefix = s[..ident_start].trim_start().trim_start_matches(',').trim_start();
-    if !prefix.is_empty() { return None; }
-    Some(ident)
-}
-
-/// Find the type string of a named parameter `param_name` inside a
-/// comma-separated parameter list text (output of `collect_fun_params_text`).
-///
-/// Handles `val`/`var` prefixes, strips them. Returns the full type string
-/// (may be a functional type like `(String, Boolean) -> Unit`).
-fn find_named_param_type_in_sig(sig: &str, param_name: &str) -> Option<String> {
-    // Split by comma at depth 0 (respecting `()` only — NOT `<>` because `->` contains `>`
-    // which would falsely decrement a `<>` depth counter).
-    let mut parts: Vec<&str> = Vec::new();
-    let mut depth: i32 = 0;
-    let mut start = 0;
-    for (i, ch) in sig.char_indices() {
-        match ch {
-            '(' | '[' => depth += 1,
-            ')' | ']' => depth -= 1,
-            ',' if depth == 0 => { parts.push(&sig[start..i]); start = i + 1; }
-            _ => {}
-        }
-    }
-    if start < sig.len() { parts.push(&sig[start..]); }
-
-    let colon_pat = format!("{param_name}:");
-    for part in parts {
-        let part = part.trim().trim_start_matches("val ").trim_start_matches("var ");
-        // Exact param_name match (no suffix)
-        let Some(col_pos) = part.find(&colon_pat) else { continue };
-        let before = &part[..col_pos];
-        if before.chars().last().map(|c| c.is_alphanumeric() || c == '_').unwrap_or(false) {
-            continue; // suffix match like `otherParam:`
-        }
-        let after = part[col_pos + colon_pat.len()..].trim();
-        if !after.is_empty() { return Some(after.to_owned()); }
-    }
-    None
-}
-
-/// 0-based index of `param_name` in a multi-param lambda opening `{ a, b, c ->`.
-/// Returns 0 for single-param lambdas.
-fn lambda_param_position_on_line(line: &str, param_name: &str) -> usize {
-    let mut search_from = 0;
-    while let Some(rel) = line[search_from..].find("->") {
-        let arrow_pos = search_from + rel;
-        if let Some(brace_pos) = line[..arrow_pos].rfind('{') {
-            let names_str = &line[brace_pos + 1..arrow_pos];
-            for (i, tok) in names_str.split(',').enumerate() {
-                let tok = tok.trim();
-                let n: String = tok.chars().take_while(|&c| c.is_alphanumeric() || c == '_').collect();
-                if n == param_name { return i; }
-            }
-        }
-        search_from = arrow_pos + 2;
-    }
-    0
-}
-
-/// Returns true if `after_open_brace` looks like the opening of an explicitly
-/// named parameter lambda — single-param `{ name ->` or multi-param `{ a, b ->`.
-///
-/// Handles multi-param correctly by finding `->` via a depth-aware scan
-/// (not just checking whether the text after the first word starts with `->`).
-///
-/// Returns false for:
-///   - `{ it }`               — implicit single param
-///   - `{ }` / `{`            — empty / block
-///   - `{ setEvent(...)` }    — starts with a function call
-fn has_named_params_not_it(after_open_brace: &str) -> bool {
-    let s = after_open_brace.trim_start();
-    // Find the first `->` at brace-depth 0 (ignoring `->` inside nested lambdas).
-    let mut depth: i32 = 0;
-    let bytes = s.as_bytes();
-    let mut arrow_pos: Option<usize> = None;
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'{' => { depth += 1; i += 1; }
-            b'}' => { depth -= 1; i += 1; }
-            b'-' if depth == 0 && i + 1 < bytes.len() && bytes[i + 1] == b'>' => {
-                arrow_pos = Some(i); break;
-            }
-            _ => { i += 1; }
-        }
-    }
-    let Some(ap) = arrow_pos else { return false; };
-    let before_arrow = s[..ap].trim_end();
-    // All tokens before `->` must be valid identifiers.
-    // If any non-`it`, non-`_` identifier is present, it's a named-param lambda.
-    for tok in before_arrow.split(',') {
-        let tok = tok.trim();
-        let name: String = tok.chars()
-            .take_while(|&c| c.is_alphanumeric() || c == '_')
-            .collect();
-        if !name.is_empty() && name != "it" && name != "_" {
-            return true;
-        }
-    }
-    false
-}
-
-fn extract_first_arg(call_expr: &str) -> Option<&str> {
-    let paren = call_expr.find('(')?;
-    let rest = &call_expr[paren + 1..];
-    let mut depth: i32 = 0;
-    let mut end = rest.len();
-    for (i, ch) in rest.char_indices() {
-        match ch {
-            '(' | '<' | '[' => depth += 1,
-            ')' | ']' => { if depth == 0 { end = i; break; } depth -= 1; }
-            '>' => depth -= 1,
-            ',' if depth == 0 => { end = i; break; }
-            _ => {}
-        }
-    }
-    let arg = rest[..end].trim();
-    if arg.is_empty() { None } else { Some(arg) }
-}
-
 /// Find the position of the last `.` that is at parenthesis/bracket depth 0
 /// (scanning left-to-right so that `fn(Enum.VALUE,` returns None — the dot
 /// is at depth 1 inside the argument list).
@@ -3405,198 +3139,6 @@ fn fun_trailing_lambda_this_type(fn_name: &str, idx: &Indexer, uri: &Url) -> Opt
     lambda_type_receiver(&last_type)
 }
 
-/// Collect the full parameter-list text for a function named `fn_name`.
-/// Fast path only — no rg, no disk I/O, no index mutations.
-/// Used by signature help (fires on every keystroke).
-fn find_fun_signature(fn_name: &str, idx: &Indexer, uri: &Url) -> Option<String> {
-    // 1. Import-aware resolution using only already-indexed files (no rg/disk).
-    let locs = crate::resolver::resolve_symbol_no_rg(idx, fn_name, uri);
-    for loc in &locs {
-        let file_uri_str = loc.uri.as_str();
-        if let Some(data) = idx.files.get(file_uri_str) {
-            let start_line = loc.range.start.line as usize;
-            if let Some(sig) = collect_params_from_line(&data.lines, start_line) {
-                return Some(sig);
-            }
-        }
-    }
-
-    // 2. Fallback: current file → all already-indexed files (name-only scan).
-    if let Some(sig) = collect_fun_params_text(fn_name, uri.as_str(), idx) {
-        return Some(sig);
-    }
-    for entry in idx.files.iter() {
-        if entry.key() == uri.as_str() { continue; }
-        if let Some(sig) = collect_fun_params_text(fn_name, entry.key(), idx) {
-            return Some(sig);
-        }
-    }
-    None
-}
-
-/// Full signature lookup including rg + on-demand indexing.
-/// Used by hover and lambda type inference where latency is acceptable.
-fn find_fun_signature_full(fn_name: &str, idx: &Indexer, uri: &Url) -> Option<String> {
-    if let Some(sig) = find_fun_signature(fn_name, idx, uri) {
-        return Some(sig);
-    }
-    // Slow path: rg to locate the definition, index on-demand.
-    let root = idx.workspace_root.read().unwrap().clone();
-    let matcher = idx.ignore_matcher.read().unwrap().clone();
-    let locs = crate::rg::rg_find_definition(fn_name, root.as_deref(), matcher.as_deref());
-    for loc in &locs {
-        let file_uri_str = loc.uri.as_str();
-        if !idx.files.contains_key(file_uri_str) {
-            if let Ok(path) = loc.uri.to_file_path() {
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    idx.index_content(&loc.uri, &content);
-                }
-            }
-        }
-        if let Some(sig) = collect_fun_params_text(fn_name, file_uri_str, idx) {
-            return Some(sig);
-        }
-    }
-    None
-}
-
-/// Collect everything between the outer `(…)` of a function's parameter list.
-/// Scans the symbol's start line and up to 20 following lines.
-/// Matches both top-level `fun` (FUNCTION) and class methods (METHOD).
-fn collect_fun_params_text(fn_name: &str, uri_str: &str, idx: &Indexer) -> Option<String> {
-    collect_all_fun_params_texts(fn_name, uri_str, idx).into_iter().next()
-}
-
-/// Like `collect_fun_params_text` but returns ALL params texts for every symbol
-/// named `fn_name` in the file (a file may have multiple same-named nested classes).
-fn collect_all_fun_params_texts(fn_name: &str, uri_str: &str, idx: &Indexer) -> Vec<String> {
-    let data = match idx.files.get(uri_str) { Some(d) => d, None => return vec![] };
-    let start_lines: Vec<usize> = data.symbols.iter()
-        .filter(|s| s.name == fn_name
-               && (s.kind == SymbolKind::FUNCTION
-                   || s.kind == SymbolKind::METHOD
-                   || s.kind == SymbolKind::CLASS
-                   || s.kind == SymbolKind::STRUCT))  // data class → STRUCT
-        .map(|s| s.range.start.line as usize)
-        .collect();
-
-    start_lines.into_iter().filter_map(|start_line| collect_params_from_line(&data.lines, start_line)).collect()
-}
-
-fn collect_params_from_line(lines: &[String], start_line: usize) -> Option<String> {
-    // Walk forward from the `fun` line accumulating chars until the outermost
-    // `)` closes — that ends the parameter list.
-    // We only track `()` depth (NOT `<>`) to avoid false-triggers on `->` arrows.
-    let mut paren_depth: i32 = 0;
-    let mut found_open = false;
-    let mut params = String::new();
-
-    'outer: for ln in start_line..start_line + 20 {
-        let line = match lines.get(ln) { Some(l) => l, None => break };
-        let mut chars = line.char_indices().peekable();
-        while let Some((_, ch)) = chars.next() {
-            match ch {
-                '(' => {
-                    paren_depth += 1;
-                    if paren_depth == 1 { found_open = true; continue; }
-                    if found_open { params.push(ch); }
-                }
-                ')' => {
-                    paren_depth -= 1;
-                    if found_open && paren_depth == 0 { break 'outer; }
-                    if found_open { params.push(ch); }
-                }
-                _ if found_open => params.push(ch),
-                _ => {}
-            }
-        }
-        if found_open { params.push('\n'); }
-    }
-
-    if params.is_empty() { None } else { Some(params) }
-}
-
-/// Split the flattened parameter list by `,` at depth-0 (respecting `()`, `<>`).
-/// Returns the type string of the parameter at position `n` (0-based).
-/// Falls back to the last parameter if `n` is out of range.
-///
-/// NOTE: `->` in Kotlin functional types (e.g. `(Boolean) -> Flow<T>`) contains
-/// `>` which would falsely decrement `<>` depth.  We skip the `>` of any `->` by
-/// tracking the previous character.
-fn nth_fun_param_type_str(params_text: &str, n: usize) -> Option<String> {
-    let mut parts: Vec<&str> = Vec::new();
-    let mut depth: i32 = 0;
-    let mut start = 0;
-    let mut prev = '\0';
-    for (i, ch) in params_text.char_indices() {
-        match ch {
-            '(' | '<' | '[' => depth += 1,
-            ')' | ']' => depth -= 1,
-            // Skip `>` of `->` so lambda return arrows don't upset `<>` depth.
-            '>' if prev != '-' => depth -= 1,
-            ',' if depth == 0 => {
-                parts.push(&params_text[start..i]);
-                start = i + 1;
-            }
-            _ => {}
-        }
-        prev = ch;
-    }
-    parts.push(&params_text[start..]);
-    // Drop trailing-comma empty parts (Kotlin allows `fun f(a: A, b: B,) {}`).
-    parts.retain(|p| !p.trim().is_empty());
-    if parts.is_empty() { return None; }
-
-    let param = parts.get(n).unwrap_or_else(|| parts.last().unwrap()).trim();
-    // Strip leading modifiers (`vararg`, `crossinline`, `noinline`).
-    let param = param.trim_start_matches(|c: char| !c.is_alphanumeric() && c != '_');
-    let colon = param.find(':')?;
-    Some(param[colon + 1..].trim().to_owned())
-}
-
-fn last_fun_param_type_str(params_text: &str) -> Option<String> {
-    // Count top-level parameters (same `->` skip logic as nth_fun_param_type_str).
-    let count = {
-        let mut n = 1usize;
-        let mut depth: i32 = 0;
-        let mut prev = '\0';
-        for ch in params_text.chars() {
-            match ch {
-                '(' | '<' | '[' => depth += 1,
-                ')' | ']' => depth -= 1,
-                '>' if prev != '-' => depth -= 1,
-                ',' if depth == 0 => n += 1,
-                _ => {}
-            }
-            prev = ch;
-        }
-        n
-    };
-    nth_fun_param_type_str(params_text, count.saturating_sub(1))
-}
-
-/// Strip a balanced trailing `(…)` argument list from the end of `s`.
-/// `"collection.method(arg1, arg2)"` → `"collection.method"`
-/// `"collection.forEach"`           → `"collection.forEach"`  (unchanged)
-fn strip_trailing_call_args(s: &str) -> &str {
-    if !s.ends_with(')') { return s; }
-    let bytes = s.as_bytes();
-    let mut depth = 0i32;
-    let mut i = bytes.len();
-    while i > 0 {
-        i -= 1;
-        match bytes[i] {
-            b')' => depth += 1,
-            b'(' => {
-                depth -= 1;
-                if depth == 0 { return &s[..i]; }
-            }
-            _ => {}
-        }
-    }
-    s
-}
-
 /// Scan backward from `(line_no, col)` — where `col` is the START of the cursor
 /// word — to find the name of the enclosing function/constructor call.
 ///
@@ -3609,7 +3151,7 @@ fn strip_trailing_call_args(s: &str) -> &str {
 /// Scans at most 20 lines backward to avoid runaway on deeply nested expressions.
 /// Tracks `()` and `[]` depth; lambda `{}` bodies are transparent (their inner
 /// `()` still balance) so we don't need special-case brace handling.
-fn find_enclosing_call_name(lines: &[String], line_no: usize, col: usize) -> Option<String> {
+pub(crate) fn find_enclosing_call_name(lines: &[String], line_no: usize, col: usize) -> Option<String> {
     let mut depth: i32 = 0;
     let scan_range_start = line_no.saturating_sub(20);
 
@@ -3692,44 +3234,6 @@ fn symbol_kw_for_lang(kind: SymbolKind, lang: &str) -> &'static str {
     let kw = symbol_kw(kind);
     // Swift uses `func`, not `fun`.
     if lang == "swift" && kw == "fun" { "func" } else { kw }
-}
-
-/// Rules:
-/// - Track `(` / `)` depth.
-/// - Once depth is back to 0, the signature ends at the current line.
-/// - A line ending with `{` signals the start of the body — strip the `{`
-///   and stop (we don't want the body in the hover).
-/// - Lines ending with `,` inside balanced parens always continue.
-/// - Cap at 15 lines to avoid runaway on pathological files.
-fn collect_signature(lines: &[String], start_line: usize) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    let mut depth: i32 = 0;
-
-    for i in start_line..(start_line + 15).min(lines.len()) {
-        let raw   = lines[i].trim();
-
-        // Count parens in this line.
-        for ch in raw.chars() {
-            match ch { '(' => depth += 1, ')' => depth -= 1, _ => {} }
-        }
-
-        if raw.ends_with('{') {
-            // Body starts — include the line without the brace (shows inheritance).
-            let trimmed = raw.trim_end_matches('{').trim_end();
-            if !trimmed.is_empty() { parts.push(trimmed.to_owned()); }
-            break;
-        }
-
-        parts.push(raw.to_owned());
-
-        // Signature ends when parens are balanced and the line doesn't
-        // look like a continuation (trailing comma means more params follow).
-        if depth <= 0 && !raw.ends_with(',') {
-            break;
-        }
-    }
-
-    parts.join("\n")
 }
 
 // ─── tests ───────────────────────────────────────────────────────────────────

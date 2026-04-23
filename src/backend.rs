@@ -7,7 +7,7 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{async_trait, Client, LanguageServer};
 
-use crate::indexer::{Indexer, IgnoreMatcher};
+use crate::indexer::{Indexer, IgnoreMatcher, find_fun_signature_with_receiver};
 
 pub struct Backend {
     client:  Client,
@@ -1197,7 +1197,7 @@ impl LanguageServer for Backend {
             _ => return Ok(None),
         };
 
-        let params_text = self.indexer.find_fun_signature_with_receiver(uri, &name, call_qualifier.as_deref());
+        let params_text = find_fun_signature_with_receiver(&self.indexer, uri, &name, call_qualifier.as_deref());
         if params_text.is_empty() {
             return Ok(None);
         }
