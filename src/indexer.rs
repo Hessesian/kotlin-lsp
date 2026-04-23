@@ -912,17 +912,30 @@ impl Indexer {
             }
         });
 
+        let gen_skipped   = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let read_failed   = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let url_failed    = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let panic_failed  = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let gen_skipped2  = Arc::clone(&gen_skipped);
+        let read_failed2  = Arc::clone(&read_failed);
+        let url_failed2   = Arc::clone(&url_failed);
+        let panic_failed2 = Arc::clone(&panic_failed);
+
         let results = crate::task_runner::run_concurrent(
             work_items,
             sem,
             move |item, sem| {
                 let idx = Arc::clone(&idx_ref);
+                let gen_skipped   = Arc::clone(&gen_skipped2);
+                let read_failed   = Arc::clone(&read_failed2);
+                let url_failed    = Arc::clone(&url_failed2);
+                let panic_failed  = Arc::clone(&panic_failed2);
                 async move {
                     log::debug!("Parsing: {}", item.path.display());
                     
                     // Check generation before parsing
                     if idx.root_generation.load(std::sync::atomic::Ordering::SeqCst) != item.start_gen {
-                        log::info!("Parse task: generation changed, skipping {}", item.path.display());
+                        gen_skipped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         return None;
                     }
                     
@@ -930,7 +943,10 @@ impl Indexer {
                     let content = match tokio::fs::read_to_string(&item.path).await {
                         Ok(c) => c,
                         Err(e) => {
-                            log::warn!("Could not read {}: {}", item.path.display(), e);
+                            let n = read_failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            if n < 5 {
+                                log::warn!("Could not read {}: {}", item.path.display(), e);
+                            }
                             return None;
                         }
                     };
@@ -939,6 +955,7 @@ impl Indexer {
                     let uri = match Url::from_file_path(&item.path) {
                         Ok(u) => u,
                         Err(_) => {
+                            url_failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             log::warn!("Invalid file path: {}", item.path.display());
                             return None;
                         }
@@ -955,6 +972,7 @@ impl Indexer {
                     }).await {
                         Ok(result) => result,
                         Err(e) => {
+                            panic_failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             log::warn!("Parse task panicked for {}: {}", item.path.display(), e);
                             return None;
                         }
@@ -990,7 +1008,12 @@ impl Indexer {
         // Stop the progress reporter (it may still be sleeping on its interval).
         progress_handle.abort();
 
-        log::info!("All {} parse tasks completed", results.len());
+        let gen_skip_n  = gen_skipped.load(std::sync::atomic::Ordering::Relaxed);
+        let read_fail_n = read_failed.load(std::sync::atomic::Ordering::Relaxed);
+        let url_fail_n  = url_failed.load(std::sync::atomic::Ordering::Relaxed);
+        let panic_n     = panic_failed.load(std::sync::atomic::Ordering::Relaxed);
+        log::info!("All {} parse tasks done: gen_skipped={}, read_failed={}, url_failed={}, panics={}",
+            results.len(), gen_skip_n, read_fail_n, url_fail_n, panic_n);
         
         // If generation changed while parse tasks ran, discard results — the new
         // root's indexing run will populate the index correctly.
@@ -2553,20 +2576,25 @@ fn warm_discover_files(root: &Path, cache: &IndexCache, matcher: Option<&IgnoreM
 
     // Phase 1: all previously cached files, filtered through the current ignore matcher
     // so that newly-configured ignorePatterns take effect even on a warm start.
+    // Also skip paths that no longer exist on disk (e.g. files deleted by a branch switch)
+    // to avoid counting them as need_parse and emitting spurious "Could not read" warnings.
     let cached_paths: HashSet<String> = cache.entries.keys()
         .filter(|p| {
             if let Some(m) = matcher {
                 if !m.is_empty() {
                     let path = Path::new(p.as_str());
                     let rel = path.strip_prefix(root).unwrap_or(path);
-                    return !m.matches(rel);
+                    if m.matches(rel) { return false; }
                 }
             }
             true
         })
         .cloned()
         .collect();
-    let mut paths: Vec<PathBuf> = cached_paths.iter().map(PathBuf::from).collect();
+    let mut paths: Vec<PathBuf> = cached_paths.iter()
+        .map(PathBuf::from)
+        .filter(|p| p.exists())
+        .collect();
 
     // Phase 2: find files created or modified since the cache was saved.
     // These are the only files `fd` needs to scan for.
@@ -2584,7 +2612,7 @@ fn warm_discover_files(root: &Path, cache: &IndexCache, matcher: Option<&IgnoreM
     }
 
     log::info!(
-        "Warm start: {} cached + {} new files (scanned last {}s window)",
+        "Warm start: {} cached (on-disk) + {} new files (scanned last {}s window)",
         cached_paths.len(), new_count, elapsed_secs
     );
     paths
