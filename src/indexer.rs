@@ -711,10 +711,9 @@ impl Indexer {
         let total = paths.len();
 
         // On warm start all selected paths are cache hits — pure deserialization with no
-        // parse overhead — so bypass the file-count cap.  The cap was designed to bound
-        // cold-start parse time, not cache-restore time.  An explicit KOTLIN_LSP_MAX_FILES
-        // env var still wins (it overrides the default 2000 with a real limit).
-        let effective_max = if warm_start && max == DEFAULT_MAX_INDEX_FILES {
+        // parse overhead — so bypass the file-count cap entirely.  The cap was designed to
+        // bound cold-start parse time; KOTLIN_LSP_MAX_FILES still limits cold-start parses.
+        let effective_max = if warm_start {
             MAX_FILES_UNLIMITED
         } else {
             max
