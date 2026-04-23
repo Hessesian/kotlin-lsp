@@ -355,7 +355,8 @@ impl LanguageServer for Backend {
                         None => true,
                         Some(ref r) => {
                             let cur_canon = std::fs::canonicalize(r).unwrap_or_else(|_| r.clone());
-                            !path.starts_with(r) && cand_canon != cur_canon
+                            let path_canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+                            !path_canon.starts_with(&cur_canon) && cand_canon != cur_canon
                         },
                     };
                     if should_switch {

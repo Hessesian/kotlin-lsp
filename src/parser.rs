@@ -708,7 +708,14 @@ pub fn parse_imports_from_lines(lines: &[String]) -> Vec<crate::types::ImportEnt
     for line in lines {
         let trimmed = line.trim_start();
         if !trimmed.starts_with("import ") { continue; }
-        let rest = trimmed["import ".len()..].trim();
+        let rest_raw = trimmed["import ".len()..].trim();
+        if rest_raw.is_empty() { continue; }
+        // Strip inline comments (e.g. `import foo.Bar // generated`)
+        let rest = if let Some(ci) = rest_raw.find("//") {
+            rest_raw[..ci].trim_end()
+        } else {
+            rest_raw
+        };
         if rest.is_empty() { continue; }
         let is_star = rest.ends_with(".*");
         let (path_part, alias) = if let Some(idx) = rest.find(" as ") {
@@ -1448,7 +1455,6 @@ class LoanReducer {
 }
 "#;
         let data = parse_kotlin(src);
-        eprintln!("ERRORS: {:?}", data.syntax_errors);
         assert!(data.syntax_errors.is_empty(),
             "Expected no syntax errors, got: {:?}", data.syntax_errors);
     }

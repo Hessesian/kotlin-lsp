@@ -2594,6 +2594,7 @@ fn warm_discover_files(root: &Path, cache: &IndexCache, matcher: Option<&IgnoreM
         .map(PathBuf::from)
         .filter(|p| p.exists())
         .collect();
+    let on_disk_cached_count = paths.len();
 
     // Phase 2: find files created or modified since the cache was saved.
     // These are the only files `fd` needs to scan for.
@@ -2612,7 +2613,7 @@ fn warm_discover_files(root: &Path, cache: &IndexCache, matcher: Option<&IgnoreM
 
     log::info!(
         "Warm start: {} cached (on-disk) + {} new files (scanned last {}s window)",
-        cached_paths.len(), new_count, elapsed_secs
+        on_disk_cached_count, new_count, elapsed_secs
     );
     paths
 }
