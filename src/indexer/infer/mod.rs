@@ -1,13 +1,15 @@
 //! Type-inference helpers for the Kotlin indexer.
 //!
 //! Each submodule handles one class of inference:
-//! - `lambda` — decomposing lambda/function types (`(T) -> R`, receiver lambdas, etc.)
-//! - `sig`    — function signature extraction (pure string/slice functions)
-//! - `args`   — call argument parsing (pure)
+//! - `lambda`   — decomposing lambda/function types (`(T) -> R`, receiver lambdas, etc.)
+//! - `sig`      — function signature extraction (pure string/slice functions)
+//! - `args`     — call argument parsing (pure)
+//! - `it_this`  — resolving `it`/`this` element types inside Kotlin lambda bodies
 
 pub mod lambda;
 pub mod sig;
 pub mod args;
+pub mod it_this;
 
 pub(crate) use lambda::{
     SCOPE_FUNCTIONS,
@@ -33,4 +35,17 @@ pub(crate) use args::{
     find_named_param_type_in_sig,
     lambda_param_position_on_line,
     has_named_params_not_it,
+};
+
+pub(crate) use it_this::{
+    find_it_element_type,
+    find_it_element_type_in_lines,
+    find_this_element_type_in_lines,
+    find_named_lambda_param_type_in_lines,
+    find_named_lambda_param_type,
+    is_lambda_param,
+    lambda_receiver_type_from_context,
+    line_has_lambda_param,
+    lambda_brace_pos_for_param,
+    find_last_dot_at_depth_zero,
 };
