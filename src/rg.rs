@@ -238,7 +238,7 @@ pub(crate) fn rg_find_definition(name: &str, root: Option<&Path>, matcher: Optio
         .filter_map(|l| parse_rg_line_with_content_rooted(l, &search_root).map(|(loc, _)| loc))
         .collect();
 
-    matcher.map_or(locs.clone(), |m| m.filter_locs(locs))
+    if let Some(m) = matcher { m.filter_locs(locs) } else { locs }
 }
 
 /// Run `rg` to find all *usages* of `name` in the project.
@@ -314,7 +314,7 @@ pub fn rg_find_references(
         //   import …ParentClass.Name   or   import …ParentClass.*
         // NOT files that merely mention both words (e.g. OtherContract.State).
         let direct_import_pat = format!(
-            r"import[^\n]*\b{}\.({}|\*)\b",
+            r"import[^\n]*\b{}\.(?:{}\b|\*)",
             safe_parent, safe_name
         );
         let candidate_files = rg_files_with_matches(&direct_import_pat, &search_root);
@@ -338,10 +338,14 @@ pub fn rg_find_references(
 
         if !all_files.is_empty() {
             let bare_hits = rg_word_in_files(&safe_name, &all_files);
+            // Deduplicate against the qualified hits using a HashSet for O(1) lookup.
+            let seen: std::collections::HashSet<(String, u32, u32)> = locs.iter()
+                .map(|l| (l.uri.to_string(), l.range.start.line, l.range.start.character))
+                .collect();
             for (loc, content) in bare_hits {
                 if let Some(loc) = filter((loc, content)) {
-                    // Deduplicate against the qualified hits.
-                    if !locs.iter().any(|l: &Location| l.uri == loc.uri && l.range.start == loc.range.start) {
+                    let key = (loc.uri.to_string(), loc.range.start.line, loc.range.start.character);
+                    if !seen.contains(&key) {
                         locs.push(loc);
                     }
                 }
@@ -555,6 +559,9 @@ fn parse_rg_line_with_content_rooted(line: &str, root: &Path) -> Option<(Locatio
         root.join(path)
     };
 
+    // Canonicalize to ensure we always produce an absolute path for Url::from_file_path,
+    // even when `root` itself was relative (e.g. workspace root from config without canonicalization).
+    let abs_path = abs_path.canonicalize().unwrap_or(abs_path);
     let uri = Url::from_file_path(&abs_path).ok()?;
     let pos = Position::new(line_num.saturating_sub(1), col.saturating_sub(1));
     Some((Location { uri, range: Range::new(pos, pos) }, content))

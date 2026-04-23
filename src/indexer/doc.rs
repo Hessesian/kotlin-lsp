@@ -4,12 +4,12 @@
 //! no I/O, no hidden state.  The single public entry-point is
 //! [`extract_doc_comment`]; everything else is a private helper.
 
-/// Collect the declaration signature starting at `start_line`, spanning
-/// multiple lines if the declaration continues (e.g. multiline constructor).
+/// Extract the doc comment associated with the declaration at `decl_line`.
 ///
 /// Walk backward from `decl_line` (exclusive) skipping blank lines, annotations
 /// (`@…`), and visibility/modifier keywords, then collect either a `/** … */`
-/// block-doc comment or a run of `//` line-doc comments.
+/// block-doc comment or a run of `//` line-doc comments immediately preceding
+/// the declaration.
 ///
 /// Returns cleaned Markdown text, or `None` when no doc comment is found.
 ///
