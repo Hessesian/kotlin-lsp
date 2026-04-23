@@ -74,24 +74,36 @@ fn cache_entry_to_file_result_preserves_hash() {
 /// `workspace_cache_path` must be stable: same root → same path.
 #[test]
 fn workspace_cache_path_stable() {
-    let root = std::path::Path::new("/tmp/my_project");
-    let p1 = workspace_cache_path(root);
-    let p2 = workspace_cache_path(root);
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().join("my_project");
+    let p1 = workspace_cache_path(&root);
+    let p2 = workspace_cache_path(&root);
     assert_eq!(p1, p2);
 }
 
 /// Different roots must produce different cache paths.
 #[test]
 fn workspace_cache_path_differs_for_different_roots() {
-    let p1 = workspace_cache_path(std::path::Path::new("/tmp/project_a"));
-    let p2 = workspace_cache_path(std::path::Path::new("/tmp/project_b"));
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let p1 = workspace_cache_path(&tmp.path().join("project_a"));
+    let p2 = workspace_cache_path(&tmp.path().join("project_b"));
     assert_ne!(p1, p2);
 }
 
-/// `try_load_cache` must return `None` for a non-existent path (no panic).
+/// `try_load_cache` must return `None` for a non-existent root (no panic).
 #[test]
 fn try_load_cache_missing_returns_none() {
-    let result = try_load_cache(std::path::Path::new("/tmp/kotlin_lsp_test_nonexistent_root_xyz"));
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().join("workspace");
+    std::fs::create_dir(&root).expect("create workspace dir");
+
+    // Ensure no stale cache exists for this fresh root.
+    let cache_path = workspace_cache_path(&root);
+    if cache_path.exists() {
+        std::fs::remove_file(&cache_path).expect("remove pre-existing cache file");
+    }
+
+    let result = try_load_cache(&root);
     assert!(result.is_none());
 }
 
@@ -101,25 +113,33 @@ fn save_and_load_cache_roundtrip() {
     use crate::indexer::Indexer;
 
     let tmp = tempfile::tempdir().expect("tempdir");
-    let root = tmp.path();
+    let root = tmp.path().join("workspace");
+    std::fs::create_dir(&root).expect("create workspace dir");
 
-    // Build a minimal indexer with one file.
+    // Build a minimal indexer with one file backed by a real temp path.
     let src = "package com.example\nclass RoundtripClass";
-    let u = Url::parse("file:///tmp/RoundtripClass.kt").unwrap();
+    let kt_file = tmp.path().join("RoundtripClass.kt");
+    std::fs::write(&kt_file, src).expect("write kt file");
+    let u = Url::from_file_path(&kt_file).expect("valid file URL");
+
     let idx = Indexer::new();
     idx.index_content(&u, src);
 
-    // Write cache.
-    save_cache(root, &idx.files, &idx.content_hashes, &idx.library_uris, true);
+    // Write cache to the workspace root (workspace_cache_path uses XDG_CACHE_HOME
+    // which may point to ~/.cache; we accept that for this test and clean up below).
+    save_cache(&root, &idx.files, &idx.content_hashes, &idx.library_uris, true);
+    let cache_path = workspace_cache_path(&root);
 
     // Read cache back.
-    let loaded = try_load_cache(root).expect("cache should exist after save");
+    let loaded = try_load_cache(&root).expect("cache should exist after save");
     assert_eq!(loaded.version, CACHE_VERSION);
     assert!(loaded.complete_scan);
 
-    // The file path from `Url::to_file_path` may differ per OS; check via URI lookup.
-    let file_path = u.to_file_path().unwrap().to_string_lossy().to_string();
+    let file_path = kt_file.to_string_lossy().to_string();
     let entry = loaded.entries.get(&file_path).expect("entry should be present");
     let has_class = entry.file_data.symbols.iter().any(|s| s.name == "RoundtripClass");
     assert!(has_class, "RoundtripClass symbol missing from cache roundtrip");
+
+    // Clean up the cache file written to the user's cache dir.
+    let _ = std::fs::remove_file(&cache_path);
 }

@@ -65,7 +65,7 @@ pub(crate) use self::infer::{
 };
 
 mod cache;
-use self::cache::{IndexCache, try_load_cache, write_status_file, save_cache, FileCacheEntry, CACHE_VERSION, cache_entry_to_file_result};
+use self::cache::{IndexCache, try_load_cache, write_status_file, save_cache, FileCacheEntry, cache_entry_to_file_result};
 pub(crate) use self::cache::workspace_cache_path;
 
 // ─── RAII guard for indexing_in_progress flag ─────────────────────────────────
