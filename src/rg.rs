@@ -559,9 +559,13 @@ fn parse_rg_line_with_content_rooted(line: &str, root: &Path) -> Option<(Locatio
         root.join(path)
     };
 
-    // Canonicalize to ensure we always produce an absolute path for Url::from_file_path,
-    // even when `root` itself was relative (e.g. workspace root from config without canonicalization).
-    let abs_path = abs_path.canonicalize().unwrap_or(abs_path);
+    // Only canonicalize when the path is not already absolute (e.g. relative workspace root).
+    // Avoid the syscall-per-result cost on large workspaces where the root is always absolute.
+    let abs_path = if abs_path.is_absolute() {
+        abs_path
+    } else {
+        abs_path.canonicalize().unwrap_or(abs_path)
+    };
     let uri = Url::from_file_path(&abs_path).ok()?;
     let pos = Position::new(line_num.saturating_sub(1), col.saturating_sub(1));
     Some((Location { uri, range: Range::new(pos, pos) }, content))
