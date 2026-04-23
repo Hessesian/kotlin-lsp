@@ -27,7 +27,8 @@ use tower_lsp::lsp_types::{
     TextEdit, Url,
 };
 
-use crate::indexer::{parse_rg_line, rg_find_definition, Indexer};
+use crate::indexer::Indexer;
+use crate::rg::{build_rg_pattern, parse_rg_line, rg_find_definition};
 use crate::types::{ImportEntry, Visibility};
 
 // ─── auto-import helpers ──────────────────────────────────────────────────────
@@ -1090,12 +1091,12 @@ fn import_file_stems(import_path: &str) -> Vec<String> {
 ///      extremely precise; handles multi-module projects where files live in
 ///      subdirs like `app/src/main/java/cz/moneta/…/EProductScreen.java`
 ///   2. Fallback: global fd by filename only (handles non-standard layouts)
-fn fd_find_and_parse(symbol_name: &str, full_import_path: &str, root: Option<&Path>, matcher: Option<&crate::indexer::IgnoreMatcher>) -> Vec<Location> {
+fn fd_find_and_parse(symbol_name: &str, full_import_path: &str, root: Option<&Path>, matcher: Option<&crate::rg::IgnoreMatcher>) -> Vec<Location> {
     let pkg = package_prefix(full_import_path);
     let expected_pkg = if pkg.is_empty() { None } else { Some(pkg.as_str()) };
     let pkg_dir = pkg.replace('.', "/");
 
-    let ext_alt = crate::indexer::SOURCE_EXTENSIONS.join("|");
+    let ext_alt = crate::rg::SOURCE_EXTENSIONS.join("|");
     for stem in import_file_stems(full_import_path) {
         // Strategy 1: precise full-path regex including the package directory.
         // e.g. ".*/cz/moneta/data/compat/enums/product/EProductScreen\.(kt|java|swift)$"
@@ -1106,14 +1107,14 @@ fn fd_find_and_parse(symbol_name: &str, full_import_path: &str, root: Option<&Pa
                 format!(r".*/{pkg_dir}/{stem}\.({ext_alt})$")
             };
             let locs = fd_search_by_full_path_pattern(&pat, symbol_name, expected_pkg, root);
-            let locs = matcher.map_or(locs.clone(), |m| m.filter_locs(locs));
+            let locs = match matcher { Some(m) => m.filter_locs(locs), None => locs };
             if !locs.is_empty() { return locs; }
         }
 
         // Strategy 2: global filename-only search (fallback for flat / non-standard layouts).
-        for ext in crate::indexer::SOURCE_EXTENSIONS {
+        for ext in crate::rg::SOURCE_EXTENSIONS {
             let locs = fd_search_file(&format!("{stem}.{ext}"), symbol_name, expected_pkg, root);
-            let locs = matcher.map_or(locs.clone(), |m| m.filter_locs(locs));
+            let locs = match matcher { Some(m) => m.filter_locs(locs), None => locs };
             if !locs.is_empty() { return locs; }
         }
     }
@@ -1465,7 +1466,7 @@ fn split_top_level_commas(text: &str) -> Vec<&str> {
 /// Package `com.example.ui` → globs `**/com/example/ui/*.{kt,java,swift}`.
 /// This handles the common case where the package structure mirrors the
 /// directory tree (standard Kotlin / Maven / Gradle convention).
-fn rg_in_package_dir(name: &str, package: &str, root: Option<&Path>, matcher: Option<&crate::indexer::IgnoreMatcher>) -> Vec<Location> {
+fn rg_in_package_dir(name: &str, package: &str, root: Option<&Path>, matcher: Option<&crate::rg::IgnoreMatcher>) -> Vec<Location> {
     let pkg_path = package.replace('.', "/");
     let pattern   = build_rg_pattern(name);
 
@@ -1478,7 +1479,7 @@ fn rg_in_package_dir(name: &str, package: &str, root: Option<&Path>, matcher: Op
     cmd.args([
         "--no-heading", "--with-filename", "--line-number", "--column",
     ]);
-    for ext in crate::indexer::SOURCE_EXTENSIONS {
+    for ext in crate::rg::SOURCE_EXTENSIONS {
         // Positive globs first — negative globs must come after to avoid being
         // overridden by later positive globs (rg: last matching glob wins).
         cmd.args(["--glob", &format!("**/{pkg_path}/*.{ext}")]);
@@ -1495,7 +1496,7 @@ fn rg_in_package_dir(name: &str, package: &str, root: Option<&Path>, matcher: Op
         .lines()
         .filter_map(parse_rg_line)
         .collect();
-    matcher.map_or(locs.clone(), |m| m.filter_locs(locs))
+    match matcher { Some(m) => m.filter_locs(locs), None => locs }
 }
 
 // ─── shared helpers ───────────────────────────────────────────────────────────
@@ -1887,26 +1888,6 @@ fn find_local_declaration(idx: &Indexer, name: &str, uri: &Url) -> Vec<Location>
     vec![]
 }
 
-/// Build the regex pattern used by `rg` for declaration sites.
-///
-/// Matches both Kotlin and Java declaration keywords followed by `NAME`.
-///
-/// Kotlin: `fun`, `class`, `object`, `val`, `var`, `typealias`, `enum class`,
-///         extension functions `fun ReceiverType.name`
-/// Java:   `class`, `interface`, `enum` (standalone, no `class` suffix),
-///         with any leading access/modifier keywords ignored
-pub(crate) fn build_rg_pattern(name: &str) -> String {
-    let safe: String = name.chars().flat_map(|c| {
-        if c.is_alphanumeric() || c == '_' { vec![c] } else { vec!['\\', c] }
-    }).collect();
-    // Kotlin: standard keywords + `enum class` + extension function receiver
-    // Java:   `enum NAME` (Java enums have no `class` after `enum`)
-    // Swift:  struct, protocol, extension, let (in addition to shared keywords)
-    format!(
-        r"(?:(?:class|struct|interface|object|protocol|fun|func|val|var|let|typealias|enum\s+class)\s+|fun\s+\w[\w.]*\.|(?:public|private|protected|fileprivate|open|internal|static|abstract|final|\s)+(?:enum|class|struct|protocol)\s+|extension\s+){safe}\b"
-    )
-}
-
 fn last_segment(dotted: &str) -> &str {
     dotted.rsplit('.').next().unwrap_or(dotted)
 }
@@ -1945,7 +1926,7 @@ mod tests {
         import_file_stems(import_path)
             .into_iter()
             .flat_map(|stem| {
-                crate::indexer::SOURCE_EXTENSIONS
+                crate::rg::SOURCE_EXTENSIONS
                     .iter()
                     .map(move |ext| format!("{stem}.{ext}"))
             })

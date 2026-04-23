@@ -4,6 +4,7 @@ mod indexer;
 mod parser;
 mod queries;
 mod resolver;
+mod rg;
 mod stdlib;
 mod stdlib_tail;
 mod task_runner;
