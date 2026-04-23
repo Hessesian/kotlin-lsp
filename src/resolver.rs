@@ -80,7 +80,7 @@ pub(crate) fn import_insertion_line(lines: &[String]) -> u32 {
 }
 
 /// Build a TextEdit that inserts `import {fqn}\n` at the correct position.
-pub(crate) fn make_import_edit(fqn: &str, lines: &[String]) -> TextEdit {
+pub(crate) fn make_import_edit(fqn: &str, lines: &[String], needs_semicolon: bool) -> TextEdit {
     let line = import_insertion_line(lines);
     // When inserting right after the package line (no existing imports), add a blank line.
     let needs_blank = line > 0
@@ -88,10 +88,11 @@ pub(crate) fn make_import_edit(fqn: &str, lines: &[String]) -> TextEdit {
             .map(|l| l.trim_start().starts_with("package "))
             .unwrap_or(false)
         && lines.get(line as usize).map(|l| !l.trim().is_empty()).unwrap_or(false);
+    let stmt = if needs_semicolon { format!("import {fqn};") } else { format!("import {fqn}") };
     let new_text = if needs_blank {
-        format!("\nimport {fqn}\n")
+        format!("\n{stmt}\n")
     } else {
-        format!("import {fqn}\n")
+        format!("{stmt}\n")
     };
     TextEdit {
         range: Range {
@@ -523,6 +524,7 @@ fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippets: bool, an
     //    prefix/acronym matches only (max_score=1) — no substring flood.
     // Emits one CompletionItem per distinct FQN, with additionalTextEdits for auto-import.
     if !lowercase_mode && prefix.len() >= 2 {
+        let is_java = from_uri.as_str().ends_with(".java");
         // Prefer live_lines (updated on every keystroke) over the indexed snapshot so that
         // import deduplication and insertion position are based on the current buffer state.
         let live = idx.live_lines.get(from_uri.as_str()).map(|ll| ll.clone());
@@ -585,7 +587,7 @@ fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippets: bool, an
                     if !seen.insert(item_key) { continue; }
 
                     let import_edit = if needs_import {
-                        Some(vec![make_import_edit(fqn, &cur_lines)])
+                        Some(vec![make_import_edit(fqn, &cur_lines, is_java)])
                     } else {
                         None
                     };

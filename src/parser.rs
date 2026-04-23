@@ -717,6 +717,9 @@ pub fn parse_imports_from_lines(lines: &[String]) -> Vec<crate::types::ImportEnt
             rest_raw
         };
         if rest.is_empty() { continue; }
+        // Trim optional trailing `;` (Java-style imports) and skip Java's `static` modifier.
+        let rest = rest.trim_end_matches(';').trim_end();
+        let rest = rest.strip_prefix("static ").map(str::trim_start).unwrap_or(rest);
         let is_star = rest.ends_with(".*");
         let (path_part, alias) = if let Some(idx) = rest.find(" as ") {
             (&rest[..idx], Some(rest[idx + 4..].trim().to_owned()))
