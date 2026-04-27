@@ -78,18 +78,22 @@ fn cache_entry_to_file_result_preserves_hash() {
 fn workspace_cache_path_stable() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().join("my_project");
-    let p1 = workspace_cache_path(&root);
-    let p2 = workspace_cache_path(&root);
-    assert_eq!(p1, p2);
+    with_xdg_cache(tmp.path(), || {
+        let p1 = workspace_cache_path(&root);
+        let p2 = workspace_cache_path(&root);
+        assert_eq!(p1, p2);
+    });
 }
 
 /// Different roots must produce different cache paths.
 #[test]
 fn workspace_cache_path_differs_for_different_roots() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let p1 = workspace_cache_path(&tmp.path().join("project_a"));
-    let p2 = workspace_cache_path(&tmp.path().join("project_b"));
-    assert_ne!(p1, p2);
+    with_xdg_cache(tmp.path(), || {
+        let p1 = workspace_cache_path(&tmp.path().join("project_a"));
+        let p2 = workspace_cache_path(&tmp.path().join("project_b"));
+        assert_ne!(p1, p2);
+    });
 }
 
 /// `try_load_cache` must return `None` for a non-existent root (no panic).
