@@ -24,6 +24,11 @@ Options:
     --binary PATH     Path to the kotlin-lsp binary (default: kotlin-lsp).
     --timeout SECS    Seconds to wait for each response (default: 30).
     --json            Output raw JSON instead of human-readable text.
+
+TCP mode (for Sora Editor / remote clients):
+    kotlin-lsp --port 9257
+    # then connect Sora Editor's editor-lsp to host:9257
+    # or tunnel over USB with: adb forward tcp:9257 tcp:9257
 """
 
 import argparse
