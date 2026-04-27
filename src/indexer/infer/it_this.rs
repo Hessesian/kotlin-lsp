@@ -420,7 +420,9 @@ pub(crate) fn lambda_brace_pos_for_param(line: &str, param_name: &str) -> Option
 /// Rules:
 ///  - Case A `receiver.method { this }`: check if `method` has a receiver-lambda last
 ///    param (`T.() -> R`) — if so return `T`.  If method not indexed but is a known
-///    stdlib scope function (`run`, `apply`, `also`, `let`), return the receiver type.
+///    stdlib scope function listed in `RECEIVER_THIS_FNS` (`run`, `apply`), return the
+///    receiver type.  `also` and `let` are intentionally excluded — they expose the
+///    receiver as `it`, not `this`.
 ///  - Case B `with(receiver) { this }`: return the receiver's type (special-cased).
 ///  - Everything else: return `None` (don't hint `this` from the lambda).
 fn lambda_receiver_this_type_from_context(

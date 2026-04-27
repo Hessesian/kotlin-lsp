@@ -256,28 +256,54 @@ impl Indexer {
         max: usize,
         client: Option<tower_lsp::Client>,
     ) {
-        if !self.pending_reindex.swap(false, std::sync::atomic::Ordering::AcqRel) {
-            return;
-        }
-        let root_opt = self.pending_reindex_root.write().unwrap().take();
-        let root = match root_opt {
-            Some(r) => r,
-            None => match self.workspace_root.read().unwrap().clone() {
+        loop {
+            // Never consume the pending flag while another scan is still active.
+            // The finishing scan will call run_pending_reindex itself and drain it.
+            if self.indexing_in_progress.load(std::sync::atomic::Ordering::Acquire) {
+                return;
+            }
+            // Atomically claim the queued request; if nothing is pending, we're done.
+            if self
+                .pending_reindex
+                .compare_exchange(
+                    true,
+                    false,
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                )
+                .is_err()
+            {
+                return;
+            }
+            let root_opt = self.pending_reindex_root.write().unwrap().take();
+            let root = match root_opt {
                 Some(r) => r,
-                None => return,
-            },
-        };
-        log::info!("run_pending_reindex: starting queued reindex for {}", root.display());
-        let result = Arc::clone(&self).index_workspace_impl(&root, max, client).await;
-        if !result.aborted {
+                None => match self.workspace_root.read().unwrap().clone() {
+                    Some(r) => r,
+                    None => return,
+                },
+            };
+            log::info!("run_pending_reindex: starting queued reindex for {}", root.display());
+            let result = Arc::clone(&self).index_workspace_impl(&root, max, client.clone()).await;
+            if result.aborted {
+                // Lost the scan guard to a concurrent caller — restore the queued
+                // request so that caller's run_pending_reindex will drain it.
+                {
+                    let mut pending_root = self.pending_reindex_root.write().unwrap();
+                    if pending_root.is_none() {
+                        *pending_root = Some(root);
+                    }
+                }
+                self.pending_reindex.store(true, std::sync::atomic::Ordering::Release);
+                return;
+            }
             self.last_scan_complete
                 .store(result.complete_scan, std::sync::atomic::Ordering::Release);
             self.apply_workspace_result(&result);
             Arc::clone(&self).index_source_paths(root).await;
             self.save_cache_to_disk();
+            // Loop: drain any request that arrived while this queued reindex was running.
         }
-        // Intentionally no recursive pending check: if more requests arrived
-        // during this run they will re-queue and be picked up by the next caller.
     }
 
     /// Core workspace indexing: file discovery → cache partition → concurrent parse.

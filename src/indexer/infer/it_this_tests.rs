@@ -239,10 +239,10 @@ fn this_type_let_does_not_infer_receiver() {
     let (u, idx) = indexed("/t.kt", src);
     let lines: Vec<String> = vec!["user.let {".to_owned(), "    this.".to_owned(), "}".to_owned()];
     let result = find_this_element_type_in_lines(&lines, 1, 9, &idx, &u);
-    assert_ne!(
+    assert_eq!(
         result.as_deref(),
-        Some("User"),
-        "let: this should NOT resolve to User (let uses `it`, not `this`)"
+        None,
+        "let: `this` must not resolve to any receiver type (let exposes receiver as `it`, not `this`)"
     );
 }
 
@@ -253,10 +253,10 @@ fn this_type_also_does_not_infer_receiver() {
     let (u, idx) = indexed("/t.kt", src);
     let lines: Vec<String> = vec!["user.also {".to_owned(), "    this.".to_owned(), "}".to_owned()];
     let result = find_this_element_type_in_lines(&lines, 1, 9, &idx, &u);
-    assert_ne!(
+    assert_eq!(
         result.as_deref(),
-        Some("User"),
-        "also: this should NOT resolve to User (also uses `it`, not `this`)"
+        None,
+        "also: `this` must not resolve to any receiver type (also exposes receiver as `it`, not `this`)"
     );
 }
 

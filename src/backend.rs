@@ -593,6 +593,25 @@ impl LanguageServer for Backend {
             }
         }
 
+        // `this.field` / `it.field` — resolve the implicit receiver/lambda type and
+        // use it as the real qualifier so definition lookup finds the correct file.
+        // `resolve_qualified("this", …)` only searches the current file + hierarchy,
+        // which misses members declared on a lambda receiver type (e.g. `Address`
+        // inside `cardAddress?.run { this.descriptiveNumber }`).
+        // `it` is never in declared_names, so `infer_variable_type` always returns
+        // None; we must go through `infer_lambda_param_type_at` here too.
+        if let Some(qual) = qualifier.as_deref() {
+            if qual == "this" || qual == "it" {
+                if let Some(type_name) = self.indexer.infer_lambda_param_type_at(qual, uri, position) {
+                    let lookup = type_name.rsplit('.').next().unwrap_or(&type_name);
+                    let locs = self.indexer.find_definition_qualified(&word, Some(lookup), uri);
+                    if !locs.is_empty() {
+                        return Ok(Some(locs_to_response(locs)));
+                    }
+                }
+            }
+        }
+
         let locs = self.indexer.find_definition_qualified(&word, qualifier.as_deref(), uri);
         if !locs.is_empty() {
             return Ok(match locs.len() {
@@ -770,6 +789,29 @@ impl LanguageServer for Backend {
 
         // Use the same resolution chain as go-to-definition so hover always
         // points at the same symbol (import-aware, not just first index match).
+
+        // `this.field` / `it.field` — resolve to the actual receiver/lambda type
+        // so hover shows the member from the correct class (mirrors goto_definition fix).
+        if let Some(qual) = qualifier.as_deref() {
+            if qual == "this" || qual == "it" {
+                if let Some(type_name) = self.indexer.infer_lambda_param_type_at(qual, uri, position) {
+                    let lookup = type_name.rsplit('.').next().unwrap_or(&type_name);
+                    let locs = self.indexer.find_definition_qualified(&word, Some(lookup), uri);
+                    if let Some(loc) = locs.first() {
+                        if let Some(md) = self.indexer.hover_info_at_location(loc, &word) {
+                            return Ok(Some(Hover {
+                                contents: HoverContents::Markup(MarkupContent {
+                                    kind:  MarkupKind::Markdown,
+                                    value: md,
+                                }),
+                                range: None,
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+
         let locs = self.indexer.find_definition_qualified(&word, qualifier.as_deref(), uri);
         let hover_md = if let Some(loc) = locs.first() {
             self.indexer.hover_info_at_location(loc, &word)
