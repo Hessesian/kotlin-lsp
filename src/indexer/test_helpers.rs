@@ -20,3 +20,35 @@ pub(crate) fn with_xdg_cache<F: FnOnce()>(dir: &std::path::Path, f: F) {
     }
     if let Err(e) = result { std::panic::resume_unwind(e); }
 }
+
+/// Global mutex serialising tests that mutate arbitrary env vars.
+/// Each unique env var should use its own lock to avoid unnecessary serialisation.
+pub(crate) static ENV_VAR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Run `f` with `var` temporarily unset.
+/// Saves the previous value and restores it on exit, even on panic.
+pub(crate) fn with_env_var_unset<F: FnOnce()>(var: &str, lock: &std::sync::Mutex<()>, f: F) {
+    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let prev = std::env::var(var).ok();
+    std::env::remove_var(var);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    match prev {
+        Some(v) => std::env::set_var(var, v),
+        None    => {},
+    }
+    if let Err(e) = result { std::panic::resume_unwind(e); }
+}
+
+/// Run `f` with `var` temporarily set to `value`.
+/// Saves the previous value and restores it (or removes the var) on exit, even on panic.
+pub(crate) fn with_env_var<F: FnOnce()>(var: &str, value: &str, lock: &std::sync::Mutex<()>, f: F) {
+    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let prev = std::env::var(var).ok();
+    std::env::set_var(var, value);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    match prev {
+        Some(v) => std::env::set_var(var, v),
+        None    => std::env::remove_var(var),
+    }
+    if let Err(e) = result { std::panic::resume_unwind(e); }
+}
