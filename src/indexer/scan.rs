@@ -106,7 +106,10 @@ pub(crate) fn find_files_for_types(
         .map(PathBuf::from)
         .filter(|p| p.exists())
         .collect();
-    matcher.map_or(paths.clone(), |m| m.filter_paths(paths))
+    match matcher {
+        None    => paths,
+        Some(m) => m.filter_paths(paths),
+    }
 }
 
 // ─── impl Indexer ─────────────────────────────────────────────────────────────
@@ -243,11 +246,6 @@ impl Indexer {
             .indexing_in_progress
             .swap(true, std::sync::atomic::Ordering::AcqRel);
 
-        // RAII guard: always clear indexing_in_progress on exit (success, panic, or early return).
-        let _guard = IndexingGuard {
-            indexer: Arc::clone(&self),
-        };
-
         if already {
             log::warn!(
                 "index_workspace_impl: an indexing run is already in progress, skipping. \
@@ -261,6 +259,12 @@ impl Indexer {
                 complete_scan: false,
             };
         }
+
+        // RAII guard: clear indexing_in_progress on exit (success, panic, or early return).
+        // Created AFTER the `already` check so we never clear the flag owned by a concurrent run.
+        let _guard = IndexingGuard {
+            indexer: Arc::clone(&self),
+        };
 
         *self.workspace_root.write().unwrap() = Some(root.to_path_buf());
         let start_gen = self
@@ -360,9 +364,9 @@ impl Indexer {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let root_str = root.to_string_lossy();
+        let root_escaped = serde_json::to_string(&root.to_string_lossy().as_ref()).unwrap_or_default();
         write_status_file(&format!(
-            r#"{{"phase":"indexing","workspace":"{root_str}","indexed":0,"total":{parse_count},"cache_hits":{cache_hits},"symbols":0,"started_at":{started_unix},"elapsed_secs":0,"estimated_total_secs":null}}"#
+            r#"{{"phase":"indexing","workspace":{root_escaped},"indexed":0,"total":{parse_count},"cache_hits":{cache_hits},"symbols":0,"started_at":{started_unix},"elapsed_secs":0,"estimated_total_secs":null}}"#
         ));
 
         // ── LSP progress: begin ──────────────────────────────────────────────
@@ -557,10 +561,9 @@ impl Indexer {
                     let _permit = sem.acquire().await.unwrap();
                     let t0 = std::time::Instant::now();
                     let uri_clone = uri.clone();
-                    let content_clone = content.clone();
                     let parse_result =
                         match tokio::task::spawn_blocking(move || {
-                            Indexer::parse_file(&uri_clone, &content_clone)
+                            Indexer::parse_file(&uri_clone, &content)
                         })
                         .await
                         {
@@ -696,9 +699,9 @@ impl Indexer {
 
         // ── Status file: done ────────────────────────────────────────────────
         let elapsed = index_start.elapsed().as_secs();
-        let root_str = root.to_string_lossy();
+        let root_escaped = serde_json::to_string(&root.to_string_lossy().as_ref()).unwrap_or_default();
         write_status_file(&format!(
-            r#"{{"phase":"done","workspace":"{root_str}","indexed":{files_parsed},"total":{total},"cache_hits":{cache_hits},"symbols":{symbols},"elapsed_secs":{elapsed},"estimated_total_secs":null}}"#,
+            r#"{{"phase":"done","workspace":{root_escaped},"indexed":{files_parsed},"total":{total},"cache_hits":{cache_hits},"symbols":{symbols},"elapsed_secs":{elapsed},"estimated_total_secs":null}}"#,
             symbols = stats.symbols_extracted,
         ));
 
