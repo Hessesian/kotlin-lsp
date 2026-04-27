@@ -850,16 +850,31 @@ impl LanguageServer for Backend {
         let pos  = params.text_document_position.position;
         let include_decl = params.context.include_declaration;
 
-        let name = match self.indexer.word_at(uri, pos) {
-            Some(w) => w,
-            None    => return Ok(None),
+        let (name, qualifier) = match self.indexer.word_and_qualifier_at(uri, pos) {
+            Some(pair) => pair,
+            None       => return Ok(None),
+        };
+
+        // When the qualifier is `this` or `it`, resolve it to the actual receiver type
+        // so that lowercase member references (e.g. `this.descriptiveNumber`) are scoped
+        // to the correct declaring class rather than doing an unscoped bare-word search.
+        let receiver_type: Option<String> = match qualifier.as_deref() {
+            Some("this") | Some("it") => {
+                let kw = qualifier.as_deref().unwrap();
+                self.indexer.infer_lambda_param_type_at(kw, uri, pos)
+                    .map(|t| t.rsplit('.').next().unwrap_or(&t).to_owned())
+            }
+            _ => None,
         };
 
         // For uppercase symbols, determine parent_class and declared_pkg:
         // - If cursor is ON the declaration of this symbol → use enclosing_class_at(cursor)
         // - If cursor is on a REFERENCE → scan imports in current file to find which
         //   specific class is meant (handles multiple `Effect` classes across files)
-        let (parent_class, declared_pkg) = if name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+        let (parent_class, declared_pkg) = if let Some(recv_type) = receiver_type {
+            // Receiver-qualified member: scope to the resolved receiver class.
+            (Some(recv_type), None)
+        } else if name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
             let on_decl = self.indexer.is_declared_in(uri, &name)
                 && self.indexer.definitions.get(&name)
                     .map(|locs| locs.iter().any(|l| l.uri == *uri && l.range.start.line == pos.line))
