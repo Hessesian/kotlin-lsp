@@ -7,7 +7,7 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{async_trait, Client, LanguageServer};
 
-use crate::indexer::{Indexer, IgnoreMatcher};
+use crate::indexer::{Indexer, IgnoreMatcher, find_fun_signature_with_receiver};
 
 pub struct Backend {
     client:  Client,
@@ -608,11 +608,11 @@ impl LanguageServer for Backend {
         let (root_opt, matcher) = {
             let wr = self.indexer.workspace_root.read().unwrap().clone();
             let m = self.indexer.ignore_matcher.read().unwrap().clone();
-            (crate::indexer::effective_rg_root(wr.as_deref(), file_path.as_deref()), m)
+            (crate::rg::effective_rg_root(wr.as_deref(), file_path.as_deref()), m)
         };
         let name_clone = word.clone();
         let rg_locs = tokio::task::spawn_blocking(move || {
-            crate::indexer::rg_find_definition(&name_clone, root_opt.as_deref(), matcher.as_deref())
+            crate::rg::rg_find_definition(&name_clone, root_opt.as_deref(), matcher.as_deref())
         }).await.unwrap_or_default();
         Ok(match rg_locs.len() {
             0 => None,
@@ -648,11 +648,11 @@ impl LanguageServer for Backend {
             let (root_opt, matcher) = {
                 let wr = self.indexer.workspace_root.read().unwrap().clone();
                 let m = self.indexer.ignore_matcher.read().unwrap().clone();
-                (crate::indexer::effective_rg_root(wr.as_deref(), file_path.as_deref()), m)
+                (crate::rg::effective_rg_root(wr.as_deref(), file_path.as_deref()), m)
             };
             let word_clone = word.clone();
             let rg_impls = tokio::task::spawn_blocking(move || {
-                crate::indexer::rg_find_implementors(&word_clone, root_opt.as_deref(), matcher.as_deref())
+                crate::rg::rg_find_implementors(&word_clone, root_opt.as_deref(), matcher.as_deref())
             }).await.unwrap_or_default();
             if !rg_impls.is_empty() {
                 // Return early with rg results.
@@ -784,9 +784,9 @@ impl LanguageServer for Backend {
                 let (rg_root, matcher) = {
                     let wr = self.indexer.workspace_root.read().unwrap().clone();
                     let m = self.indexer.ignore_matcher.read().unwrap().clone();
-                    (crate::indexer::effective_rg_root(wr.as_deref(), file_path.as_deref()), m)
+                    (crate::rg::effective_rg_root(wr.as_deref(), file_path.as_deref()), m)
                 };
-                let rg_locs = crate::indexer::rg_find_definition(&word, rg_root.as_deref(), matcher.as_deref());
+                let rg_locs = crate::rg::rg_find_definition(&word, rg_root.as_deref(), matcher.as_deref());
                 rg_locs.first().and_then(|loc| self.indexer.hover_info_at_location(loc, &word))
             }
         };
@@ -869,7 +869,7 @@ impl LanguageServer for Backend {
         let parent2 = parent_class.clone();
         let decl2 = declared_pkg.clone();
         let mut locs = tokio::task::spawn_blocking(move || {
-            crate::indexer::rg_find_references(
+            crate::rg::rg_find_references(
                 &name2,
                 parent2.as_deref(),
                 decl2.as_deref(),
@@ -1054,7 +1054,7 @@ impl LanguageServer for Backend {
             let matcher = self.indexer.ignore_matcher.read().unwrap().clone();
             let q = query.to_string();
             let rg_locs = tokio::task::spawn_blocking(move || {
-                crate::indexer::rg_find_definition(&q, root_opt.as_deref(), matcher.as_deref())
+                crate::rg::rg_find_definition(&q, root_opt.as_deref(), matcher.as_deref())
             }).await.unwrap_or_default();
             if !rg_locs.is_empty() {
                 let rg_syms: Vec<SymbolInformation> = rg_locs.into_iter().map(|loc| {
@@ -1197,7 +1197,7 @@ impl LanguageServer for Backend {
             _ => return Ok(None),
         };
 
-        let params_text = self.indexer.find_fun_signature_with_receiver(uri, &name, call_qualifier.as_deref());
+        let params_text = find_fun_signature_with_receiver(&self.indexer, uri, &name, call_qualifier.as_deref());
         if params_text.is_empty() {
             return Ok(None);
         }
@@ -1321,7 +1321,7 @@ impl LanguageServer for Backend {
         let decl2 = declared_pkg.clone();
         // include_declaration=true so we also rename the declaration site
         let ref_locs = tokio::task::spawn_blocking(move || {
-            crate::indexer::rg_find_references(
+            crate::rg::rg_find_references(
                 &name2,
                 parent2.as_deref(),
                 decl2.as_deref(),
@@ -1710,10 +1710,10 @@ impl Backend {
         let (root_opt, matcher) = {
             let wr = self.indexer.workspace_root.read().unwrap().clone();
             let m = self.indexer.ignore_matcher.read().unwrap().clone();
-            (crate::indexer::effective_rg_root(wr.as_deref(), file_path.as_deref()), m)
+            (crate::rg::effective_rg_root(wr.as_deref(), file_path.as_deref()), m)
         };
         tokio::task::spawn_blocking(move || {
-            crate::indexer::rg_find_definition(&name_clone, root_opt.as_deref(), matcher.as_deref())
+            crate::rg::rg_find_definition(&name_clone, root_opt.as_deref(), matcher.as_deref())
         }).await.unwrap_or_default()
     }
 

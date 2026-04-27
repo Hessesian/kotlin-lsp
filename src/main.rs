@@ -4,6 +4,7 @@ mod indexer;
 mod parser;
 mod queries;
 mod resolver;
+mod rg;
 mod stdlib;
 mod stdlib_tail;
 mod task_runner;
@@ -58,12 +59,12 @@ async fn async_main() {
             .parse()
             .unwrap_or_else(|_| { eprintln!("Invalid port number"); std::process::exit(1); });
 
-        let addr = format!("0.0.0.0:{port}");
+        let addr = format!("127.0.0.1:{port}");
         let listener = tokio::net::TcpListener::bind(&addr).await.unwrap_or_else(|e| {
             eprintln!("Failed to bind {addr}: {e}");
             std::process::exit(1);
         });
-        eprintln!("kotlin-lsp listening on {addr} (TCP)");
+        eprintln!("kotlin-lsp listening on {addr} (TCP, loopback only)");
 
         // Serve one client at a time; restart the loop for subsequent connections.
         loop {
