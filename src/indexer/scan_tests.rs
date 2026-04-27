@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use super::{find_files_for_types, resolve_max_files, IndexingGuard};
 use crate::indexer::Indexer;
-use crate::indexer::test_helpers::{ENV_VAR_LOCK, with_env_var};
+use crate::indexer::test_helpers::{ENV_VAR_LOCK, with_env_var, with_env_var_unset};
 
 // ─── resolve_max_files ────────────────────────────────────────────────────────
 
@@ -27,15 +27,9 @@ fn resolve_max_files_uses_env_issue_scan() {
 
 #[test]
 fn resolve_max_files_uses_default_when_unset_issue_scan() {
-    let _guard = ENV_VAR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let prev = std::env::var("KOTLIN_LSP_MAX_FILES").ok();
-    std::env::remove_var("KOTLIN_LSP_MAX_FILES");
-    let result = resolve_max_files(2000);
-    match prev {
-        Some(v) => std::env::set_var("KOTLIN_LSP_MAX_FILES", v),
-        None => {}
-    }
-    assert_eq!(result, 2000, "expected default 2000 when env var is absent");
+    with_env_var_unset("KOTLIN_LSP_MAX_FILES", &ENV_VAR_LOCK, || {
+        assert_eq!(resolve_max_files(2000), 2000, "expected default 2000 when env var is absent");
+    });
 }
 
 #[test]

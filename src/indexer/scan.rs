@@ -58,11 +58,13 @@ pub(super) const DEFAULT_MAX_INDEX_FILES: usize = 2000;
 
 /// Pure: resolve the maximum number of files to eagerly index.
 ///
-/// Reads `KOTLIN_LSP_MAX_FILES` from the environment once.
+/// Reads `KOTLIN_LSP_MAX_FILES` from the environment on each call.
 /// Returns `default` when the variable is absent or not a valid integer.
 ///
 /// - LSP mode callers pass `DEFAULT_MAX_INDEX_FILES` (2000).
 /// - CLI `--index-only` callers pass `MAX_FILES_UNLIMITED`.
+///   Note: even with `MAX_FILES_UNLIMITED`, setting `KOTLIN_LSP_MAX_FILES`
+///   in the environment will still cap the count.
 pub fn resolve_max_files(default: usize) -> usize {
     std::env::var("KOTLIN_LSP_MAX_FILES")
         .ok()
@@ -115,8 +117,9 @@ pub(crate) fn find_files_for_types(
 // ─── impl Indexer ─────────────────────────────────────────────────────────────
 
 impl Indexer {
-    /// Full reindex without file-count limit — used by `--index-only` CLI mode
-    /// and the `kotlin-lsp/reindex` workspace command.
+    /// Full reindex passing `MAX_FILES_UNLIMITED` as the default file cap —
+    /// used by `--index-only` CLI mode and the `kotlin-lsp/reindex` workspace command.
+    /// The `KOTLIN_LSP_MAX_FILES` environment variable can still override the count.
     pub async fn index_workspace_full(
         self: Arc<Self>,
         root: &Path,
