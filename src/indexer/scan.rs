@@ -704,7 +704,8 @@ impl Indexer {
         let elapsed = index_start.elapsed().as_secs();
         let root_escaped = serde_json::to_string(&root.to_string_lossy().as_ref()).unwrap_or_default();
         write_status_file(&format!(
-            r#"{{"phase":"done","workspace":{root_escaped},"indexed":{files_parsed},"total":{total},"cache_hits":{cache_hits},"symbols":{symbols},"elapsed_secs":{elapsed},"estimated_total_secs":null}}"#,
+            r#"{{"phase":"done","workspace":{root_escaped},"indexed":{files_parsed},"total":{actually_indexed},"cache_hits":{cache_hits},"symbols":{symbols},"elapsed_secs":{elapsed},"estimated_total_secs":null}}"#,
+            actually_indexed = files_parsed + cache_hits,
             symbols = stats.symbols_extracted,
         ));
 

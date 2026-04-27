@@ -102,19 +102,14 @@ async fn index_workspace_full_indexes_kt_files_issue_scan() {
     let idx = Arc::new(Indexer::new());
 
     // Set XDG_CACHE_HOME so save_cache_to_disk writes into the temp dir.
-    let _guard = crate::indexer::test_helpers::XDG_CACHE_LOCK
+    // EnvVarGuard is drop-safe even across .await points, unlike the sync
+    // with_xdg_cache helper.
+    let _lock = crate::indexer::test_helpers::XDG_CACHE_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let prev_xdg = std::env::var("XDG_CACHE_HOME").ok();
-    std::env::set_var("XDG_CACHE_HOME", tmp.path());
+    let _xdg = crate::indexer::test_helpers::EnvVarGuard::set("XDG_CACHE_HOME", tmp.path());
 
     Arc::clone(&idx).index_workspace_full(&workspace, None).await;
-
-    match prev_xdg {
-        Some(v) => std::env::set_var("XDG_CACHE_HOME", v),
-        None    => std::env::remove_var("XDG_CACHE_HOME"),
-    }
-    drop(_guard);
 
     assert!(
         idx.definitions.contains_key("Foo"),

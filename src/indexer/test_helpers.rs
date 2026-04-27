@@ -34,9 +34,36 @@ pub(crate) fn with_env_var_unset<F: FnOnce()>(var: &str, lock: &std::sync::Mutex
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
     match prev {
         Some(v) => std::env::set_var(var, v),
-        None    => {},
+        None    => std::env::remove_var(var),
     }
     if let Err(e) = result { std::panic::resume_unwind(e); }
+}
+
+/// RAII guard that restores an environment variable to its original value on drop.
+/// Panic-safe and works in async contexts (unlike `with_env_var` / `with_env_var_unset`
+/// which require a synchronous closure).
+/// The caller is responsible for holding any relevant serialisation lock.
+pub(crate) struct EnvVarGuard {
+    key: &'static str,
+    prev: Option<String>,
+}
+
+impl EnvVarGuard {
+    /// Set `key` to `value`, saving the current value for later restore.
+    pub(crate) fn set(key: &'static str, value: &std::path::Path) -> Self {
+        let prev = std::env::var(key).ok();
+        std::env::set_var(key, value);
+        EnvVarGuard { key, prev }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match &self.prev {
+            Some(v) => std::env::set_var(self.key, v),
+            None    => std::env::remove_var(self.key),
+        }
+    }
 }
 
 /// Run `f` with `var` temporarily set to `value`.

@@ -58,8 +58,6 @@ use self::discover::find_source_files_unconstrained;
 mod scan;
 pub use self::scan::resolve_max_files;
 pub const MAX_FILES_UNLIMITED: usize = usize::MAX;
-#[allow(unused_imports)]
-pub(crate) use self::scan::find_files_for_types;
 
 // Re-export cache/scan items needed by the inline test module below.
 #[cfg(test)]
