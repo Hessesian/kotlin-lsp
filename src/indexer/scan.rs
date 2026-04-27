@@ -147,7 +147,8 @@ impl Indexer {
         root: &Path,
         client: Option<tower_lsp::Client>,
     ) {
-        *self.workspace_root.write().unwrap() = Some(root.to_path_buf());
+        // workspace_root is updated inside index_workspace_impl after the
+        // concurrency guard is acquired, so we never set a stale root here.
         let max = resolve_max_files(DEFAULT_MAX_INDEX_FILES);
         let result = Arc::clone(&self).index_workspace_impl(root, max, client).await;
         if !result.aborted {
@@ -170,9 +171,14 @@ impl Indexer {
         initial_paths: Vec<PathBuf>,
         client: Option<tower_lsp::Client>,
     ) {
-        *self.workspace_root.write().unwrap() = Some(root.to_path_buf());
+        // workspace_root is updated inside index_workspace_impl; don't set it
+        // here to avoid leaving a stale root if the impl aborts early.
 
-        if !initial_paths.is_empty() {
+        // Guard priority parsing: if a scan is already running, skip it to
+        // avoid mutating the shared index concurrently.
+        if !self.indexing_in_progress.load(std::sync::atomic::Ordering::Acquire)
+            && !initial_paths.is_empty()
+        {
             let sem = Arc::clone(&self.parse_sem);
 
             let mut priority_paths: Vec<PathBuf> = Vec::new();
@@ -250,9 +256,13 @@ impl Indexer {
             .swap(true, std::sync::atomic::Ordering::AcqRel);
 
         if already {
+            // Bump root_generation so the running scan detects a root change and
+            // aborts itself at the next generation check. The caller should
+            // re-trigger indexing once indexing_in_progress clears.
+            self.root_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             log::warn!(
-                "index_workspace_impl: an indexing run is already in progress, skipping. \
-                 This may cause incomplete indexing — trigger 'kotlin-lsp/reindex' to recover."
+                "index_workspace_impl: an indexing run is already in progress; \
+                 interrupted it via root_generation bump. Re-trigger indexing to recover."
             );
             return WorkspaceIndexResult {
                 files: Vec::new(),
