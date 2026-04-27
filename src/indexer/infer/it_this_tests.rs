@@ -72,12 +72,9 @@ fn this_element_type_multiline_scope_fn() {
         "    this.".to_owned(),
         "}".to_owned(),
     ];
-    // `run` is a stdlib scope function → `this` refers to List<String> → "List"
-    // (run passes the receiver, not element type — expect None because List is
-    // not a scope-function-receiver-lambda in the typical sense, but `run` IS
-    // in SCOPE_FUNCTIONS so the base type "List" is returned)
+    // `run` is a stdlib scope function (RECEIVER_THIS_FNS) → `this` refers to List<String> → "List"
     let result = find_this_element_type_in_lines(&lines, 1, 9, &idx, &u);
-    // `run` is a SCOPE_FUNCTION that passes receiver as `this`;
+    // `run` is in RECEIVER_THIS_FNS: passes receiver as `this`;
     // `items` is `List<String>`, so base type should be "List".
     assert_eq!(result.as_deref(), Some("List"),
         "`items.run {{ this }}` should yield List, got: {result:?}");
@@ -200,4 +197,77 @@ fn dot_at_depth_zero_ignores_inner_dot() {
 #[test]
 fn dot_at_depth_zero_chained() {
     assert_eq!(find_last_dot_at_depth_zero("a.b(x).c"), Some(6));
+}
+
+// ── RECEIVER_THIS_FNS regression (Issue #4) ─────────────────────────────────
+
+#[test]
+fn this_type_run_infers_receiver() {
+    // user.run {
+    //     this.   ← cursor here (line 1, col 9)
+    // }
+    let src = "val user: User = User()";
+    let (u, idx) = indexed("/t.kt", src);
+    let lines: Vec<String> = vec!["user.run {".to_owned(), "    this.".to_owned(), "}".to_owned()];
+    assert_eq!(
+        find_this_element_type_in_lines(&lines, 1, 9, &idx, &u).as_deref(),
+        Some("User"),
+        "run: this should resolve to User"
+    );
+}
+
+#[test]
+fn this_type_apply_infers_receiver() {
+    // user.apply {
+    //     this.   ← cursor here (line 1, col 9)
+    // }
+    let src = "val user: User = User()";
+    let (u, idx) = indexed("/t.kt", src);
+    let lines: Vec<String> = vec!["user.apply {".to_owned(), "    this.".to_owned(), "}".to_owned()];
+    assert_eq!(
+        find_this_element_type_in_lines(&lines, 1, 9, &idx, &u).as_deref(),
+        Some("User"),
+        "apply: this should resolve to User"
+    );
+}
+
+#[test]
+fn this_type_let_does_not_infer_receiver() {
+    // `let` exposes the receiver as `it`, not `this`.
+    // `this` inside a let{} block should NOT resolve to User via RECEIVER_THIS_FNS.
+    let src = "val user: User = User()";
+    let (u, idx) = indexed("/t.kt", src);
+    let lines: Vec<String> = vec!["user.let {".to_owned(), "    this.".to_owned(), "}".to_owned()];
+    let result = find_this_element_type_in_lines(&lines, 1, 9, &idx, &u);
+    assert_ne!(
+        result.as_deref(),
+        Some("User"),
+        "let: this should NOT resolve to User (let uses `it`, not `this`)"
+    );
+}
+
+#[test]
+fn this_type_also_does_not_infer_receiver() {
+    // `also` exposes the receiver as `it`, not `this`.
+    let src = "val user: User = User()";
+    let (u, idx) = indexed("/t.kt", src);
+    let lines: Vec<String> = vec!["user.also {".to_owned(), "    this.".to_owned(), "}".to_owned()];
+    let result = find_this_element_type_in_lines(&lines, 1, 9, &idx, &u);
+    assert_ne!(
+        result.as_deref(),
+        Some("User"),
+        "also: this should NOT resolve to User (also uses `it`, not `this`)"
+    );
+}
+
+#[test]
+fn it_type_let_still_infers_receiver() {
+    // `user.let { it.` — `let` exposes receiver as `it` → should still infer User
+    let src = "val user: User = User()";
+    let (u, idx) = indexed("/t.kt", src);
+    assert_eq!(
+        find_it_element_type("user.let { it.", &idx, &u).as_deref(),
+        Some("User"),
+        "let: it should still resolve to User"
+    );
 }

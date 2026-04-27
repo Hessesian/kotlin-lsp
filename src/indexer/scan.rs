@@ -126,7 +126,7 @@ impl Indexer {
         client: Option<tower_lsp::Client>,
     ) {
         let max = resolve_max_files(MAX_FILES_UNLIMITED);
-        let result = Arc::clone(&self).index_workspace_impl(root, max, client).await;
+        let result = Arc::clone(&self).index_workspace_impl(root, max, client.clone()).await;
         if !result.aborted {
             self.last_scan_complete
                 .store(result.complete_scan, std::sync::atomic::Ordering::Release);
@@ -136,6 +136,7 @@ impl Indexer {
                 .await;
             self.save_cache_to_disk();
         }
+        Arc::clone(&self).run_pending_reindex(max, client).await;
     }
 
     /// Normal LSP startup: bounded workspace scan.
@@ -150,7 +151,7 @@ impl Indexer {
         // workspace_root is updated inside index_workspace_impl after the
         // concurrency guard is acquired, so we never set a stale root here.
         let max = resolve_max_files(DEFAULT_MAX_INDEX_FILES);
-        let result = Arc::clone(&self).index_workspace_impl(root, max, client).await;
+        let result = Arc::clone(&self).index_workspace_impl(root, max, client.clone()).await;
         if !result.aborted {
             self.last_scan_complete
                 .store(result.complete_scan, std::sync::atomic::Ordering::Release);
@@ -160,6 +161,7 @@ impl Indexer {
                 .await;
             self.save_cache_to_disk();
         }
+        Arc::clone(&self).run_pending_reindex(max, client).await;
     }
 
     /// Prioritized indexing: parse `initial_paths` first (high-priority files such as the
@@ -231,7 +233,7 @@ impl Indexer {
         }
 
         let max = resolve_max_files(DEFAULT_MAX_INDEX_FILES);
-        let result = Arc::clone(&self).index_workspace_impl(root, max, client).await;
+        let result = Arc::clone(&self).index_workspace_impl(root, max, client.clone()).await;
         if !result.aborted {
             self.last_scan_complete
                 .store(result.complete_scan, std::sync::atomic::Ordering::Release);
@@ -241,6 +243,41 @@ impl Indexer {
                 .await;
             self.save_cache_to_disk();
         }
+        Arc::clone(&self).run_pending_reindex(max, client).await;
+    }
+
+    /// If a reindex was queued while a scan was in progress, run it now.
+    ///
+    /// Called at the end of every public scan function, after the full workflow
+    /// (impl + apply + source_paths + save_cache) completes. Mirrors RA's
+    /// `OpQueue` pattern: at most one pending request is retained (last wins).
+    async fn run_pending_reindex(
+        self: Arc<Self>,
+        max: usize,
+        client: Option<tower_lsp::Client>,
+    ) {
+        if !self.pending_reindex.swap(false, std::sync::atomic::Ordering::AcqRel) {
+            return;
+        }
+        let root_opt = self.pending_reindex_root.write().unwrap().take();
+        let root = match root_opt {
+            Some(r) => r,
+            None => match self.workspace_root.read().unwrap().clone() {
+                Some(r) => r,
+                None => return,
+            },
+        };
+        log::info!("run_pending_reindex: starting queued reindex for {}", root.display());
+        let result = Arc::clone(&self).index_workspace_impl(&root, max, client).await;
+        if !result.aborted {
+            self.last_scan_complete
+                .store(result.complete_scan, std::sync::atomic::Ordering::Release);
+            self.apply_workspace_result(&result);
+            Arc::clone(&self).index_source_paths(root).await;
+            self.save_cache_to_disk();
+        }
+        // Intentionally no recursive pending check: if more requests arrived
+        // during this run they will re-queue and be picked up by the next caller.
     }
 
     /// Core workspace indexing: file discovery → cache partition → concurrent parse.
@@ -256,13 +293,16 @@ impl Indexer {
             .swap(true, std::sync::atomic::Ordering::AcqRel);
 
         if already {
-            // Bump root_generation so the running scan detects a root change and
-            // aborts itself at the next generation check. The caller should
-            // re-trigger indexing once indexing_in_progress clears.
+            // Queue this request so the active scan's caller will re-run once done.
+            // Last caller wins (RA OpQueue semantics): overwrite any earlier pending root.
+            *self.pending_reindex_root.write().unwrap() = Some(root.to_path_buf());
+            self.pending_reindex.store(true, std::sync::atomic::Ordering::Release);
+            // Bump root_generation so the running scan aborts early on root change.
             self.root_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             log::warn!(
-                "index_workspace_impl: an indexing run is already in progress; \
-                 interrupted it via root_generation bump. Re-trigger indexing to recover."
+                "index_workspace_impl: scan in progress; queued reindex for {} \
+                 and interrupted current run via root_generation bump.",
+                root.display()
             );
             return WorkspaceIndexResult {
                 files: Vec::new(),

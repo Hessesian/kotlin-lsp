@@ -17,7 +17,7 @@ use tower_lsp::lsp_types::Url;
 // ── from infer submodules (re-exported through infer/mod.rs) ─────────────────
 use super::{
     // lambda.rs
-    SCOPE_FUNCTIONS,
+    RECEIVER_THIS_FNS,
     lambda_type_first_input,
     lambda_type_nth_input,
     lambda_type_receiver,
@@ -451,7 +451,7 @@ fn lambda_receiver_this_type_from_context(
                 return Some(ty);
             }
             // Stdlib scope functions are receiver lambdas but not indexed.
-            if SCOPE_FUNCTIONS.contains(&method.as_str()) {
+            if RECEIVER_THIS_FNS.contains(&method.as_str()) {
                 if let Some(raw) = crate::resolver::infer_variable_type_raw(idx, &receiver_var, uri) {
                     let base: String = raw.chars().take_while(|&c| is_id_char(c)).collect();
                     if !base.is_empty() { return Some(base); }

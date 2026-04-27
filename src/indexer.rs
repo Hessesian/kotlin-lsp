@@ -146,6 +146,13 @@ pub struct Indexer {
     pub(crate) root_generation: AtomicU64,
     /// Guard to prevent concurrent background indexing runs on same Indexer.
     pub(crate) indexing_in_progress: std::sync::atomic::AtomicBool,
+    /// Set when a reindex request arrives while a scan is already running.
+    /// The pending scan is started by the active scan's caller once its full
+    /// workflow (impl + apply + source_paths + save_cache) completes.
+    pub(crate) pending_reindex: std::sync::atomic::AtomicBool,
+    /// Root to use for the pending reindex. `None` means use the current workspace root.
+    /// Written under a mutex so the *last* concurrent caller wins (RA OpQueue semantics).
+    pub(crate) pending_reindex_root: RwLock<Option<PathBuf>>,
     /// Number of parse tasks completed in current indexing run (for progress tracking).
     pub(crate) parse_tasks_completed: std::sync::atomic::AtomicUsize,
     /// Total number of parse tasks spawned in current indexing run.
@@ -209,6 +216,8 @@ impl Indexer {
             last_completion: std::sync::Mutex::new(None),
             root_generation: AtomicU64::new(0),
             indexing_in_progress: std::sync::atomic::AtomicBool::new(false),
+            pending_reindex: std::sync::atomic::AtomicBool::new(false),
+            pending_reindex_root: RwLock::new(None),
             parse_tasks_completed: std::sync::atomic::AtomicUsize::new(0),
             parse_tasks_total: std::sync::atomic::AtomicUsize::new(0),
             scheduled_paths: DashMap::new(),
