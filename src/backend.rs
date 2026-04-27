@@ -850,7 +850,7 @@ impl LanguageServer for Backend {
         let pos  = params.text_document_position.position;
         let include_decl = params.context.include_declaration;
 
-        let (name, qualifier) = match self.indexer.word_and_qualifier_at(uri, pos) {
+        let (name, _qualifier) = match self.indexer.word_and_qualifier_at(uri, pos) {
             Some(pair) => pair,
             None       => return Ok(None),
         };
@@ -859,31 +859,9 @@ impl LanguageServer for Backend {
         // - If cursor is ON the declaration of this symbol → use enclosing_class_at(cursor)
         // - If cursor is on a REFERENCE → scan imports in current file to find which
         //   specific class is meant (handles multiple `Effect` classes across files)
-        let (parent_class, declared_pkg) = if name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
-            let on_decl = self.indexer.is_declared_in(uri, &name)
-                && self.indexer.definitions.get(&name)
-                    .map(|locs| locs.iter().any(|l| l.uri == *uri && l.range.start.line == pos.line))
-                    .unwrap_or(false);
-            if on_decl {
-                // Cursor is on the class declaration — use local enclosing class.
-                let parent = self.indexer.enclosing_class_at(uri, pos.line);
-                let pkg    = self.indexer.package_of(uri);
-                (parent, pkg)
-            } else {
-                // Cursor is on a reference — resolve via import in current file.
-                let (parent, pkg) = self.indexer.resolve_symbol_via_import(uri, &name);
-                if parent.is_some() || pkg.is_some() {
-                    (parent, pkg)
-                } else {
-                    // Not imported explicitly (same package). Use declaration site.
-                    let parent = self.indexer.declared_parent_class_of(&name, uri);
-                    let pkg    = self.indexer.declared_package_of(&name);
-                    (parent, pkg)
-                }
-            }
-        } else {
-            (None, None)
-        };
+        let (parent_class, declared_pkg) = resolve_references_scope(
+            &self.indexer, uri, pos.line, &name,
+        );
         // Collect declaration file paths — but only those where the enclosing class
         // matches parent_class (if known).  Without this filter, every contract file
         // that has `sealed interface Event` would be included, causing false positives
@@ -1792,6 +1770,44 @@ fn locs_to_response(locs: Vec<Location>) -> GotoDefinitionResponse {
     }
 }
 
+/// Determine the `(parent_class, declared_pkg)` scope for a `findReferences` request.
+///
+/// For uppercase symbols the scope is narrowed via import analysis or declaration
+/// site lookup so that `rg_find_references` Pass A/B can restrict results to the
+/// specific class variant (e.g. the right `Event` among many sealed interfaces).
+///
+/// For lowercase symbols (fields, methods) `(None, None)` is returned — an
+/// unscoped bare-word search is used.  Injecting a parent class derived from
+/// `this`/`it` type inference would narrow rg to `ClassName.fieldName` qualified
+/// patterns which almost never appear in real Kotlin code, leaving only in-memory
+/// hits in the current file.
+fn resolve_references_scope(
+    idx:      &crate::indexer::Indexer,
+    uri:      &tower_lsp::lsp_types::Url,
+    line:     u32,
+    name:     &str,
+) -> (Option<String>, Option<String>) {
+    if !name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+        return (None, None);
+    }
+    let on_decl = idx.is_declared_in(uri, name)
+        && idx.definitions.get(name)
+            .map(|locs| locs.iter().any(|l| l.uri == *uri && l.range.start.line == line))
+            .unwrap_or(false);
+    if on_decl {
+        let parent = idx.enclosing_class_at(uri, line);
+        let pkg    = idx.package_of(uri);
+        return (parent, pkg);
+    }
+    let (parent, pkg) = idx.resolve_symbol_via_import(uri, name);
+    if parent.is_some() || pkg.is_some() {
+        return (parent, pkg);
+    }
+    let parent = idx.declared_parent_class_of(name, uri);
+    let pkg    = idx.declared_package_of(name);
+    (parent, pkg)
+}
+
 /// Replace all whole-word occurrences of `word` in `lines` with `replacement`.
 /// Returns the full new file content as a single string (lines joined with `\n`).
 fn whole_word_replace_file(lines: &[String], word: &str, replacement: &str) -> String {
@@ -2146,5 +2162,39 @@ mod tests {
         let (start, end) = enclosing_scope(&ls, 2);
         assert_eq!(start, 1, "should find the inner {{ at line 1");
         assert_eq!(end, 3,   "inner block closes at line 3");
+    }
+
+    // ── resolve_references_scope ──────────────────────────────────────────────
+
+    fn make_indexer_with(src: &str, uri: &tower_lsp::lsp_types::Url) -> crate::indexer::Indexer {
+        let idx = crate::indexer::Indexer::new();
+        idx.index_content(uri, src);
+        idx
+    }
+
+    /// Lowercase member names must always yield (None, None) regardless of context.
+    /// This prevents the caller from injecting a parent_class derived from this/it
+    /// type inference, which would scope rg to `ClassName.fieldName` qualified
+    /// patterns that almost never appear in real Kotlin code.
+    #[test]
+    fn scope_lowercase_name_always_none() {
+        let uri = tower_lsp::lsp_types::Url::parse("file:///t.kt").unwrap();
+        let src = "package demo\nclass Foo { val descriptiveNumber: String = \"\" }";
+        let idx = make_indexer_with(src, &uri);
+        let (parent, pkg) = resolve_references_scope(&idx, &uri, 1, "descriptiveNumber");
+        assert_eq!(parent, None, "lowercase member must not get a parent_class");
+        assert_eq!(pkg,    None, "lowercase member must not get a declared_pkg");
+    }
+
+    /// Uppercase names on the declaration line should use enclosing class + package.
+    #[test]
+    fn scope_uppercase_on_declaration_uses_enclosing_class() {
+        let uri = tower_lsp::lsp_types::Url::parse("file:///t.kt").unwrap();
+        let src = "package demo\nclass Outer {\n    class Inner\n}";
+        let idx = make_indexer_with(src, &uri);
+        // `Inner` is declared on line 2 inside `Outer`
+        let (parent, pkg) = resolve_references_scope(&idx, &uri, 2, "Inner");
+        assert_eq!(parent.as_deref(), Some("Outer"), "declaration site: parent should be enclosing class");
+        assert_eq!(pkg.as_deref(), Some("demo"));
     }
 }
