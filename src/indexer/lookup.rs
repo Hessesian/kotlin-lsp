@@ -109,7 +109,6 @@ impl Indexer {
 
     /// Return the package in which `name` is declared, by looking up its
     /// definition locations and reading the `package` field of those files.
-    /// If `prefer_uri` is set, prefer definitions from that file first.
     pub fn declared_package_of(&self, name: &str) -> Option<String> {
         let locs = self.definitions.get(name)?;
         for loc in locs.iter() {
