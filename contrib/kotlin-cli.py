@@ -34,6 +34,7 @@ TCP mode (for Sora Editor / remote clients):
 import argparse
 import json
 import os
+import pathlib
 import queue
 import subprocess
 import sys
@@ -103,8 +104,10 @@ class LspClient:
             except queue.Empty:
                 continue
             rid = msg.get("id")
-            if rid is not None and rid in self._pending:
-                self._pending[rid].put(msg)
+            if rid is not None:
+                q = self._pending.get(rid)
+                if q is not None:
+                    q.put(msg)
 
     def _send(self, msg: dict):
         self._proc.stdin.write(_encode(msg))
@@ -127,7 +130,7 @@ class LspClient:
         self._send({"jsonrpc": "2.0", "method": method, "params": params})
 
     def initialize(self):
-        root_uri = "file://" + self.workspace
+        root_uri = pathlib.Path(self.workspace).as_uri()
         self.request("initialize", {
             "processId": os.getpid(),
             "rootUri": root_uri,
