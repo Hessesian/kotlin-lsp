@@ -118,7 +118,55 @@ async fn index_workspace_full_indexes_kt_files_issue_scan() {
     );
 }
 
-// ─── concurrent-indexing guard ────────────────────────────────────────────────
+// ─── queued reindex ───────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn queued_reindex_executes_after_first_scan_completes_issue_scan() {
+    use std::sync::atomic::Ordering;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let workspace = tmp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("mkdir");
+    std::fs::write(workspace.join("Foo.kt"), "class Foo {}").expect("write Foo.kt");
+
+    let idx = Arc::new(Indexer::new());
+    let _lock = crate::indexer::test_helpers::XDG_CACHE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _xdg = crate::indexer::test_helpers::EnvVarGuard::set("XDG_CACHE_HOME", tmp.path());
+
+    // Simulate a running scan by manually setting the flag.
+    idx.indexing_in_progress.store(true, Ordering::Release);
+
+    // A concurrent scan request queues itself and returns immediately (aborted).
+    Arc::clone(&idx).index_workspace(&workspace, None).await;
+
+    assert!(
+        idx.pending_reindex.load(Ordering::Acquire),
+        "pending_reindex must be true after queueing during active scan"
+    );
+    assert!(
+        idx.definitions.is_empty(),
+        "definitions must stay empty — queued scan hasn't run yet"
+    );
+
+    // Simulate the first scan completing: clear the flag so run_pending_reindex can proceed.
+    idx.indexing_in_progress.store(false, Ordering::Release);
+
+    // Drain the queue — this should run the queued reindex.
+    Arc::clone(&idx).run_pending_reindex(None).await;
+
+    assert!(
+        !idx.pending_reindex.load(Ordering::Acquire),
+        "pending_reindex must be cleared after run_pending_reindex drains the queue"
+    );
+    assert!(
+        idx.definitions.contains_key("Foo"),
+        "Foo must be indexed after queued reindex executes; got: {:?}",
+        idx.definitions.iter().map(|e| e.key().clone()).collect::<Vec<_>>()
+    );
+}
+
 
 #[tokio::test]
 async fn index_workspace_skips_second_concurrent_run_issue_scan() {

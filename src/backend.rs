@@ -603,8 +603,14 @@ impl LanguageServer for Backend {
         if let Some(qual) = qualifier.as_deref() {
             if qual == "this" || qual == "it" {
                 if let Some(type_name) = self.indexer.infer_lambda_param_type_at(qual, uri, position) {
-                    let lookup = type_name.rsplit('.').next().unwrap_or(&type_name);
-                    let locs = self.indexer.find_definition_qualified(&word, Some(lookup), uri);
+                    // Try full qualified name first (e.g. `Outer.Inner`), then short segment.
+                    let locs = self.indexer.find_definition_qualified(&word, Some(&type_name), uri);
+                    let locs = if locs.is_empty() {
+                        let short = type_name.rsplit('.').next().unwrap_or(&type_name);
+                        if short != type_name {
+                            self.indexer.find_definition_qualified(&word, Some(short), uri)
+                        } else { locs }
+                    } else { locs };
                     if !locs.is_empty() {
                         return Ok(Some(locs_to_response(locs)));
                     }
@@ -795,8 +801,14 @@ impl LanguageServer for Backend {
         if let Some(qual) = qualifier.as_deref() {
             if qual == "this" || qual == "it" {
                 if let Some(type_name) = self.indexer.infer_lambda_param_type_at(qual, uri, position) {
-                    let lookup = type_name.rsplit('.').next().unwrap_or(&type_name);
-                    let locs = self.indexer.find_definition_qualified(&word, Some(lookup), uri);
+                    // Try full qualified name first (e.g. `Outer.Inner`), then short segment.
+                    let locs = self.indexer.find_definition_qualified(&word, Some(&type_name), uri);
+                    let locs = if locs.is_empty() {
+                        let short = type_name.rsplit('.').next().unwrap_or(&type_name);
+                        if short != type_name {
+                            self.indexer.find_definition_qualified(&word, Some(short), uri)
+                        } else { locs }
+                    } else { locs };
                     if let Some(loc) = locs.first() {
                         if let Some(md) = self.indexer.hover_info_at_location(loc, &word) {
                             return Ok(Some(Hover {

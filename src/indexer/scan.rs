@@ -126,17 +126,13 @@ impl Indexer {
         client: Option<tower_lsp::Client>,
     ) {
         let max = resolve_max_files(MAX_FILES_UNLIMITED);
-        let result = Arc::clone(&self).index_workspace_impl(root, max, client.clone()).await;
-        if !result.aborted {
-            self.last_scan_complete
-                .store(result.complete_scan, std::sync::atomic::Ordering::Release);
-            self.apply_workspace_result(&result);
-            Arc::clone(&self)
-                .index_source_paths(root.to_path_buf())
-                .await;
-            self.save_cache_to_disk();
+        let (result, guard_opt) = Arc::clone(&self).index_workspace_impl(root, max, client.clone()).await;
+        if let Some(guard) = guard_opt {
+            if !result.aborted {
+                Arc::clone(&self).finalize_workspace_scan(result, guard, client.clone()).await;
+            }
         }
-        Arc::clone(&self).run_pending_reindex(max, client).await;
+        Arc::clone(&self).run_pending_reindex(client).await;
     }
 
     /// Normal LSP startup: bounded workspace scan.
@@ -151,17 +147,13 @@ impl Indexer {
         // workspace_root is updated inside index_workspace_impl after the
         // concurrency guard is acquired, so we never set a stale root here.
         let max = resolve_max_files(DEFAULT_MAX_INDEX_FILES);
-        let result = Arc::clone(&self).index_workspace_impl(root, max, client.clone()).await;
-        if !result.aborted {
-            self.last_scan_complete
-                .store(result.complete_scan, std::sync::atomic::Ordering::Release);
-            self.apply_workspace_result(&result);
-            Arc::clone(&self)
-                .index_source_paths(root.to_path_buf())
-                .await;
-            self.save_cache_to_disk();
+        let (result, guard_opt) = Arc::clone(&self).index_workspace_impl(root, max, client.clone()).await;
+        if let Some(guard) = guard_opt {
+            if !result.aborted {
+                Arc::clone(&self).finalize_workspace_scan(result, guard, client.clone()).await;
+            }
         }
-        Arc::clone(&self).run_pending_reindex(max, client).await;
+        Arc::clone(&self).run_pending_reindex(client).await;
     }
 
     /// Prioritized indexing: parse `initial_paths` first (high-priority files such as the
@@ -233,17 +225,13 @@ impl Indexer {
         }
 
         let max = resolve_max_files(DEFAULT_MAX_INDEX_FILES);
-        let result = Arc::clone(&self).index_workspace_impl(root, max, client.clone()).await;
-        if !result.aborted {
-            self.last_scan_complete
-                .store(result.complete_scan, std::sync::atomic::Ordering::Release);
-            self.apply_workspace_result(&result);
-            Arc::clone(&self)
-                .index_source_paths(root.to_path_buf())
-                .await;
-            self.save_cache_to_disk();
+        let (result, guard_opt) = Arc::clone(&self).index_workspace_impl(root, max, client.clone()).await;
+        if let Some(guard) = guard_opt {
+            if !result.aborted {
+                Arc::clone(&self).finalize_workspace_scan(result, guard, client.clone()).await;
+            }
         }
-        Arc::clone(&self).run_pending_reindex(max, client).await;
+        Arc::clone(&self).run_pending_reindex(client).await;
     }
 
     /// If a reindex was queued while a scan was in progress, run it now.
@@ -253,7 +241,6 @@ impl Indexer {
     /// `OpQueue` pattern: at most one pending request is retained (last wins).
     async fn run_pending_reindex(
         self: Arc<Self>,
-        max: usize,
         client: Option<tower_lsp::Client>,
     ) {
         loop {
@@ -283,8 +270,11 @@ impl Indexer {
                     None => return,
                 },
             };
+            // Use the max stored when the request was queued so a full (unbounded) reindex
+            // that was queued during a bounded scan keeps its unlimited cap.
+            let max = self.pending_reindex_max.load(std::sync::atomic::Ordering::Acquire);
             log::info!("run_pending_reindex: starting queued reindex for {}", root.display());
-            let result = Arc::clone(&self).index_workspace_impl(&root, max, client.clone()).await;
+            let (result, guard_opt) = Arc::clone(&self).index_workspace_impl(&root, max, client.clone()).await;
             if result.aborted {
                 // Lost the scan guard to a concurrent caller — restore the queued
                 // request so that caller's run_pending_reindex will drain it.
@@ -297,23 +287,41 @@ impl Indexer {
                 self.pending_reindex.store(true, std::sync::atomic::Ordering::Release);
                 return;
             }
-            self.last_scan_complete
-                .store(result.complete_scan, std::sync::atomic::Ordering::Release);
-            self.apply_workspace_result(&result);
-            Arc::clone(&self).index_source_paths(root).await;
-            self.save_cache_to_disk();
+            if let Some(guard) = guard_opt {
+                Arc::clone(&self).finalize_workspace_scan(result, guard, client.clone()).await;
+            }
             // Loop: drain any request that arrived while this queued reindex was running.
         }
     }
 
+    /// Apply scan results, index source paths, and save the cache — while keeping
+    /// `indexing_in_progress` true for the full duration via `_guard`.
+    async fn finalize_workspace_scan(
+        self: Arc<Self>,
+        result: WorkspaceIndexResult,
+        _guard: IndexingGuard,
+        _client: Option<tower_lsp::Client>,
+    ) {
+        self.last_scan_complete
+            .store(result.complete_scan, std::sync::atomic::Ordering::Release);
+        let root = result.workspace_root.clone();
+        self.apply_workspace_result(&result);
+        Arc::clone(&self).index_source_paths(root).await;
+        self.save_cache_to_disk();
+        // _guard dropped here → indexing_in_progress cleared
+    }
+
     /// Core workspace indexing: file discovery → cache partition → concurrent parse.
-    /// Returns a [`WorkspaceIndexResult`] without mutating the index; callers apply it.
+    /// Returns `(result, guard)`. The guard is `Some` when this call successfully acquired
+    /// `indexing_in_progress`; callers must hold it alive until the full workflow completes
+    /// (apply + source_paths + save_cache). When `result.aborted` is true the guard is
+    /// still `Some` (to allow the lock to be cleared) but callers should skip finalization.
     async fn index_workspace_impl(
         self: Arc<Self>,
         root: &Path,
         max: usize,
         client: Option<tower_lsp::Client>,
-    ) -> WorkspaceIndexResult {
+    ) -> (WorkspaceIndexResult, Option<IndexingGuard>) {
         let already = self
             .indexing_in_progress
             .swap(true, std::sync::atomic::Ordering::AcqRel);
@@ -323,6 +331,8 @@ impl Indexer {
             // Last caller wins (RA OpQueue semantics): overwrite any earlier pending root.
             *self.pending_reindex_root.write().unwrap() = Some(root.to_path_buf());
             self.pending_reindex.store(true, std::sync::atomic::Ordering::Release);
+            // Queue the max alongside the root so a full reindex preserves its cap.
+            self.pending_reindex_max.store(max, std::sync::atomic::Ordering::Release);
             // Bump root_generation so the running scan aborts early on root change.
             self.root_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             log::warn!(
@@ -330,18 +340,22 @@ impl Indexer {
                  and interrupted current run via root_generation bump.",
                 root.display()
             );
-            return WorkspaceIndexResult {
-                files: Vec::new(),
-                stats: IndexStats::default(),
-                workspace_root: root.to_path_buf(),
-                aborted: true,
-                complete_scan: false,
-            };
+            return (
+                WorkspaceIndexResult {
+                    files: Vec::new(),
+                    stats: IndexStats::default(),
+                    workspace_root: root.to_path_buf(),
+                    aborted: true,
+                    complete_scan: false,
+                },
+                None,
+            );
         }
 
-        // RAII guard: clear indexing_in_progress on exit (success, panic, or early return).
-        // Created AFTER the `already` check so we never clear the flag owned by a concurrent run.
-        let _guard = IndexingGuard {
+        // Transfer the lock to the caller via RAII guard so `indexing_in_progress` stays
+        // true until the *complete* workflow (parse + apply + source_paths + save_cache)
+        // finishes — not just until this function returns.
+        let guard = IndexingGuard {
             indexer: Arc::clone(&self),
         };
 
@@ -720,13 +734,16 @@ impl Indexer {
         }
 
         if aborted_early {
-            return WorkspaceIndexResult {
-                files: Vec::new(),
-                stats: IndexStats::default(),
-                workspace_root: root.to_path_buf(),
-                aborted: true,
-                complete_scan: false,
-            };
+            return (
+                WorkspaceIndexResult {
+                    files: Vec::new(),
+                    stats: IndexStats::default(),
+                    workspace_root: root.to_path_buf(),
+                    aborted: true,
+                    complete_scan: false,
+                },
+                Some(guard),
+            );
         }
 
         let mut parsed_results: Vec<FileIndexResult> =
@@ -785,13 +802,16 @@ impl Indexer {
             symbols = stats.symbols_extracted,
         ));
 
-        WorkspaceIndexResult {
-            files: all_results,
-            stats,
-            workspace_root: root.to_path_buf(),
-            aborted: false,
-            complete_scan: !truncated,
-        }
+        (
+            WorkspaceIndexResult {
+                files: all_results,
+                stats,
+                workspace_root: root.to_path_buf(),
+                aborted: false,
+                complete_scan: !truncated,
+            },
+            Some(guard),
+        )
     }
 
     /// Serialize the current index to `~/.cache/kotlin-lsp/<root-hash>/index.bin`.

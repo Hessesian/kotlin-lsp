@@ -452,7 +452,8 @@ fn lambda_receiver_this_type_from_context(
             if let Some(ty) = fun_trailing_lambda_this_type(&method, idx, uri) {
                 return Some(ty);
             }
-            // Stdlib scope functions are receiver lambdas but not indexed.
+            // Only functions listed in `RECEIVER_THIS_FNS` (`run`, `apply`) are treated as
+            // receiver-`this` lambdas; `also`/`let` are intentionally excluded.
             if RECEIVER_THIS_FNS.contains(&method.as_str()) {
                 if let Some(raw) = crate::resolver::infer_variable_type_raw(idx, &receiver_var, uri) {
                     let base: String = raw.chars().take_while(|&c| is_id_char(c)).collect();
