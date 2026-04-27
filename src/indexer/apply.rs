@@ -312,7 +312,7 @@ impl Indexer {
 
     /// Primitive: drain a [`FileContributions`] into the DashMaps.
     /// Deduplicates before inserting (same behaviour as before).
-    pub(super) fn apply_contributions(&self, contrib: FileContributions) {
+    fn apply_contributions(&self, contrib: FileContributions) {
         let (uri_str, file_data) = contrib.file_data;
         let (hash_key, hash_val) = contrib.content_hash;
 
@@ -465,7 +465,7 @@ impl Indexer {
             let uri2 = from_uri.clone();
             let sem = Arc::clone(&limit);
             tokio::spawn(async move {
-                let _permit = sem.acquire_owned().await;
+                let _permit = sem.acquire_owned().await.expect("semaphore closed");
                 tokio::task::spawn_blocking(move || {
                     let locs = crate::resolver::resolve_symbol(&idx, &type_name, None, &uri2);
                     if let Some(loc) = locs.first() {

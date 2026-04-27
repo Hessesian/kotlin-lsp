@@ -49,7 +49,7 @@ pub(crate) use self::infer::{
     find_last_dot_at_depth_zero,
 };
 
-pub(crate) mod cache;
+pub(super) mod cache;
 pub(crate) use self::cache::workspace_cache_path;
 
 mod discover;

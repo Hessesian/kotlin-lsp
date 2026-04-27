@@ -10,19 +10,20 @@ use dashmap::DashMap;
 use tower_lsp::lsp_types::*;
 
 use crate::indexer::{Indexer, file_contributions, stale_keys_for, build_bare_names};
-use crate::indexer::cache::{FileCacheEntry, cache_entry_to_file_result};
-use crate::types::{FileData, FileIndexResult, WorkspaceIndexResult, IndexStats, SymbolEntry};
+use super::super::cache::{FileCacheEntry, cache_entry_to_file_result};
+use crate::types::{WorkspaceIndexResult, IndexStats};
 
 // ── Test helpers ──────────────────────────────────────────────────────────────
 
-/// Build a `file://` URL from an absolute path string.
-fn uri(path: &str) -> Url {
+/// Build a `file://` URL rooted under the system temp directory.
+fn uri(name: &str) -> Url {
+    let path = std::env::temp_dir().join(name.trim_start_matches('/'));
     Url::from_file_path(path).unwrap()
 }
 
 /// Convenience: create an Indexer and call `index_content` once.
-fn indexed(path: &str, src: &str) -> (Url, Indexer) {
-    let u = uri(path);
+fn indexed(name: &str, src: &str) -> (Url, Indexer) {
+    let u = uri(name);
     let idx = Indexer::new();
     idx.index_content(&u, src);
     (u, idx)
