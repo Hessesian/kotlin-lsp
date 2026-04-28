@@ -901,10 +901,12 @@ fn last_segment(dotted: &str) -> &str {
 /// Android projects don't ship `android.*` / `androidx.*` sources by default.
 /// Swift: framework imports like Foundation, UIKit, etc. have no local sources.
 pub(crate) fn is_stdlib(pkg: &str) -> bool {
+    // Check dotted prefixes before splitting.
+    if pkg.starts_with("com.sun") { return true; }
     let first = pkg.split('.').next().unwrap_or("");
     matches!(
         first,
-        "kotlin" | "java" | "javax" | "android" | "androidx" | "sun" | "com.sun"
+        "kotlin" | "java" | "javax" | "android" | "androidx" | "sun"
         // Swift standard frameworks
         | "Foundation" | "UIKit" | "SwiftUI" | "Combine" | "CoreData"
         | "CoreGraphics" | "CoreLocation" | "MapKit" | "AVFoundation"

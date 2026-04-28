@@ -6,7 +6,6 @@ use super::actions::is_non_call_keyword;
 /// Replace all whole-word occurrences of `word` in `lines` with `replacement`.
 /// Returns the full new file content as a single string (lines joined with `\n`).
 pub(super) fn whole_word_replace_file(lines: &[String], word: &str, replacement: &str) -> String {
-    let pattern = format!(r"\b{word}\b");
     // Use simple char-by-char replacement to avoid regex dependency.
     let wchars: Vec<char> = word.chars().collect();
     let wlen = wchars.len();
@@ -36,8 +35,6 @@ pub(super) fn whole_word_replace_file(lines: &[String], word: &str, replacement:
             j += 1;
         }
     }
-    // Drop unused pattern variable.
-    let _ = pattern;
     result
 }
 

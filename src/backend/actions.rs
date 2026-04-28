@@ -204,7 +204,9 @@ impl Backend {
         };
 
         // Case A: cursor on import line — append ` as <last_segment>`.
-        if trimmed.starts_with("import ") && !trimmed.contains(" as ") {
+        // Only relevant for Kotlin/KTS files (Java/Swift don't use this syntax).
+        let is_kotlin = uri.path().ends_with(".kt") || uri.path().ends_with(".kts");
+        if is_kotlin && trimmed.starts_with("import ") && !trimmed.contains(" as ") {
             let path  = trimmed.trim_start_matches("import ").trim().trim_end_matches(".*");
             let alias = path.rsplit('.').next().unwrap_or(path);
             if !alias.is_empty() {
@@ -232,7 +234,8 @@ impl Backend {
         //   B2. Replace all whole-word occurrences in this file with `_<word>`
         //       as a placeholder (single whole-file TextEdit, no crash risk).
         //       User then does  %s_Word<ret>cNewName<esc>  in Helix.
-        if !is_import_line && !cursor_word.is_empty()
+        // Only for Kotlin/KTS files — Java/Swift use different rename flows.
+        if is_kotlin && !is_import_line && !cursor_word.is_empty()
             && cursor_word.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
         {
             // Combined: add `as _Word` to matching import + rename Word→_Word in body (single action).
@@ -276,12 +279,10 @@ impl Backend {
                 // at the import line position directly).
                 if let Some(ie) = import_edit {
                     // Splice the alias into the body content at the right line.
-                    let mut body_lines: Vec<&str> = body_edit.new_text.split('\n').collect();
+                    let mut body_lines: Vec<String> = body_edit.new_text.split('\n').map(|s| s.to_owned()).collect();
                     let iln = ie.range.start.line as usize;
                     if iln < body_lines.len() {
-                        let orig = body_lines[iln].to_owned();
-                        let patched = format!("{orig}{}", ie.new_text);
-                        body_lines[iln] = Box::leak(patched.into_boxed_str());
+                        body_lines[iln].push_str(&ie.new_text);
                     }
                     body_edit.new_text = body_lines.join("\n");
                 }

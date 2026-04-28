@@ -40,11 +40,14 @@ pub(crate) fn match_score(name: &str, prefix: &str) -> Option<u8> {
 /// True if every character in `prefix` matches the first character of a successive
 /// CamelCase or underscore-delimited word in `name`.
 ///
+/// Matching is case-insensitive: both `prefix` and the collected word starts are
+/// compared in lowercase.
+///
 /// Examples:
 ///   `CB`  vs `ColumnButton`    → true  (C=Column, B=Button)
 ///   `mSF` vs `myStateFlow`     → true  (m=my, S=State, F=Flow)
-///   `CB`  vs `CoolBar`         → false (C=C ok, B must start next word, 'oolBar' has no word start at 'B')
-///   `CB`  vs `coolBar`         → false (first prefix char is 'C' but name's first char is lowercase 'c')
+///   `CB`  vs `CoolBar`         → false (C=C ok, B must start next word; 'oolBar' has no word-start at 'B')
+///   `CB`  vs `coolBar`         → true  (case-insensitive: c=cool, b=Bar)
 fn camel_acronym_match(name: &str, prefix: &str) -> bool {
     // Collect the first character of each CamelCase / underscore segment.
     let mut word_starts: Vec<char> = Vec::new();
@@ -134,6 +137,8 @@ fn complete_super(idx: &Indexer, from_uri: &Url, snippets: bool) -> Vec<Completi
     let mut items: Vec<CompletionItem> = Vec::new();
     let mut visited: Vec<String> = vec![from_uri.as_str().to_owned()];
     collect_hierarchy_completions(idx, from_uri, &lines, &mut visited, 0, &mut items, snippets);
+    // Filter out private members — inaccessible even via super.
+    items.retain(|i| i.sort_text.as_deref().map(|s| !s.starts_with("prv:")).unwrap_or(true));
     items.sort_by_key(|i| kind_sort_rank(i.kind));
     items.dedup_by_key(|i| i.label.clone());
     items
@@ -283,12 +288,21 @@ fn symbols_from_nested_type(
         }
     };
 
-    let body_start = type_sym.range.start.line;
-    let body_end   = type_sym.range.end.line;
+    let type_start = type_sym.range.start;
+    let type_end   = type_sym.range.end;
 
-    // Collect symbols that fall strictly inside the type's body span.
+    // Collect symbols whose start position falls within the type's body span.
+    // Compare both line and character so one-line declarations like
+    // `class Foo { fun bar() {} }` still include same-line members.
     symbols_ref.iter()
-        .filter(|s| s.range.start.line > body_start && s.range.start.line <= body_end)
+        .filter(|s| {
+            let start = s.range.start;
+            let starts_after = start.line > type_start.line
+                || (start.line == type_start.line && start.character > type_start.character);
+            let starts_before = start.line < type_end.line
+                || (start.line == type_end.line && start.character <= type_end.character);
+            starts_after && starts_before
+        })
         .filter(|s| s.visibility != Visibility::Private)
         .map(|s| {
             let kind = symbol_kind_to_completion(s.kind);
