@@ -150,12 +150,11 @@ pub struct Indexer {
     /// The pending scan is started by the active scan's caller once its full
     /// workflow (impl + apply + source_paths + save_cache) completes.
     pub(crate) pending_reindex: std::sync::atomic::AtomicBool,
-    /// Root to use for the pending reindex. `None` means use the current workspace root.
-    /// Written under a mutex so the *last* concurrent caller wins (RA OpQueue semantics).
-    pub(crate) pending_reindex_root: RwLock<Option<PathBuf>>,
-    /// Max files cap for the pending reindex. Preserves the intent of the last caller:
-    /// a full (unbounded) reindex queued during a bounded scan keeps its unlimited cap.
-    pub(crate) pending_reindex_max: std::sync::atomic::AtomicUsize,
+    /// (root, max) pair for the pending reindex, stored atomically under a single mutex
+    /// so they are always read and written together (last caller wins, RA OpQueue semantics).
+    /// `pending_reindex` is the fast-path flag; callers must hold this lock when reading
+    /// or writing the payload.
+    pub(crate) pending_reindex_state: std::sync::Mutex<Option<(PathBuf, usize)>>,
     /// Number of parse tasks completed in current indexing run (for progress tracking).
     pub(crate) parse_tasks_completed: std::sync::atomic::AtomicUsize,
     /// Total number of parse tasks spawned in current indexing run.
@@ -220,8 +219,7 @@ impl Indexer {
             root_generation: AtomicU64::new(0),
             indexing_in_progress: std::sync::atomic::AtomicBool::new(false),
             pending_reindex: std::sync::atomic::AtomicBool::new(false),
-            pending_reindex_root: RwLock::new(None),
-            pending_reindex_max: std::sync::atomic::AtomicUsize::new(0),
+            pending_reindex_state: std::sync::Mutex::new(None),
             parse_tasks_completed: std::sync::atomic::AtomicUsize::new(0),
             parse_tasks_total: std::sync::atomic::AtomicUsize::new(0),
             scheduled_paths: DashMap::new(),

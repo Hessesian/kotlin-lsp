@@ -262,26 +262,29 @@ impl Indexer {
             {
                 return;
             }
-            let root_opt = self.pending_reindex_root.write().unwrap().take();
-            let root = match root_opt {
-                Some(r) => r,
-                None => match self.workspace_root.read().unwrap().clone() {
-                    Some(r) => r,
-                    None => return,
-                },
+            // Take the queued (root, max) pair atomically — reading both under the same
+            // lock so we never see a split (old_root, new_max) pair.
+            let state = self.pending_reindex_state.lock().unwrap().take();
+            let (root, max) = match state {
+                Some(pair) => pair,
+                None => {
+                    // No state queued; fall back to current workspace root with default cap.
+                    let root = match self.workspace_root.read().unwrap().clone() {
+                        Some(r) => r,
+                        None => return,
+                    };
+                    (root, DEFAULT_MAX_INDEX_FILES)
+                }
             };
-            // Use the max stored when the request was queued so a full (unbounded) reindex
-            // that was queued during a bounded scan keeps its unlimited cap.
-            let max = self.pending_reindex_max.load(std::sync::atomic::Ordering::Acquire);
             log::info!("run_pending_reindex: starting queued reindex for {}", root.display());
             let (result, guard_opt) = Arc::clone(&self).index_workspace_impl(&root, max, client.clone()).await;
             if result.aborted {
                 // Lost the scan guard to a concurrent caller — restore the queued
-                // request so that caller's run_pending_reindex will drain it.
+                // request (root+max together) so that caller's run_pending_reindex drains it.
                 {
-                    let mut pending_root = self.pending_reindex_root.write().unwrap();
-                    if pending_root.is_none() {
-                        *pending_root = Some(root);
+                    let mut state = self.pending_reindex_state.lock().unwrap();
+                    if state.is_none() {
+                        *state = Some((root, max));
                     }
                 }
                 self.pending_reindex.store(true, std::sync::atomic::Ordering::Release);
@@ -330,11 +333,11 @@ impl Indexer {
         if already {
             // Queue this request so the active scan's caller will re-run once done.
             // Last caller wins (RA OpQueue semantics): overwrite any earlier pending root.
-            // Store root and max BEFORE setting pending_reindex=true so that
-            // run_pending_reindex never reads stale values (Release on the flag acts
-            // as the happens-before boundary for all queued data).
-            *self.pending_reindex_root.write().unwrap() = Some(root.to_path_buf());
-            self.pending_reindex_max.store(max, std::sync::atomic::Ordering::Release);
+            // Store root+max as an atomic pair BEFORE setting pending_reindex=true.
+            // Last caller wins (RA OpQueue semantics). Using a single Mutex ensures
+            // root and max are always read and written together (no split-read race).
+            *self.pending_reindex_state.lock().unwrap() = Some((root.to_path_buf(), max));
+            // Publish the queued request last so consumers do not observe stale payload.
             self.pending_reindex.store(true, std::sync::atomic::Ordering::Release);
             // Bump root_generation so the running scan aborts early on root change.
             self.root_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
