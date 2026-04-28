@@ -187,7 +187,6 @@ impl Backend {
         // scoping logic (package / parent-class filtering) applied by rg_find_references.
         let cur_uri_str = uri.as_str();
         if let Some(data) = self.indexer.files.get(cur_uri_str) {
-            let name_len = name.chars().count() as u32;
             for (line_idx, line) in data.lines.iter().enumerate() {
                 let dup_line = locs.iter().any(|l: &Location| {
                     l.uri == *uri && l.range.start.line == line_idx as u32
@@ -209,10 +208,12 @@ impl Backend {
                         }
                     };
                     if before_ok && after_ok {
-                        let col = line[..abs].chars().count() as u32;
+                        // Compute UTF-16 column (LSP units) for the match start.
+                        let col: u32 = line[..abs].chars().map(|c| c.len_utf16() as u32).sum();
+                        let col_end: u32 = col + name.chars().map(|c| c.len_utf16() as u32).sum::<u32>();
                         let range = Range::new(
                             Position::new(line_idx as u32, col),
-                            Position::new(line_idx as u32, col + name_len),
+                            Position::new(line_idx as u32, col_end),
                         );
                         let already = locs.iter().any(|l: &Location| {
                             l.uri == *uri && l.range.start == range.start
@@ -393,7 +394,19 @@ impl Backend {
             return Ok(None);
         }
         let line_text = &lines[line_idx];
-        let col = (pos.character as usize).min(line_text.len());
+        // pos.character is UTF-16 units — convert to a byte offset.
+        let col = {
+            let mut utf16_remaining = pos.character as usize;
+            let mut byte_pos = 0;
+            for ch in line_text.chars() {
+                if utf16_remaining == 0 { break; }
+                let units = ch.len_utf16();
+                if utf16_remaining < units { break; }
+                utf16_remaining -= units;
+                byte_pos += ch.len_utf8();
+            }
+            byte_pos
+        };
         let before = &line_text[..col];
 
         // Count commas at the current paren depth to find active param.

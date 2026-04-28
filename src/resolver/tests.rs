@@ -320,6 +320,14 @@
     // ── build_rg_pattern ─────────────────────────────────────────────────────
     // Use rg itself to validate patterns (it's always available in the dev env).
 
+    fn rg_available() -> bool {
+        std::process::Command::new("rg")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
     fn rg_matches(pattern: &str, text: &str) -> bool {
         std::process::Command::new("rg")
             .args(["--quiet", "-e", pattern, "--"])
@@ -337,6 +345,7 @@
 
     #[test]
     fn rg_pattern_matches_kotlin_class() {
+        if !rg_available() { eprintln!("skipping: rg not available"); return; }
         let pat = build_rg_pattern("Foo");
         assert!(rg_matches(&pat, "class Foo {"));
         assert!(rg_matches(&pat, "sealed class Foo"));
@@ -344,12 +353,14 @@
 
     #[test]
     fn rg_pattern_matches_kotlin_enum() {
+        if !rg_available() { eprintln!("skipping: rg not available"); return; }
         let pat = build_rg_pattern("EScreen");
         assert!(rg_matches(&pat, "enum class EScreen {"));
     }
 
     #[test]
     fn rg_pattern_matches_java_enum() {
+        if !rg_available() { eprintln!("skipping: rg not available"); return; }
         let pat = build_rg_pattern("EProductScreen");
         assert!(rg_matches(&pat, "public enum EProductScreen {"));
         assert!(rg_matches(&pat, "  enum EProductScreen {"));
@@ -358,6 +369,7 @@
 
     #[test]
     fn rg_pattern_no_false_positive_on_usage() {
+        if !rg_available() { eprintln!("skipping: rg not available"); return; }
         let pat = build_rg_pattern("EProductScreen");
         // Should NOT match a plain usage (not a declaration)
         assert!(!rg_matches(&pat, "EProductScreen.SOMETHING"));
@@ -366,6 +378,7 @@
 
     #[test]
     fn rg_pattern_matches_java_class() {
+        if !rg_available() { eprintln!("skipping: rg not available"); return; }
         let pat = build_rg_pattern("FlexiEntryVM");
         assert!(rg_matches(&pat, "public class FlexiEntryVM extends Base {"));
     }

@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use tower_lsp::lsp_types::{Location, Url};
 
 use crate::indexer::Indexer;
@@ -98,8 +99,15 @@ fn find_declaration_range_after_line(lines: &[String], name: &str, start_line: u
 /// Returns the location of `name:` in the current file.  This catches function
 /// parameters that lack `val`/`var` and are therefore absent from the symbol index.
 pub(crate) fn find_local_declaration(idx: &Indexer, name: &str, uri: &Url) -> Vec<Location> {
-    let Some(data) = idx.files.get(uri.as_str()) else { return vec![]; };
-    if let Some(range) = find_declaration_range_in_lines(&data.lines, name) {
+    // Prefer live_lines (unsaved buffer) so newly-typed params are found immediately.
+    let lines: Arc<Vec<String>> = if let Some(ll) = idx.live_lines.get(uri.as_str()) {
+        ll.clone()
+    } else if let Some(data) = idx.files.get(uri.as_str()) {
+        data.lines.clone()
+    } else {
+        return vec![];
+    };
+    if let Some(range) = find_declaration_range_in_lines(&lines, name) {
         return vec![Location { uri: uri.clone(), range }];
     }
     vec![]

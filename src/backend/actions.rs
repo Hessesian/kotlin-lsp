@@ -65,10 +65,13 @@ fn derive_var_name(expr: &str) -> String {
         let rest = &seg[3..];
         // Only strip if next char is uppercase (proper camelCase).
         if rest.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
-            let mut r = rest.to_string();
-            if let Some(first) = r.get_mut(0..1) {
-                first.make_ascii_lowercase();
-            }
+            let r = if let Some(first) = rest.chars().next() {
+                let mut s = first.to_lowercase().collect::<String>();
+                s.push_str(&rest[first.len_utf8()..]);
+                s
+            } else {
+                rest.to_string()
+            };
             r
         } else {
             seg.to_string()
@@ -158,14 +161,14 @@ impl Backend {
                 let prefix: String = chars[..s].iter().collect();
                 let suffix: String = chars[e..].iter().collect();
                 let replaced_line = format!("{prefix}{var_name}{suffix}");
-                let line_char_count = chars.len() as u32;
+                let line_utf16_len: u32 = line_text.chars().map(|c| c.len_utf16() as u32).sum();
                 let new_text = format!("{indent}val {var_name} = {expr}\n{replaced_line}");
 
                 let mut changes = std::collections::HashMap::new();
                 changes.insert(uri.clone(), vec![TextEdit {
                     range: Range {
                         start: Position { line: sel_start.line, character: 0 },
-                        end:   Position { line: sel_start.line, character: line_char_count },
+                        end:   Position { line: sel_start.line, character: line_utf16_len },
                     },
                     new_text,
                 }]);

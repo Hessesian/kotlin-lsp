@@ -124,8 +124,9 @@ pub fn complete_symbol_with_context(
 /// Detect whether the character immediately before `prefix` in `line` is `@`.
 /// Used to restrict completions to annotation/class kinds only.
 pub(crate) fn is_annotation_context(line: &str, prefix: &str) -> bool {
-    let trim = line.len().saturating_sub(prefix.len());
-    line[..trim].ends_with('@')
+    line.strip_suffix(prefix)
+        .map(|before| before.ends_with('@'))
+        .unwrap_or(false)
 }
 
 /// Completion for `super.` — gather all members from the parent hierarchy.
@@ -139,7 +140,7 @@ fn complete_super(idx: &Indexer, from_uri: &Url, snippets: bool) -> Vec<Completi
     collect_hierarchy_completions(idx, from_uri, &lines, &mut visited, 0, &mut items, snippets);
     // Filter out private members — inaccessible even via super.
     items.retain(|i| i.sort_text.as_deref().map(|s| !s.starts_with("prv:")).unwrap_or(true));
-    items.sort_by_key(|i| kind_sort_rank(i.kind));
+    items.sort_by_key(|i| (kind_sort_rank(i.kind), i.label.clone()));
     items.dedup_by_key(|i| i.label.clone());
     items
 }
