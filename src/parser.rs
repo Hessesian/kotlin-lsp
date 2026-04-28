@@ -998,21 +998,33 @@ fn user_type_name(node: &Node, bytes: &[u8]) -> Option<String> {
     if name.is_empty() { None } else { Some(name.to_owned()) }
 }
 
-/// Extract the first `type_identifier` (or `scoped_type_identifier`) inside a Java node.
+/// Extract the outermost type name from a Java type node.
+///
+/// Handles leaf `type_identifier`, `scoped_type_identifier`, and wrapper nodes
+/// like `generic_type` (`Base<String>` → `"Base"`) by descending until
+/// a `type_identifier` is found. `type_arguments` nodes are skipped so generic
+/// parameters don't shadow the base type name.
 fn java_first_type_name(node: &Node, bytes: &[u8]) -> Option<String> {
-    let mut cur = node.walk();
-    for child in node.children(&mut cur) {
-        if matches!(child.kind(), "type_identifier") {
-            return child.utf8_text(bytes).ok().map(str::to_owned);
-        }
-        // scoped_type_identifier: walk one level deeper
-        if child.kind() == "scoped_type_identifier" {
-            let mut cc = child.walk();
-            for gc in child.children(&mut cc) {
-                if gc.kind() == "type_identifier" {
-                    return gc.utf8_text(bytes).ok().map(str::to_owned);
-                }
+    let mut stack = vec![*node];
+    while let Some(n) = stack.pop() {
+        match n.kind() {
+            "type_identifier" => {
+                return n.utf8_text(bytes).ok().map(str::to_owned);
             }
+            "scoped_type_identifier" => {
+                // Return the full dotted name (e.g. `pkg.Base`), stripping any trailing
+                // generic args that may appear inside the scope chain.
+                let text = n.utf8_text(bytes).ok()?;
+                let name = text.split('<').next().unwrap_or(text).trim();
+                return if name.is_empty() { None } else { Some(name.to_owned()) };
+            }
+            // Skip type_arguments entirely — they contain the generic params, not the base name.
+            "type_arguments" => continue,
+            _ => {}
+        }
+        let mut cur = n.walk();
+        for child in n.children(&mut cur) {
+            if child.is_named() { stack.push(child); }
         }
     }
     None

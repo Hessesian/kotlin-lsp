@@ -441,6 +441,26 @@
     }
 
     #[test]
+    fn supers_java_generic_extends() {
+        let java = |src: &str| -> Vec<String> {
+            crate::parser::parse_java(src).supers.into_iter().map(|(_, n)| n).collect()
+        };
+
+        let s = java("public class Foo extends Base<String> {}");
+        assert!(s.contains(&"Base".to_string()), "generic extends, got {s:?}");
+
+        let s = java("public class Foo extends pkg.Base<String> {}");
+        assert!(
+            s.contains(&"pkg.Base".to_string()) || s.contains(&"Base".to_string()),
+            "qualified generic extends, got {s:?}"
+        );
+
+        let s = java("public class Foo extends Base<String> implements Runnable {}");
+        assert!(s.contains(&"Base".to_string()),     "generic extends+implements, got {s:?}");
+        assert!(s.contains(&"Runnable".to_string()), "generic extends+implements, got {s:?}");
+    }
+
+    #[test]
     fn supers_does_not_pick_up_type_annotations() {
         let src = "class Foo {\n  val x: Int = 0\n  fun f(): String = \"\"\n}";
         let s = kotlin_supers(src);
