@@ -312,10 +312,11 @@ impl Indexer {
     }
 
     /// Core workspace indexing: file discovery → cache partition → concurrent parse.
-    /// Returns `(result, guard)`. The guard is `Some` when this call successfully acquired
+    /// Returns `(result, guard)`. `guard` is `Some` iff this call successfully acquired
     /// `indexing_in_progress`; callers must hold it alive until the full workflow completes
-    /// (apply + source_paths + save_cache). When `result.aborted` is true the guard is
-    /// still `Some` (to allow the lock to be cleared) but callers should skip finalization.
+    /// (apply + source_paths + save_cache). `result.aborted` may be true with either
+    /// `Some` or `None` guard depending on the abort reason; callers should skip finalization
+    /// whenever `result.aborted` is true.
     async fn index_workspace_impl(
         self: Arc<Self>,
         root: &Path,
@@ -329,10 +330,12 @@ impl Indexer {
         if already {
             // Queue this request so the active scan's caller will re-run once done.
             // Last caller wins (RA OpQueue semantics): overwrite any earlier pending root.
+            // Store root and max BEFORE setting pending_reindex=true so that
+            // run_pending_reindex never reads stale values (Release on the flag acts
+            // as the happens-before boundary for all queued data).
             *self.pending_reindex_root.write().unwrap() = Some(root.to_path_buf());
-            self.pending_reindex.store(true, std::sync::atomic::Ordering::Release);
-            // Queue the max alongside the root so a full reindex preserves its cap.
             self.pending_reindex_max.store(max, std::sync::atomic::Ordering::Release);
+            self.pending_reindex.store(true, std::sync::atomic::Ordering::Release);
             // Bump root_generation so the running scan aborts early on root change.
             self.root_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             log::warn!(
