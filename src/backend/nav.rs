@@ -214,20 +214,18 @@ impl Backend {
             .unwrap_or_default();
         for loc in &locs {
             if let Some(file) = self.indexer.files.get(loc.uri.as_str()) {
-                let start = loc.range.start.line as usize;
-                let end = (start + 15).min(file.lines.len());
-                let mut decl_lines: Vec<String> = vec![];
-                for line in &file.lines[start..end] {
-                    decl_lines.push(line.clone());
-                    if line.contains('{') { break; }
-                }
-                let names = crate::resolver::extract_supers_from_lines(&decl_lines);
+                let names: Vec<String> = file.supers.iter()
+                    .filter(|(l, _)| *l == loc.range.start.line)
+                    .map(|(_, n)| n.clone())
+                    .collect();
                 if !names.is_empty() { return names; }
             }
         }
-        // Fallback: scan live_lines for the open file itself.
+        // Fallback: parse live_lines for the open file itself.
         if let Some(lines) = self.indexer.live_lines.get(uri.as_str()) {
-            let names = crate::resolver::extract_supers_from_lines(&lines);
+            let content = lines.join("\n");
+            let names: Vec<String> = crate::parser::parse_by_extension(uri.path(), &content)
+                .supers.into_iter().map(|(_, n)| n).collect();
             if !names.is_empty() { return names; }
         }
         vec![]

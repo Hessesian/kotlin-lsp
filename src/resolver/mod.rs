@@ -676,21 +676,21 @@ fn resolve_from_class_hierarchy(
     if visited.contains(&key) { return vec![]; }
     visited.push(key);
 
-    let lines: Arc<Vec<String>> = match idx.files.get(from_uri.as_str()) {
-        Some(f) => f.lines.clone(),
-        None => {
-            // File not indexed yet — read from disk so hierarchy walk works
-            // even before background indexing reaches this file.
-            let path = from_uri.to_file_path().ok();
-            let content = path.and_then(|p| std::fs::read_to_string(p).ok());
-            match content {
-                Some(c) => Arc::new(c.lines().map(String::from).collect()),
-                None => return vec![],
-            }
+    let supers: Vec<String> = if let Some(f) = idx.files.get(from_uri.as_str()) {
+        f.supers.iter().map(|(_, n)| n.clone()).collect()
+    } else {
+        // File not indexed yet — parse on demand so hierarchy walk works
+        // even before background indexing reaches this file.
+        let path = from_uri.to_file_path().ok();
+        let content = path.and_then(|p| std::fs::read_to_string(p).ok());
+        match content {
+            Some(c) => crate::parser::parse_by_extension(from_uri.path(), &c)
+                .supers.iter().map(|(_, n)| n.clone()).collect(),
+            None => return vec![],
         }
     };
 
-    for super_name in extract_supers_from_lines(&lines) {
+    for super_name in supers {
         // Locate the supertype's file via steps 1-4+5 only — NOT step 4.5.
         // Using the full resolve_symbol here would re-enter this function with
         // a fresh visited-set, causing infinite recursion.
@@ -709,148 +709,6 @@ fn resolve_from_class_hierarchy(
     vec![]
 }
 
-/// Extract direct supertype names from source lines.
-///
-/// Handles:
-/// - Kotlin single-line: `class Foo : Bar(), Baz<X> {`
-/// - Kotlin multi-line constructor: last line of primary ctor is `) : Bar()` or
-///   a standalone `) : Bar()` after the constructor parameter block
-/// - Java: `class Foo extends Bar implements Baz, Qux {`
-pub(crate) fn extract_supers_from_lines(lines: &[String]) -> Vec<String> {
-    let mut result = Vec::new();
-    for line in lines {
-        let t = line.trim();
-        if t.is_empty()
-            || t.starts_with("//")
-            || t.starts_with('*')
-            || t.starts_with("import ")
-            || t.starts_with("package ")
-        {
-            continue;
-        }
-
-        // Java: extends SuperClass
-        if let Some(pos) = word_boundary_pos(t, "extends") {
-            let rest = t[pos + 7..].trim_start();
-            let nm = leading_type_ident(rest);
-            if !nm.is_empty() { result.push(nm.to_owned()); }
-        }
-
-        // Java: implements I1, I2
-        if let Some(pos) = word_boundary_pos(t, "implements") {
-            let rest  = t[pos + 10..].trim_start();
-            let chunk = rest.split('{').next().unwrap_or(rest);
-            for part in split_top_level_commas(chunk) {
-                let nm = leading_type_ident(part.trim());
-                if !nm.is_empty() { result.push(nm.to_owned()); }
-            }
-        }
-
-        // Kotlin delegation specifiers: `: TypeA(...), TypeB<X>`
-        if let Some(colon) = kotlin_delegation_colon(t) {
-            let after = t[colon + 1..].trim_start();
-            let chunk = after.split('{').next().unwrap_or(after);
-            for part in split_top_level_commas(chunk) {
-                let nm = leading_type_ident(part.trim());
-                if !nm.is_empty()
-                    && nm.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
-                {
-                    result.push(nm.to_owned());
-                }
-            }
-        }
-    }
-    result.sort();
-    result.dedup();
-    result
-}
-
-/// Find the byte offset of `word` in `text` at a word boundary.
-fn word_boundary_pos(text: &str, word: &str) -> Option<usize> {
-    let wlen = word.len();
-    let b    = text.as_bytes();
-    let wb   = word.as_bytes();
-    let mut i = 0;
-    while i + wlen <= b.len() {
-        if b[i..i + wlen] == *wb {
-            let before_ok = i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_');
-            let after_ok  = i + wlen >= b.len()
-                || !(b[i + wlen].is_ascii_alphanumeric() || b[i + wlen] == b'_');
-            if before_ok && after_ok { return Some(i); }
-        }
-        i += 1;
-    }
-    None
-}
-
-/// Extract the leading identifier / type name, stopping before `<(;{ ,\t\n`.
-fn leading_type_ident(s: &str) -> &str {
-    let end = s
-        .find(|c: char| matches!(c, '<' | '(' | '{' | ';' | ',' | ' ' | '\t' | '\n'))
-        .unwrap_or(s.len());
-    &s[..end]
-}
-
-/// Find the `:` that introduces Kotlin delegation specifiers (not type
-/// annotations on `val`/`var`/`fun` return types).
-///
-/// Valid:   `class Foo : Bar`  `) : Bar`  `class Foo(val x: Int) : Bar`
-/// Invalid: `val x: Int`  `fun f(): Int`  (return-type annotations)
-fn kotlin_delegation_colon(line: &str) -> Option<usize> {
-    let b = line.as_bytes();
-    let mut depth: i32 = 0;
-    let mut found: Option<usize> = None;
-
-    for (i, &ch) in b.iter().enumerate() {
-        match ch {
-            b'<' | b'(' => depth += 1,
-            b'>' | b')' => { if depth > 0 { depth -= 1; } }
-            b':' if depth == 0 => {
-                // Must be followed (after spaces) by an uppercase letter.
-                let after = line[i + 1..].trim_start();
-                if !after.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
-                    continue;
-                }
-                let before     = line[..i].trim_end();
-                let class_kw   = before.contains("class ")
-                    || before.contains("interface ")
-                    || before.contains("object ");
-                let after_paren = before.ends_with(')');
-
-                if class_kw {
-                    // Inside a class/interface/object declaration line — always valid.
-                    found = Some(i);
-                } else if after_paren {
-                    // Could be `fun f(): Int` (return type) or `): Bar` (continuation).
-                    // Accept only if the line itself starts with `)` (a pure continuation
-                    // line from a multi-line primary constructor).
-                    if line.trim_start().starts_with(')') {
-                        found = Some(i);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    found
-}
-
-/// Split `text` at commas that are not inside `<>` or `()`.
-fn split_top_level_commas(text: &str) -> Vec<&str> {
-    let mut parts = Vec::new();
-    let mut depth: i32 = 0;
-    let mut start = 0;
-    for (i, ch) in text.char_indices() {
-        match ch {
-            '<' | '(' => depth += 1,
-            '>' | ')' => { if depth > 0 { depth -= 1; } }
-            ',' if depth == 0 => { parts.push(&text[start..i]); start = i + 1; }
-            _ => {}
-        }
-    }
-    if start <= text.len() { parts.push(&text[start..]); }
-    parts
-}
 
 /// `rg` scoped to the directory that would contain `package` sources.
 ///

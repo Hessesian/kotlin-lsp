@@ -396,60 +396,55 @@
         assert_eq!(s, vec!["OuterClass", "InnerClass"]);
     }
 
-    // ── extract_supers_from_lines ─────────────────────────────────────────────
+    // ── supers CST extraction (via parse_kotlin / parse_java) ────────────────
+
+    fn kotlin_supers(src: &str) -> Vec<String> {
+        crate::parser::parse_kotlin(src).supers.into_iter().map(|(_, n)| n).collect()
+    }
 
     #[test]
     fn supers_kotlin_single_line() {
-        let lines = vec!["class DetailViewModel : MviViewModel<Event, State, Effect>() {".to_string()];
-        assert_eq!(extract_supers_from_lines(&lines), vec!["MviViewModel"]);
+        let s = kotlin_supers("class DetailViewModel : MviViewModel<Event, State, Effect>() {}");
+        assert!(s.contains(&"MviViewModel".to_string()), "got {s:?}");
     }
 
     #[test]
     fn supers_kotlin_multi_line_ctor() {
-        // Primary constructor spans multiple lines; super is on the closing ) line
-        let lines = vec![
-            "class DetailViewModel @Inject constructor(".to_string(),
-            "  private val useCase: UseCase,".to_string(),
-            ") : MviViewModel<Event, State, Effect>() {".to_string(),
-        ];
-        assert_eq!(extract_supers_from_lines(&lines), vec!["MviViewModel"]);
+        let src = "class DetailViewModel @Inject constructor(\n  private val useCase: UseCase,\n) : MviViewModel<Event, State, Effect>() {}";
+        let s = kotlin_supers(src);
+        assert!(s.contains(&"MviViewModel".to_string()), "got {s:?}");
     }
 
     #[test]
     fn supers_kotlin_multiple() {
-        let lines = vec!["class Foo : BaseClass(), SomeInterface, AnotherInterface {".to_string()];
-        let s = extract_supers_from_lines(&lines);
-        assert!(s.contains(&"BaseClass".to_string()));
-        assert!(s.contains(&"SomeInterface".to_string()));
-        assert!(s.contains(&"AnotherInterface".to_string()));
+        let src = "class Foo : BaseClass(), SomeInterface, AnotherInterface {}";
+        let s = kotlin_supers(src);
+        assert!(s.contains(&"BaseClass".to_string()),       "got {s:?}");
+        assert!(s.contains(&"SomeInterface".to_string()),   "got {s:?}");
+        assert!(s.contains(&"AnotherInterface".to_string()), "got {s:?}");
     }
 
     #[test]
     fn supers_java_extends() {
-        let lines = vec!["public class FlexiEntryVM extends BaseFlexikreditVM {".to_string()];
-        assert_eq!(extract_supers_from_lines(&lines), vec!["BaseFlexikreditVM"]);
+        let src = "public class FlexiEntryVM extends BaseFlexikreditVM {}";
+        let s: Vec<String> = crate::parser::parse_java(src).supers.into_iter().map(|(_, n)| n).collect();
+        assert!(s.contains(&"BaseFlexikreditVM".to_string()), "got {s:?}");
     }
 
     #[test]
     fn supers_java_implements() {
-        let lines = vec![
-            "public class Foo extends Base implements Runnable, Serializable {".to_string()
-        ];
-        let s = extract_supers_from_lines(&lines);
-        assert!(s.contains(&"Base".to_string()));
-        assert!(s.contains(&"Runnable".to_string()));
-        assert!(s.contains(&"Serializable".to_string()));
+        let src = "public class Foo extends Base implements Runnable, Serializable {}";
+        let s: Vec<String> = crate::parser::parse_java(src).supers.into_iter().map(|(_, n)| n).collect();
+        assert!(s.contains(&"Base".to_string()),         "got {s:?}");
+        assert!(s.contains(&"Runnable".to_string()),     "got {s:?}");
+        assert!(s.contains(&"Serializable".to_string()), "got {s:?}");
     }
 
     #[test]
     fn supers_does_not_pick_up_type_annotations() {
-        // val x: Int — the ':' here must NOT be treated as delegation
-        let lines = vec![
-            "class Foo {".to_string(),
-            "  val x: Int = 0".to_string(),
-            "  fun f(): String = \"\"".to_string(),
-        ];
-        assert!(extract_supers_from_lines(&lines).is_empty());
+        let src = "class Foo {\n  val x: Int = 0\n  fun f(): String = \"\"\n}";
+        let s = kotlin_supers(src);
+        assert!(s.is_empty(), "should have no supers, got {s:?}");
     }
 
     // ── resolve_from_class_hierarchy ─────────────────────────────────────────
@@ -769,43 +764,33 @@ data class State(
         assert!(!names.contains(&"filter"), "domain type should NOT have filter()");
     }
 
-    // ── extract_supers_from_lines – annotation handling ─────────────────────
+    // ── supers CST extraction – annotation handling ──────────────────────────
 
     #[test]
     fn extract_supers_annotation_same_line() {
-        let lines = vec!["@Suppress(\"unused\") class Foo : Bar {".to_string()];
-        let supers = extract_supers_from_lines(&lines);
-        assert_eq!(supers, vec!["Bar"]);
+        let s = kotlin_supers("@Suppress(\"unused\") class Foo : Bar {}");
+        assert!(s.contains(&"Bar".to_string()), "got {s:?}");
     }
 
     #[test]
     fn extract_supers_annotation_separate_line() {
-        let lines = vec![
-            "@Module".to_string(),
-            "class Foo : Bar, Baz {".to_string(),
-        ];
-        let supers = extract_supers_from_lines(&lines);
-        assert!(supers.contains(&"Bar".to_string()), "got {supers:?}");
-        assert!(supers.contains(&"Baz".to_string()), "got {supers:?}");
+        let src = "@Module\nclass Foo : Bar, Baz {}";
+        let s = kotlin_supers(src);
+        assert!(s.contains(&"Bar".to_string()), "got {s:?}");
+        assert!(s.contains(&"Baz".to_string()), "got {s:?}");
     }
 
     #[test]
     fn extract_supers_field_inject_annotation() {
-        // @field:Inject should not produce false supers
-        let lines = vec!["@field:Inject".to_string()];
-        let supers = extract_supers_from_lines(&lines);
-        assert!(supers.is_empty(), "annotation-only line should produce no supers, got {supers:?}");
+        let s = kotlin_supers("@field:Inject\nclass Foo {}");
+        assert!(s.is_empty(), "annotation-only line should produce no supers, got {s:?}");
     }
 
     #[test]
     fn extract_supers_multiple_annotations() {
-        let lines = vec![
-            "@Module".to_string(),
-            "@Provides".to_string(),
-            "class FooModule : BaseModule() {".to_string(),
-        ];
-        let supers = extract_supers_from_lines(&lines);
-        assert_eq!(supers, vec!["BaseModule"]);
+        let src = "@Module\n@Provides\nclass FooModule : BaseModule() {}";
+        let s = kotlin_supers(src);
+        assert!(s.contains(&"BaseModule".to_string()), "got {s:?}");
     }
 
     // ── auto-import helpers ───────────────────────────────────────────────────

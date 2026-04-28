@@ -186,8 +186,9 @@ impl Indexer {
                 };
                 // Expand priority set to include supertypes so cross-class navigation
                 // (super, override resolution) works before the full scan completes.
-                let lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
-                let supers = crate::resolver::extract_supers_from_lines(&lines);
+                let path_str = path.to_str().unwrap_or("");
+                let supers: Vec<String> = crate::parser::parse_by_extension(path_str, &content)
+                    .supers.into_iter().map(|(_, n)| n).collect();
                 if !supers.is_empty() {
                     let m = self.ignore_matcher.read().unwrap().clone();
                     let super_paths = find_files_for_types(&supers, root, m.as_deref());
