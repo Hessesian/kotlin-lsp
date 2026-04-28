@@ -7,9 +7,11 @@
 #[path = "lambda_tests.rs"]
 mod tests;
 
-/// Kotlin stdlib scope functions whose lambda parameter is a receiver lambda `T.() -> R`.
+/// Kotlin stdlib scope functions whose lambda receives the object as `this` (receiver lambdas).
 /// For these, `this` inside the lambda refers to `T` (the receiver), so a type hint is valid.
-pub(crate) const SCOPE_FUNCTIONS: &[&str] = &["run", "apply", "also", "let"];
+///
+/// Note: `let` and `also` are intentionally excluded — their lambda parameter is `it`, not `this`.
+pub(crate) const RECEIVER_THIS_FNS: &[&str] = &["run", "apply"];
 
 /// Return the Nth (0-based) input type from a functional type expression.
 ///

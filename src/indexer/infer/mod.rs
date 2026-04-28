@@ -12,7 +12,7 @@ pub mod args;
 pub mod it_this;
 
 pub(crate) use lambda::{
-    SCOPE_FUNCTIONS,
+    RECEIVER_THIS_FNS,
     lambda_type_first_input,
     lambda_type_nth_input,
     lambda_type_receiver,

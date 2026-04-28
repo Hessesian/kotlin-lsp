@@ -17,7 +17,7 @@ use tower_lsp::lsp_types::Url;
 // ── from infer submodules (re-exported through infer/mod.rs) ─────────────────
 use super::{
     // lambda.rs
-    SCOPE_FUNCTIONS,
+    RECEIVER_THIS_FNS,
     lambda_type_first_input,
     lambda_type_nth_input,
     lambda_type_receiver,
@@ -420,7 +420,9 @@ pub(crate) fn lambda_brace_pos_for_param(line: &str, param_name: &str) -> Option
 /// Rules:
 ///  - Case A `receiver.method { this }`: check if `method` has a receiver-lambda last
 ///    param (`T.() -> R`) — if so return `T`.  If method not indexed but is a known
-///    stdlib scope function (`run`, `apply`, `also`, `let`), return the receiver type.
+///    stdlib scope function listed in `RECEIVER_THIS_FNS` (`run`, `apply`), return the
+///    receiver type.  `also` and `let` are intentionally excluded — they expose the
+///    receiver as `it`, not `this`.
 ///  - Case B `with(receiver) { this }`: return the receiver's type (special-cased).
 ///  - Everything else: return `None` (don't hint `this` from the lambda).
 fn lambda_receiver_this_type_from_context(
@@ -450,8 +452,9 @@ fn lambda_receiver_this_type_from_context(
             if let Some(ty) = fun_trailing_lambda_this_type(&method, idx, uri) {
                 return Some(ty);
             }
-            // Stdlib scope functions are receiver lambdas but not indexed.
-            if SCOPE_FUNCTIONS.contains(&method.as_str()) {
+            // Only functions listed in `RECEIVER_THIS_FNS` (`run`, `apply`) are treated as
+            // receiver-`this` lambdas; `also`/`let` are intentionally excluded.
+            if RECEIVER_THIS_FNS.contains(&method.as_str()) {
                 if let Some(raw) = crate::resolver::infer_variable_type_raw(idx, &receiver_var, uri) {
                     let base: String = raw.chars().take_while(|&c| is_id_char(c)).collect();
                     if !base.is_empty() { return Some(base); }

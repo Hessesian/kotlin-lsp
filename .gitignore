@@ -1,3 +1,4 @@
 /target
 *.orig
 .env
+__pycache__/
