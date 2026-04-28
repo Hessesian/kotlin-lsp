@@ -142,8 +142,17 @@ impl Backend {
 
         if has_selection && !is_import_line {
             let chars: Vec<char> = line_text.chars().collect();
-            let raw_s = (sel_start.character as usize).min(chars.len());
-            let raw_e = (sel_end.character as usize).min(chars.len());
+            // Convert UTF-16 code-unit offsets (LSP protocol) to char indices.
+            let utf16_to_char = |utf16: usize| {
+                let mut cu = 0usize;
+                for (i, c) in chars.iter().enumerate() {
+                    if cu >= utf16 { return i; }
+                    cu += c.len_utf16();
+                }
+                chars.len()
+            };
+            let raw_s = utf16_to_char(sel_start.character as usize);
+            let raw_e = utf16_to_char(sel_end.character as usize);
 
             // Expand the selection to capture the full dotted-call expression.
             // Helix often sends only the word under the cursor (e.g. `isRefreshing`)
@@ -198,7 +207,16 @@ impl Backend {
         // Word under cursor.
         let cursor_word: String = {
             let chars: Vec<char> = line_text.chars().collect();
-            let col = (range.start.character as usize).min(chars.len());
+            let col = {
+                let utf16 = range.start.character as usize;
+                let mut cu = 0usize;
+                let mut idx_c = chars.len();
+                for (i, c) in chars.iter().enumerate() {
+                    if cu >= utf16 { idx_c = i; break; }
+                    cu += c.len_utf16();
+                }
+                idx_c
+            };
             let mut ws = col;
             while ws > 0 && (chars[ws-1].is_alphanumeric() || chars[ws-1] == '_') { ws -= 1; }
             let mut we = col;
@@ -214,7 +232,7 @@ impl Backend {
             let alias = path.rsplit('.').next().unwrap_or(path);
             if !alias.is_empty() {
                 let ln  = range.start.line;
-                let col = line_text.chars().count() as u32;
+                let col = line_text.chars().map(|c| c.len_utf16() as u32).sum::<u32>();
                 let mut changes = std::collections::HashMap::new();
                 changes.insert(uri.clone(), vec![TextEdit {
                     range: Range {
@@ -247,7 +265,7 @@ impl Backend {
                 // Rename in non-import lines only (whole-file TextEdit).
                 let new_content = whole_word_replace_file(&all_lines, &cursor_word, &placeholder);
                 let last_line   = (all_lines.len() - 1) as u32;
-                let last_col    = all_lines.last().map(|l| l.chars().count() as u32).unwrap_or(0);
+                let last_col    = all_lines.last().map(|l| l.chars().map(|c| c.len_utf16() as u32).sum::<u32>()).unwrap_or(0);
 
                 // Check if there's a matching import to also alias.
                 let import_edit = all_lines.iter().enumerate()
@@ -257,7 +275,7 @@ impl Backend {
                         && t.rsplit(['.', ' ']).next().map(|s| s == cursor_word).unwrap_or(false)
                     })
                     .map(|(import_ln, import_line_text)| {
-                        let col = import_line_text.chars().count() as u32;
+                        let col = import_line_text.chars().map(|c| c.len_utf16() as u32).sum::<u32>();
                         TextEdit {
                             range: Range {
                                 start: Position { line: import_ln as u32, character: col },

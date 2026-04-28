@@ -419,10 +419,12 @@ impl LanguageServer for Backend {
             let idx = Arc::clone(&self.indexer);
             let sem = idx.parse_sem();
             tokio::task::spawn(async move {
-                tokio::task::spawn_blocking(move || {
-                    let _permit = sem.try_acquire_owned();
-                    idx.index_content(&uri, &text);
-                }).await.ok();
+                if let Ok(permit) = sem.acquire_owned().await {
+                    tokio::task::spawn_blocking(move || {
+                        let _permit = permit;
+                        idx.index_content(&uri, &text);
+                    }).await.ok();
+                }
             });
             return;
         }
@@ -437,8 +439,9 @@ impl LanguageServer for Backend {
         let idx2 = Arc::clone(&self.indexer);
         tokio::task::spawn(async move {
             let uri2 = uri.clone();
+            let Ok(permit) = sem.acquire_owned().await else { return; };
             let result = tokio::task::spawn_blocking(move || {
-                let _permit = sem.try_acquire_owned();
+                let _permit = permit;
                 let data = idx.index_content(&uri, &text);
                 // Pre-warm completion cache for all types referenced in this file.
                 Arc::clone(&idx).prewarm_completion_cache(&uri);
@@ -522,11 +525,15 @@ impl LanguageServer for Backend {
             let uri = change.uri;
             let idx = Arc::clone(&self.indexer);
             let sem = idx.parse_sem();
-            tokio::task::spawn_blocking(move || {
+            tokio::task::spawn(async move {
                 if let Ok(path) = uri.to_file_path() {
                     if let Ok(content) = std::fs::read_to_string(&path) {
-                        let _permit = sem.try_acquire_owned();
-                        idx.index_content(&uri, &content);
+                        if let Ok(permit) = sem.acquire_owned().await {
+                            tokio::task::spawn_blocking(move || {
+                                let _permit = permit;
+                                idx.index_content(&uri, &content);
+                            }).await.ok();
+                        }
                     }
                 }
             });

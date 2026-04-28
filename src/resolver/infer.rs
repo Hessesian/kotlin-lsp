@@ -5,21 +5,20 @@ use crate::indexer::Indexer;
 /// Scan the current file's lines for a type annotation on `var_name` and return
 /// the declared type name if found.  Delegates to [`infer_type_in_lines`].
 pub(crate) fn infer_variable_type(idx: &Indexer, var_name: &str, uri: &Url) -> Option<String> {
-    // Fast reject: if var_name isn't in declared_names, it has no `: Type`
-    // annotation in this file — skip the full line scan entirely.
-    if let Some(data) = idx.files.get(uri.as_str()) {
-        if !data.declared_names.iter().any(|n| n == var_name) {
-            return None;
-        }
-    }
-    // Prefer live_lines: updated synchronously on every keystroke.
+    // Prefer live_lines: updated synchronously on every keystroke, so they
+    // reflect unsaved edits that the indexed snapshot may not yet contain.
     if let Some(ll) = idx.live_lines.get(uri.as_str()) {
         if let result @ Some(_) = infer_type_in_lines(&*ll, var_name) {
             return result;
         }
     }
-    // Fall back to indexed lines.
+    // Fall back to indexed snapshot.  Use declared_names as a fast reject
+    // only when live_lines are unavailable or returned nothing, since the
+    // index may lag behind in-flight edits.
     if let Some(data) = idx.files.get(uri.as_str()) {
+        if !data.declared_names.iter().any(|n| n == var_name) {
+            return None;
+        }
         return infer_type_in_lines(&data.lines, var_name);
     }
     // File not indexed yet — read from disk.

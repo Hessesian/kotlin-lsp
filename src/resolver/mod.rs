@@ -428,7 +428,7 @@ fn resolve_via_imports(idx: &Indexer, name: &str, uri: &Url) -> Vec<Location> {
                 .filter(|loc| {
                     idx.files.get(loc.uri.as_str())
                         .and_then(|f| f.package.clone())
-                        .map(|p| p == expected_pkg || p.starts_with(&expected_pkg))
+                        .map(|p| p == expected_pkg || p.starts_with(&format!("{expected_pkg}.")))
                         .unwrap_or(false)
                 })
                 .cloned()
@@ -760,6 +760,7 @@ pub(crate) fn extract_supers_from_lines(lines: &[String]) -> Vec<String> {
             }
         }
     }
+    result.sort();
     result.dedup();
     result
 }
