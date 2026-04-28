@@ -86,6 +86,7 @@ class LspClient:
         self._id = 0
         self._q: queue.Queue = queue.Queue()
         self._pending: dict[int, queue.Queue] = {}
+        self._indexing_done = threading.Event()
         self._proc = subprocess.Popen(
             [binary],
             stdin=subprocess.PIPE,
@@ -104,10 +105,28 @@ class LspClient:
             except queue.Empty:
                 continue
             rid = msg.get("id")
-            if rid is not None:
+            method = msg.get("method", "")
+            if rid is not None and method:
+                # Server-to-client request (e.g. window/workDoneProgress/create)
+                self._send({"jsonrpc": "2.0", "id": rid, "result": None})
+            elif rid is not None:
+                # Response to one of our requests
                 q = self._pending.get(rid)
                 if q is not None:
                     q.put(msg)
+            else:
+                # Notification
+                self._handle_notification(msg)
+
+    def _handle_notification(self, msg: dict):
+        if msg.get("method") == "$/progress":
+            value = msg.get("params", {}).get("value", {})
+            if value.get("kind") == "end":
+                self._indexing_done.set()
+
+    def wait_for_indexing(self, timeout: float):
+        """Block until the server sends WorkDoneProgress.End (index applied) or timeout."""
+        self._indexing_done.wait(timeout=timeout)
 
     def _send(self, msg: dict):
         self._proc.stdin.write(_encode(msg))
@@ -274,8 +293,9 @@ def main():
     client = LspClient(args.binary, args.workspace, args.timeout)
     client.initialize()
 
-    # Give the server a moment to load from cache (usually instant)
-    time.sleep(0.2)
+    # Wait for the server to finish indexing (WorkDoneProgress.End fires
+    # after apply_workspace_result, so the index is ready when we unblock).
+    client.wait_for_indexing(timeout=args.timeout)
 
     try:
         if args.cmd == "find-declaration":

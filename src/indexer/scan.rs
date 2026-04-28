@@ -126,10 +126,11 @@ impl Indexer {
         client: Option<tower_lsp::Client>,
     ) {
         let max = resolve_max_files(MAX_FILES_UNLIMITED);
+        let index_start = std::time::Instant::now();
         let (result, guard_opt) = Arc::clone(&self).index_workspace_impl(root, max, client.clone()).await;
         if let Some(guard) = guard_opt {
             if !result.aborted {
-                Arc::clone(&self).finalize_workspace_scan(result, guard, client.clone()).await;
+                Arc::clone(&self).finalize_workspace_scan(result, guard, client.clone(), index_start).await;
             }
         }
         Arc::clone(&self).run_pending_reindex(client).await;
@@ -147,10 +148,11 @@ impl Indexer {
         // workspace_root is updated inside index_workspace_impl after the
         // concurrency guard is acquired, so we never set a stale root here.
         let max = resolve_max_files(DEFAULT_MAX_INDEX_FILES);
+        let index_start = std::time::Instant::now();
         let (result, guard_opt) = Arc::clone(&self).index_workspace_impl(root, max, client.clone()).await;
         if let Some(guard) = guard_opt {
             if !result.aborted {
-                Arc::clone(&self).finalize_workspace_scan(result, guard, client.clone()).await;
+                Arc::clone(&self).finalize_workspace_scan(result, guard, client.clone(), index_start).await;
             }
         }
         Arc::clone(&self).run_pending_reindex(client).await;
@@ -225,10 +227,11 @@ impl Indexer {
         }
 
         let max = resolve_max_files(DEFAULT_MAX_INDEX_FILES);
+        let index_start = std::time::Instant::now();
         let (result, guard_opt) = Arc::clone(&self).index_workspace_impl(root, max, client.clone()).await;
         if let Some(guard) = guard_opt {
             if !result.aborted {
-                Arc::clone(&self).finalize_workspace_scan(result, guard, client.clone()).await;
+                Arc::clone(&self).finalize_workspace_scan(result, guard, client.clone(), index_start).await;
             }
         }
         Arc::clone(&self).run_pending_reindex(client).await;
@@ -277,6 +280,7 @@ impl Indexer {
                 }
             };
             log::info!("run_pending_reindex: starting queued reindex for {}", root.display());
+            let index_start = std::time::Instant::now();
             let (result, guard_opt) = Arc::clone(&self).index_workspace_impl(&root, max, client.clone()).await;
             if result.aborted {
                 // Lost the scan guard to a concurrent caller — restore the queued
@@ -291,7 +295,7 @@ impl Indexer {
                 return;
             }
             if let Some(guard) = guard_opt {
-                Arc::clone(&self).finalize_workspace_scan(result, guard, client.clone()).await;
+                Arc::clone(&self).finalize_workspace_scan(result, guard, client.clone(), index_start).await;
             }
             // Loop: drain any request that arrived while this queued reindex was running.
         }
@@ -299,18 +303,54 @@ impl Indexer {
 
     /// Apply scan results, index source paths, and save the cache — while keeping
     /// `indexing_in_progress` true for the full duration via `_guard`.
+    /// Sends `WorkDoneProgress.End` and writes the status file *after* the index
+    /// is fully applied, so clients waiting on `$/progress End` see a ready index.
     async fn finalize_workspace_scan(
         self: Arc<Self>,
         result: WorkspaceIndexResult,
         _guard: IndexingGuard,
-        _client: Option<tower_lsp::Client>,
+        client: Option<tower_lsp::Client>,
+        index_start: std::time::Instant,
     ) {
         self.last_scan_complete
             .store(result.complete_scan, std::sync::atomic::Ordering::Release);
         let root = result.workspace_root.clone();
         self.apply_workspace_result(&result);
-        Arc::clone(&self).index_source_paths(root).await;
+        Arc::clone(&self).index_source_paths(root.clone()).await;
         self.save_cache_to_disk();
+
+        // ── LSP progress: end (sent after apply so clients see a ready index) ──
+        let stats = &result.stats;
+        let token = NumberOrString::String("kotlin-lsp/indexing".into());
+        if let Some(ref client) = client {
+            client
+                .send_notification::<progress::KotlinProgress>(ProgressParams {
+                    token: token.clone(),
+                    value: ProgressParamsValue::WorkDone(WorkDoneProgress::End(
+                        WorkDoneProgressEnd {
+                            message: Some(format!(
+                                "Indexed {} files ({} cached, {} parsed)",
+                                stats.cache_hits + stats.files_parsed,
+                                stats.cache_hits,
+                                stats.files_parsed,
+                            )),
+                        },
+                    )),
+                })
+                .await;
+        }
+
+        // ── Status file: done (also after apply) ─────────────────────────────
+        let elapsed = index_start.elapsed().as_secs();
+        let root_escaped =
+            serde_json::to_string(&root.to_string_lossy().as_ref()).unwrap_or_default();
+        write_status_file(&format!(
+            r#"{{"phase":"done","workspace":{root_escaped},"indexed":{indexed},"total":{total},"cache_hits":{cache_hits},"symbols":{symbols},"elapsed_secs":{elapsed},"estimated_total_secs":null}}"#,
+            indexed = stats.files_parsed,
+            total = stats.files_parsed + stats.cache_hits,
+            cache_hits = stats.cache_hits,
+            symbols = stats.symbols_extracted,
+        ));
         // _guard dropped here → indexing_in_progress cleared
     }
 
@@ -458,7 +498,6 @@ impl Indexer {
             .store(parse_count, std::sync::atomic::Ordering::Release);
 
         // ── Status file: indexing started ────────────────────────────────────
-        let index_start = std::time::Instant::now();
         let started_unix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -779,34 +818,6 @@ impl Indexer {
             parse_errors,
             all_results.len()
         );
-
-        // ── LSP progress: end ────────────────────────────────────────────────
-        if let Some(ref client) = client {
-            client
-                .send_notification::<progress::KotlinProgress>(ProgressParams {
-                    token: token.clone(),
-                    value: ProgressParamsValue::WorkDone(WorkDoneProgress::End(
-                        WorkDoneProgressEnd {
-                            message: Some(format!(
-                                "Indexed {} files ({} cached, {} parsed)",
-                                all_results.len(),
-                                cache_hits,
-                                files_parsed
-                            )),
-                        },
-                    )),
-                })
-                .await;
-        }
-
-        // ── Status file: done ────────────────────────────────────────────────
-        let elapsed = index_start.elapsed().as_secs();
-        let root_escaped = serde_json::to_string(&root.to_string_lossy().as_ref()).unwrap_or_default();
-        write_status_file(&format!(
-            r#"{{"phase":"done","workspace":{root_escaped},"indexed":{files_parsed},"total":{actually_indexed},"cache_hits":{cache_hits},"symbols":{symbols},"elapsed_secs":{elapsed},"estimated_total_secs":null}}"#,
-            actually_indexed = files_parsed + cache_hits,
-            symbols = stats.symbols_extracted,
-        ));
 
         (
             WorkspaceIndexResult {
