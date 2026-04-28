@@ -143,7 +143,7 @@ pub(crate) fn cache_entry_to_file_result(uri: &Url, entry: &FileCacheEntry) -> F
         SymbolKind::CLASS, SymbolKind::INTERFACE, SymbolKind::STRUCT,
         SymbolKind::ENUM, SymbolKind::OBJECT,
     ];
-        let mut supertypes: Vec<(String, Location)> = Vec::new();
+    let mut supertypes: Vec<(String, Location)> = Vec::new();
     for sym in &data.symbols {
         if !class_kinds.contains(&sym.kind) { continue; }
         let start_line = sym.selection_range.start.line;

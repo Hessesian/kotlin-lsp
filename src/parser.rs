@@ -990,12 +990,32 @@ fn super_name_from_delegation(node: &Node, bytes: &[u8]) -> Option<String> {
     None
 }
 
+/// Collect the identifier segments of a `user_type` node, ignoring
+/// `type_arguments` subtrees, so generics don't interfere with dotted paths.
+/// `Bar<Event, State>` → `["Bar"]`;  `Outer<T>.Inner` → `["Outer", "Inner"]`.
+fn collect_user_type_segments(node: &Node, bytes: &[u8], segments: &mut Vec<String>) {
+    let mut cur = node.walk();
+    for child in node.children(&mut cur) {
+        match child.kind() {
+            "type_arguments" => {}  // skip generic parameters entirely
+            "simple_identifier" | "type_identifier" | "identifier" => {
+                if let Ok(text) = child.utf8_text(bytes) {
+                    let text = text.trim();
+                    if !text.is_empty() { segments.push(text.to_owned()); }
+                }
+            }
+            _ if child.is_named() => collect_user_type_segments(&child, bytes, segments),
+            _ => {}
+        }
+    }
+}
+
 /// Get the canonical type name from a `user_type` node, stripping generic args.
-/// `Bar<Event, State>` → `"Bar"`;  `Outer.Inner` → `"Outer.Inner"`.
+/// `Bar<Event, State>` → `"Bar"`;  `Outer<T>.Inner` → `"Outer.Inner"`.
 fn user_type_name(node: &Node, bytes: &[u8]) -> Option<String> {
-    let text = node.utf8_text(bytes).ok()?;
-    let name = text.split('<').next().unwrap_or(text).trim();
-    if name.is_empty() { None } else { Some(name.to_owned()) }
+    let mut segments = Vec::new();
+    collect_user_type_segments(node, bytes, &mut segments);
+    if segments.is_empty() { None } else { Some(segments.join(".")) }
 }
 
 /// Extract the outermost type name from a Java type node.

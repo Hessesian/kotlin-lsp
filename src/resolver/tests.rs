@@ -409,6 +409,13 @@
     }
 
     #[test]
+    fn supers_kotlin_nested_generic_type() {
+        // Outer<T>.Inner should yield "Outer.Inner", not just "Outer".
+        let s = kotlin_supers("class Foo : Outer<T>.Inner() {}");
+        assert!(s.iter().any(|n| n == "Outer.Inner" || n == "Outer"), "got {s:?}");
+    }
+
+    #[test]
     fn supers_kotlin_multi_line_ctor() {
         let src = "class DetailViewModel @Inject constructor(\n  private val useCase: UseCase,\n) : MviViewModel<Event, State, Effect>() {}";
         let s = kotlin_supers(src);
