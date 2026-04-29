@@ -60,8 +60,8 @@ impl Backend {
                 }
             }
             // Lambda parameter with failed type inference — jump to `{ name -> }`.
-            if let Some(loc) = ctx.lambda_decl {
-                return Ok(Some(GotoDefinitionResponse::Scalar(loc)));
+            if let Some(loc) = ctx.lambda_decl.as_ref() {
+                return Ok(Some(GotoDefinitionResponse::Scalar(loc.clone())));
             }
         }
 

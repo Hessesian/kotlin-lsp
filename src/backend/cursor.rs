@@ -47,11 +47,27 @@ impl CursorContext {
 
         let live_doc = idx.live_doc(uri);
 
-        // Determine whether this is a contextual name (it / this / lambda param).
-        let is_contextual = qualifier.as_deref().map_or(false, |q| q == "it" || q == "this")
-            || (qualifier.is_none()
-                && (word == "it" || word == "this"
-                    || word.chars().next().map_or(false, |c| c.is_lowercase())));
+        let line = position.line as usize;
+        let col  = position.character as usize;
+
+        // `it`/`this` are always contextual (lambda receiver inference).
+        let is_it_or_this = qualifier.as_deref().map_or(false, |q| q == "it" || q == "this")
+            || (qualifier.is_none() && (word == "it" || word == "this"));
+
+        // For other lowercase bare identifiers, confirm they are in scope as lambda
+        // params before running contextual inference.  Without this check, regular
+        // annotated variables like `val user: User` would be resolved to their type
+        // class on hover, which is incorrect.
+        let in_scope_lambda_params: Vec<String> = if !is_it_or_this
+            && qualifier.is_none()
+            && word.chars().next().map_or(false, |c| c.is_lowercase())
+        {
+            idx.lambda_params_at_col(uri, line, col)
+        } else {
+            vec![]
+        };
+
+        let is_contextual = is_it_or_this || in_scope_lambda_params.contains(&word);
 
         let contextual = if is_contextual {
             let name: &str = qualifier.as_deref().unwrap_or(&word);
@@ -63,9 +79,13 @@ impl CursorContext {
         // For goto-def: if inference failed but the word is a named lambda param
         // in scope, pre-resolve the declaration location.
         let lambda_decl = if contextual.is_none() && is_contextual && qualifier.is_none() {
-            let line = position.line as usize;
-            let col  = position.character as usize;
-            let params = idx.lambda_params_at_col(uri, line, col);
+            // For `it`/`this`, lambda_params_at_col wasn't called yet — call it now.
+            // For named params the cache already has the result.
+            let params = if in_scope_lambda_params.is_empty() {
+                idx.lambda_params_at_col(uri, line, col)
+            } else {
+                in_scope_lambda_params
+            };
             if params.contains(&word) {
                 idx.find_lambda_param_decl(uri, &word, line)
             } else {
