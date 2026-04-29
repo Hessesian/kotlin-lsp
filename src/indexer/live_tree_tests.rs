@@ -102,18 +102,32 @@ fn unknown_extension_never_stores() {
 }
 
 #[test]
-fn unknown_extension_removes_stale_entry() {
-    // If a URI somehow had a previous live_tree and is re-opened as an
+fn unknown_extension_stale_eviction() {
+    // If a URI previously had a live tree and is then stored again with an
     // unsupported extension, the stale entry must be evicted.
+    let idx = Indexer::new();
+    let txt = txt_uri();
+    // Manually insert a stale entry for the txt URI by abusing the DashMap.
+    let lang = lang_for_path("Foo.kt").unwrap();
+    let doc = parse_live(KOTLIN_SRC, lang).unwrap();
+    idx.live_trees.insert(txt.to_string(), std::sync::Arc::new(doc));
+    assert!(idx.live_doc(&txt).is_some(), "pre-condition: stale entry exists");
+
+    // Now call store_live_tree — unsupported extension must evict the stale entry.
+    idx.store_live_tree(&txt, "content");
+    assert!(idx.live_doc(&txt).is_none(), "stale entry must be removed");
+}
+
+#[test]
+fn unknown_extension_does_not_affect_other_entries() {
+    // Storing an unsupported URI should be a no-op: it must not create a live
+    // entry for that URI, and it must not disturb an existing supported entry
+    // stored under a different URI.
     let idx = Indexer::new();
     let uri = kt_uri();
     idx.store_live_tree(&uri, KOTLIN_SRC);
     assert!(idx.live_doc(&uri).is_some());
 
-    // "Re-open" same URI but path now unknown (simulate by calling with a .md URI
-    // that shares the same key position — here we just call store on txt_uri which
-    // is a different URI, so instead exercise that unsupported ext removes nothing
-    // for a never-stored URI, which should be a no-op).
     let txt = txt_uri();
     idx.store_live_tree(&txt, "content");
     assert!(idx.live_doc(&txt).is_none());

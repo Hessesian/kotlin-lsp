@@ -512,6 +512,14 @@ impl LanguageServer for Backend {
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
         let uri = &params.text_document.uri;
+
+        // Cancel any pending debounced reindex so it cannot re-publish
+        // diagnostics after the file has been closed.
+        let key = uri.to_string();
+        if let Some((_, handle)) = self.pending_reindex.remove(&key) {
+            handle.abort();
+        }
+
         self.indexer.remove_live_tree(uri);
         self.indexer.live_lines.remove(uri.as_str());
         // Clear diagnostics so stale errors don't linger after the file is closed.
