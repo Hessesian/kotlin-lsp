@@ -1,7 +1,7 @@
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use super::Backend;
-use crate::resolver::{ReceiverKind, infer_receiver_type};
+use super::cursor::CursorContext;
 
 fn locs_to_response(locs: Vec<Location>) -> GotoDefinitionResponse {
     match locs.len() {
@@ -19,12 +19,12 @@ impl Backend {
         let uri      = &pp.text_document.uri;
         let position = pp.position;
 
-        let Some((word, qualifier)) = self.indexer.word_and_qualifier_at(uri, position) else {
+        let Some(ctx) = CursorContext::build(&self.indexer, uri, position) else {
             return Ok(None);
         };
 
         // Special case: `this` keyword — navigate to the enclosing class definition.
-        if qualifier.is_none() && word == "this" {
+        if ctx.qualifier.is_none() && ctx.word == "this" {
             if let Some(class_name) = self.indexer.enclosing_class_at(uri, position.line) {
                 let locs = self.indexer.find_definition_qualified(&class_name, None, uri);
                 if !locs.is_empty() {
@@ -35,7 +35,7 @@ impl Backend {
         }
 
         // Special case: `super` keyword — navigate to the enclosing class's first supertype.
-        if qualifier.is_none() && word == "super" {
+        if ctx.qualifier.is_none() && ctx.word == "super" {
             if let Some(result) = self.goto_super_class(uri, position.line).await {
                 return Ok(Some(result));
             }
@@ -43,58 +43,43 @@ impl Backend {
         }
 
         // Special case: `super.method(...)` — resolve `method` in the parent class.
-        if qualifier.as_deref() == Some("super") {
-            if let Some(result) = self.goto_super_method(uri, position.line, &word).await {
+        if ctx.qualifier.as_deref() == Some("super") {
+            if let Some(result) = self.goto_super_method(uri, position.line, &ctx.word).await {
                 return Ok(Some(result));
             }
             return Ok(None);
         }
 
-        // Special case: `it` or a named lambda parameter — resolve to the
-        // inferred element/receiver type class instead of trying a text search.
-        if qualifier.is_none() && (word == "it" || word.chars().next().map(|c| c.is_lowercase()).unwrap_or(true)) {
-            if let Some(type_name) = self.indexer.infer_lambda_param_type_at(&word, uri, position) {
-                // For qualified names (e.g. `Outer.Inner`) try the full name first,
-                // then fall back to the last segment which is what the index stores.
-                let lookup = type_name.rsplit('.').next().unwrap_or(&type_name);
+        // `it` / named lambda parameter — resolve to the element/receiver type class.
+        if ctx.qualifier.is_none() {
+            if let Some(ref rt) = ctx.contextual {
+                let lookup = rt.leaf.as_str();
                 let locs = self.indexer.find_definition_qualified(lookup, None, uri);
                 if !locs.is_empty() {
-                    return Ok(match locs.len() {
-                        1 => Some(GotoDefinitionResponse::Scalar(locs.into_iter().next().unwrap())),
-                        _ => Some(GotoDefinitionResponse::Array(locs)),
-                    });
+                    return Ok(Some(locs_to_response(locs)));
                 }
             }
-            // If the word is a lambda parameter (type resolution failed), jump to
-            // the `{ name ->` declaration line in the current file.
-            let lambda_params = self.indexer.lambda_params_at_col(uri, position.line as usize, position.character as usize);
-            if lambda_params.contains(&word) {
-                if let Some(loc) = self.indexer.find_lambda_param_decl(uri, &word, position.line as usize) {
-                    return Ok(Some(GotoDefinitionResponse::Scalar(loc)));
-                }
-                return Ok(None);
+            // Lambda parameter with failed type inference — jump to `{ name -> }`.
+            if let Some(loc) = ctx.lambda_decl.as_ref() {
+                return Ok(Some(GotoDefinitionResponse::Scalar(loc.clone())));
             }
         }
 
-        // `this.field` / `it.field` — resolve the implicit receiver/lambda type and
-        // use it as the real qualifier so definition lookup finds the correct file.
-        if let Some(qual) = qualifier.as_deref() {
-            if qual == "this" || qual == "it" {
-                let kind = ReceiverKind::Contextual { name: qual, position };
-                if let Some(rt) = infer_receiver_type(&self.indexer, kind, uri) {
-                    // Try full qualified type first (e.g. `Outer.Inner`), then leaf segment.
-                    let locs = self.indexer.find_definition_qualified(&word, Some(&rt.qualified), uri);
-                    let locs = if locs.is_empty() && rt.leaf != rt.qualified {
-                        self.indexer.find_definition_qualified(&word, Some(&rt.leaf), uri)
-                    } else { locs };
-                    if !locs.is_empty() {
-                        return Ok(Some(locs_to_response(locs)));
-                    }
+        // `this.field` / `it.field` — use the already-resolved contextual receiver
+        // so lookup finds the member in the correct class.
+        if ctx.qualifier.is_some() {
+            if let Some(ref rt) = ctx.contextual {
+                let locs = self.indexer.find_definition_qualified(&ctx.word, Some(&rt.qualified), uri);
+                let locs = if locs.is_empty() && rt.leaf != rt.qualified {
+                    self.indexer.find_definition_qualified(&ctx.word, Some(&rt.leaf), uri)
+                } else { locs };
+                if !locs.is_empty() {
+                    return Ok(Some(locs_to_response(locs)));
                 }
             }
         }
 
-        let locs = self.indexer.find_definition_qualified(&word, qualifier.as_deref(), uri);
+        let locs = self.indexer.find_definition_qualified(&ctx.word, ctx.qualifier.as_deref(), uri);
         if !locs.is_empty() {
             return Ok(match locs.len() {
                 1 => Some(GotoDefinitionResponse::Scalar(locs.into_iter().next().unwrap())),
@@ -111,7 +96,7 @@ impl Backend {
             let m = self.indexer.ignore_matcher.read().unwrap().clone();
             (crate::rg::effective_rg_root(wr.as_deref(), file_path.as_deref()), m)
         };
-        let name_clone = word.clone();
+        let name_clone = ctx.word.clone();
         let rg_locs = tokio::task::spawn_blocking(move || {
             crate::rg::rg_find_definition(&name_clone, root_opt.as_deref(), matcher.as_deref())
         }).await.unwrap_or_default();

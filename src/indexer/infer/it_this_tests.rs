@@ -20,6 +20,18 @@ fn indexed(path: &str, src: &str) -> (Url, Indexer) {
     (u, idx)
 }
 
+/// Index `sig_src` for signature lookup, plus store a live tree for `code_src`
+/// at the same URI (for CST fast-path tests).
+fn indexed_with_live(path: &str, sig_src: &str, code_src: &str) -> (Url, Indexer, Vec<String>) {
+    let u = uri(path);
+    let idx = Indexer::new();
+    idx.index_content(&u, sig_src);
+    idx.store_live_tree(&u, code_src);
+    idx.set_live_lines(&u, code_src);
+    let lines: Vec<String> = code_src.lines().map(String::from).collect();
+    (u, idx, lines)
+}
+
 // ── find_it_element_type ─────────────────────────────────────────────────────
 
 #[test]
@@ -56,6 +68,59 @@ fn it_element_type_scope_fn_let() {
         find_it_element_type("user.let { it.", &idx, &u).as_deref(),
         Some("User")
     );
+}
+
+// ── two lambdas same line ─────────────────────────────────────────────────────
+
+#[test]
+fn it_type_second_of_two_lambdas_same_line() {
+    // { setState { it } }, { setEffect { it } }
+    // First `it` (inside setState lambda): should resolve to State
+    // Second `it` (inside setEffect lambda): should resolve to Effect
+    let src = "fun setState(block: (State) -> Unit) {}\nfun setEffect(block: (Effect) -> Unit) {}";
+    let (u, idx) = indexed("/t.kt", src);
+    let before1 = "{ setState { ";
+    let before2 = "{ setState { it } }, { setEffect { ";
+    assert_eq!(find_it_element_type(before1, &idx, &u).as_deref(), Some("State"),
+        "first it (inside setState) should resolve to State");
+    assert_eq!(find_it_element_type(before2, &idx, &u).as_deref(), Some("Effect"),
+        "second it (inside setEffect) should resolve to Effect");
+}
+
+// ── two lambdas, multi-line, outer function not indexed ─────────────────────
+
+/// Bug regression: when both lambdas are on separate lines inside an `observe()`
+/// call and the inner function (`setEffect`) is NOT indexed, the second `it`
+/// must still resolve via the CST structural walk-up to `observe`'s 2nd param.
+#[test]
+fn it_type_second_lambda_multiline_unindexed_inner() {
+    // observe is indexed; setState/setEffect are NOT (only `observe` matters here).
+    let sig_src = "fun observe(onState: (State) -> Unit, onEffect: (Effect) -> Unit) {}";
+    // The code snippet has observe on line 0, lambdas on lines 1 and 2.
+    let code_src = "observe(\n    { setState { it } },\n    { setEffect { it } }\n)";
+    // Line 2: "    { setEffect { it } }"
+    //          0123456789012345678901234
+    // second `it` is at col 18 on line 2
+    let (u, idx, lines) = indexed_with_live("/t.kt", sig_src, code_src);
+    let pos = crate::types::CursorPos { line: 2, utf16_col: 18 };
+    let result = find_it_element_type_in_lines(&lines, pos, &idx, &u);
+    assert_eq!(result.as_deref(), Some("Effect"),
+        "second it inside unindexed setEffect should resolve via observe's 2nd param");
+}
+
+/// Same scenario but for the FIRST lambda — must resolve to observe's 1st param.
+#[test]
+fn it_type_first_lambda_multiline_unindexed_inner() {
+    let sig_src = "fun observe(onState: (State) -> Unit, onEffect: (Effect) -> Unit) {}";
+    let code_src = "observe(\n    { setState { it } },\n    { setEffect { it } }\n)";
+    // Line 1: "    { setState { it } },"
+    //          012345678901234567890123
+    // first `it` is at col 17 on line 1
+    let (u, idx, lines) = indexed_with_live("/t.kt", sig_src, code_src);
+    let pos = crate::types::CursorPos { line: 1, utf16_col: 17 };
+    let result = find_it_element_type_in_lines(&lines, pos, &idx, &u);
+    assert_eq!(result.as_deref(), Some("State"),
+        "first it inside unindexed setState should resolve via observe's 1st param");
 }
 
 // ── find_this_element_type_in_lines ─────────────────────────────────────────
@@ -270,4 +335,20 @@ fn it_type_let_still_infers_receiver() {
         Some("User"),
         "let: it should still resolve to User"
     );
+}
+
+/// When setState IS indexed and the live tree is available, the simple
+/// trailing-lambda case (Case B) must still resolve via the EXISTING path
+/// — `cst_lambda_param_type_via_call` must NOT be called or, if it is,
+/// must not interfere.
+#[test]
+fn it_type_indexed_inner_fn_cst_still_works() {
+    let sig_src = "fun setState(block: (State) -> Unit) {}";
+    let code_src = "setState { it }";
+    let (u, idx, lines) = indexed_with_live("/t.kt", sig_src, code_src);
+    // "setState { " = 11 chars → `it` at col 11
+    let pos = crate::types::CursorPos { line: 0, utf16_col: 11 };
+    let result = find_it_element_type_in_lines(&lines, pos, &idx, &u);
+    assert_eq!(result.as_deref(), Some("State"),
+        "simple trailing-lambda with live tree must still resolve via Case B");
 }

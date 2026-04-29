@@ -360,7 +360,7 @@ fn cst_call_arg_type(pos: CursorPos, idx: &Indexer, uri: &Url) -> Option<String>
 
 /// Extract the function name from a `call_expression` node.
 /// Handles simple calls `foo(...)` and navigation chains `foo.bar(...)`.
-fn cst_call_fn_name(call_expr: tree_sitter::Node<'_>, bytes: &[u8]) -> Option<String> {
+pub(crate) fn cst_call_fn_name(call_expr: tree_sitter::Node<'_>, bytes: &[u8]) -> Option<String> {
     let callee = call_expr.child(0)?;
     let name_node = match callee.kind() {
         "simple_identifier" | "type_identifier" => callee,
@@ -377,7 +377,7 @@ fn cst_call_fn_name(call_expr: tree_sitter::Node<'_>, bytes: &[u8]) -> Option<St
 
 /// If `value_argument` has a named-arg label (`simple_identifier "="` prefix),
 /// return the label text; otherwise `None`.
-fn cst_named_arg_label(value_arg: tree_sitter::Node<'_>, bytes: &[u8]) -> Option<String> {
+pub(crate) fn cst_named_arg_label(value_arg: tree_sitter::Node<'_>, bytes: &[u8]) -> Option<String> {
     let count = value_arg.child_count();
     for i in 0..count.saturating_sub(1) {
         let (c, next) = (value_arg.child(i)?, value_arg.child(i + 1)?);
@@ -389,7 +389,7 @@ fn cst_named_arg_label(value_arg: tree_sitter::Node<'_>, bytes: &[u8]) -> Option
 }
 
 /// Count how many `value_argument` siblings precede `value_arg` in its parent.
-fn cst_value_arg_position(value_arg: tree_sitter::Node<'_>) -> usize {
+pub(crate) fn cst_value_arg_position(value_arg: tree_sitter::Node<'_>) -> usize {
     let parent = match value_arg.parent() { Some(p) => p, None => return 0 };
     let target_id = value_arg.id();
     let mut pos = 0usize;
