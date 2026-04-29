@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 use tower_lsp::lsp_types::*;
+use tree_sitter::Point;
 
 use super::{
     Indexer,
@@ -236,6 +237,52 @@ impl Indexer {
     /// Without the limit, the scan hits `}` first (depth→1), then `{` resets to 0
     /// (not <0), so the lambda params are never collected.
     pub fn lambda_params_at_col(&self, uri: &Url, cursor_line: usize, cursor_col: usize) -> Vec<String> {
+        // ── CST fast path ────────────────────────────────────────────────────
+        if let Some(doc) = self.live_doc(uri) {
+            let lines_text = std::str::from_utf8(&doc.bytes).unwrap_or("");
+            let line_text  = lines_text.lines().nth(cursor_line).unwrap_or("");
+            let byte_col   = crate::indexer::live_tree::utf16_col_to_byte(line_text, cursor_col);
+            let point      = Point { row: cursor_line, column: byte_col };
+            if let Some(node) = doc.tree.root_node().descendant_for_point_range(point, point) {
+                let mut params: Vec<String> = Vec::new();
+                let mut cur = node;
+                loop {
+                    if cur.kind() == "lambda_literal" {
+                        for i in 0..cur.child_count() {
+                            if let Some(lp) = cur.child(i) {
+                                if lp.kind() == "lambda_parameters" {
+                                    for j in 0..lp.child_count() {
+                                        if let Some(vd) = lp.child(j) {
+                                            if vd.kind() == "variable_declaration" {
+                                                if let Some(si) = vd.child(0) {
+                                                    if si.kind() == "simple_identifier" {
+                                                        if let Ok(name) = std::str::from_utf8(&doc.bytes[si.byte_range()]) {
+                                                            if name != "it" && name != "_"
+                                                                && name.chars().next().map(|c| c.is_lowercase()).unwrap_or(false)
+                                                                && !params.contains(&name.to_string())
+                                                            {
+                                                                params.push(name.to_string());
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    match cur.parent() {
+                        Some(p) => cur = p,
+                        None    => break,
+                    }
+                }
+                return params;
+            }
+        }
+
+        // ── Text fallback ────────────────────────────────────────────────────
         let lines = self.live_lines.get(uri.as_str())
             .map(|ll| ll.clone())
             .or_else(|| self.files.get(uri.as_str()).map(|f| f.lines.clone()))
@@ -247,11 +294,7 @@ impl Indexer {
 
         for ln in (scan_start..=cursor_line).rev() {
             let line = match lines.get(ln) { Some(l) => l, None => continue };
-            // On the cursor line only consider chars up to the cursor column so
-            // that the closing `}` of an inline lambda (which comes AFTER the
-            // cursor) does not inflate the depth counter.
             let scan_line: &str = if ln == cursor_line && cursor_col < line.len() {
-                // cursor_col is a UTF-16 character offset; find the byte boundary.
                 let mut utf16 = 0usize;
                 let mut byte_end = line.len();
                 for (bi, ch) in line.char_indices() {
@@ -268,9 +311,7 @@ impl Indexer {
                     '{' => {
                         depth -= 1;
                         if depth < 0 {
-                            // Skip string interpolation.
                             if line[..bi].ends_with('$') { depth = 0; continue; }
-                            // Check for named params `{ a, b -> }`.
                             let after = line[bi + 1..].trim_start();
                             if let Some(arrow_pos) = after.find("->") {
                                 let names_str = &after[..arrow_pos];
@@ -283,7 +324,6 @@ impl Indexer {
                                         && !params.contains(&name) { params.push(name.clone()); }
                                 }
                             }
-                            // Reset so outer lambdas can also be found.
                             depth = 0;
                         }
                     }
@@ -327,56 +367,92 @@ impl Indexer {
     /// its parent sealed class so we can filter out unrelated `Loading` classes
     /// in other sealed hierarchies.
     pub fn enclosing_class_at(&self, uri: &Url, row: u32) -> Option<String> {
-        let file = self.files.get(uri.as_str())?;
         let row = row as usize;
 
-        // Walk backward tracking brace depth to find the innermost class/object
-        // declaration that encloses the cursor.  We ignore indentation because
-        // the cursor may sit on an import or top-level line (indent 0) where the
-        // indentation heuristic always returns None.
+        // ── CST fast path ────────────────────────────────────────────────────
+        if let Some(doc) = self.live_doc(uri) {
+            let lines_text = std::str::from_utf8(&doc.bytes).unwrap_or("");
+            // Use the first non-whitespace byte on the row as the probe column.
+            let probe_col = lines_text.lines().nth(row)
+                .map(|l| l.len() - l.trim_start().len())
+                .unwrap_or(0);
+            let point = Point { row, column: probe_col };
+            if let Some(node) = doc.tree.root_node().descendant_for_point_range(point, point) {
+                let mut cur = node;
+                loop {
+                    match cur.kind() {
+                        "class_declaration" | "interface_declaration"
+                        | "object_declaration" | "companion_object" => {
+                            // Preserve existing semantics: exclude the node if its
+                            // declaration starts on the query row (cursor is on the
+                            // class's own declaration line).
+                            if cur.start_position().row < row {
+                                if let Some(name) = cst_extract_type_name(&cur, &doc.bytes) {
+                                    return Some(name);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    match cur.parent() {
+                        Some(p) => cur = p,
+                        None    => break,
+                    }
+                }
+            }
+        }
+
+        // ── Text fallback ────────────────────────────────────────────────────
+        let file = self.files.get(uri.as_str())?;
         let mut depth = 0i32;
         let end = row.min(file.lines.len().saturating_sub(1));
         for i in (0..=end).rev() {
             let line = match file.lines.get(i) { Some(l) => l, None => continue };
-            // Count braces right-to-left on this line.
             for ch in line.chars().rev() {
-                match ch {
-                    '}' => depth += 1,
-                    '{' => depth -= 1,
-                    _ => {}
-                }
+                match ch { '}' => depth += 1, '{' => depth -= 1, _ => {} }
             }
-            // depth < 0: we just crossed the opening brace of a scope that
-            // starts on this line and isn't closed before the cursor.
-            // The cursor line itself is excluded (it can't enclose itself).
             if depth < 0 && i < row {
                 let t = line.trim();
-                if let Some(name) = extract_class_decl_name(t) {
-                    return Some(name);
-                }
-                // The `{` may be on a different line than the `class` keyword, e.g.:
-                //   line N:   class Foo @Inject constructor(
-                //   ...params...
-                //   line i:   ) : Bar() {
-                // Scan up to 15 lines backward from `i` to find the class keyword.
+                if let Some(name) = extract_class_decl_name(t) { return Some(name); }
                 let scan_up = i.saturating_sub(15);
                 for j in (scan_up..i).rev() {
                     if let Some(prev) = file.lines.get(j) {
-                        if let Some(name) = extract_class_decl_name(prev.trim()) {
-                            return Some(name);
-                        }
-                        // Stop if we hit a line that is clearly a different scope
-                        // (another `}` or a function/lambda body closer).
+                        if let Some(name) = extract_class_decl_name(prev.trim()) { return Some(name); }
                         let pt = prev.trim();
                         if pt.starts_with('}') || pt.ends_with('}') { break; }
                     }
                 }
-                // Opening brace belongs to a function/lambda — keep searching.
                 depth = 0;
             }
         }
         None
     }
+}
+
+/// Extract the type/class name from a CST class/interface/object/companion_object node.
+/// Tries `child_by_field_name("name")` first, then walks direct children for
+/// `type_identifier` or `simple_identifier` that starts with an uppercase letter.
+fn cst_extract_type_name(node: &tree_sitter::Node, bytes: &[u8]) -> Option<String> {
+    if let Some(n) = node.child_by_field_name("name") {
+        if let Ok(s) = std::str::from_utf8(&bytes[n.byte_range()]) {
+            let s = s.to_string();
+            if s.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                return Some(s);
+            }
+        }
+    }
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i) {
+            if matches!(child.kind(), "type_identifier" | "simple_identifier" | "identifier") {
+                if let Ok(s) = std::str::from_utf8(&bytes[child.byte_range()]) {
+                    if s.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                        return Some(s.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// If `line` is a class/interface/object/sealed declaration, return the type name.

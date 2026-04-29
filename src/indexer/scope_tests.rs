@@ -462,3 +462,72 @@ fn multi_param_lambda_is_detected() {
     assert!(is_lambda_param("a", "items.zip(other) { a, b ->", &idx, &u, 0));
     assert!(is_lambda_param("b", "items.zip(other) { a, b ->", &idx, &u, 0));
 }
+
+// ── CST fast-path coverage ───────────────────────────────────────────────
+
+fn indexed_with_live(path: &str, src: &str) -> (Url, Indexer) {
+    let u = uri(path);
+    let idx = Indexer::new();
+    idx.index_content(&u, src);
+    idx.store_live_tree(&u, src);
+    (u, idx)
+}
+
+#[test]
+fn enclosing_class_cst_simple() {
+    let src = "sealed interface Outer {\n    data object Inner : Outer\n}";
+    let (u, idx) = indexed_with_live("/Outer.kt", src);
+    assert_eq!(idx.enclosing_class_at(&u, 1), Some("Outer".into()));
+}
+
+#[test]
+fn enclosing_class_cst_interface() {
+    let src = "interface IFoo {\n    fun doIt()\n}";
+    let (u, idx) = indexed_with_live("/IFoo.kt", src);
+    assert_eq!(idx.enclosing_class_at(&u, 1), Some("IFoo".into()));
+}
+
+#[test]
+fn enclosing_class_cst_declaration_line_returns_none() {
+    // The cursor is on the class declaration itself — enclosing should be None.
+    let src = "class Foo {\n    fun doIt() {}\n}";
+    let (u, idx) = indexed_with_live("/Foo.kt", src);
+    assert_eq!(idx.enclosing_class_at(&u, 0), None);
+}
+
+#[test]
+fn enclosing_class_cst_nested() {
+    let src = "class Outer {\n    sealed class Inner {\n        data object Loading : Inner\n    }\n}";
+    let (u, idx) = indexed_with_live("/Outer.kt", src);
+    // Line 2 = "        data object Loading..." → innermost enclosing = Inner
+    assert_eq!(idx.enclosing_class_at(&u, 2), Some("Inner".into()));
+}
+
+#[test]
+fn lambda_params_at_col_cst_collects_named() {
+    let src = "val x = items.map { item ->\n    item.id\n}";
+    let (u, idx) = indexed_with_live("/t.kt", src);
+    // Cursor on line 1, inside the lambda body
+    let params = idx.lambda_params_at_col(&u, 1, 4);
+    assert!(params.contains(&"item".to_string()),
+        "CST path must collect 'item', got: {params:?}");
+}
+
+#[test]
+fn lambda_params_at_col_cst_multi_param() {
+    let src = "items.zip(other) { a, b ->\n    a.id\n}";
+    let (u, idx) = indexed_with_live("/t.kt", src);
+    let params = idx.lambda_params_at_col(&u, 1, 4);
+    assert!(params.contains(&"a".to_string()), "must find 'a', got: {params:?}");
+    assert!(params.contains(&"b".to_string()), "must find 'b', got: {params:?}");
+}
+
+#[test]
+fn lambda_params_at_col_cst_excludes_it() {
+    // Lambdas without an explicit param list use `it` — should not appear in params.
+    let src = "items.forEach {\n    it.id\n}";
+    let (u, idx) = indexed_with_live("/t.kt", src);
+    let params = idx.lambda_params_at_col(&u, 1, 4);
+    assert!(!params.contains(&"it".to_string()),
+        "'it' must never appear in named params, got: {params:?}");
+}

@@ -6,154 +6,205 @@
 //! 3. `this` inside scope functions / class methods — shows `: Type` after `this`
 //! 4. Untyped local `val`/`var` declarations — shows `: InferredType` after the name
 //!    (only when the type is determinable from the index without rg)
+//!
+//! Uses the live CST (tree-sitter parse tree stored in `Indexer::live_trees`) when
+//! available, or re-parses on demand for files not currently open in the editor.
 
 use std::sync::Arc;
 use tower_lsp::lsp_types::{InlayHint, InlayHintKind, InlayHintLabel, Position, Range, Url};
 
 use crate::indexer::Indexer;
+use crate::indexer::live_tree::{lang_for_path, parse_live};
 
 pub fn compute_inlay_hints(idx: &Arc<Indexer>, uri: &Url, range: Range) -> Vec<InlayHint> {
-    // Prefer live_lines (updated synchronously on every did_change) over
-    // files.lines (only refreshed after debounced reindex).  This keeps hint
-    // positions consistent with the text the editor is currently showing.
-    let lines = idx.live_lines.get(uri.as_str()).map(|l| l.clone())
-        .or_else(|| idx.files.get(uri.as_str()).map(|f| f.lines.clone()))
-        .unwrap_or_default();
+    // Fast path: editor has the file open → use pre-parsed live tree.
+    if let Some(doc) = idx.live_doc(uri) {
+        return cst_hints(idx, uri, &doc.tree, &doc.bytes, range);
+    }
+
+    // Fallback: reconstruct content from live_lines or indexed file data, then
+    // re-parse. tree-sitter parses 5000 lines in ~3ms so this is not a regression.
+    let lines_arc = idx.live_lines.get(uri.as_str()).map(|l| Arc::clone(&*l))
+        .or_else(|| idx.files.get(uri.as_str()).map(|f| Arc::clone(&f.lines)));
+    let Some(lines) = lines_arc else { return vec![]; };
     if lines.is_empty() { return vec![]; }
 
-    let start = range.start.line as usize;
-    let end   = (range.end.line as usize + 1).min(lines.len());
+    let content = lines.join("\n");
+    let Some(lang) = lang_for_path(uri.path()) else { return vec![]; };
+    let Some(doc)  = parse_live(&content, lang)  else { return vec![]; };
+    cst_hints(idx, uri, &doc.tree, &doc.bytes, range)
+}
 
-    let mut hints = Vec::new();
+// ─── CST walk ────────────────────────────────────────────────────────────────
 
-    for (ln_idx, line) in lines[start..end].iter().enumerate() {
-        let ln = (start + ln_idx) as u32;
-        let trimmed = line.trim_start();
-        // Skip comments.
-        if trimmed.starts_with("//") || trimmed.starts_with('*') || trimmed.starts_with("/*") {
-            continue;
+/// Preorder-walk the tree and emit inlay hints for nodes within `range`.
+fn cst_hints(
+    idx:   &Arc<Indexer>,
+    uri:   &Url,
+    tree:  &tree_sitter::Tree,
+    bytes: &[u8],
+    range: Range,
+) -> Vec<InlayHint> {
+    let mut hints  = Vec::new();
+    let mut cursor = tree.walk();
+
+    'walk: loop {
+        let node = cursor.node();
+        let ns = node.start_position().row as u32;
+        let ne = node.end_position().row as u32;
+
+        // Node starts after the requested range → done.
+        if ns > range.end.line { break; }
+
+        // Entire subtree precedes the requested range → skip it.
+        if ne < range.start.line {
+            loop {
+                if cursor.goto_next_sibling() { continue 'walk; }
+                if !cursor.goto_parent()      { break 'walk; }
+            }
         }
 
-        // ── 1 & 2 & 3: lambda param / `it` / `this` type hints ───────────────
-        hint_lambda_params(idx, uri, line, ln, &mut hints);
+        match node.kind() {
+            "lambda_literal" => {
+                hint_lambda(idx, uri, &node, bytes, range, &mut hints);
+            }
+            "simple_identifier" => {
+                if node.utf8_text(bytes) == Ok("it") {
+                    let pos = ts_pos_to_lsp(node.start_position(), bytes);
+                    if in_range(pos.line, range) {
+                        if let Some(ty) = idx.infer_lambda_param_type_at("it", uri, pos) {
+                            hints.push(type_hint(ts_pos_to_lsp(node.end_position(), bytes), &ty));
+                        }
+                    }
+                }
+            }
+            "this_expression" => {
+                let pos = ts_pos_to_lsp(node.start_position(), bytes);
+                if in_range(pos.line, range) {
+                    if let Some(ty) = idx.infer_lambda_param_type_at("this", uri, pos) {
+                        hints.push(type_hint(ts_pos_to_lsp(node.end_position(), bytes), &ty));
+                    }
+                }
+            }
+            "property_declaration" => {
+                hint_property(idx, uri, &node, bytes, range, &mut hints);
+            }
+            _ => {}
+        }
 
-        // ── 4: untyped val/var declarations ──────────────────────────────────
-        hint_untyped_val(idx, uri, line, ln, &mut hints);
+        // Descend to first child, or advance to next sibling / ancestor sibling.
+        if cursor.goto_first_child() { continue; }
+        loop {
+            if cursor.goto_next_sibling() { break; }
+            if !cursor.goto_parent() { break 'walk; }
+        }
     }
 
     hints
 }
 
-/// Scan one line for `it`, `this`, or named lambda params and emit `: Type` hints.
-fn hint_lambda_params(
-    idx:   &Indexer,
+/// Emit `: Type` hints for named parameters in a `lambda_literal`.
+///
+/// Structure confirmed from tree-sitter-kotlin probe:
+/// `lambda_literal { lambda_parameters { variable_declaration { simple_identifier } } -> statements }`
+fn hint_lambda(
+    idx:   &Arc<Indexer>,
     uri:   &Url,
-    line:  &str,
-    ln:    u32,
+    node:  &tree_sitter::Node<'_>,
+    bytes: &[u8],
+    range: Range,
     hints: &mut Vec<InlayHint>,
 ) {
-    // ── Pass 1: named lambda param declarations `{ name ->` or `{ a, b ->` ──
-    // Iterate ALL `->` occurrences so nested lambdas on the same line are handled.
-    let mut search_from = 0;
-    while let Some(arrow_rel) = line[search_from..].find("->") {
-        let arrow_pos = search_from + arrow_rel;
-        if let Some(brace_pos) = line[..arrow_pos].rfind('{') {
-            let names_str = &line[brace_pos + 1..arrow_pos];
-            let mut name_search = 0usize;
-            for tok in names_str.split(',') {
-                let tok_trimmed = tok.trim();
-                let name: String = tok_trimmed.chars()
-                    .take_while(|&c| c.is_alphanumeric() || c == '_')
-                    .collect();
-                if !name.is_empty() && name != "it" && name != "_"
-                    && name.chars().next().map(|c| c.is_lowercase()).unwrap_or(false)
-                {
-                    // Find this token's position inside `names_str` from `name_search`.
-                    if let Some(tok_rel) = names_str[name_search..].find(tok_trimmed) {
-                        let abs = brace_pos + 1 + name_search + tok_rel;
-                        let col = char_col(line, abs) as u32;
-                        if let Some(ty) = idx.infer_lambda_param_type_at(
-                            &name, uri, Position::new(ln, col)
-                        ) {
-                            let hint_pos = Position::new(ln, col + name.len() as u32);
-                            hints.push(type_hint(hint_pos, &ty));
-                        }
-                    }
+    let mut nc = node.walk();
+    for child in node.children(&mut nc) {
+        if child.kind() != "lambda_parameters" { continue; }
+
+        let mut pc = child.walk();
+        for param in child.children(&mut pc) {
+            if param.kind() != "variable_declaration" { continue; }
+
+            // Skip params that already carry a type annotation (`: Type` child).
+            let mut vc = param.walk();
+            let mut has_type  = false;
+            let mut name_node = None;
+            for pchild in param.children(&mut vc) {
+                match pchild.kind() {
+                    "simple_identifier" if name_node.is_none() => { name_node = Some(pchild); }
+                    ":"                                        => { has_type = true; break; }
+                    _ => {}
                 }
-                name_search += tok.len() + 1; // +1 for the `,` separator
+            }
+            if has_type { continue; }
+
+            let Some(name_n) = name_node                    else { continue };
+            let Ok(name)     = name_n.utf8_text(bytes)      else { continue };
+            let name = name.trim();
+            if name.is_empty() || name == "_" { continue; }
+            if !name.chars().next().map(|c| c.is_lowercase()).unwrap_or(false) { continue; }
+
+            let start_pos = ts_pos_to_lsp(name_n.start_position(), bytes);
+            let end_pos   = ts_pos_to_lsp(name_n.end_position(),   bytes);
+            if !in_range(start_pos.line, range) { continue; }
+
+            if let Some(ty) = idx.infer_lambda_param_type_at(name, uri, start_pos) {
+                hints.push(type_hint(end_pos, &ty));
             }
         }
-        search_from = arrow_pos + 2;
-    }
-
-    // ── Pass 2: `it` and `this` usages (may appear multiple times per line) ──
-    let mut pos = 0;
-    while pos < line.len() {
-        let remaining = &line[pos..];
-
-        if let Some(rel) = find_word(remaining, "it") {
-            let abs = pos + rel;
-            let col = char_col(line, abs) as u32;
-            if let Some(ty) = idx.infer_lambda_param_type_at(
-                "it", uri, Position::new(ln, col)
-            ) {
-                hints.push(type_hint(Position::new(ln, col + 2), &ty));
-            }
-            pos = abs + 2;
-            continue;
-        }
-
-        if let Some(rel) = find_word(remaining, "this") {
-            let abs = pos + rel;
-            let col = char_col(line, abs) as u32;
-            if let Some(ty) = idx.infer_lambda_param_type_at(
-                "this", uri, Position::new(ln, col)
-            ) {
-                hints.push(type_hint(Position::new(ln, col + 4), &ty));
-            }
-            pos = abs + 4;
-            continue;
-        }
-
-        break;
+        break; // only one lambda_parameters block per literal
     }
 }
 
 /// Emit `: Type` hint for `val name = expr` / `var name = expr` without explicit type.
-///
-/// Pattern: `(val|var) <ident> =` with NO `:` between the ident and `=`.
-fn hint_untyped_val(
-    idx:   &Indexer,
+fn hint_property(
+    idx:   &Arc<Indexer>,
     uri:   &Url,
-    line:  &str,
-    ln:    u32,
+    node:  &tree_sitter::Node<'_>,
+    bytes: &[u8],
+    range: Range,
     hints: &mut Vec<InlayHint>,
 ) {
-    let trimmed = line.trim_start();
-    let prefix = if trimmed.starts_with("val ") { "val " }
-                 else if trimmed.starts_with("var ") { "var " }
-                 else { return; };
+    // Find the variable_declaration child.
+    let mut nc  = node.walk();
+    let mut var_decl = None;
+    for child in node.children(&mut nc) {
+        if child.kind() == "variable_declaration" { var_decl = Some(child); break; }
+    }
+    let Some(vd) = var_decl else { return };
 
-    let after_kw = &trimmed[prefix.len()..];
-    // Extract identifier.
-    let name: String = after_kw.chars().take_while(|&c| c.is_alphanumeric() || c == '_').collect();
+    // Check for existing type annotation.
+    let mut vc        = vd.walk();
+    let mut has_type  = false;
+    let mut name_node = None;
+    for child in vd.children(&mut vc) {
+        match child.kind() {
+            "simple_identifier" if name_node.is_none() => { name_node = Some(child); }
+            ":"                                        => { has_type = true; break; }
+            _ => {}
+        }
+    }
+    if has_type { return; }
+
+    // Must have `=` (skip abstract / delegate declarations without an initializer).
+    let mut nc2      = node.walk();
+    let has_assign   = node.children(&mut nc2).any(|c| c.kind() == "=");
+    if !has_assign { return; }
+
+    let Some(name_n) = name_node               else { return };
+    let Ok(name)     = name_n.utf8_text(bytes) else { return };
+    let name = name.trim();
     if name.is_empty() { return; }
 
-    let after_name = after_kw[name.len()..].trim_start();
-    // If the next non-space char is `:` → already typed, skip.
-    if after_name.starts_with(':') { return; }
-    // Must be `=` to be an assignment.
-    if !after_name.starts_with('=') { return; }
+    let start_pos = ts_pos_to_lsp(name_n.start_position(), bytes);
+    let end_pos   = ts_pos_to_lsp(name_n.end_position(),   bytes);
+    if !in_range(start_pos.line, range) { return; }
 
-    // Find the column of the name in the original line.
-    let name_byte = line.find(&name[..]).unwrap_or(0);
-    let col = char_col(line, name_byte) as u32;
-
-    if let Some(raw) = crate::resolver::infer_variable_type_raw(idx, &name, uri) {
-        let base: String = raw.chars().take_while(|&c| c.is_alphanumeric() || c == '_' || c == '<' || c == '>').collect();
-        if base.is_empty() { return; }
-        let hint_pos = Position::new(ln, col + name.len() as u32);
-        hints.push(type_hint(hint_pos, &base));
+    if let Some(raw) = crate::resolver::infer_variable_type_raw(idx, name, uri) {
+        let base: String = raw.chars()
+            .take_while(|&c| c.is_alphanumeric() || c == '_' || c == '<' || c == '>')
+            .collect();
+        if !base.is_empty() {
+            hints.push(type_hint(end_pos, &base));
+        }
     }
 }
 
@@ -162,35 +213,37 @@ fn hint_untyped_val(
 fn type_hint(position: Position, type_name: &str) -> InlayHint {
     InlayHint {
         position,
-        label:   InlayHintLabel::String(format!(": {type_name}")),
-        kind:    Some(InlayHintKind::TYPE),
-        text_edits:  None,
-        tooltip:     None,
-        padding_left:  Some(false),
+        label:        InlayHintLabel::String(format!(": {type_name}")),
+        kind:         Some(InlayHintKind::TYPE),
+        text_edits:   None,
+        tooltip:      None,
+        padding_left: Some(false),
         padding_right: Some(true),
-        data:    None,
+        data:         None,
     }
 }
 
-/// Find `word` as a complete identifier (not part of a longer name) in `s`.
-/// Returns the byte offset of the match, or `None`.
-fn find_word(s: &str, word: &str) -> Option<usize> {
-    let mut start = 0;
-    while let Some(rel) = s[start..].find(word) {
-        let abs = start + rel;
-        let before_ok = abs == 0
-            || !s[..abs].chars().last().map(|c| c.is_alphanumeric() || c == '_').unwrap_or(false);
-        let after_ok  = abs + word.len() >= s.len()
-            || !s[abs + word.len()..].chars().next().map(|c| c.is_alphanumeric() || c == '_').unwrap_or(false);
-        if before_ok && after_ok { return Some(abs); }
-        start = abs + 1;
-    }
-    None
+#[inline]
+fn in_range(line: u32, range: Range) -> bool {
+    line >= range.start.line && line <= range.end.line
 }
 
-/// Convert a byte offset in `line` to a Unicode character column.
-fn char_col(line: &str, byte_offset: usize) -> usize {
-    line[..byte_offset.min(line.len())].chars().count()
+/// Convert a tree-sitter `Point` (row, byte-column) to an LSP `Position`
+/// (0-based line, UTF-16 code-unit column).
+fn ts_pos_to_lsp(pos: tree_sitter::Point, bytes: &[u8]) -> Position {
+    Position::new(pos.row as u32, ts_byte_col_to_utf16(bytes, pos.row, pos.column) as u32)
+}
+
+/// Count the UTF-16 code units in `bytes` from the start of `row` up to `byte_col`.
+fn ts_byte_col_to_utf16(bytes: &[u8], row: usize, byte_col: usize) -> usize {
+    let line_start: usize = bytes.split(|&b| b == b'\n')
+        .take(row)
+        .map(|l| l.len() + 1)
+        .sum();
+    let end = (line_start + byte_col).min(bytes.len());
+    std::str::from_utf8(&bytes[line_start..end])
+        .map(|s| s.chars().map(|c| c.len_utf16()).sum())
+        .unwrap_or(byte_col)
 }
 
 // ─── tests ───────────────────────────────────────────────────────────────────
@@ -242,7 +295,6 @@ mod tests {
     fn no_hint_for_typed_val() {
         let src = "val items: List<Product> = emptyList()";
         let hints = hints_for(src);
-        // `items` has an explicit type — no hint needed.
         assert!(
             !hints.iter().any(|h| matches!(&h.label, InlayHintLabel::String(s) if s.contains("items"))),
             "should not hint explicitly typed val",
@@ -250,17 +302,7 @@ mod tests {
     }
 
     #[test]
-    fn find_word_finds_whole_words() {
-        assert_eq!(find_word("it.name", "it"), Some(0));
-        assert_eq!(find_word("bits.name", "it"), None);  // `it` inside `bits`
-        assert_eq!(find_word("  it ", "it"), Some(2));
-        assert_eq!(find_word("with(it)", "it"), Some(5));
-    }
-
-    #[test]
     fn hints_inject_constructor_lambdas() {
-        // Reproduces DashboardProductsViewModel pattern:
-        // @Inject constructor with nested lambdas containing `it`.
         let src = r#"package test
 
 class ProductsUseCases
@@ -290,7 +332,6 @@ class DashboardProductsViewModel @javax.inject.Inject constructor(
 
     #[test]
     fn hints_survive_syntax_error() {
-        // Simulate a file with a missing closing brace — tree-sitter error recovery.
         let src = "val items: List<Product> = emptyList()\nitems.forEach { it.name\n";
         let hints = hints_for(src);
         assert!(
@@ -301,8 +342,6 @@ class DashboardProductsViewModel @javax.inject.Inject constructor(
 
     #[test]
     fn hints_nested_named_arg_lambda() {
-        // Reproduces DashboardProductsViewModel pattern:
-        // nested named-arg lambdas inside a constructor call.
         let src = r#"package test
 
 class SheetReloadActions(
@@ -321,20 +360,16 @@ class Vm {
 "#;
         let hints = hints_for(src);
         eprintln!("nested_named_arg hints: {hints:?}");
-        // `it` in buildingSavings lambda should infer `: String`
         let has_string = hints.iter().any(|h| {
             matches!(&h.label, InlayHintLabel::String(s) if s == ": String")
         });
         eprintln!("has_string={has_string}");
-        // At minimum, we should be able to resolve `it` type from constructor param
         assert!(has_string,
             "expected ': String' hint for it/loanId in nested named-arg lambda, got: {hints:?}");
     }
 
     #[test]
     fn hints_nested_named_arg_cross_file() {
-        // Cross-file variant: SheetReloadActions is a nested data class
-        // inside DashboardProductsReducer (separate file), matching the real codebase.
         let idx = Arc::new(Indexer::new());
         let u1 = uri("/DashboardProductsReducer.kt");
         idx.index_content(&u1, r#"package test
@@ -383,4 +418,25 @@ class Vm {
         assert!(has_card,
             "expected ': CardProduct' hint for it in cards lambda, got: {hints:?}");
     }
+
+    #[test]
+    fn ts_byte_col_utf16_ascii() {
+        // For ASCII content the UTF-16 column equals the byte column.
+        let bytes = b"fun main() {}\n";
+        assert_eq!(ts_byte_col_to_utf16(bytes, 0, 4), 4); // "fun " = 4 bytes = 4 UTF-16 units
+    }
+
+    #[test]
+    fn ts_byte_col_utf16_multibyte() {
+        // "café" — 'é' is U+00E9 (2 UTF-8 bytes, 1 UTF-16 unit).
+        let line = "café foo";
+        let bytes = line.as_bytes();
+        // byte offset 6 is after "café " (c=1,a=1,f=1,é=2,space=1 → 6 bytes)
+        // char cols: c=0,a=1,f=1(wait: c-a-f-é = 4 chars, then space = 5 chars total for "café ")
+        // UTF-16: same as char count for BMP chars = 5
+        let byte_col = "café ".len(); // 6 bytes
+        let utf16 = ts_byte_col_to_utf16(bytes, 0, byte_col);
+        assert_eq!(utf16, 5, "expected 5 UTF-16 units for 'café '");
+    }
 }
+
