@@ -271,6 +271,17 @@ impl Indexer {
         self.live_lines.insert(uri.to_string(), lines);
     }
 
+    /// Returns lines for `uri` from the in-memory caches only (no disk I/O).
+    /// Prefers live (unsaved) lines; falls back to the last indexed snapshot.
+    /// Use this on hot paths (completion, hover, signature help).
+    /// For cold-start / rg-based paths that may need disk, use `scope::lines_for`.
+    pub(crate) fn mem_lines_for(&self, uri: &str) -> Option<Arc<Vec<String>>> {
+        if let Some(live) = self.live_lines.get(uri) {
+            return Some(live.clone());
+        }
+        self.files.get(uri).map(|f| f.lines.clone())
+    }
+
     ///
     /// Uses `live_lines` (updated synchronously on every keystroke) for the
     /// current file's line text, falling back to indexed lines or disk.
@@ -405,9 +416,7 @@ impl Indexer {
                         t
                     } else {
                         // Multi-line fallback: lambda opened on a previous line.
-                        let lines = self.live_lines.get(uri.as_str())
-                            .map(|ll| ll.clone())
-                            .or_else(|| self.files.get(uri.as_str()).map(|f| f.lines.clone()));
+                        let lines = self.mem_lines_for(uri.as_str());
                         let ml = lines.and_then(|ls| {
                             if recv == "this" {
                                 find_this_element_type_in_lines(&ls, cursor_line, cursor_col, self, uri)

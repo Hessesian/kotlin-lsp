@@ -378,16 +378,10 @@ impl Backend {
         // Use live_lines for the current line (updated synchronously on every
         // keystroke) so signatureHelp fires immediately when `(` is typed,
         // without waiting for the 120ms debounce that updates `files`.
-        let lines_owned: Arc<Vec<String>>;
-        let lines: &[String] = if let Some(ll) = self.indexer.live_lines.get(uri.as_str()) {
-            lines_owned = ll.clone();
-            &lines_owned
-        } else if let Some(data) = self.indexer.files.get(uri.as_str()) {
-            lines_owned = data.lines.clone();
-            &lines_owned
-        } else {
+        let Some(lines_owned) = self.indexer.mem_lines_for(uri.as_str()) else {
             return Ok(None);
         };
+        let lines: &[String] = &lines_owned;
 
         let line_idx = pos.line as usize;
         if line_idx >= lines.len() {

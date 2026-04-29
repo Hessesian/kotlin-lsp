@@ -131,9 +131,7 @@ pub(crate) fn find_named_lambda_param_type(
     uri:          &Url,
     cursor_line:  usize,
 ) -> Option<String> {
-    let lines = idx.live_lines.get(uri.as_str())
-        .map(|ll| ll.clone())
-        .or_else(|| idx.files.get(uri.as_str()).map(|f| f.lines.clone()));
+    let lines = idx.mem_lines_for(uri.as_str());
 
     // 1. Check same line first — covers `items.forEach { item -> item.`
     //    Also handles multi-param: `items.map { a, b -> a.`
@@ -185,9 +183,7 @@ pub(crate) fn is_lambda_param(
 
     if line_has_lambda_param(before_cur, recv) { return true; }
 
-    let lines_opt = idx.live_lines.get(uri.as_str())
-        .map(|ll| ll.clone())
-        .or_else(|| idx.files.get(uri.as_str()).map(|f| f.lines.clone()));
+    let lines_opt = idx.mem_lines_for(uri.as_str());
 
     if let Some(lines) = lines_opt {
         // Only scan back up to 10 lines — lambda params declared further away
