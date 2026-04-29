@@ -33,6 +33,9 @@ use super::{
     has_named_params_not_it,
     extract_first_arg,
     lambda_param_position_on_line,
+    cst_call_fn_name,
+    cst_named_arg_label,
+    cst_value_arg_position,
 };
 
 // ── from indexer.rs (parent of infer; descendants can access private items) ──
@@ -342,7 +345,12 @@ fn find_it_element_type_in_lines_impl(
                             let result = lambda_receiver_type_from_context(before_brace, idx, uri)
                                 .or_else(|| lambda_receiver_type_named_arg_ml(
                                     before_brace, 0, lines, ln, idx, uri,
-                                ));
+                                ))
+                                // CST structural fallback: walk up the call tree to find
+                                // the enclosing function call and the lambda's argument
+                                // position. Handles multi-line cases where the call site
+                                // is on a different line than the lambda `{`.
+                                .or_else(|| cst_lambda_param_type_via_call(&doc, &cur, idx, uri));
                             if result.is_some() { return result; }
                         }
                     }
@@ -603,6 +611,58 @@ fn lambda_receiver_type_named_arg_ml(
 
     let param_type = find_named_param_type_in_sig(&sig, named_arg)?;
     lambda_type_nth_input(&param_type, lambda_param_pos)
+}
+
+/// CST structural fallback for `it` type: given a `lambda_literal` node, walk
+/// up the call tree to find the enclosing function call and the lambda's
+/// positional or named argument index, then return the first input type of
+/// that parameter.
+///
+/// This handles multi-line cases where the function call is on a different line
+/// than the lambda opening `{`, so the text-based `before_brace` approach cannot
+/// reach the function name.
+fn cst_lambda_param_type_via_call(
+    doc:    &crate::indexer::live_tree::LiveDoc,
+    lambda: &tree_sitter::Node<'_>,
+    idx:    &Indexer,
+    uri:    &Url,
+) -> Option<String> {
+    let bytes = &doc.bytes;
+    let mut cur = *lambda;
+    loop {
+        let parent = cur.parent()?;
+        match parent.kind() {
+            "value_argument" => {
+                // Lambda is a parenthesised argument.
+                let mut node = parent;
+                let call_expr = loop {
+                    let p = node.parent()?;
+                    if p.kind() == "call_expression" { break p; }
+                    node = p;
+                };
+                let fn_name = cst_call_fn_name(call_expr, bytes)?;
+                let sig = find_fun_signature_full(&fn_name, idx, uri)?;
+                let param_type = if let Some(label) = cst_named_arg_label(parent, bytes) {
+                    find_named_param_type_in_sig(&sig, &label)
+                } else {
+                    nth_fun_param_type_str(&sig, cst_value_arg_position(parent))
+                }?;
+                return lambda_type_first_input(&param_type);
+            }
+            "call_suffix" => {
+                // Trailing lambda: `fn(...) { it }` or `fn { it }`.
+                let call_expr = parent.parent()?;
+                if call_expr.kind() != "call_expression" { cur = parent; continue; }
+                let fn_name = cst_call_fn_name(call_expr, bytes)?;
+                let sig = find_fun_signature_full(&fn_name, idx, uri)?;
+                let last_type = last_fun_param_type_str(&sig)?;
+                return lambda_type_first_input(&last_type);
+            }
+            // Stop at an enclosing lambda — its iteration in the outer loop will handle it.
+            "lambda_literal" => return None,
+            _ => { cur = parent; }
+        }
+    }
 }
 
 /// For an INLINE lambda argument `fn(a, b, { param -> ... })`:
