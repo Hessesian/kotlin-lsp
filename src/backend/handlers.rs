@@ -2,8 +2,8 @@ use std::sync::Arc;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use crate::indexer::find_fun_signature_with_receiver;
-use crate::resolver::{ReceiverKind, infer_receiver_type};
 use super::Backend;
+use super::cursor::CursorContext;
 use super::helpers::resolve_references_scope;
 use super::actions::is_non_call_keyword;
 
@@ -13,23 +13,21 @@ impl Backend {
         let uri      = &pp.text_document.uri;
         let position = pp.position;
 
-        let Some((word, qualifier)) = self.indexer.word_and_qualifier_at(uri, position) else {
+        let Some(ctx) = CursorContext::build(&self.indexer, uri, position) else {
             return Ok(None);
         };
 
         // For `it` or a named lambda param, generate hover showing the inferred type.
-        if qualifier.is_none() && (word == "it" || word.chars().next().map(|c| c.is_lowercase()).unwrap_or(true)) {
-            if let Some(type_name) = self.indexer.infer_lambda_param_type_at(&word, uri, position) {
+        if ctx.qualifier.is_none() {
+            if let Some(ref rt) = ctx.contextual {
+                let type_name = &rt.raw;
                 let lang = if uri.path().ends_with(".kt") { "kotlin" }
                            else if uri.path().ends_with(".swift") { "swift" }
                            else { "java" };
-                // Show the inferred binding
                 let kw = if uri.path().ends_with(".swift") { "let" } else { "val" };
-                let sig_md = format!("```{lang}\n{kw} {word}: {type_name}\n```");
-                // For symbol lookup use the last segment of a qualified name
-                // (symbols are indexed by short name, e.g. `CardProduct` not
-                // `CreditCardDashboardInteractor.CardProduct`).
-                let lookup_name = type_name.rsplit('.').next().unwrap_or(&type_name);
+                let sig_md = format!("```{lang}\n{kw} {}: {type_name}\n```", ctx.word);
+                // For symbol lookup use the last segment of a qualified name.
+                let lookup_name = type_name.rsplit('.').next().unwrap_or(type_name.as_str());
                 let type_hover = self.indexer.hover_info(lookup_name);
                 let full = if let Some(th) = type_hover {
                     format!("{sig_md}\n\n---\n\n{th}")
@@ -44,11 +42,9 @@ impl Backend {
                     range: None,
                 }));
             }
-            // If the word is a lambda parameter (type resolution failed), don't
-            // fall through to rg-based definition lookup — it would find unrelated
-            // symbols with the same name and show confusing hover text.
-            let lambda_params = self.indexer.lambda_params_at_col(uri, position.line as usize, position.character as usize);
-            if lambda_params.contains(&word) {
+            // Lambda parameter with failed type inference — don't fall through to rg
+            // lookup (would show confusing hover for unrelated symbols).
+            if ctx.lambda_decl.is_some() {
                 return Ok(None);
             }
         }
@@ -56,38 +52,34 @@ impl Backend {
         // Use the same resolution chain as go-to-definition so hover always
         // points at the same symbol (import-aware, not just first index match).
 
-        // `this.field` / `it.field` — resolve to the actual receiver/lambda type
-        // so hover shows the member from the correct class (mirrors goto_definition fix).
-        if let Some(qual) = qualifier.as_deref() {
-            if qual == "this" || qual == "it" {
-                let kind = ReceiverKind::Contextual { name: qual, position };
-                if let Some(rt) = infer_receiver_type(&self.indexer, kind, uri) {
-                    // Try full qualified type first (e.g. `Outer.Inner`), then leaf segment.
-                    let locs = self.indexer.find_definition_qualified(&word, Some(&rt.qualified), uri);
-                    let locs = if locs.is_empty() && rt.leaf != rt.qualified {
-                        self.indexer.find_definition_qualified(&word, Some(&rt.leaf), uri)
-                    } else { locs };
-                    if let Some(loc) = locs.first() {
-                        if let Some(md) = self.indexer.hover_info_at_location(loc, &word) {
-                            return Ok(Some(Hover {
-                                contents: HoverContents::Markup(MarkupContent {
-                                    kind:  MarkupKind::Markdown,
-                                    value: md,
-                                }),
-                                range: None,
-                            }));
-                        }
+        // `this.field` / `it.field` — use the already-resolved contextual receiver
+        // so hover shows the member from the correct class.
+        if ctx.qualifier.is_some() {
+            if let Some(ref rt) = ctx.contextual {
+                let locs = self.indexer.find_definition_qualified(&ctx.word, Some(&rt.qualified), uri);
+                let locs = if locs.is_empty() && rt.leaf != rt.qualified {
+                    self.indexer.find_definition_qualified(&ctx.word, Some(&rt.leaf), uri)
+                } else { locs };
+                if let Some(loc) = locs.first() {
+                    if let Some(md) = self.indexer.hover_info_at_location(loc, &ctx.word) {
+                        return Ok(Some(Hover {
+                            contents: HoverContents::Markup(MarkupContent {
+                                kind:  MarkupKind::Markdown,
+                                value: md,
+                            }),
+                            range: None,
+                        }));
                     }
                 }
             }
         }
 
-        let locs = self.indexer.find_definition_qualified(&word, qualifier.as_deref(), uri);
+        let locs = self.indexer.find_definition_qualified(&ctx.word, ctx.qualifier.as_deref(), uri);
         let hover_md = if let Some(loc) = locs.first() {
-            self.indexer.hover_info_at_location(loc, &word)
+            self.indexer.hover_info_at_location(loc, &ctx.word)
         } else {
             // Index lookup — works for already-indexed symbols + stdlib.
-            let from_index = self.indexer.hover_info(&word);
+            let from_index = self.indexer.hover_info(&ctx.word);
             if from_index.is_some() {
                 from_index
             } else {
@@ -98,8 +90,8 @@ impl Backend {
                     let m = self.indexer.ignore_matcher.read().unwrap().clone();
                     (crate::rg::effective_rg_root(wr.as_deref(), file_path.as_deref()), m)
                 };
-                let rg_locs = crate::rg::rg_find_definition(&word, rg_root.as_deref(), matcher.as_deref());
-                rg_locs.first().and_then(|loc| self.indexer.hover_info_at_location(loc, &word))
+                let rg_locs = crate::rg::rg_find_definition(&ctx.word, rg_root.as_deref(), matcher.as_deref());
+                rg_locs.first().and_then(|loc| self.indexer.hover_info_at_location(loc, &ctx.word))
             }
         };
 
