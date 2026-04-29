@@ -484,8 +484,10 @@ impl Backend {
                         }).sum();
                         if net > 0 {
                             call_name = Some(name);
-                            for mid_line in &lines[(scan_line + 1)..line_idx] {
-                                active_param += mid_line.chars().filter(|&c| c == ',').count() as u32;
+                            if scan_line + 1 < line_idx {
+                                for mid_line in &lines[(scan_line + 1)..line_idx] {
+                                    active_param += mid_line.chars().filter(|&c| c == ',').count() as u32;
+                                }
                             }
                             active_param += before.chars().filter(|&c| c == ',').count() as u32;
                             break 'outer;
