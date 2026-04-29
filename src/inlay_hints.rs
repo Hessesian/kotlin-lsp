@@ -37,6 +37,17 @@ pub fn compute_inlay_hints(idx: &Arc<Indexer>, uri: &Url, range: Range) -> Vec<I
 
 // ─── CST walk ────────────────────────────────────────────────────────────────
 
+/// Precompute the byte offset of each line's first byte within `bytes`.
+/// Used by `ts_byte_col_to_utf16` so it doesn't rescan from the file start
+/// for every node position.
+fn line_starts(bytes: &[u8]) -> Vec<usize> {
+    let mut starts = vec![0usize];
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'\n' { starts.push(i + 1); }
+    }
+    starts
+}
+
 /// Preorder-walk the tree and emit inlay hints for nodes within `range`.
 fn cst_hints(
     idx:   &Arc<Indexer>,
@@ -45,6 +56,7 @@ fn cst_hints(
     bytes: &[u8],
     range: Range,
 ) -> Vec<InlayHint> {
+    let starts = line_starts(bytes);
     let mut hints  = Vec::new();
     let mut cursor = tree.walk();
 
@@ -66,28 +78,28 @@ fn cst_hints(
 
         match node.kind() {
             "lambda_literal" => {
-                hint_lambda(idx, uri, &node, bytes, range, &mut hints);
+                hint_lambda(idx, uri, &node, bytes, &starts, range, &mut hints);
             }
             "simple_identifier" => {
                 if node.utf8_text(bytes) == Ok("it") {
-                    let pos = ts_pos_to_lsp(node.start_position(), bytes);
+                    let pos = ts_pos_to_lsp(node.start_position(), &starts, bytes);
                     if in_range(pos.line, range) {
                         if let Some(ty) = idx.infer_lambda_param_type_at("it", uri, pos) {
-                            hints.push(type_hint(ts_pos_to_lsp(node.end_position(), bytes), &ty));
+                            hints.push(type_hint(ts_pos_to_lsp(node.end_position(), &starts, bytes), &ty));
                         }
                     }
                 }
             }
             "this_expression" => {
-                let pos = ts_pos_to_lsp(node.start_position(), bytes);
+                let pos = ts_pos_to_lsp(node.start_position(), &starts, bytes);
                 if in_range(pos.line, range) {
                     if let Some(ty) = idx.infer_lambda_param_type_at("this", uri, pos) {
-                        hints.push(type_hint(ts_pos_to_lsp(node.end_position(), bytes), &ty));
+                        hints.push(type_hint(ts_pos_to_lsp(node.end_position(), &starts, bytes), &ty));
                     }
                 }
             }
             "property_declaration" => {
-                hint_property(idx, uri, &node, bytes, range, &mut hints);
+                hint_property(idx, uri, &node, bytes, &starts, range, &mut hints);
             }
             _ => {}
         }
@@ -108,12 +120,13 @@ fn cst_hints(
 /// Structure confirmed from tree-sitter-kotlin probe:
 /// `lambda_literal { lambda_parameters { variable_declaration { simple_identifier } } -> statements }`
 fn hint_lambda(
-    idx:   &Arc<Indexer>,
-    uri:   &Url,
-    node:  &tree_sitter::Node<'_>,
-    bytes: &[u8],
-    range: Range,
-    hints: &mut Vec<InlayHint>,
+    idx:    &Arc<Indexer>,
+    uri:    &Url,
+    node:   &tree_sitter::Node<'_>,
+    bytes:  &[u8],
+    starts: &[usize],
+    range:  Range,
+    hints:  &mut Vec<InlayHint>,
 ) {
     let mut nc = node.walk();
     for child in node.children(&mut nc) {
@@ -142,8 +155,8 @@ fn hint_lambda(
             if name.is_empty() || name == "_" { continue; }
             if !name.chars().next().map(|c| c.is_lowercase()).unwrap_or(false) { continue; }
 
-            let start_pos = ts_pos_to_lsp(name_n.start_position(), bytes);
-            let end_pos   = ts_pos_to_lsp(name_n.end_position(),   bytes);
+            let start_pos = ts_pos_to_lsp(name_n.start_position(), starts, bytes);
+            let end_pos   = ts_pos_to_lsp(name_n.end_position(),   starts, bytes);
             if !in_range(start_pos.line, range) { continue; }
 
             if let Some(ty) = idx.infer_lambda_param_type_at(name, uri, start_pos) {
@@ -156,12 +169,13 @@ fn hint_lambda(
 
 /// Emit `: Type` hint for `val name = expr` / `var name = expr` without explicit type.
 fn hint_property(
-    idx:   &Arc<Indexer>,
-    uri:   &Url,
-    node:  &tree_sitter::Node<'_>,
-    bytes: &[u8],
-    range: Range,
-    hints: &mut Vec<InlayHint>,
+    idx:    &Arc<Indexer>,
+    uri:    &Url,
+    node:   &tree_sitter::Node<'_>,
+    bytes:  &[u8],
+    starts: &[usize],
+    range:  Range,
+    hints:  &mut Vec<InlayHint>,
 ) {
     // Find the variable_declaration child.
     let mut nc  = node.walk();
@@ -186,18 +200,29 @@ fn hint_property(
 
     // Must have `=` (skip abstract / delegate declarations without an initializer).
     let mut nc2      = node.walk();
-    let has_assign   = node.children(&mut nc2).any(|c| c.kind() == "=");
-    if !has_assign { return; }
+    let mut init_node = None;
+    let mut past_eq   = false;
+    for child in node.children(&mut nc2) {
+        if child.kind() == "=" { past_eq = true; continue; }
+        if past_eq { init_node = Some(child); break; }
+    }
+    let Some(init) = init_node else { return };
 
     let Some(name_n) = name_node               else { return };
     let Ok(name)     = name_n.utf8_text(bytes) else { return };
     let name = name.trim();
     if name.is_empty() { return; }
 
-    let start_pos = ts_pos_to_lsp(name_n.start_position(), bytes);
-    let end_pos   = ts_pos_to_lsp(name_n.end_position(),   bytes);
-    if !in_range(start_pos.line, range) { return; }
+    let end_pos = ts_pos_to_lsp(name_n.end_position(), starts, bytes);
+    if !in_range(end_pos.line, range) { return; }
 
+    // Derive the type name from the initializer expression.
+    if let Some(ty) = infer_type_from_init(init, bytes) {
+        hints.push(type_hint(end_pos, &ty));
+        return;
+    }
+
+    // Fallback: text-based inference (handles `val x: Type` pattern aliases etc.)
     if let Some(raw) = crate::resolver::infer_variable_type_raw(idx, name, uri) {
         let base: String = raw.chars()
             .take_while(|&c| c.is_alphanumeric() || c == '_' || c == '<' || c == '>')
@@ -206,6 +231,35 @@ fn hint_property(
             hints.push(type_hint(end_pos, &base));
         }
     }
+}
+
+/// Infer a display type name from the CST initializer node.
+///
+/// Returns `Some(name)` when the initializer is a constructor or factory call
+/// whose callee starts with an uppercase letter — indicating the type name is
+/// the same as the callee (`val user = User(…)` → `"User"`).
+fn infer_type_from_init(init: tree_sitter::Node<'_>, bytes: &[u8]) -> Option<String> {
+    // call_expression: callee(...) or callee<T>(...)
+    if init.kind() == "call_expression" {
+        let callee = init.child(0)?;
+        // Callee may be a navigation chain: `Pkg.Type(...)` — use last segment.
+        let name_node = match callee.kind() {
+            "simple_identifier" | "type_identifier" => callee,
+            "navigation_expression" => {
+                // last child that is an identifier
+                let mut nc = callee.walk();
+                callee.children(&mut nc)
+                    .filter(|c| c.kind() == "simple_identifier" || c.kind() == "type_identifier")
+                    .last()?
+            }
+            _ => return None,
+        };
+        let name = name_node.utf8_text(bytes).ok()?.trim();
+        if name.starts_with(|c: char| c.is_uppercase()) {
+            return Some(name.to_string());
+        }
+    }
+    None
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
@@ -230,16 +284,19 @@ fn in_range(line: u32, range: Range) -> bool {
 
 /// Convert a tree-sitter `Point` (row, byte-column) to an LSP `Position`
 /// (0-based line, UTF-16 code-unit column).
-fn ts_pos_to_lsp(pos: tree_sitter::Point, bytes: &[u8]) -> Position {
-    Position::new(pos.row as u32, ts_byte_col_to_utf16(bytes, pos.row, pos.column) as u32)
+fn ts_pos_to_lsp(pos: tree_sitter::Point, starts: &[usize], bytes: &[u8]) -> Position {
+    Position::new(pos.row as u32, ts_byte_col_to_utf16(bytes, starts, pos.row, pos.column) as u32)
 }
 
-/// Count the UTF-16 code units in `bytes` from the start of `row` up to `byte_col`.
-fn ts_byte_col_to_utf16(bytes: &[u8], row: usize, byte_col: usize) -> usize {
-    let line_start: usize = bytes.split(|&b| b == b'\n')
-        .take(row)
-        .map(|l| l.len() + 1)
-        .sum();
+/// Count the UTF-16 code units from the start of `row` up to `byte_col`.
+///
+/// `starts` must have been produced by `line_starts(bytes)` — it is used to
+/// jump directly to the line without rescanning the whole file (O(1) lookup
+/// instead of O(file_size)).
+fn ts_byte_col_to_utf16(bytes: &[u8], starts: &[usize], row: usize, byte_col: usize) -> usize {
+    let line_start = starts.get(row).copied().unwrap_or_else(|| {
+        bytes.split(|&b| b == b'\n').take(row).map(|l| l.len() + 1).sum()
+    });
     let end = (line_start + byte_col).min(bytes.len());
     std::str::from_utf8(&bytes[line_start..end])
         .map(|s| s.chars().map(|c| c.len_utf16()).sum())
@@ -423,7 +480,8 @@ class Vm {
     fn ts_byte_col_utf16_ascii() {
         // For ASCII content the UTF-16 column equals the byte column.
         let bytes = b"fun main() {}\n";
-        assert_eq!(ts_byte_col_to_utf16(bytes, 0, 4), 4); // "fun " = 4 bytes = 4 UTF-16 units
+        let starts = line_starts(bytes);
+        assert_eq!(ts_byte_col_to_utf16(bytes, &starts, 0, 4), 4); // "fun " = 4 bytes = 4 UTF-16 units
     }
 
     #[test]
@@ -431,12 +489,46 @@ class Vm {
         // "café" — 'é' is U+00E9 (2 UTF-8 bytes, 1 UTF-16 unit).
         let line = "café foo";
         let bytes = line.as_bytes();
+        let starts = line_starts(bytes);
         // byte offset 6 is after "café " (c=1,a=1,f=1,é=2,space=1 → 6 bytes)
         // char cols: c=0,a=1,f=1(wait: c-a-f-é = 4 chars, then space = 5 chars total for "café ")
         // UTF-16: same as char count for BMP chars = 5
         let byte_col = "café ".len(); // 6 bytes
-        let utf16 = ts_byte_col_to_utf16(bytes, 0, byte_col);
+        let utf16 = ts_byte_col_to_utf16(bytes, &starts, 0, byte_col);
         assert_eq!(utf16, 5, "expected 5 UTF-16 units for 'café '");
     }
-}
 
+    #[test]
+    fn untyped_val_constructor_call_gets_hint() {
+        // `val user = User("alice")` — no explicit type annotation.
+        // hint_property should emit `: User` from the CST initializer.
+        let src = r#"package test
+class User(val name: String)
+fun make() {
+    val user = User("alice")
+}
+"#;
+        let hints = hints_for(src);
+        assert!(
+            hints.iter().any(|h| matches!(&h.label, InlayHintLabel::String(s) if s == ": User")),
+            "expected ': User' hint for untyped val with constructor call, got: {hints:?}",
+        );
+    }
+
+    #[test]
+    fn typed_val_no_property_hint() {
+        // Explicit `val user: User = …` must NOT get a duplicate hint.
+        let src = r#"package test
+class User(val name: String)
+fun make() {
+    val user: User = User("alice")
+}
+"#;
+        let hints = hints_for(src);
+        let prop_hints: Vec<_> = hints.iter()
+            .filter(|h| matches!(&h.label, InlayHintLabel::String(s) if s == ": User"))
+            .collect();
+        assert!(prop_hints.is_empty(),
+            "should not emit property hint for already-typed val, got: {hints:?}");
+    }
+}
