@@ -183,38 +183,17 @@ impl Backend {
                     l.uri == *uri && l.range.start.line == line_idx as u32
                 });
                 if dup_line { continue; }
-                let mut search = line.as_str();
-                let mut byte_off = 0usize;
-                while let Some(pos) = search.find(name.as_str()) {
-                    let abs = byte_off + pos;
-                    let before_ok = abs == 0 || {
-                        let ch = line[..abs].chars().next_back().unwrap_or(' ');
-                        !ch.is_alphanumeric() && ch != '_'
-                    };
-                    let after_ok = {
-                        let end = abs + name.len();
-                        end >= line.len() || {
-                            let ch = line[end..].chars().next().unwrap_or(' ');
-                            !ch.is_alphanumeric() && ch != '_'
-                        }
-                    };
-                    if before_ok && after_ok {
-                        // Compute UTF-16 column (LSP units) for the match start.
-                        let col: u32 = line[..abs].chars().map(|c| c.len_utf16() as u32).sum();
-                        let col_end: u32 = col + name.chars().map(|c| c.len_utf16() as u32).sum::<u32>();
-                        let range = Range::new(
-                            Position::new(line_idx as u32, col),
-                            Position::new(line_idx as u32, col_end),
-                        );
-                        let already = locs.iter().any(|l: &Location| {
-                            l.uri == *uri && l.range.start == range.start
-                        });
-                        if !already {
-                            locs.push(Location { uri: uri.clone(), range });
-                        }
+                for abs in word_byte_offsets(line, name.as_str()) {
+                    // Compute UTF-16 column (LSP units) for the match start.
+                    let col: u32 = line[..abs].chars().map(|c| c.len_utf16() as u32).sum();
+                    let col_end: u32 = col + name.chars().map(|c| c.len_utf16() as u32).sum::<u32>();
+                    let range = Range::new(
+                        Position::new(line_idx as u32, col),
+                        Position::new(line_idx as u32, col_end),
+                    );
+                    if !locs.iter().any(|l: &Location| l.uri == *uri && l.range.start == range.start) {
+                        locs.push(Location { uri: uri.clone(), range });
                     }
-                    byte_off += pos + name.len().max(1);
-                    search = &line[byte_off.min(line.len())..];
                 }
             }
         }
@@ -726,4 +705,62 @@ fn text_call_info(
 
     let name = call_name.filter(|n| !n.is_empty())?;
     Some((name, call_qualifier, active_param))
+}
+
+/// Iterator over the byte offsets in `line` where `word` occurs as a whole
+/// word (not as a substring of a longer identifier).
+fn word_byte_offsets<'a>(line: &'a str, word: &'a str) -> impl Iterator<Item = usize> + 'a {
+    let word_len = word.len();
+    let is_id = |c: char| c.is_alphanumeric() || c == '_';
+    let mut search_from = 0;
+    std::iter::from_fn(move || {
+        while let Some(rel) = line[search_from..].find(word) {
+            let pos = search_from + rel;
+            search_from = pos + word_len;
+            let before_ok = pos == 0 || !is_id(line[..pos].chars().next_back()?);
+            let after_ok = pos + word_len >= line.len()
+                || !is_id(line[pos + word_len..].chars().next()?);
+            if before_ok && after_ok { return Some(pos); }
+        }
+        None
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::word_byte_offsets;
+
+    #[test]
+    fn finds_single_word() {
+        let offsets: Vec<_> = word_byte_offsets("hello world", "world").collect();
+        assert_eq!(offsets, vec![6]);
+    }
+
+    #[test]
+    fn skips_partial_match() {
+        // "name" should not match inside "rename"
+        let offsets: Vec<_> = word_byte_offsets("rename name", "name").collect();
+        assert_eq!(offsets, vec![7]);
+    }
+
+    #[test]
+    fn multiple_occurrences() {
+        let offsets: Vec<_> = word_byte_offsets("a b a c a", "a").collect();
+        assert_eq!(offsets, vec![0, 4, 8]);
+    }
+
+    #[test]
+    fn unicode_line() {
+        // "ñ" is 2 bytes in UTF-8; "name" after it still at correct byte offset
+        let line = "ñ name ñ";
+        let offsets: Vec<_> = word_byte_offsets(line, "name").collect();
+        assert_eq!(offsets.len(), 1);
+        assert_eq!(&line[offsets[0]..offsets[0] + 4], "name");
+    }
+
+    #[test]
+    fn no_match() {
+        let offsets: Vec<_> = word_byte_offsets("foo bar", "baz").collect();
+        assert!(offsets.is_empty());
+    }
 }

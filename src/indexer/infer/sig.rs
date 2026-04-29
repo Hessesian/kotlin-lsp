@@ -171,6 +171,33 @@ pub(crate) fn collect_params_from_line(lines: &[String], start_line: usize) -> O
 
 // ─── Parameter type accessors ─────────────────────────────────────────────────
 
+/// Split `text` at top-level commas (depth 0), skipping commas inside `()`, `<>`, `[]`.
+/// The `->` Kotlin function-type arrow is handled: `>` preceded by `-` is NOT a closing
+/// generic delimiter.
+///
+/// Returns the raw slices between commas; does NOT trim or filter empty parts.
+pub(crate) fn split_params_at_depth_zero(text: &str) -> Vec<&str> {
+    let mut parts: Vec<&str> = Vec::new();
+    let mut depth: i32 = 0;
+    let mut start = 0;
+    let mut prev = '\0';
+    for (i, ch) in text.char_indices() {
+        match ch {
+            '(' | '<' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            '>' if prev != '-' && depth > 0 => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(&text[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+        prev = ch;
+    }
+    parts.push(&text[start..]);
+    parts
+}
+
 /// Split the flattened parameter list by `,` at depth-0 (respecting `()`, `<>`).
 /// Returns the type string of the parameter at position `n` (0-based).
 /// Falls back to the last parameter if `n` is out of range.
@@ -179,25 +206,7 @@ pub(crate) fn collect_params_from_line(lines: &[String], start_line: usize) -> O
 /// `>` which would falsely decrement `<>` depth.  We skip the `>` of any `->` by
 /// tracking the previous character.
 pub(crate) fn nth_fun_param_type_str(params_text: &str, n: usize) -> Option<String> {
-    let mut parts: Vec<&str> = Vec::new();
-    let mut depth: i32 = 0;
-    let mut start = 0;
-    let mut prev = '\0';
-    for (i, ch) in params_text.char_indices() {
-        match ch {
-            '(' | '<' | '[' => depth += 1,
-            ')' | ']' => depth -= 1,
-            // Skip `>` of `->` and guard against going negative on bare `>` operators.
-            '>' if prev != '-' && depth > 0 => depth -= 1,
-            ',' if depth == 0 => {
-                parts.push(&params_text[start..i]);
-                start = i + 1;
-            }
-            _ => {}
-        }
-        prev = ch;
-    }
-    parts.push(&params_text[start..]);
+    let mut parts = split_params_at_depth_zero(params_text);
     // Drop trailing-comma empty parts (Kotlin allows `fun f(a: A, b: B,) {}`).
     parts.retain(|p| !p.trim().is_empty());
     if parts.is_empty() { return None; }
@@ -211,23 +220,10 @@ pub(crate) fn nth_fun_param_type_str(params_text: &str, n: usize) -> Option<Stri
 
 /// Return the type string of the last parameter in `params_text`.
 pub(crate) fn last_fun_param_type_str(params_text: &str) -> Option<String> {
-    // Count top-level parameters (same `->` skip logic as nth_fun_param_type_str).
-    let count = {
-        let mut n = 1usize;
-        let mut depth: i32 = 0;
-        let mut prev = '\0';
-        for ch in params_text.chars() {
-            match ch {
-                '(' | '<' | '[' => depth += 1,
-                ')' | ']' => depth -= 1,
-                '>' if prev != '-' && depth > 0 => depth -= 1,
-                ',' if depth == 0 => n += 1,
-                _ => {}
-            }
-            prev = ch;
-        }
-        n
-    };
+    let count = split_params_at_depth_zero(params_text)
+        .iter()
+        .filter(|p| !p.trim().is_empty())
+        .count();
     nth_fun_param_type_str(params_text, count.saturating_sub(1))
 }
 

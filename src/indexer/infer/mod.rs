@@ -39,7 +39,6 @@ pub(crate) use args::{
     extract_first_arg,
     extract_named_arg_name,
     find_named_param_type_in_sig,
-    lambda_param_position_on_line,
     has_named_params_not_it,
     cst_call_fn_name,
     cst_named_arg_label,
@@ -56,5 +55,7 @@ pub(crate) use it_this::{
     lambda_receiver_type_from_context,
     line_has_lambda_param,
     lambda_brace_pos_for_param,
+    find_lambda_brace_for_param,
+    lambda_param_position_on_line,
     find_last_dot_at_depth_zero,
 };
