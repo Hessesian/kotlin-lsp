@@ -76,7 +76,12 @@ pub(crate) fn find_as_call_arg_type(
     // ── Positional arg: `fn(a, keyword)` ────────────────────────────────────
     // Scan backward tracking paren/bracket depth; count top-level commas to
     // determine which argument position the cursor is in.
+    //
+    // Also track brace depth: if we encounter an unmatched `{` going backward,
+    // the cursor is inside a nested lambda body — NOT directly a function arg.
+    // Stop immediately so we don't mis-infer the outer function's param type.
     let mut depth: i32 = 0;
+    let mut brace_depth: i32 = 0;
     let mut arg_pos: usize = 0;
     let scan_start = cursor_line.saturating_sub(20);
 
@@ -86,6 +91,16 @@ pub(crate) fn find_as_call_arg_type(
 
         for i in (0..scan_to).rev() {
             match chars[i] {
+                // Skip string interpolation `${`: treat `{` preceded by `$` as neutral.
+                '{' if i > 0 && chars[i - 1] == '$' => {}
+                '}' => brace_depth += 1,
+                '{' => {
+                    brace_depth -= 1;
+                    if brace_depth < 0 {
+                        // Cursor is inside a lambda body — do not match the outer call.
+                        return None;
+                    }
+                }
                 ')' | ']' => depth += 1,
                 // `>` going backward = entering a generic block; guard against `->`.
                 '>' if i == 0 || chars[i - 1] != '-' => depth += 1,

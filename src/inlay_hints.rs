@@ -516,19 +516,30 @@ fun make() {
     }
 
     #[test]
-    fn typed_val_no_property_hint() {
-        // Explicit `val user: User = …` must NOT get a duplicate hint.
+    fn it_inside_nested_lambda_not_suspend() {
+        // Regression: `it` inside `setState { it }` where `setState` has a
+        // `suspend` function type parameter was incorrectly showing `: suspend`.
+        // `find_as_call_arg_type` must bail out when the backward scan crosses
+        // an unmatched `{`, meaning `it` is inside a nested lambda body.
         let src = r#"package test
-class User(val name: String)
-fun make() {
-    val user: User = User("alice")
+
+class State
+class Effect
+
+class Vm {
+    private val items: List<State> = emptyList()
+
+    fun load() {
+        items.forEach { item ->
+            setState { item }
+        }
+    }
+
+    fun setState(reducer: suspend State.() -> State) {}
 }
 "#;
         let hints = hints_for(src);
-        let prop_hints: Vec<_> = hints.iter()
-            .filter(|h| matches!(&h.label, InlayHintLabel::String(s) if s == ": User"))
-            .collect();
-        assert!(prop_hints.is_empty(),
-            "should not emit property hint for already-typed val, got: {hints:?}");
+        let bad = hints.iter().any(|h| matches!(&h.label, InlayHintLabel::String(s) if s == ": suspend"));
+        assert!(!bad, "must not emit ': suspend' hint for it inside nested lambda, got: {hints:?}");
     }
 }

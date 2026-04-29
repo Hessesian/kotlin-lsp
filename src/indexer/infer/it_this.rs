@@ -314,8 +314,7 @@ fn find_it_element_type_in_lines_impl(
     // ── CST fast path ────────────────────────────────────────────────────────
     if let Some(doc) = idx.live_doc(uri) {
         use tree_sitter::Point;
-        let file_text  = std::str::from_utf8(&doc.bytes).unwrap_or("");
-        let line_text  = file_text.lines().nth(cursor_line).unwrap_or("");
+        let line_text  = lines.get(cursor_line).map(|s| s.as_str()).unwrap_or("");
         let byte_col   = crate::indexer::live_tree::utf16_col_to_byte(line_text, cursor_col);
         let point      = Point { row: cursor_line, column: byte_col };
         if let Some(node) = doc.tree.root_node().descendant_for_point_range(point, point) {

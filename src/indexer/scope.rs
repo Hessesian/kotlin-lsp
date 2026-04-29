@@ -239,9 +239,10 @@ impl Indexer {
     pub fn lambda_params_at_col(&self, uri: &Url, cursor_line: usize, cursor_col: usize) -> Vec<String> {
         // ── CST fast path ────────────────────────────────────────────────────
         if let Some(doc) = self.live_doc(uri) {
-            let lines_text = std::str::from_utf8(&doc.bytes).unwrap_or("");
-            let line_text  = lines_text.lines().nth(cursor_line).unwrap_or("");
-            let byte_col   = crate::indexer::live_tree::utf16_col_to_byte(line_text, cursor_col);
+            let line_text = self.live_lines.get(uri.as_str())
+                .and_then(|ll| ll.get(cursor_line).cloned())
+                .unwrap_or_default();
+            let byte_col   = crate::indexer::live_tree::utf16_col_to_byte(&line_text, cursor_col);
             let point      = Point { row: cursor_line, column: byte_col };
             if let Some(node) = doc.tree.root_node().descendant_for_point_range(point, point) {
                 let mut params: Vec<String> = Vec::new();
@@ -371,9 +372,9 @@ impl Indexer {
 
         // ── CST fast path ────────────────────────────────────────────────────
         if let Some(doc) = self.live_doc(uri) {
-            let lines_text = std::str::from_utf8(&doc.bytes).unwrap_or("");
             // Use the first non-whitespace byte on the row as the probe column.
-            let probe_col = lines_text.lines().nth(row)
+            let probe_col = self.live_lines.get(uri.as_str())
+                .and_then(|ll| ll.get(row).cloned())
                 .map(|l| l.len() - l.trim_start().len())
                 .unwrap_or(0);
             let point = Point { row, column: probe_col };
