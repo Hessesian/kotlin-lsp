@@ -1176,3 +1176,50 @@ data class State(
         assert!(!is_annotation_context("Composable", "Composable")); // no @
         // "x@Comp" — technically matches, real code won't have identifiers directly before @
     }
+
+    // ── ReceiverType::from_raw ────────────────────────────────────────────────
+
+    #[test]
+    fn receiver_type_simple() {
+        let rt = infer::ReceiverType::from_raw("MyClass".to_string());
+        assert_eq!(rt.raw,       "MyClass");
+        assert_eq!(rt.qualified, "MyClass");
+        assert_eq!(rt.outer,     "MyClass");
+        assert_eq!(rt.leaf,      "MyClass");
+    }
+
+    #[test]
+    fn receiver_type_with_generics() {
+        let rt = infer::ReceiverType::from_raw("Flow<UiState>".to_string());
+        assert_eq!(rt.raw,       "Flow<UiState>");
+        assert_eq!(rt.qualified, "Flow");
+        assert_eq!(rt.outer,     "Flow");
+        assert_eq!(rt.leaf,      "Flow");
+    }
+
+    #[test]
+    fn receiver_type_dotted_nested() {
+        let rt = infer::ReceiverType::from_raw("Outer.Inner".to_string());
+        assert_eq!(rt.raw,       "Outer.Inner");
+        assert_eq!(rt.qualified, "Outer.Inner");
+        assert_eq!(rt.outer,     "Outer");
+        assert_eq!(rt.leaf,      "Inner");
+    }
+
+    #[test]
+    fn receiver_type_dotted_with_generics() {
+        let rt = infer::ReceiverType::from_raw("Outer.Inner<Param>".to_string());
+        assert_eq!(rt.raw,       "Outer.Inner<Param>");
+        assert_eq!(rt.qualified, "Outer.Inner");
+        assert_eq!(rt.outer,     "Outer");
+        assert_eq!(rt.leaf,      "Inner");
+    }
+
+    #[test]
+    fn receiver_type_generic_with_params() {
+        let rt = infer::ReceiverType::from_raw("OneYearOlderInteractor<Params>".to_string());
+        assert_eq!(rt.qualified, "OneYearOlderInteractor");
+        assert_eq!(rt.outer,     "OneYearOlderInteractor");
+        assert_eq!(rt.leaf,      "OneYearOlderInteractor");
+    }
+

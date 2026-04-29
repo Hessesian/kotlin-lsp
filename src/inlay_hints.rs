@@ -15,6 +15,7 @@ use tower_lsp::lsp_types::{InlayHint, InlayHintKind, InlayHintLabel, Position, R
 
 use crate::indexer::Indexer;
 use crate::indexer::live_tree::{lang_for_path, parse_live};
+use crate::resolver::{ReceiverKind, infer_receiver_type};
 
 pub fn compute_inlay_hints(idx: &Arc<Indexer>, uri: &Url, range: Range) -> Vec<InlayHint> {
     // Fast path: editor has the file open → use pre-parsed live tree.
@@ -83,8 +84,9 @@ fn cst_hints(
                 if node.utf8_text(bytes) == Ok("it") {
                     let pos = ts_pos_to_lsp(node.start_position(), &starts, bytes);
                     if in_range(pos.line, range) {
-                        if let Some(ty) = idx.infer_lambda_param_type_at("it", uri, pos) {
-                            hints.push(type_hint(ts_pos_to_lsp(node.end_position(), &starts, bytes), &ty));
+                        let kind = ReceiverKind::Contextual { name: "it", position: pos };
+                        if let Some(rt) = infer_receiver_type(idx, kind, uri) {
+                            hints.push(type_hint(ts_pos_to_lsp(node.end_position(), &starts, bytes), &rt.raw));
                         }
                     }
                 }
@@ -92,8 +94,9 @@ fn cst_hints(
             "this_expression" => {
                 let pos = ts_pos_to_lsp(node.start_position(), &starts, bytes);
                 if in_range(pos.line, range) {
-                    if let Some(ty) = idx.infer_lambda_param_type_at("this", uri, pos) {
-                        hints.push(type_hint(ts_pos_to_lsp(node.end_position(), &starts, bytes), &ty));
+                    let kind = ReceiverKind::Contextual { name: "this", position: pos };
+                    if let Some(rt) = infer_receiver_type(idx, kind, uri) {
+                        hints.push(type_hint(ts_pos_to_lsp(node.end_position(), &starts, bytes), &rt.raw));
                     }
                 }
             }
@@ -158,8 +161,8 @@ fn hint_lambda(
             let end_pos   = ts_pos_to_lsp(name_n.end_position(),   starts, bytes);
             if !in_range(start_pos.line, range) { continue; }
 
-            if let Some(ty) = idx.infer_lambda_param_type_at(name, uri, start_pos) {
-                hints.push(type_hint(end_pos, &ty));
+            if let Some(rt) = infer_receiver_type(idx, ReceiverKind::Contextual { name, position: start_pos }, uri) {
+                hints.push(type_hint(end_pos, &rt.raw));
             }
         }
         break; // only one lambda_parameters block per literal
@@ -222,8 +225,8 @@ fn hint_property(
     }
 
     // Fallback: text-based inference (handles `val x: Type` pattern aliases etc.)
-    if let Some(raw) = crate::resolver::infer_variable_type_raw(idx, name, uri) {
-        let base: String = raw.chars()
+    if let Some(rt) = infer_receiver_type(idx, ReceiverKind::Variable(name), uri) {
+        let base: String = rt.raw.chars()
             .take_while(|&c| c.is_alphanumeric() || c == '_' || c == '<' || c == '>')
             .collect();
         if !base.is_empty() {
