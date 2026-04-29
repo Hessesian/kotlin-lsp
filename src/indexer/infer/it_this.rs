@@ -181,24 +181,18 @@ pub(crate) fn is_lambda_param(
     if recv.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) { return false; }
     if recv.contains('.') { return false; }
 
+    // Same-line fast check: the lambda declaration may be on the cursor line
+    // itself (e.g. `items.forEach { item -> item.`).
     if line_has_lambda_param(before_cur, recv) { return true; }
 
-    let lines_opt = idx.mem_lines_for(uri.as_str());
-
-    if let Some(lines) = lines_opt {
-        // Only scan back up to 10 lines — lambda params declared further away
-        // are practically out of scope for normal code.
-        let scan_start = cursor_line.saturating_sub(10);
-        for ln in (scan_start..cursor_line).rev() {
-            if let Some(line) = lines.get(ln) {
-                if line_has_lambda_param(line, recv) { return true; }
-                // Stop early if we cross a closing brace at depth 0 — we've
-                // left the enclosing lambda scope entirely.
-                if line.trim_start().starts_with('}') { break; }
-            }
-        }
-    }
-    false
+    // Delegate to lambda_params_at_col for multi-line detection.  That function
+    // uses the CST live-tree when available (O(depth) walk) and falls back to a
+    // brace-depth text scan covering up to 50 prior lines — both more thorough
+    // than the old 10-line ad-hoc scan here.
+    let cursor_col = before_cur.encode_utf16().count();
+    idx.lambda_params_at_col(uri, cursor_line, cursor_col)
+        .iter()
+        .any(|p| p == recv)
 }
 
 /// Shared core: given the text BEFORE the `{` that opens a lambda, infer
