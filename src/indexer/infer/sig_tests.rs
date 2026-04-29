@@ -161,6 +161,45 @@ fn last_param_type_empty_returns_none() {
     assert_eq!(last_fun_param_type_str(""), None);
 }
 
+// ─── split_params_at_depth_zero ──────────────────────────────────────────────
+
+use super::split_params_at_depth_zero;
+
+#[test]
+fn split_simple() {
+    assert_eq!(split_params_at_depth_zero("a: A, b: B"), vec!["a: A", " b: B"]);
+}
+
+#[test]
+fn split_nested_generics() {
+    // comma inside <> must not split
+    assert_eq!(split_params_at_depth_zero("a: Map<K, V>, b: B"), vec!["a: Map<K, V>", " b: B"]);
+}
+
+#[test]
+fn split_function_type_arrow() {
+    // `->` must not cause `>` to consume generic depth
+    assert_eq!(split_params_at_depth_zero("block: (T) -> Unit, n: Int"),
+               vec!["block: (T) -> Unit", " n: Int"]);
+}
+
+#[test]
+fn split_empty() {
+    assert_eq!(split_params_at_depth_zero(""), vec![""]);
+}
+
+#[test]
+fn split_single() {
+    assert_eq!(split_params_at_depth_zero("a: A"), vec!["a: A"]);
+}
+
+#[test]
+fn split_trailing_comma() {
+    let parts = split_params_at_depth_zero("a: A, b: B,");
+    assert_eq!(parts.len(), 3);
+    assert_eq!(parts[2], "");
+}
+
 // ─── strip_trailing_call_args ─────────────────────────────────────────────────
 
 #[test]

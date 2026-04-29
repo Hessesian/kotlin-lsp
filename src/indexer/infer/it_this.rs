@@ -32,7 +32,6 @@ use super::{
     find_named_param_type_in_sig,
     has_named_params_not_it,
     extract_first_arg,
-    lambda_param_position_on_line,
     cst_call_fn_name,
     cst_named_arg_label,
     cst_value_arg_position,
@@ -109,10 +108,8 @@ pub(crate) fn find_named_lambda_param_type_in_lines(
     // Include cursor_line itself (different from completion path which is exclusive).
     for ln in (scan_start..=cursor_line).rev() {
         let line = match lines.get(ln) { Some(l) => l, None => continue };
-        if !line_has_lambda_param(line, param_name) { continue; }
-        let brace_pos = lambda_brace_pos_for_param(line, param_name).unwrap_or(0);
+        let Some((brace_pos, pos)) = find_lambda_brace_for_param(line, param_name) else { continue; };
         let before_brace = &line[..brace_pos];
-        let pos = lambda_param_position_on_line(line, param_name);
         let result = lambda_receiver_type_from_context(before_brace, idx, uri)
             .or_else(|| lambda_receiver_type_named_arg_ml(before_brace, pos, lines, ln, idx, uri));
         if result.is_some() { return result; }
@@ -140,16 +137,13 @@ pub(crate) fn find_named_lambda_param_type(
 
     // 1. Check same line first — covers `items.forEach { item -> item.`
     //    Also handles multi-param: `items.map { a, b -> a.`
-    if line_has_lambda_param(before_cursor, param_name) {
-        if let Some(brace_pos) = lambda_brace_pos_for_param(before_cursor, param_name) {
-            let before_brace = &before_cursor[..brace_pos];
-            let pos = lambda_param_position_on_line(before_cursor, param_name);
-            let result = lambda_receiver_type_from_context(before_brace, idx, uri)
-                .or_else(|| lines.as_deref().and_then(|ls|
-                    lambda_receiver_type_named_arg_ml(before_brace, pos, ls, cursor_line, idx, uri)
-                ));
-            if result.is_some() { return result; }
-        }
+    if let Some((brace_pos, pos)) = find_lambda_brace_for_param(before_cursor, param_name) {
+        let before_brace = &before_cursor[..brace_pos];
+        let result = lambda_receiver_type_from_context(before_brace, idx, uri)
+            .or_else(|| lines.as_deref().and_then(|ls|
+                lambda_receiver_type_named_arg_ml(before_brace, pos, ls, cursor_line, idx, uri)
+            ));
+        if result.is_some() { return result; }
     }
 
     // 2. Scan backward through previous lines.
@@ -157,14 +151,11 @@ pub(crate) fn find_named_lambda_param_type(
     let scan_start = cursor_line.saturating_sub(20);
     for ln in (scan_start..cursor_line).rev() {
         let line = match lines.get(ln) { Some(l) => l, None => continue };
-        if !line_has_lambda_param(line, param_name) { continue; }
-        if let Some(brace_pos) = lambda_brace_pos_for_param(line, param_name) {
-            let before_brace = &line[..brace_pos];
-            let pos = lambda_param_position_on_line(line, param_name);
-            let result = lambda_receiver_type_from_context(before_brace, idx, uri)
-                .or_else(|| lambda_receiver_type_named_arg_ml(before_brace, pos, &lines, ln, idx, uri));
-            if result.is_some() { return result; }
-        }
+        let Some((brace_pos, pos)) = find_lambda_brace_for_param(line, param_name) else { continue; };
+        let before_brace = &line[..brace_pos];
+        let result = lambda_receiver_type_from_context(before_brace, idx, uri)
+            .or_else(|| lambda_receiver_type_named_arg_ml(before_brace, pos, &lines, ln, idx, uri));
+        if result.is_some() { return result; }
     }
     None
 }
@@ -298,6 +289,75 @@ pub(crate) fn lambda_receiver_type_from_context(
 
 // ─── private helpers ─────────────────────────────────────────────────────────
 
+/// Returns `true` if `lambda_node` (a `lambda_literal` CST node) has a
+/// `lambda_parameters` child that contains at least one named parameter that
+/// is neither `it` nor `_`.
+pub(super) fn has_lambda_named_params(lambda_node: tree_sitter::Node<'_>, bytes: &[u8]) -> bool {
+    let Some(lp) = (0..lambda_node.child_count())
+        .filter_map(|i| lambda_node.child(i))
+        .find(|c| c.kind() == "lambda_parameters")
+    else { return false; };
+
+    (0..lp.child_count())
+        .filter_map(|i| lp.child(i))
+        .filter(|c| c.kind() == "variable_declaration")
+        .any(|vd| {
+            let Some(si) = vd.child(0).filter(|n| n.kind() == "simple_identifier") else { return false; };
+            let Ok(name) = std::str::from_utf8(&bytes[si.byte_range()]) else { return false; };
+            name != "it" && name != "_"
+        })
+}
+
+/// Walk ancestors from `start_node` looking for a `lambda_literal` without
+/// named params, then infer the `it`/`this` type for that lambda.
+///
+/// This is the extracted body of the CST fast-path in
+/// `find_it_element_type_in_lines_impl`.
+fn cst_it_or_this_type(
+    start_node: tree_sitter::Node<'_>,
+    doc:        &crate::indexer::live_tree::LiveDoc,
+    lines:      &[String],
+    for_this:   bool,
+    idx:        &Indexer,
+    uri:        &Url,
+) -> Option<String> {
+    let mut cur = start_node;
+    loop {
+        if cur.kind() == "lambda_literal" && !has_lambda_named_params(cur, &doc.bytes) {
+            // Extract text of the lambda-opening line up to the `{`.
+            let brace_byte = cur.start_byte();
+            let line_start = doc.bytes[..brace_byte]
+                .iter()
+                .rposition(|&b| b == b'\n')
+                .map(|i| i + 1)
+                .unwrap_or(0);
+            let before_brace = std::str::from_utf8(&doc.bytes[line_start..brace_byte])
+                .unwrap_or("")
+                .trim_end();
+            let ln = cur.start_position().row;
+
+            if for_this {
+                if let Some(t) = lambda_receiver_this_type_from_context(before_brace, idx, uri) {
+                    return Some(t);
+                }
+            } else {
+                // CST structural fallback: walk up the call tree to find
+                // the enclosing function call and the lambda's argument
+                // position. Handles multi-line cases where the call site
+                // is on a different line than the lambda `{`.
+                let result = lambda_receiver_type_from_context(before_brace, idx, uri)
+                    .or_else(|| lambda_receiver_type_named_arg_ml(
+                        before_brace, 0, lines, ln, idx, uri,
+                    ))
+                    .or_else(|| cst_lambda_param_type_via_call(doc, &cur, idx, uri));
+                if result.is_some() { return result; }
+            }
+        }
+        let Some(p) = cur.parent() else { return None; };
+        cur = p;
+    }
+}
+
 fn find_it_element_type_in_lines_impl(
     lines:    &[String],
     pos:      CursorPos,
@@ -308,62 +368,13 @@ fn find_it_element_type_in_lines_impl(
     // ── CST fast path ────────────────────────────────────────────────────────
     if let Some(doc) = idx.live_doc(uri) {
         use tree_sitter::Point;
-        let line_text  = lines.get(pos.line).map(|s| s.as_str()).unwrap_or("");
-        let byte_col   = crate::indexer::live_tree::utf16_col_to_byte(line_text, pos.utf16_col);
-        let point      = Point { row: pos.line, column: byte_col };
+        let line_text = lines.get(pos.line).map(|s| s.as_str()).unwrap_or("");
+        let byte_col  = crate::indexer::live_tree::utf16_col_to_byte(line_text, pos.utf16_col);
+        let point     = Point { row: pos.line, column: byte_col };
         if let Some(node) = doc.tree.root_node().descendant_for_point_range(point, point) {
-            let mut cur = node;
-            loop {
-                if cur.kind() == "lambda_literal" {
-                    // Skip string interpolations — their `{` is a child of
-                    // `multiline_string_expression`, not `lambda_literal`.
-                    // Skip named-param lambdas: those have a `lambda_parameters` child
-                    // containing at least one non-`it`/non-`_` identifier.
-                    let has_named = (0..cur.child_count()).filter_map(|i| cur.child(i))
-                        .find(|c| c.kind() == "lambda_parameters")
-                        .map(|lp| {
-                            (0..lp.child_count()).filter_map(|i| lp.child(i))
-                                .filter(|c| c.kind() == "variable_declaration")
-                                .filter_map(|vd| {
-                                    vd.child(0).filter(|si| si.kind() == "simple_identifier")
-                                        .and_then(|si| std::str::from_utf8(&doc.bytes[si.byte_range()]).ok().map(|s| s.to_string()))
-                                })
-                                .any(|name| name != "it" && name != "_")
-                        })
-                        .unwrap_or(false);
-                    if !has_named {
-                        // `before_brace` = text of the lambda-opening line up to the `{`.
-                        let brace_byte  = cur.start_byte();
-                        let line_start  = doc.bytes[..brace_byte].iter().rposition(|&b| b == b'\n')
-                            .map(|i| i + 1).unwrap_or(0);
-                        let before_brace = std::str::from_utf8(&doc.bytes[line_start..brace_byte])
-                            .unwrap_or("").trim_end();
-                        let ln = cur.start_position().row;
-                        if for_this {
-                            if let Some(t) = lambda_receiver_this_type_from_context(before_brace, idx, uri) {
-                                return Some(t);
-                            }
-                        } else {
-                            let result = lambda_receiver_type_from_context(before_brace, idx, uri)
-                                .or_else(|| lambda_receiver_type_named_arg_ml(
-                                    before_brace, 0, lines, ln, idx, uri,
-                                ))
-                                // CST structural fallback: walk up the call tree to find
-                                // the enclosing function call and the lambda's argument
-                                // position. Handles multi-line cases where the call site
-                                // is on a different line than the lambda `{`.
-                                .or_else(|| cst_lambda_param_type_via_call(&doc, &cur, idx, uri));
-                            if result.is_some() { return result; }
-                        }
-                    }
-                }
-                match cur.parent() {
-                    Some(p) => cur = p,
-                    None    => break,
-                }
-            }
-            return None;
+            return cst_it_or_this_type(node, &doc, lines, for_this, idx, uri);
         }
+        // Node not found for this position — fall through to text scan.
     }
 
     // ── Text fallback ────────────────────────────────────────────────────────
@@ -422,45 +433,69 @@ fn find_it_element_type_in_lines_impl(
     None
 }
 
+/// Iterator over `(brace_pos, names_str)` for each `->` in `line` that has a
+/// preceding `{`. `names_str` is the text between `{` and `->` (not trimmed).
+/// This is the shared scanning kernel used by all lambda-param helpers.
+fn lambda_brace_arrows(line: &str) -> impl Iterator<Item = (usize, &str)> {
+    let mut search_from = 0usize;
+    std::iter::from_fn(move || {
+        loop {
+            let rel = line[search_from..].find("->")?;
+            let arrow_pos = search_from + rel;
+            search_from = arrow_pos + 2;
+            if let Some(brace_pos) = line[..arrow_pos].rfind('{') {
+                let names_str = &line[brace_pos + 1..arrow_pos];
+                return Some((brace_pos, names_str));
+            }
+        }
+    })
+}
+
+fn names_has_param(names_str: &str, param_name: &str) -> bool {
+    names_str.split(',').any(|tok| {
+        let n: String = tok.trim().chars().take_while(|&c| c.is_alphanumeric() || c == '_').collect();
+        n == param_name
+    })
+}
+
+fn param_index_in(names_str: &str, param_name: &str) -> Option<usize> {
+    names_str.split(',').enumerate().find_map(|(i, tok)| {
+        let n: String = tok.trim().chars().take_while(|&c| c.is_alphanumeric() || c == '_').collect();
+        if n == param_name { Some(i) } else { None }
+    })
+}
+
 /// Returns true if `line` contains a lambda declaration that names `param_name`
 /// as one of its parameters (handles single and multi-param patterns):
 ///   `{ param -> ... }`, `{ a, param, b -> ... }`
 pub(crate) fn line_has_lambda_param(line: &str, param_name: &str) -> bool {
-    // There may be multiple `->` on one line (e.g. inline + trailing lambda).
-    // Iterate every `->` and check whether param_name is in the names before it.
-    let mut search_from = 0;
-    while let Some(rel) = line[search_from..].find("->") {
-        let arrow_pos = search_from + rel;
-        if let Some(brace_pos) = line[..arrow_pos].rfind('{') {
-            let names_str = &line[brace_pos + 1..arrow_pos];
-            for tok in names_str.split(',') {
-                let tok = tok.trim();
-                let n: String = tok.chars().take_while(|&c| c.is_alphanumeric() || c == '_').collect();
-                if n == param_name { return true; }
-            }
-        }
-        search_from = arrow_pos + 2;
-    }
-    false
+    lambda_brace_arrows(line).any(|(_, names)| names_has_param(names, param_name))
 }
 
 /// Find the `{` byte position in `line` for the lambda that declares `param_name`.
 /// Scans all `->` occurrences (a line may have multiple lambdas).
 pub(crate) fn lambda_brace_pos_for_param(line: &str, param_name: &str) -> Option<usize> {
-    let mut search_from = 0;
-    while let Some(rel) = line[search_from..].find("->") {
-        let arrow_pos = search_from + rel;
-        if let Some(brace_pos) = line[..arrow_pos].rfind('{') {
-            let names_str = &line[brace_pos + 1..arrow_pos];
-            for tok in names_str.split(',') {
-                let tok = tok.trim();
-                let n: String = tok.chars().take_while(|&c| c.is_alphanumeric() || c == '_').collect();
-                if n == param_name { return Some(brace_pos); }
-            }
-        }
-        search_from = arrow_pos + 2;
-    }
-    None
+    lambda_brace_arrows(line)
+        .find(|(_, names)| names_has_param(names, param_name))
+        .map(|(pos, _)| pos)
+}
+
+/// Returns `(brace_pos, param_index)` for the lambda on `line` that declares
+/// `param_name`, combining `lambda_brace_pos_for_param` + `lambda_param_position_on_line`
+/// into a single scan.
+pub(crate) fn find_lambda_brace_for_param(line: &str, param_name: &str) -> Option<(usize, usize)> {
+    lambda_brace_arrows(line)
+        .find_map(|(brace_pos, names)| {
+            param_index_in(names, param_name).map(|idx| (brace_pos, idx))
+        })
+}
+
+/// 0-based index of `param_name` in a multi-param lambda opening `{ a, b, c ->`.
+/// Returns 0 for single-param lambdas.
+pub(crate) fn lambda_param_position_on_line(line: &str, param_name: &str) -> usize {
+    lambda_brace_arrows(line)
+        .find_map(|(_, names)| param_index_in(names, param_name))
+        .unwrap_or(0)
 }
 
 ///

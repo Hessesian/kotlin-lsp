@@ -208,25 +208,6 @@ pub(crate) fn find_named_param_type_in_sig(sig: &str, param_name: &str) -> Optio
 
 // ─── Lambda parameter helpers ─────────────────────────────────────────────────
 
-/// 0-based index of `param_name` in a multi-param lambda opening `{ a, b, c ->`.
-/// Returns 0 for single-param lambdas.
-pub(crate) fn lambda_param_position_on_line(line: &str, param_name: &str) -> usize {
-    let mut search_from = 0;
-    while let Some(rel) = line[search_from..].find("->") {
-        let arrow_pos = search_from + rel;
-        if let Some(brace_pos) = line[..arrow_pos].rfind('{') {
-            let names_str = &line[brace_pos + 1..arrow_pos];
-            for (i, tok) in names_str.split(',').enumerate() {
-                let tok = tok.trim();
-                let n: String = tok.chars().take_while(|&c| c.is_alphanumeric() || c == '_').collect();
-                if n == param_name { return i; }
-            }
-        }
-        search_from = arrow_pos + 2;
-    }
-    0
-}
-
 /// Returns `true` if `after_open_brace` looks like the opening of an explicitly
 /// named parameter lambda — single-param `{ name ->` or multi-param `{ a, b ->`.
 ///

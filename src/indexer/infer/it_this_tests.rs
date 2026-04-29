@@ -213,6 +213,49 @@ fn lambda_brace_pos_none_for_unknown_param() {
     assert_eq!(lambda_brace_pos_for_param(line, "unknown"), None);
 }
 
+// ── find_lambda_brace_for_param ──────────────────────────────────────────────
+
+#[test]
+fn find_lambda_brace_returns_brace_pos_and_index() {
+    let line = "items.forEach { item -> item.name }";
+    assert_eq!(find_lambda_brace_for_param(line, "item"), Some((14, 0)));
+}
+
+#[test]
+fn find_lambda_brace_multi_param() {
+    let line = "fn { a, b -> a + b }";
+    assert_eq!(find_lambda_brace_for_param(line, "b"), Some((3, 1)));
+}
+
+#[test]
+fn find_lambda_brace_unknown_param() {
+    let line = "fn { x -> x }";
+    assert_eq!(find_lambda_brace_for_param(line, "y"), None);
+}
+
+#[test]
+fn find_lambda_brace_extra_spaces() {
+    let line = "{   name   -> name.foo }";
+    assert_eq!(find_lambda_brace_for_param(line, "name"), Some((0, 0)));
+}
+
+// ── lambda_param_position_on_line ─────────────────────────────────────────────
+
+#[test]
+fn lambda_param_position_single() {
+    assert_eq!(lambda_param_position_on_line("{ a -> }", "a"), 0);
+}
+
+#[test]
+fn lambda_param_position_second() {
+    assert_eq!(lambda_param_position_on_line("{ a, b -> }", "b"), 1);
+}
+
+#[test]
+fn lambda_param_position_missing() {
+    assert_eq!(lambda_param_position_on_line("{ a -> }", "x"), 0);
+}
+
 // ── has_named_params_not_it ──────────────────────────────────────────────────
 
 #[test]
@@ -351,6 +394,68 @@ fn it_type_indexed_inner_fn_cst_still_works() {
     let result = find_it_element_type_in_lines(&lines, pos, &idx, &u);
     assert_eq!(result.as_deref(), Some("State"),
         "simple trailing-lambda with live tree must still resolve via Case B");
+}
+
+// ── has_lambda_named_params ──────────────────────────────────────────────────
+
+fn parse_kotlin(src: &str) -> tree_sitter::Tree {
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_kotlin::language()).unwrap();
+    parser.parse(src, None).unwrap()
+}
+
+fn find_node_kind<'a>(node: tree_sitter::Node<'a>, kind: &str) -> Option<tree_sitter::Node<'a>> {
+    if node.kind() == kind { return Some(node); }
+    for i in 0..node.child_count() {
+        if let Some(n) = node.child(i).and_then(|c| find_node_kind(c, kind)) {
+            return Some(n);
+        }
+    }
+    None
+}
+
+#[test]
+fn has_lambda_named_params_false_for_no_params() {
+    // lambda_literal with no lambda_parameters child → false
+    let src = "val x = items.map { it.name }";
+    let bytes = src.as_bytes();
+    let tree = parse_kotlin(src);
+    let lambda = find_node_kind(tree.root_node(), "lambda_literal").unwrap();
+    assert!(!super::has_lambda_named_params(lambda, bytes),
+        "no lambda_parameters child should yield false");
+}
+
+#[test]
+fn has_lambda_named_params_false_for_it() {
+    // lambda_parameters containing only `it` → false
+    let src = "val x = items.map { it -> it.name }";
+    let bytes = src.as_bytes();
+    let tree = parse_kotlin(src);
+    let lambda = find_node_kind(tree.root_node(), "lambda_literal").unwrap();
+    assert!(!super::has_lambda_named_params(lambda, bytes),
+        "param named `it` should yield false");
+}
+
+#[test]
+fn has_lambda_named_params_true_for_named() {
+    // lambda_parameters containing `item` → true
+    let src = "val x = items.map { item -> item.name }";
+    let bytes = src.as_bytes();
+    let tree = parse_kotlin(src);
+    let lambda = find_node_kind(tree.root_node(), "lambda_literal").unwrap();
+    assert!(super::has_lambda_named_params(lambda, bytes),
+        "param named `item` should yield true");
+}
+
+#[test]
+fn has_lambda_named_params_false_for_underscore() {
+    // lambda_parameters containing only `_` → false
+    let src = "val x = items.map { _ -> 42 }";
+    let bytes = src.as_bytes();
+    let tree = parse_kotlin(src);
+    let lambda = find_node_kind(tree.root_node(), "lambda_literal").unwrap();
+    assert!(!super::has_lambda_named_params(lambda, bytes),
+        "param named `_` should yield false");
 }
 
 // ── TestDeps-based leaf-helper tests ─────────────────────────────────────────
