@@ -22,12 +22,12 @@ use tower_lsp::lsp_types::Url;
 
 /// Minimum dependency surface for pure lambda/type inference leaf functions.
 ///
-/// Two concrete impls exist (Rule of Three satisfied):
+/// Two concrete implementations:
 /// - `Indexer` — production, full resolution with rg fallback
 /// - `TestDeps` — test stub, drives leaf-helper unit tests from plain `HashMap`s
 pub trait InferDeps {
-    /// Return the raw parameter signature text for a function, e.g.
-    /// `"(key: K, flow: Flow<T>, map: (T) -> Model)"`.
+    /// Return the raw parameter text inside a function's outer `()`, e.g.
+    /// `"key: K, flow: Flow<T>, map: (T) -> Model"` (no surrounding parens).
     ///
     /// May perform on-demand rg/disk I/O in the `Indexer` implementation.
     /// Returns `None` when the function is not found.
