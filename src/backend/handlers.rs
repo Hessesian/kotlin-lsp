@@ -395,18 +395,7 @@ impl Backend {
         }
         let line_text = &lines[line_idx];
         // pos.character is UTF-16 units — convert to a byte offset.
-        let col = {
-            let mut utf16_remaining = pos.character as usize;
-            let mut byte_pos = 0;
-            for ch in line_text.chars() {
-                if utf16_remaining == 0 { break; }
-                let units = ch.len_utf16();
-                if utf16_remaining < units { break; }
-                utf16_remaining -= units;
-                byte_pos += ch.len_utf8();
-            }
-            byte_pos
-        };
+        let col = crate::indexer::live_tree::utf16_col_to_byte(line_text, pos.character as usize);
         let before = &line_text[..col];
 
         // Count commas at the current paren depth to find active param.

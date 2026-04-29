@@ -34,12 +34,7 @@ pub(crate) fn find_as_call_arg_type(
     let line = lines.get(cursor_line)?;
     // Slice the line up to (but not including) the cursor position.
     let before_cursor = {
-        let mut byte_end = line.len();
-        let mut utf16 = 0usize;
-        for (bi, ch) in line.char_indices() {
-            if utf16 >= cursor_col { byte_end = bi; break; }
-            utf16 += ch.len_utf16();
-        }
+        let byte_end = crate::indexer::live_tree::utf16_col_to_byte(line, cursor_col);
         &line[..byte_end]
     };
     let col = before_cursor.chars().count();

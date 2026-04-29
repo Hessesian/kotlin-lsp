@@ -383,12 +383,7 @@ fn find_it_element_type_in_lines_impl(
         // On cursor_line restrict to chars at byte positions < cursor_col.
         let scan_slice: &str = if ln == cursor_line {
             // cursor_col is a UTF-16 character offset (from LSP); convert to a byte boundary.
-            let mut utf16 = 0usize;
-            let mut byte_end = line.len();
-            for (bi, ch) in line.char_indices() {
-                if utf16 >= cursor_col { byte_end = bi; break; }
-                utf16 += ch.len_utf16();
-            }
+            let byte_end = crate::indexer::live_tree::utf16_col_to_byte(line, cursor_col);
             &line[..byte_end]
         } else {
             line.as_str()
