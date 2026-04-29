@@ -86,6 +86,9 @@ pub fn parse_kotlin(content: &str) -> FileData {
     // ── fun interface (tree-sitter parses these as ERROR + lambda_literal) ───
     extract_fun_interfaces(root, bytes, &mut data);
 
+    // ── supertype relationships (delegation specifiers) ──────────────────────
+    extract_supers_kotlin(root, bytes, &mut data);
+
     // ── declared_names: scan lines once for `ident:` patterns ───────────────
     data.declared_names = extract_declared_names(&data.lines);
 
@@ -108,6 +111,7 @@ pub fn parse_java(content: &str) -> FileData {
     let mut queue = vec![tree.root_node()];
     while let Some(node) = queue.pop() {
         extract_java(&node, bytes, &mut data);
+        extract_supers_java(&node, bytes, &mut data);
         let mut cur = node.walk();
         for child in node.children(&mut cur) { queue.push(child); }
     }
@@ -874,6 +878,199 @@ pub(crate) fn extract_declared_names(lines: &[String]) -> Vec<String> {
     names
 }
 
+
+// ─── supertype CST extraction ────────────────────────────────────────────────
+
+/// Walk the Kotlin CST and populate `data.supers` with `(class_name_line, supertype_name)`
+/// for every `class_declaration` and `object_declaration` that has delegation specifiers.
+fn extract_supers_kotlin(root: Node, bytes: &[u8], data: &mut FileData) {
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        match node.kind() {
+            "class_declaration" | "object_declaration" => {
+                let name_line = node_name_line(&node);
+                let mut cur = node.walk();
+                for child in node.children(&mut cur) {
+                    if child.kind() == "delegation_specifier" {
+                        if let Some(name) = super_name_from_delegation(&child, bytes) {
+                            data.supers.push((name_line, name));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        let mut cur = node.walk();
+        for child in node.children(&mut cur) { stack.push(child); }
+    }
+}
+
+/// Walk the Java CST and populate `data.supers` for class/interface/enum/record
+/// declarations that extend or implement other types.
+fn extract_supers_java(node: &Node, bytes: &[u8], data: &mut FileData) {
+    match node.kind() {
+        "class_declaration" | "record_declaration" | "enum_declaration" => {
+            let name_line = node_name_line(node);
+            let mut cur = node.walk();
+            for child in node.children(&mut cur) {
+                match child.kind() {
+                    "superclass" => {
+                        // (superclass "extends" _type)
+                        if let Some(name) = java_first_type_name(&child, bytes) {
+                            data.supers.push((name_line, name));
+                        }
+                    }
+                    "super_interfaces" => {
+                        // (super_interfaces "implements" (type_list _type, ...))
+                        java_collect_type_list(&child, bytes, name_line, data);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        "interface_declaration" => {
+            let name_line = node_name_line(node);
+            let mut cur = node.walk();
+            for child in node.children(&mut cur) {
+                if child.kind() == "extends_interfaces" {
+                    // (extends_interfaces "extends" (type_list ...))
+                    java_collect_type_list(&child, bytes, name_line, data);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Get the start line of the class-name identifier — matches `SymbolEntry::selection_range.start.line`.
+fn node_name_line(node: &Node) -> u32 {
+    // Java uses field "name"; Kotlin has type_identifier as a direct child.
+    if let Some(n) = node.child_by_field_name("name") {
+        return n.start_position().row as u32;
+    }
+    let mut cur = node.walk();
+    for child in node.children(&mut cur) {
+        if matches!(child.kind(), "type_identifier" | "simple_identifier" | "identifier") {
+            return child.start_position().row as u32;
+        }
+    }
+    node.start_position().row as u32
+}
+
+/// Extract the supertype name from a `delegation_specifier` node.
+fn super_name_from_delegation(node: &Node, bytes: &[u8]) -> Option<String> {
+    let mut cur = node.walk();
+    for child in node.children(&mut cur) {
+        match child.kind() {
+            "constructor_invocation" => {
+                // constructor_invocation → user_type value_arguments
+                let mut cc = child.walk();
+                for gc in child.children(&mut cc) {
+                    if gc.kind() == "user_type" {
+                        return user_type_name(&gc, bytes);
+                    }
+                }
+            }
+            "user_type" | "explicit_delegation" => {
+                // explicit_delegation → user_type "by" expression
+                if child.kind() == "explicit_delegation" {
+                    let mut cc = child.walk();
+                    for gc in child.children(&mut cc) {
+                        if gc.kind() == "user_type" {
+                            return user_type_name(&gc, bytes);
+                        }
+                    }
+                } else {
+                    return user_type_name(&child, bytes);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Collect the identifier segments of a `user_type` node, ignoring
+/// `type_arguments` subtrees, so generics don't interfere with dotted paths.
+/// `Bar<Event, State>` → `["Bar"]`;  `Outer<T>.Inner` → `["Outer", "Inner"]`.
+fn collect_user_type_segments(node: &Node, bytes: &[u8], segments: &mut Vec<String>) {
+    let mut cur = node.walk();
+    for child in node.children(&mut cur) {
+        match child.kind() {
+            "type_arguments" => {}  // skip generic parameters entirely
+            "simple_identifier" | "type_identifier" | "identifier" => {
+                if let Ok(text) = child.utf8_text(bytes) {
+                    let text = text.trim();
+                    if !text.is_empty() { segments.push(text.to_owned()); }
+                }
+            }
+            _ if child.is_named() => collect_user_type_segments(&child, bytes, segments),
+            _ => {}
+        }
+    }
+}
+
+/// Get the canonical type name from a `user_type` node, stripping generic args.
+/// `Bar<Event, State>` → `"Bar"`;  `Outer<T>.Inner` → `"Outer.Inner"`.
+fn user_type_name(node: &Node, bytes: &[u8]) -> Option<String> {
+    let mut segments = Vec::new();
+    collect_user_type_segments(node, bytes, &mut segments);
+    if segments.is_empty() { None } else { Some(segments.join(".")) }
+}
+
+/// Extract the outermost type name from a Java type node.
+///
+/// Handles leaf `type_identifier`, `scoped_type_identifier`, and wrapper nodes
+/// like `generic_type` (`Base<String>` → `"Base"`) by descending until
+/// a `type_identifier` is found. `type_arguments` nodes are skipped so generic
+/// parameters don't shadow the base type name.
+fn java_first_type_name(node: &Node, bytes: &[u8]) -> Option<String> {
+    let mut stack = vec![*node];
+    while let Some(n) = stack.pop() {
+        match n.kind() {
+            "type_identifier" => {
+                return n.utf8_text(bytes).ok().map(str::to_owned);
+            }
+            "scoped_type_identifier" => {
+                // Return the full dotted name (e.g. `pkg.Base`), stripping any trailing
+                // generic args that may appear inside the scope chain.
+                let text = n.utf8_text(bytes).ok()?;
+                let name = text.split('<').next().unwrap_or(text).trim();
+                return if name.is_empty() { None } else { Some(name.to_owned()) };
+            }
+            // Skip type_arguments entirely — they contain the generic params, not the base name.
+            "type_arguments" => continue,
+            _ => {}
+        }
+        let mut cur = n.walk();
+        for child in n.children(&mut cur) {
+            if child.is_named() { stack.push(child); }
+        }
+    }
+    None
+}
+
+/// Walk a `super_interfaces` or `extends_interfaces` node, collecting all type names
+/// from its `type_list` child into `data.supers`.
+fn java_collect_type_list(node: &Node, bytes: &[u8], name_line: u32, data: &mut FileData) {
+    let mut cur = node.walk();
+    for child in node.children(&mut cur) {
+        if child.kind() == "type_list" {
+            let mut cc = child.walk();
+            for type_node in child.children(&mut cc) {
+                // type_list children may be leaf type_identifier nodes directly,
+                // or wrapper nodes (generic_type, scoped_type_identifier) containing one.
+                let name = if type_node.kind() == "type_identifier" {
+                    type_node.utf8_text(bytes).ok().map(str::to_owned)
+                } else {
+                    java_first_type_name(&type_node, bytes)
+                };
+                if let Some(n) = name { data.supers.push((name_line, n)); }
+            }
+        }
+    }
+}
+
 // ─── tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1001,6 +1198,7 @@ mod tests {
         let data = parse_kotlin("class Vec {\n  operator fun plus(other: Vec): Vec = Vec()\n}");
         assert_eq!(sym(&data, "plus").unwrap().kind, SymbolKind::OPERATOR);
     }
+
 
     #[test]
     fn primary_ctor_val_param_indexed() {

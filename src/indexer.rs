@@ -714,14 +714,11 @@ class Foo @Inject constructor(
         let locs = idx.definitions.get("Foo").map(|v| v.clone()).unwrap_or_default();
         assert!(!locs.is_empty(), "Foo must be in definitions");
         let file = idx.files.get(locs[0].uri.as_str()).unwrap();
-        let start = locs[0].range.start.line as usize;
-        let end = (start + 10).min(file.lines.len());
-        let mut decl_lines: Vec<String> = vec![];
-        for line in &file.lines[start..end] {
-            decl_lines.push(line.clone());
-            if line.contains('{') { break; }
-        }
-        let supers = crate::resolver::extract_supers_from_lines(&decl_lines);
+        let start_line = locs[0].range.start.line;
+        let supers: Vec<String> = file.supers.iter()
+            .filter(|(l, _)| *l == start_line)
+            .map(|(_, n)| n.clone())
+            .collect();
         assert!(supers.contains(&"Bar".to_string()), "supers={supers:?}");
 
         // 3. find_definition_qualified finds Bar (same package)

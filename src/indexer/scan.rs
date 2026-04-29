@@ -184,10 +184,20 @@ impl Indexer {
                     Ok(c) => c,
                     Err(_) => continue,
                 };
+                let Ok(uri) = Url::from_file_path(&path) else { continue };
+                // Index now so that (a) we can read FileData.supers directly and
+                // (b) the priority-loop's index_content call hash-skips this file —
+                // avoiding a double parse for each initial_paths entry.
+                let idx_c = Arc::clone(&self);
+                let uri_c  = uri.clone();
+                let cont_c = content.clone();
+                let supers: Vec<String> = tokio::task::spawn_blocking(move || {
+                    idx_c.index_content(&uri_c, &cont_c)
+                        .map(|d| d.supers.iter().map(|(_, n)| n.clone()).collect())
+                        .unwrap_or_default()
+                }).await.unwrap_or_default();
                 // Expand priority set to include supertypes so cross-class navigation
                 // (super, override resolution) works before the full scan completes.
-                let lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
-                let supers = crate::resolver::extract_supers_from_lines(&lines);
                 if !supers.is_empty() {
                     let m = self.ignore_matcher.read().unwrap().clone();
                     let super_paths = find_files_for_types(&supers, root, m.as_deref());

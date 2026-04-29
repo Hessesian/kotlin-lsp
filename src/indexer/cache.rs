@@ -21,7 +21,7 @@ use crate::types::{FileData, FileIndexResult};
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 /// Bump when the serialized format changes; invalidates any older cache files.
-pub(crate) const CACHE_VERSION: u32 = 4;
+pub(crate) const CACHE_VERSION: u32 = 5;
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -146,18 +146,10 @@ pub(crate) fn cache_entry_to_file_result(uri: &Url, entry: &FileCacheEntry) -> F
     let mut supertypes: Vec<(String, Location)> = Vec::new();
     for sym in &data.symbols {
         if !class_kinds.contains(&sym.kind) { continue; }
-        let start = sym.selection_range.start.line as usize;
-        if start >= data.lines.len() { continue; }
-        let limit  = (start + 10).min(data.lines.len());
-        if start >= limit { continue; }
-        let mut decl_lines: Vec<String> = Vec::new();
-        for line in &data.lines[start..limit] {
-            decl_lines.push(line.clone());
-            if line.contains('{') { break; }
-        }
+        let start_line = sym.selection_range.start.line;
         let class_loc = Location { uri: uri.clone(), range: sym.selection_range };
-        for super_name in crate::resolver::extract_supers_from_lines(&decl_lines) {
-            supertypes.push((super_name, class_loc.clone()));
+        for (_, super_name) in data.supers.iter().filter(|(l, _)| *l == start_line) {
+            supertypes.push((super_name.clone(), class_loc.clone()));
         }
     }
     FileIndexResult {

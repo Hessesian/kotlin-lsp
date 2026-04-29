@@ -67,6 +67,12 @@ pub struct FileData {
     /// Lower-cased identifiers found before `:` on non-comment lines.
     /// Populated once at parse time; used by completion without re-scanning.
     pub declared_names: Vec<String>,
+    /// Supertype relationships extracted from the CST at parse time.
+    /// Each entry is `(class_name_line, supertype_name)` where `class_name_line`
+    /// matches `SymbolEntry::selection_range.start.line` for the declaring class.
+    /// Replaces the old string-based `extract_supers_from_lines` scanner.
+    #[serde(default)]
+    pub supers: Vec<(u32, String)>,
     /// Structural syntax errors from tree-sitter (ERROR / MISSING nodes).
     /// Transient — not serialized to disk cache.
     #[serde(skip)]

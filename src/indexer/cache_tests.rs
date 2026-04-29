@@ -31,6 +31,7 @@ fn cache_entry_to_file_result_supertypes_extracted() {
         selection_range: Default::default(),
         detail: String::new(),
     });
+    data.supers.push((0, "IAnimal".into()));
 
     let entry = FileCacheEntry {
         mtime_secs: 100,
