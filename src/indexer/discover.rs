@@ -105,20 +105,18 @@ fn walkdir_find(root: &Path, matcher: Option<&IgnoreMatcher>) -> Vec<PathBuf> {
         matcher.filter(|m| !m.is_empty()).map(|m| m.glob_set());
     let root_owned2 = root.to_path_buf();
 
-    for result in builder.build() {
-        if let Ok(entry) = result {
-            let path = entry.path();
-            if path.is_file() {
-                if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
-                    if SOURCE_EXTENSIONS.contains(&ext) {
-                        if let Some(gs) = &user_glob_set_files {
-                            let rel = path.strip_prefix(&root_owned2).unwrap_or(path);
-                            if gs.is_match(rel) {
-                                continue;
-                            }
+    for entry in builder.build().flatten() {
+        let path = entry.path();
+        if path.is_file() {
+            if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+                if SOURCE_EXTENSIONS.contains(&ext) {
+                    if let Some(gs) = &user_glob_set_files {
+                        let rel = path.strip_prefix(&root_owned2).unwrap_or(path);
+                        if gs.is_match(rel) {
+                            continue;
                         }
-                        paths.push(path.to_path_buf());
                     }
+                    paths.push(path.to_path_buf());
                 }
             }
         }
@@ -159,14 +157,12 @@ pub(super) fn find_source_files_unconstrained(root: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     let mut builder = ignore::WalkBuilder::new(root);
     builder.standard_filters(false).hidden(false).parents(false);
-    for result in builder.build() {
-        if let Ok(entry) = result {
-            let path = entry.path();
-            if path.is_file() {
-                if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
-                    if SOURCE_EXTENSIONS.contains(&ext) {
-                        paths.push(path.to_path_buf());
-                    }
+    for entry in builder.build().flatten() {
+        let path = entry.path();
+        if path.is_file() {
+            if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+                if SOURCE_EXTENSIONS.contains(&ext) {
+                    paths.push(path.to_path_buf());
                 }
             }
         }

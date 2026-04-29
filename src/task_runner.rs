@@ -1,7 +1,7 @@
-/// Async task orchestration utilities (SOLID refactoring)
-/// 
-/// Single responsibility: execute async work items concurrently and collect results.
-/// Separated from indexer logic for testability.
+//! Async task orchestration utilities (SOLID refactoring)
+//!
+//! Single responsibility: execute async work items concurrently and collect results.
+//! Separated from indexer logic for testability.
 
 use std::sync::Arc;
 use tokio::sync::Semaphore;

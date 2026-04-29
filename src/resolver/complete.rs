@@ -22,8 +22,8 @@ pub(crate) fn is_screaming_snake(name: &str) -> bool {
 ///
 /// - `0` — `name` starts with `prefix` (case-insensitive, fastest/best)
 /// - `1` — camelCase acronym: every character in `prefix` (uppercase-as-given)
-///          matches the first letter of successive CamelCase/underscore word
-///          segments in `name` (e.g. `CB` → `ColumnButton`, `mSF` → `myStateFlow`)
+///   matches the first letter of successive CamelCase/underscore word
+///   segments in `name` (e.g. `CB` → `ColumnButton`, `mSF` → `myStateFlow`)
 /// - `2` — `name` contains `prefix` as a case-insensitive substring
 /// - `None` — no match; exclude this symbol
 pub(crate) fn match_score(name: &str, prefix: &str) -> Option<u8> {
@@ -54,7 +54,7 @@ fn camel_acronym_match(name: &str, prefix: &str) -> bool {
     for (i, &c) in chars.iter().enumerate() {
         let is_word_start = i == 0
             || c == '_'
-            || (i > 0 && chars[i - 1] == '_' && c != '_')  // char immediately after underscore
+            || (i > 0 && chars[i - 1] == '_')          // char immediately after underscore
             || (c.is_uppercase() && i > 0 && chars[i - 1].is_lowercase())
             || (c.is_uppercase() && i > 0 && chars[i - 1].is_uppercase()
                 && i + 1 < chars.len() && chars[i + 1].is_lowercase());

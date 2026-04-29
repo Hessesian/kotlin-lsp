@@ -402,7 +402,7 @@ pub fn live_templates() -> Vec<tower_lsp::lsp_types::CompletionItem> {
             detail:             Some(desc.to_string()),
             documentation:      Some(Documentation::MarkupContent(MarkupContent {
                 kind:  MarkupKind::Markdown,
-                value: format!("```kotlin\n{}\n```", body.replace("${0}", "").replace(|c: char| c == '$' || c == '{' || c == '}', "")),
+                value: format!("```kotlin\n{}\n```", body.replace("${0}", "").replace(['$', '{', '}'], "")),
             })),
             insert_text:        Some(body.to_string()),
             insert_text_format: Some(InsertTextFormat::SNIPPET),

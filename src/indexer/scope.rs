@@ -280,9 +280,7 @@ impl Indexer {
                                         .collect();
                                     if !name.is_empty() && name != "it" && name != "_"
                                         && name.chars().next().map(|c| c.is_lowercase()).unwrap_or(false)
-                                    {
-                                        if !params.contains(&name) { params.push(name.clone()); }
-                                    }
+                                        && !params.contains(&name) { params.push(name.clone()); }
                                 }
                             }
                             // Reset so outer lambdas can also be found.

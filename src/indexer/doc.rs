@@ -71,17 +71,12 @@ pub(super) fn extract_doc_comment(lines: &[String], decl_line: usize) -> Option<
             .iter()
             .map(|l| {
                 let t = l.trim();
-                let stripped = if t.starts_with("/// ") {
-                    &t[4..]
-                } else if t.starts_with("//! ") {
-                    &t[4..]
-                } else if t.starts_with("// ") {
-                    &t[3..]
-                } else if t.starts_with("//") {
-                    &t[2..]
-                } else {
-                    t
-                };
+                let stripped = t
+                    .strip_prefix("/// ")
+                    .or_else(|| t.strip_prefix("//! "))
+                    .or_else(|| t.strip_prefix("// "))
+                    .or_else(|| t.strip_prefix("//"))
+                    .unwrap_or(t);
                 stripped.to_owned()
             })
             .collect::<Vec<_>>()
@@ -260,8 +255,8 @@ fn inline_doc_markup(s: &str) -> String {
 
     // KDoc `[Symbol]` → `Symbol`
     // Avoid matching Markdown links `[text](url)` — only bare `[Word]`
-    let out = regex_replace_kdoc_links(&out);
-    out
+    
+    regex_replace_kdoc_links(&out)
 }
 
 /// Replace KDoc `[SymbolName]` (not followed by `(`) with `` `SymbolName` ``.

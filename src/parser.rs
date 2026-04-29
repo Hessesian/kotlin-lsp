@@ -4,6 +4,8 @@ use tower_lsp::lsp_types::{Position, Range, SymbolKind};
 use crate::queries::{self, KOTLIN_DEFINITIONS, SWIFT_DEFINITIONS};
 use crate::types::{FileData, ImportEntry, SymbolEntry, SyntaxError, Visibility};
 
+type MatchEntry = (usize, [Option<(String, Range, Range)>; 2]);
+
 // ─── public entry points ────────────────────────────────────────────────────
 
 pub fn parse_kotlin(content: &str) -> FileData {
@@ -27,7 +29,7 @@ pub fn parse_kotlin(content: &str) -> FileData {
     let name_idx = def_q.capture_index_for_name("name").unwrap_or(1);
 
     let mut cur = QueryCursor::new();
-    let matches: Vec<(usize, [Option<(String, Range, Range)>; 2])> = cur
+    let matches: Vec<MatchEntry> = cur
         .matches(&def_q, root, bytes)
         .map(|m| {
             let pidx = m.pattern_index;
@@ -141,7 +143,7 @@ pub fn parse_swift(content: &str) -> FileData {
     let name_idx = def_q.capture_index_for_name("name").unwrap_or(1);
 
     let mut cur = QueryCursor::new();
-    let matches: Vec<(usize, [Option<(String, Range, Range)>; 2])> = cur
+    let matches: Vec<MatchEntry> = cur
         .matches(&def_q, root, bytes)
         .map(|m| {
             let pidx = m.pattern_index;
@@ -406,11 +408,12 @@ fn fun_interface_name_from_fn_decl(node: &Node, bytes: &[u8]) -> Option<(usize, 
             // (internal case: ERROR { simple_identifier("IPairCodeParser"), "{", "fun", ... })
             if child.is_error() {
                 let mut ec = child.walk();
-                for ec_child in child.children(&mut ec) {
-                    if ec_child.kind() == "simple_identifier" {
-                        return Some((ec_child.start_byte(), ec_child.end_byte(), ec_child.range()));
-                    }
-                    break; // Only look at the first child
+                let info = child.children(&mut ec)
+                    .next()
+                    .filter(|c| c.kind() == "simple_identifier")
+                    .map(|c| (c.start_byte(), c.end_byte(), c.range()));
+                if let Some(loc) = info {
+                    return Some(loc);
                 }
             }
         }
@@ -426,7 +429,7 @@ fn fun_interface_name_from_fn_decl(node: &Node, bytes: &[u8]) -> Option<(usize, 
 /// Tree-sitter produces two different misparsings depending on whether modifiers precede:
 /// - No modifiers: ERROR("fun", user_type("interface"), simple_identifier("Foo"))
 /// - With modifiers: function_declaration(modifiers, "fun", user_type("interface"),
-///                                        simple_identifier("Foo"), ERROR(...))
+///   simple_identifier("Foo"), ERROR(...))
 fn extract_fun_interfaces(root: Node, bytes: &[u8], data: &mut FileData) {
     if !root.has_error() { return; }
     let mut stack = vec![root];

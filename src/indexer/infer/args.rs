@@ -58,7 +58,7 @@ pub(crate) fn find_as_call_arg_type(
                 let preceding = s[..ident_start].trim_end().chars().last();
                 if matches!(preceding, Some('(') | Some(',')) {
                     if let Some(fn_full) = find_enclosing_call_name(lines, cursor_line, col) {
-                        if let Some(fn_name) = fn_full.split('.').last().filter(|n| !n.is_empty()) {
+                        if let Some(fn_name) = fn_full.split('.').next_back().filter(|n| !n.is_empty()) {
                             if let Some(sig) = find_fun_signature_full(fn_name, idx, uri) {
                                 if let Some(param_type) = find_named_param_type_in_sig(&sig, named_arg) {
                                     let base: String = param_type.trim()
@@ -101,7 +101,7 @@ pub(crate) fn find_as_call_arg_type(
                         if end >= i { return None; }
                         let full_name: String = chars[end..i].iter().collect();
                         let fn_name = full_name.trim_matches('.')
-                            .split('.').last().filter(|n| !n.is_empty())?;
+                            .split('.').next_back().filter(|n| !n.is_empty())?;
                         let sig = find_fun_signature_full(fn_name, idx, uri)?;
                         let param_type = nth_fun_param_type_str(&sig, arg_pos)?;
                         let base: String = param_type.trim()

@@ -4,23 +4,22 @@
 //! ────────────────
 //! 1. **Local file**        — symbols defined in the same file (highest priority).
 //! 2. **Explicit imports**  — `import com.example.Foo` or `import com.example.Foo as F`.
-//!                            Tries the `qualified` index first, then the short-name index.
+//!    Tries the `qualified` index first, then the short-name index.
 //! 3. **Same package**      — all symbols in files that share the same `package` declaration
-//!                            are visible without imports in Kotlin.
+//!    are visible without imports in Kotlin.
 //! 4. **Star imports**      — `import com.example.*`  checks indexed files in that package,
-//!                            then falls back to an `rg` search scoped to the package dir.
+//!    then falls back to an `rg` search scoped to the package dir.
 //! 5. **Extension functions** — `fun Receiver.name(...)` is stored as a top-level symbol
-//!                            named `name`; steps 1–4 already pick these up. No special
-//!                            handling needed beyond noting that receiver type is ignored.
+//!    named `name`; steps 1–4 already pick these up. No special
+//!    handling needed beyond noting that receiver type is ignored.
 //! 6. **Project-wide `rg`** — pattern `(fun|class|…)\s+NAME\b` across *.kt / *.java.
-//!                            Last resort; always finds stdlib-shadowing project symbols.
+//!    Last resort; always finds stdlib-shadowing project symbols.
 //!
 //! Stdlib packages (`kotlin.*`, `java.*`, `android.*`, `androidx.*`) are skipped because
 //! their sources aren't present in the project tree.
 
 use std::path::Path;
 use std::process::Command;
-use std::sync::Arc;
 
 use tower_lsp::lsp_types::{Location, Range, TextEdit, Url};
 

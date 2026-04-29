@@ -8,7 +8,7 @@ pub(crate) fn infer_variable_type(idx: &Indexer, var_name: &str, uri: &Url) -> O
     // Prefer live_lines: updated synchronously on every keystroke, so they
     // reflect unsaved edits that the indexed snapshot may not yet contain.
     if let Some(ll) = idx.live_lines.get(uri.as_str()) {
-        if let result @ Some(_) = infer_type_in_lines(&*ll, var_name) {
+        if let result @ Some(_) = infer_type_in_lines(&ll, var_name) {
             return result;
         }
     }
@@ -34,7 +34,7 @@ pub(crate) fn infer_variable_type(idx: &Indexer, var_name: &str, uri: &Url) -> O
 /// Used by the `it`-completion path to extract the collection element type.
 pub fn infer_variable_type_raw(idx: &Indexer, var_name: &str, uri: &Url) -> Option<String> {
     if let Some(ll) = idx.live_lines.get(uri.as_str()) {
-        if let result @ Some(_) = infer_type_in_lines_raw(&*ll, var_name) {
+        if let result @ Some(_) = infer_type_in_lines_raw(&ll, var_name) {
             return result;
         }
     }

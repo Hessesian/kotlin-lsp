@@ -25,8 +25,8 @@ pub(crate) fn collect_signature(lines: &[String], start_line: usize) -> String {
     let mut parts: Vec<String> = Vec::new();
     let mut depth: i32 = 0;
 
-    for i in start_line..(start_line + 15).min(lines.len()) {
-        let raw = lines[i].trim();
+    for raw_line in lines[start_line..(start_line + 15).min(lines.len())].iter() {
+        let raw = raw_line.trim();
 
         // Count parens in this line.
         for ch in raw.chars() {
@@ -145,8 +145,8 @@ pub(crate) fn collect_params_from_line(lines: &[String], start_line: usize) -> O
 
     'outer: for ln in start_line..start_line + 20 {
         let line = match lines.get(ln) { Some(l) => l, None => break };
-        let mut chars = line.char_indices().peekable();
-        while let Some((_, ch)) = chars.next() {
+        let chars = line.char_indices().peekable();
+        for (_, ch) in chars {
             match ch {
                 '(' => {
                     paren_depth += 1;

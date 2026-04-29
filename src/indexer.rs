@@ -1,20 +1,18 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, RwLock};
 
 use dashmap::{DashMap, DashSet};
 use tower_lsp::lsp_types::*;
 
-use crate::parser;
-use crate::types::{FileData, SymbolEntry, FileIndexResult, WorkspaceIndexResult};
+use crate::types::FileData;
 
 // Re-export rg-module items that existing callers reach via `crate::indexer::`.
 pub(crate) use crate::rg::IgnoreMatcher;
 pub use crate::rg::SOURCE_EXTENSIONS;
 
 mod doc;
-use doc::extract_doc_comment;
 
 mod infer;
 // Re-export pure helpers from submodules so existing callers within this file
@@ -53,15 +51,13 @@ mod cache;
 pub(crate) use self::cache::workspace_cache_path;
 
 mod discover;
-use self::discover::find_source_files_unconstrained;
 
 mod scan;
-pub use self::scan::resolve_max_files;
 pub const MAX_FILES_UNLIMITED: usize = usize::MAX;
 
 mod apply;
+#[allow(unused_imports)]
 pub(crate) use self::apply::{file_contributions, stale_keys_for, build_bare_names};
-use self::apply::hash_str;
 
 mod lookup;
 
@@ -74,7 +70,7 @@ pub(crate) use scope::find_enclosing_call_name;
 use self::cache::{FileCacheEntry, cache_entry_to_file_result};
 #[cfg(test)]
 #[allow(unused_imports)]
-use crate::types::IndexStats;
+use crate::types::{IndexStats, FileIndexResult};
 #[cfg(test)]
 use crate::rg::regex_escape;
 #[cfg(test)]
@@ -338,13 +334,12 @@ impl Indexer {
             }
         }
         // (compute below, then store in cache at the end)
-        let dot_receiver = if before_prefix.ends_with('.') {
+        let dot_receiver = if let Some(before_dot) = before_prefix.strip_suffix('.') {
             // Grab the expression immediately preceding the dot.
             // For simple identifiers: `foo.` → "foo"
             // For qualified nested types: `DPSCoordinator.Kind.` → "DPSCoordinator.Kind"
             // We walk backwards collecting identifier chars; if we then see a dot followed
             // by another identifier, include that outer segment too (one level only).
-            let before_dot = &before_prefix[..before_prefix.len() - 1];
             let inner: String = before_dot
                 .chars()
                 .rev()

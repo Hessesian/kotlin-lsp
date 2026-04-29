@@ -62,8 +62,8 @@ pub(super) fn enclosing_scope(lines: &[String], cursor_line: usize) -> (usize, u
     // Walk forward from scope_start to find matching `}`.
     let mut depth = 0i32;
     let mut scope_end = lines.len().saturating_sub(1);
-    for i in scope_start..lines.len() {
-        for ch in lines[i].chars() {
+    for (i, line) in lines.iter().enumerate().skip(scope_start) {
+        for ch in line.chars() {
             match ch {
                 '{' => depth += 1,
                 '}' => {
@@ -94,13 +94,14 @@ pub(super) fn rename_in_scope(
     if wlen == 0 { return vec![]; }
     let mut edits: Vec<TextEdit> = Vec::new();
 
-    for ln in scope.0..=scope.1.min(lines.len().saturating_sub(1)) {
+    let end = scope.1.min(lines.len().saturating_sub(1));
+    for (ln, line) in lines.iter().enumerate().take(end + 1).skip(scope.0) {
         // Skip package declaration — never rename the package statement.
-        let trimmed = lines[ln].trim_start();
+        let trimmed = line.trim_start();
         if trimmed.starts_with("package ") {
             continue;
         }
-        let chars: Vec<char> = lines[ln].chars().collect();
+        let chars: Vec<char> = line.chars().collect();
         let mut j = 0usize;
         let char_to_utf16: Vec<u32> = {
             let mut v = Vec::with_capacity(chars.len() + 1);

@@ -250,6 +250,7 @@ pub(crate) fn rg_find_definition(name: &str, root: Option<&Path>, matcher: Optio
 /// `include_decl` is false (the definition is already known).
 ///
 /// Results in directories matched by `matcher` are filtered out.
+#[allow(clippy::too_many_arguments)]
 pub fn rg_find_references(
     name:         &str,
     parent_class: Option<&str>,

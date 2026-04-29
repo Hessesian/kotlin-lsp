@@ -703,7 +703,7 @@ impl Indexer {
                             .ok()
                             .and_then(|v| v.parse::<u128>().ok())
                             .unwrap_or(1000);
-                    if took as u128 > threshold {
+                    if took > threshold {
                         log::warn!(
                             "Slow parse: {} took {} ms",
                             item.path.display(),
