@@ -24,8 +24,7 @@ pub fn compute_inlay_hints(idx: &Arc<Indexer>, uri: &Url, range: Range) -> Vec<I
 
     // Fallback: reconstruct content from live_lines or indexed file data, then
     // re-parse. tree-sitter parses 5000 lines in ~3ms so this is not a regression.
-    let lines_arc = idx.live_lines.get(uri.as_str()).map(|l| Arc::clone(&*l))
-        .or_else(|| idx.files.get(uri.as_str()).map(|f| Arc::clone(&f.lines)));
+    let lines_arc = idx.mem_lines_for(uri.as_str());
     let Some(lines) = lines_arc else { return vec![]; };
     if lines.is_empty() { return vec![]; }
 

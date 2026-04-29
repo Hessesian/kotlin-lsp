@@ -42,6 +42,8 @@ use super::super::{
     find_enclosing_call_name,
 };
 
+use crate::types::CursorPos;
+
 // ─── public API ──────────────────────────────────────────────────────────────
 
 /// Resolve the element type of `it` when inside a lambda.
@@ -67,23 +69,21 @@ pub(crate) fn find_it_element_type(before_cursor: &str, idx: &Indexer, uri: &Url
 /// the opening `{` of the immediately enclosing lambda.  Then inspect that
 /// line for a receiver expression before the brace.
 pub(crate) fn find_it_element_type_in_lines(
-    lines:       &[String],
-    cursor_line: usize,
-    cursor_col:  usize,
-    idx:         &Indexer,
-    uri:         &Url,
+    lines: &[String],
+    pos:   CursorPos,
+    idx:   &Indexer,
+    uri:   &Url,
 ) -> Option<String> {
-    find_it_element_type_in_lines_impl(lines, cursor_line, cursor_col, idx, uri, false)
+    find_it_element_type_in_lines_impl(lines, pos, idx, uri, false)
 }
 
 pub(crate) fn find_this_element_type_in_lines(
-    lines:       &[String],
-    cursor_line: usize,
-    cursor_col:  usize,
-    idx:         &Indexer,
-    uri:         &Url,
+    lines: &[String],
+    pos:   CursorPos,
+    idx:   &Indexer,
+    uri:   &Url,
 ) -> Option<String> {
-    find_it_element_type_in_lines_impl(lines, cursor_line, cursor_col, idx, uri, true)
+    find_it_element_type_in_lines_impl(lines, pos, idx, uri, true)
 }
 
 /// Multi-line version of `find_named_lambda_param_type` for hover/goto-def.
@@ -131,9 +131,7 @@ pub(crate) fn find_named_lambda_param_type(
     uri:          &Url,
     cursor_line:  usize,
 ) -> Option<String> {
-    let lines = idx.live_lines.get(uri.as_str())
-        .map(|ll| ll.clone())
-        .or_else(|| idx.files.get(uri.as_str()).map(|f| f.lines.clone()));
+    let lines = idx.mem_lines_for(uri.as_str());
 
     // 1. Check same line first — covers `items.forEach { item -> item.`
     //    Also handles multi-param: `items.map { a, b -> a.`
@@ -183,26 +181,18 @@ pub(crate) fn is_lambda_param(
     if recv.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) { return false; }
     if recv.contains('.') { return false; }
 
+    // Same-line fast check: the lambda declaration may be on the cursor line
+    // itself (e.g. `items.forEach { item -> item.`).
     if line_has_lambda_param(before_cur, recv) { return true; }
 
-    let lines_opt = idx.live_lines.get(uri.as_str())
-        .map(|ll| ll.clone())
-        .or_else(|| idx.files.get(uri.as_str()).map(|f| f.lines.clone()));
-
-    if let Some(lines) = lines_opt {
-        // Only scan back up to 10 lines — lambda params declared further away
-        // are practically out of scope for normal code.
-        let scan_start = cursor_line.saturating_sub(10);
-        for ln in (scan_start..cursor_line).rev() {
-            if let Some(line) = lines.get(ln) {
-                if line_has_lambda_param(line, recv) { return true; }
-                // Stop early if we cross a closing brace at depth 0 — we've
-                // left the enclosing lambda scope entirely.
-                if line.trim_start().starts_with('}') { break; }
-            }
-        }
-    }
-    false
+    // Delegate to lambda_params_at_col for multi-line detection.  That function
+    // uses the CST live-tree when available (O(depth) walk) and falls back to a
+    // brace-depth text scan covering up to 50 prior lines — both more thorough
+    // than the old 10-line ad-hoc scan here.
+    let cursor_col = before_cur.encode_utf16().count();
+    idx.lambda_params_at_col(uri, cursor_line, cursor_col)
+        .iter()
+        .any(|p| p == recv)
 }
 
 /// Shared core: given the text BEFORE the `{` that opens a lambda, infer
@@ -304,19 +294,18 @@ pub(crate) fn lambda_receiver_type_from_context(
 // ─── private helpers ─────────────────────────────────────────────────────────
 
 fn find_it_element_type_in_lines_impl(
-    lines:       &[String],
-    cursor_line: usize,
-    cursor_col:  usize,
-    idx:         &Indexer,
-    uri:         &Url,
-    for_this:    bool,
+    lines:    &[String],
+    pos:      CursorPos,
+    idx:      &Indexer,
+    uri:      &Url,
+    for_this: bool,
 ) -> Option<String> {
     // ── CST fast path ────────────────────────────────────────────────────────
     if let Some(doc) = idx.live_doc(uri) {
         use tree_sitter::Point;
-        let line_text  = lines.get(cursor_line).map(|s| s.as_str()).unwrap_or("");
-        let byte_col   = crate::indexer::live_tree::utf16_col_to_byte(line_text, cursor_col);
-        let point      = Point { row: cursor_line, column: byte_col };
+        let line_text  = lines.get(pos.line).map(|s| s.as_str()).unwrap_or("");
+        let byte_col   = crate::indexer::live_tree::utf16_col_to_byte(line_text, pos.utf16_col);
+        let point      = Point { row: pos.line, column: byte_col };
         if let Some(node) = doc.tree.root_node().descendant_for_point_range(point, point) {
             let mut cur = node;
             loop {
@@ -376,19 +365,14 @@ fn find_it_element_type_in_lines_impl(
     // Characters to the right of the cursor (e.g., closing `}`) must not affect
     // the depth; otherwise a balanced `{ it.name }` would never trigger depth < 0.
     let mut depth: i32 = 0;
-    let scan_start = cursor_line.saturating_sub(15);
+    let scan_start = pos.line.saturating_sub(15);
 
-    for ln in (scan_start..=cursor_line).rev() {
+    for ln in (scan_start..=pos.line).rev() {
         let line = match lines.get(ln) { Some(l) => l, None => continue };
         // On cursor_line restrict to chars at byte positions < cursor_col.
-        let scan_slice: &str = if ln == cursor_line {
-            // cursor_col is a UTF-16 character offset (from LSP); convert to a byte boundary.
-            let mut utf16 = 0usize;
-            let mut byte_end = line.len();
-            for (bi, ch) in line.char_indices() {
-                if utf16 >= cursor_col { byte_end = bi; break; }
-                utf16 += ch.len_utf16();
-            }
+        let scan_slice: &str = if ln == pos.line {
+            // pos.utf16_col is a UTF-16 character offset (from LSP); convert to a byte boundary.
+            let byte_end = crate::indexer::live_tree::utf16_col_to_byte(line, pos.utf16_col);
             &line[..byte_end]
         } else {
             line.as_str()

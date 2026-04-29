@@ -378,16 +378,10 @@ impl Backend {
         // Use live_lines for the current line (updated synchronously on every
         // keystroke) so signatureHelp fires immediately when `(` is typed,
         // without waiting for the 120ms debounce that updates `files`.
-        let lines_owned: Arc<Vec<String>>;
-        let lines: &[String] = if let Some(ll) = self.indexer.live_lines.get(uri.as_str()) {
-            lines_owned = ll.clone();
-            &lines_owned
-        } else if let Some(data) = self.indexer.files.get(uri.as_str()) {
-            lines_owned = data.lines.clone();
-            &lines_owned
-        } else {
+        let Some(lines_owned) = self.indexer.mem_lines_for(uri.as_str()) else {
             return Ok(None);
         };
+        let lines: &[String] = &lines_owned;
 
         let line_idx = pos.line as usize;
         if line_idx >= lines.len() {
@@ -395,18 +389,7 @@ impl Backend {
         }
         let line_text = &lines[line_idx];
         // pos.character is UTF-16 units — convert to a byte offset.
-        let col = {
-            let mut utf16_remaining = pos.character as usize;
-            let mut byte_pos = 0;
-            for ch in line_text.chars() {
-                if utf16_remaining == 0 { break; }
-                let units = ch.len_utf16();
-                if utf16_remaining < units { break; }
-                utf16_remaining -= units;
-                byte_pos += ch.len_utf8();
-            }
-            byte_pos
-        };
+        let col = crate::indexer::live_tree::utf16_col_to_byte(line_text, pos.character as usize);
         let before = &line_text[..col];
 
         // Count commas at the current paren depth to find active param.

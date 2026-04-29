@@ -73,7 +73,7 @@ fn this_element_type_multiline_scope_fn() {
         "}".to_owned(),
     ];
     // `run` is a stdlib scope function (RECEIVER_THIS_FNS) → `this` refers to List<String> → "List"
-    let result = find_this_element_type_in_lines(&lines, 1, 9, &idx, &u);
+    let result = find_this_element_type_in_lines(&lines, CursorPos { line: 1, utf16_col: 9 }, &idx, &u);
     // `run` is in RECEIVER_THIS_FNS: passes receiver as `this`;
     // `items` is `List<String>`, so base type should be "List".
     assert_eq!(result.as_deref(), Some("List"),
@@ -90,7 +90,7 @@ fn this_type_with_block() {
         "    this.".to_owned(),
         "}".to_owned(),
     ];
-    let result = find_this_element_type_in_lines(&lines, 1, 9, &idx, &u);
+    let result = find_this_element_type_in_lines(&lines, CursorPos { line: 1, utf16_col: 9 }, &idx, &u);
     assert_eq!(result.as_deref(), Some("User"),
         "`with(user) {{ this }}` should yield User, got: {result:?}");
 }
@@ -210,7 +210,7 @@ fn this_type_run_infers_receiver() {
     let (u, idx) = indexed("/t.kt", src);
     let lines: Vec<String> = vec!["user.run {".to_owned(), "    this.".to_owned(), "}".to_owned()];
     assert_eq!(
-        find_this_element_type_in_lines(&lines, 1, 9, &idx, &u).as_deref(),
+        find_this_element_type_in_lines(&lines, CursorPos { line: 1, utf16_col: 9 }, &idx, &u).as_deref(),
         Some("User"),
         "run: this should resolve to User"
     );
@@ -225,7 +225,7 @@ fn this_type_apply_infers_receiver() {
     let (u, idx) = indexed("/t.kt", src);
     let lines: Vec<String> = vec!["user.apply {".to_owned(), "    this.".to_owned(), "}".to_owned()];
     assert_eq!(
-        find_this_element_type_in_lines(&lines, 1, 9, &idx, &u).as_deref(),
+        find_this_element_type_in_lines(&lines, CursorPos { line: 1, utf16_col: 9 }, &idx, &u).as_deref(),
         Some("User"),
         "apply: this should resolve to User"
     );
@@ -238,7 +238,7 @@ fn this_type_let_does_not_infer_receiver() {
     let src = "val user: User = User()";
     let (u, idx) = indexed("/t.kt", src);
     let lines: Vec<String> = vec!["user.let {".to_owned(), "    this.".to_owned(), "}".to_owned()];
-    let result = find_this_element_type_in_lines(&lines, 1, 9, &idx, &u);
+    let result = find_this_element_type_in_lines(&lines, CursorPos { line: 1, utf16_col: 9 }, &idx, &u);
     assert_eq!(
         result.as_deref(),
         None,
@@ -252,7 +252,7 @@ fn this_type_also_does_not_infer_receiver() {
     let src = "val user: User = User()";
     let (u, idx) = indexed("/t.kt", src);
     let lines: Vec<String> = vec!["user.also {".to_owned(), "    this.".to_owned(), "}".to_owned()];
-    let result = find_this_element_type_in_lines(&lines, 1, 9, &idx, &u);
+    let result = find_this_element_type_in_lines(&lines, CursorPos { line: 1, utf16_col: 9 }, &idx, &u);
     assert_eq!(
         result.as_deref(),
         None,
