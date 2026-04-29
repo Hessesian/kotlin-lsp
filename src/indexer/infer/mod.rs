@@ -1,15 +1,21 @@
 //! Type-inference helpers for the Kotlin indexer.
 //!
 //! Each submodule handles one class of inference:
+//! - `deps`     — `InferDeps` trait + `TestDeps` stub for unit-testing leaf helpers
 //! - `lambda`   — decomposing lambda/function types (`(T) -> R`, receiver lambdas, etc.)
 //! - `sig`      — function signature extraction (pure string/slice functions)
 //! - `args`     — call argument parsing (pure)
 //! - `it_this`  — resolving `it`/`this` element types inside Kotlin lambda bodies
 
+pub mod deps;
 pub mod lambda;
 pub mod sig;
 pub mod args;
 pub mod it_this;
+
+pub(crate) use deps::InferDeps;
+#[cfg(test)]
+pub(crate) use deps::TestDeps;
 
 pub(crate) use lambda::{
     RECEIVER_THIS_FNS,

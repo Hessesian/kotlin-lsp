@@ -352,3 +352,66 @@ fn it_type_indexed_inner_fn_cst_still_works() {
     assert_eq!(result.as_deref(), Some("State"),
         "simple trailing-lambda with live tree must still resolve via Case B");
 }
+
+// ── TestDeps-based leaf-helper tests ─────────────────────────────────────────
+//
+// These tests drive the pure leaf helpers (Cases B & C of
+// `lambda_receiver_type_from_context`) using `TestDeps` instead of a full
+// `Indexer`, proving the seam works and the helpers are truly I/O-free.
+
+fn test_uri() -> Url { uri("/deps_test.kt") }
+
+#[test]
+fn test_deps_case_b_trailing_lambda_it_type() {
+    // `loadData { it }` — trailing lambda, function registered in TestDeps.
+    let u = test_uri();
+    let deps = super::super::TestDeps::new()
+        .with_fun(u.as_str(), "loadData", "block: (Product) -> Unit");
+    let result = lambda_receiver_type_from_context("loadData", &deps, &u);
+    assert_eq!(result.as_deref(), Some("Product"),
+        "Case B: trailing lambda param type from TestDeps");
+}
+
+#[test]
+fn test_deps_case_b_with_args() {
+    // `loadData(key) { it }` — same, after `strip_trailing_call_args` strips `(key)`.
+    let u = test_uri();
+    let deps = super::super::TestDeps::new()
+        .with_fun(u.as_str(), "loadData", "key: String, block: (Product) -> Unit");
+    let result = lambda_receiver_type_from_context("loadData(key)", &deps, &u);
+    assert_eq!(result.as_deref(), Some("Product"),
+        "Case B with args stripped: last param lambda type");
+}
+
+#[test]
+fn test_deps_case_a_receiver_dot_method() {
+    // `items.map { it }` — receiver is `items: List<Item>`.
+    let u = test_uri();
+    let deps = super::super::TestDeps::new()
+        .with_var(u.as_str(), "items", "List<Item>");
+    let result = lambda_receiver_type_from_context("items.map", &deps, &u);
+    assert_eq!(result.as_deref(), Some("Item"),
+        "Case A: extract element type from List<Item>");
+}
+
+#[test]
+fn test_deps_case_a_var_type_no_collection() {
+    // `repo.run { it }` — receiver type returned directly when no collection elem.
+    let u = test_uri();
+    let deps = super::super::TestDeps::new()
+        .with_var(u.as_str(), "repo", "Repository")
+        .with_fun(u.as_str(), "run", "block: (Repository) -> Unit");
+    // `run` is found so the method's lambda-param type wins.
+    let result = lambda_receiver_type_from_context("repo.run", &deps, &u);
+    assert_eq!(result.as_deref(), Some("Repository"),
+        "Case A: non-collection receiver, method lambda param type");
+}
+
+#[test]
+fn test_deps_unknown_fn_returns_none() {
+    // Function not registered → None.
+    let u = test_uri();
+    let deps = super::super::TestDeps::new();
+    let result = lambda_receiver_type_from_context("unknownFn", &deps, &u);
+    assert_eq!(result, None, "unknown function should return None");
+}

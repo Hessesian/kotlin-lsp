@@ -36,6 +36,8 @@ use super::{
     cst_call_fn_name,
     cst_named_arg_label,
     cst_value_arg_position,
+    // deps.rs
+    InferDeps,
 };
 
 // ── from indexer.rs (parent of infer; descendants can access private items) ──
@@ -208,7 +210,7 @@ pub(crate) fn is_lambda_param(
 ///   D) multi-line named-arg `name = {\n  it }` — resolved by callers via `_ml` variant
 pub(crate) fn lambda_receiver_type_from_context(
     before_brace: &str,
-    idx:          &Indexer,
+    deps:         &impl InferDeps,
     uri:          &Url,
 ) -> Option<String> {
     let trimmed = before_brace.trim_end();
@@ -234,7 +236,7 @@ pub(crate) fn lambda_receiver_type_from_context(
             .collect();
 
         if !receiver_var.is_empty() {
-            if let Some(raw) = crate::resolver::infer_variable_type_raw(idx, &receiver_var, uri) {
+            if let Some(raw) = deps.find_var_type(&receiver_var, uri) {
                 if let Some(elem) = crate::resolver::extract_collection_element_type(&raw) {
                     return Some(elem);
                 }
@@ -243,7 +245,7 @@ pub(crate) fn lambda_receiver_type_from_context(
                 // `block: suspend (T) -> Unit`).  Fall back to receiver type when the method
                 // is not found (e.g. stdlib `run`, `apply`, `let` → receiver type is correct).
                 if !method.is_empty() {
-                    if let Some(ty) = fun_trailing_lambda_it_type(&method, idx, uri) {
+                    if let Some(ty) = fun_trailing_lambda_it_type(&method, deps, uri) {
                         return Some(ty);
                     }
                 }
@@ -272,7 +274,7 @@ pub(crate) fn lambda_receiver_type_from_context(
         // first argument as the receiver and infer its type directly.
         if trailing_fn == "with" {
             if let Some(recv_name) = extract_first_arg(trimmed) {
-                if let Some(raw) = crate::resolver::infer_variable_type_raw(idx, recv_name, uri) {
+                if let Some(raw) = deps.find_var_type(recv_name, uri) {
                     let base: String = raw.chars().take_while(|&c| is_id_char(c)).collect();
                     if !base.is_empty() { return Some(base); }
                 }
@@ -283,7 +285,7 @@ pub(crate) fn lambda_receiver_type_from_context(
                 }
             }
         }
-        if let Some(ty) = fun_trailing_lambda_it_type(&trailing_fn, idx, uri) {
+        if let Some(ty) = fun_trailing_lambda_it_type(&trailing_fn, deps, uri) {
             return Some(ty);
         }
     }
@@ -291,7 +293,7 @@ pub(crate) fn lambda_receiver_type_from_context(
     // ── Case C: inline lambda arg — `fn(arg, { param -> ... }, ...)` ─────────
     // `before_brace` ends inside an unclosed `(`, so scan backward to find
     // the function name and the positional index of this lambda argument.
-    inline_lambda_param_type(trimmed, idx, uri)
+    inline_lambda_param_type(trimmed, deps, uri)
 }
 
 // ─── private helpers ─────────────────────────────────────────────────────────
@@ -476,7 +478,7 @@ pub(crate) fn lambda_brace_pos_for_param(line: &str, param_name: &str) -> Option
 ///  - Everything else: return `None` (don't hint `this` from the lambda).
 fn lambda_receiver_this_type_from_context(
     before_brace: &str,
-    idx:          &Indexer,
+    deps:         &impl InferDeps,
     uri:          &Url,
 ) -> Option<String> {
     let trimmed = before_brace.trim_end();
@@ -498,13 +500,13 @@ fn lambda_receiver_this_type_from_context(
 
         if !receiver_var.is_empty() && !method.is_empty() {
             // Prefer the method's own receiver-lambda type (only for indexed fns).
-            if let Some(ty) = fun_trailing_lambda_this_type(&method, idx, uri) {
+            if let Some(ty) = fun_trailing_lambda_this_type(&method, deps, uri) {
                 return Some(ty);
             }
             // Only functions listed in `RECEIVER_THIS_FNS` (`run`, `apply`) are treated as
             // receiver-`this` lambdas; `also`/`let` are intentionally excluded.
             if RECEIVER_THIS_FNS.contains(&method.as_str()) {
-                if let Some(raw) = crate::resolver::infer_variable_type_raw(idx, &receiver_var, uri) {
+                if let Some(raw) = deps.find_var_type(&receiver_var, uri) {
                     let base: String = raw.chars().take_while(|&c| is_id_char(c)).collect();
                     if !base.is_empty() { return Some(base); }
                 }
@@ -524,7 +526,7 @@ fn lambda_receiver_this_type_from_context(
         .collect();
     if trailing_fn == "with" {
         if let Some(recv_name) = extract_first_arg(trimmed) {
-            if let Some(raw) = crate::resolver::infer_variable_type_raw(idx, recv_name, uri) {
+            if let Some(raw) = deps.find_var_type(recv_name, uri) {
                 let base: String = raw.chars().take_while(|&c| is_id_char(c)).collect();
                 if !base.is_empty() { return Some(base); }
             }
@@ -624,7 +626,7 @@ fn lambda_receiver_type_named_arg_ml(
 fn cst_lambda_param_type_via_call(
     doc:    &crate::indexer::live_tree::LiveDoc,
     lambda: &tree_sitter::Node<'_>,
-    idx:    &Indexer,
+    deps:   &impl InferDeps,
     uri:    &Url,
 ) -> Option<String> {
     let bytes = &doc.bytes;
@@ -641,7 +643,7 @@ fn cst_lambda_param_type_via_call(
                     node = p;
                 };
                 let fn_name = cst_call_fn_name(call_expr, bytes)?;
-                let sig = find_fun_signature_full(&fn_name, idx, uri)?;
+                let sig = deps.find_fun_params_text(&fn_name, uri)?;
                 let param_type = if let Some(label) = cst_named_arg_label(parent, bytes) {
                     find_named_param_type_in_sig(&sig, &label)
                 } else {
@@ -654,7 +656,7 @@ fn cst_lambda_param_type_via_call(
                 let call_expr = parent.parent()?;
                 if call_expr.kind() != "call_expression" { cur = parent; continue; }
                 let fn_name = cst_call_fn_name(call_expr, bytes)?;
-                let sig = find_fun_signature_full(&fn_name, idx, uri)?;
+                let sig = deps.find_fun_params_text(&fn_name, uri)?;
                 let last_type = last_fun_param_type_str(&sig)?;
                 return lambda_type_first_input(&last_type);
             }
@@ -668,7 +670,7 @@ fn cst_lambda_param_type_via_call(
 /// For an INLINE lambda argument `fn(a, b, { param -> ... })`:
 /// find the enclosing function name and the 0-based position of this lambda,
 /// then look up that function parameter's type.
-fn inline_lambda_param_type(before_brace: &str, idx: &Indexer, uri: &Url) -> Option<String> {
+fn inline_lambda_param_type(before_brace: &str, deps: &impl InferDeps, uri: &Url) -> Option<String> {
     // Scan right-to-left to find the nearest unclosed `(`.
     // Convention: `)` increments depth, `(` decrements.  depth < 0 → found it.
     let mut depth: i32 = 0;
@@ -698,7 +700,7 @@ fn inline_lambda_param_type(before_brace: &str, idx: &Indexer, uri: &Url) -> Opt
 
     if fn_name.is_empty() { return None; }
 
-    let sig = find_fun_signature_full(&fn_name, idx, uri)?;
+    let sig = deps.find_fun_params_text(&fn_name, uri)?;
     let param_type = nth_fun_param_type_str(&sig, comma_count)?;
     lambda_type_first_input(&param_type)
 }
@@ -708,16 +710,16 @@ fn inline_lambda_param_type(before_brace: &str, idx: &Indexer, uri: &Url) -> Opt
 ///
 /// Example: `fun loadProduct(key: K, flow: Flow<T>, map: (ResultState<T>) -> Model)`
 /// returns `Some("ResultState")` so that `it` in `loadProduct(...) { it }` resolves.
-fn fun_trailing_lambda_it_type(fn_name: &str, idx: &Indexer, uri: &Url) -> Option<String> {
-    let sig = find_fun_signature_full(fn_name, idx, uri)?;
+fn fun_trailing_lambda_it_type(fn_name: &str, deps: &impl InferDeps, uri: &Url) -> Option<String> {
+    let sig = deps.find_fun_params_text(fn_name, uri)?;
     let last_type = last_fun_param_type_str(&sig)?;
     lambda_type_first_input(&last_type)
 }
 
 /// Like `fun_trailing_lambda_it_type` but for `this`: only returns a type when
 /// the trailing lambda parameter is a **receiver lambda** `T.() -> R`.
-fn fun_trailing_lambda_this_type(fn_name: &str, idx: &Indexer, uri: &Url) -> Option<String> {
-    let sig = find_fun_signature_full(fn_name, idx, uri)?;
+fn fun_trailing_lambda_this_type(fn_name: &str, deps: &impl InferDeps, uri: &Url) -> Option<String> {
+    let sig = deps.find_fun_params_text(fn_name, uri)?;
     let last_type = last_fun_param_type_str(&sig)?;
     lambda_type_receiver(&last_type)
 }

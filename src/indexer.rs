@@ -191,6 +191,15 @@ pub struct Indexer {
     pub(crate) live_trees: DashMap<String, Arc<LiveDoc>>,
 }
 
+impl crate::indexer::infer::InferDeps for Indexer {
+    fn find_fun_params_text(&self, fn_name: &str, uri: &Url) -> Option<String> {
+        find_fun_signature_full(fn_name, self, uri)
+    }
+    fn find_var_type(&self, var_name: &str, uri: &Url) -> Option<String> {
+        crate::resolver::infer_variable_type_raw(self, var_name, uri)
+    }
+}
+
 impl Indexer {
     pub fn parse_sem(&self) -> Arc<tokio::sync::Semaphore> {
         Arc::clone(&self.parse_sem)
