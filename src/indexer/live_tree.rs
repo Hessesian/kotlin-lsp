@@ -22,6 +22,17 @@ pub fn lang_for_path(path: &str) -> Option<Language> {
     }
 }
 
+/// Convert a UTF-16 column offset (as used in LSP positions) to a byte offset
+/// within `line_text`.  Tree-sitter `Point::column` expects byte offsets.
+pub fn utf16_col_to_byte(line_text: &str, utf16_col: usize) -> usize {
+    let mut utf16 = 0usize;
+    for (bi, ch) in line_text.char_indices() {
+        if utf16 >= utf16_col { return bi; }
+        utf16 += ch.len_utf16();
+    }
+    line_text.len()
+}
+
 /// Parse `content` with `lang` and return a `LiveDoc`, or `None` if the
 /// parser fails (malformed grammar state — extremely rare).
 pub fn parse_live(content: &str, lang: Language) -> Option<LiveDoc> {

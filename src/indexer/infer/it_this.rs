@@ -311,6 +311,64 @@ fn find_it_element_type_in_lines_impl(
     uri:         &Url,
     for_this:    bool,
 ) -> Option<String> {
+    // ── CST fast path ────────────────────────────────────────────────────────
+    if let Some(doc) = idx.live_doc(uri) {
+        use tree_sitter::Point;
+        let file_text  = std::str::from_utf8(&doc.bytes).unwrap_or("");
+        let line_text  = file_text.lines().nth(cursor_line).unwrap_or("");
+        let byte_col   = crate::indexer::live_tree::utf16_col_to_byte(line_text, cursor_col);
+        let point      = Point { row: cursor_line, column: byte_col };
+        if let Some(node) = doc.tree.root_node().descendant_for_point_range(point, point) {
+            let mut cur = node;
+            loop {
+                if cur.kind() == "lambda_literal" {
+                    // Skip string interpolations — their `{` is a child of
+                    // `multiline_string_expression`, not `lambda_literal`.
+                    // Skip named-param lambdas: those have a `lambda_parameters` child
+                    // containing at least one non-`it`/non-`_` identifier.
+                    let has_named = (0..cur.child_count()).filter_map(|i| cur.child(i))
+                        .find(|c| c.kind() == "lambda_parameters")
+                        .map(|lp| {
+                            (0..lp.child_count()).filter_map(|i| lp.child(i))
+                                .filter(|c| c.kind() == "variable_declaration")
+                                .filter_map(|vd| {
+                                    vd.child(0).filter(|si| si.kind() == "simple_identifier")
+                                        .and_then(|si| std::str::from_utf8(&doc.bytes[si.byte_range()]).ok().map(|s| s.to_string()))
+                                })
+                                .any(|name| name != "it" && name != "_")
+                        })
+                        .unwrap_or(false);
+                    if !has_named {
+                        // `before_brace` = text of the lambda-opening line up to the `{`.
+                        let brace_byte  = cur.start_byte();
+                        let line_start  = doc.bytes[..brace_byte].iter().rposition(|&b| b == b'\n')
+                            .map(|i| i + 1).unwrap_or(0);
+                        let before_brace = std::str::from_utf8(&doc.bytes[line_start..brace_byte])
+                            .unwrap_or("").trim_end();
+                        let ln = cur.start_position().row;
+                        if for_this {
+                            if let Some(t) = lambda_receiver_this_type_from_context(before_brace, idx, uri) {
+                                return Some(t);
+                            }
+                        } else {
+                            let result = lambda_receiver_type_from_context(before_brace, idx, uri)
+                                .or_else(|| lambda_receiver_type_named_arg_ml(
+                                    before_brace, 0, lines, ln, idx, uri,
+                                ));
+                            if result.is_some() { return result; }
+                        }
+                    }
+                }
+                match cur.parent() {
+                    Some(p) => cur = p,
+                    None    => break,
+                }
+            }
+            return None;
+        }
+    }
+
+    // ── Text fallback ────────────────────────────────────────────────────────
     // Scan right-to-left tracking brace depth.
     // Convention: depth starts at 0. `}` increments, `{` decrements.
     // When depth goes < 0, we've found the `{` that opens our enclosing lambda.

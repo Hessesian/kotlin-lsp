@@ -1,4 +1,4 @@
-use super::{lang_for_path, parse_live};
+use super::{lang_for_path, parse_live, utf16_col_to_byte};
 use crate::indexer::Indexer;
 use tower_lsp::lsp_types::Url;
 
@@ -143,4 +143,45 @@ fn live_trees_survive_reset_index_state() {
     idx.reset_index_state();
     // Live trees must NOT be cleared by a workspace reindex.
     assert!(idx.live_doc(&uri).is_some());
+}
+
+// ── utf16_col_to_byte ────────────────────────────────────────────────────────
+
+#[test]
+fn utf16_col_ascii_identity() {
+    // For ASCII text, UTF-16 offset == byte offset.
+    assert_eq!(utf16_col_to_byte("hello world", 6), 6);
+    assert_eq!(utf16_col_to_byte("hello world", 0), 0);
+    assert_eq!(utf16_col_to_byte("hello world", 11), 11);
+}
+
+#[test]
+fn utf16_col_multibyte_bmp() {
+    // "é" is U+00E9: 2 UTF-8 bytes, 1 UTF-16 unit.
+    // "résumé" bytes: r(1) é(2) s(1) u(1) m(1) é(2) = 8 bytes, but 6 UTF-16 units.
+    let s = "résumé";
+    // UTF-16 col 2 = after "ré" = byte offset 3 (r=1, é=2)
+    assert_eq!(utf16_col_to_byte(s, 2), 3);
+    // UTF-16 col 5 = after "résum" = byte offset 6 (r=1, é=2, s=1, u=1, m=1)
+    assert_eq!(utf16_col_to_byte(s, 5), 6);
+}
+
+#[test]
+fn utf16_col_surrogate_pair() {
+    // U+1F600 (emoji) encodes to 2 UTF-16 units and 4 UTF-8 bytes.
+    let s = "a😀b";
+    // UTF-16 col 0 → byte 0 (before 'a')
+    assert_eq!(utf16_col_to_byte(s, 0), 0);
+    // UTF-16 col 1 → byte 1 (after 'a', before emoji)
+    assert_eq!(utf16_col_to_byte(s, 1), 1);
+    // UTF-16 col 3 → byte 5 (after 'a' + emoji (4 bytes), at 'b')
+    assert_eq!(utf16_col_to_byte(s, 3), 5);
+    // UTF-16 col 4 → byte 6 (after 'b')
+    assert_eq!(utf16_col_to_byte(s, 4), 6);
+}
+
+#[test]
+fn utf16_col_past_end_returns_len() {
+    let s = "abc";
+    assert_eq!(utf16_col_to_byte(s, 100), s.len());
 }
