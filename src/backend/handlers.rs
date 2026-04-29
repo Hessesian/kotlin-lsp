@@ -392,7 +392,22 @@ impl Backend {
         let col = crate::indexer::live_tree::utf16_col_to_byte(line_text, pos.character as usize);
         let before = &line_text[..col];
 
-        // Count commas at the current paren depth to find active param.
+        // ── CST fast path ────────────────────────────────────────────────────
+        // Walk from the cursor node up to the nearest call_expression ancestor,
+        // then extract fn name, qualifier, and active param from the tree.
+        // O(depth) vs the O(lines × chars) text scan below.
+        if let Some((cst_name, cst_qualifier, cst_active_param)) =
+            cst_signature_help_data(pos, &self.indexer, uri)
+        {
+            let params_text = find_fun_signature_with_receiver(
+                &self.indexer, uri, &cst_name, cst_qualifier.as_deref(),
+            );
+            if !params_text.is_empty() {
+                return Ok(build_signature_help(&cst_name, &params_text, cst_active_param));
+            }
+        }
+
+        // ── Text path ────────────────────────────────────────────────────────
         let mut depth: i32 = 0;
         let mut active_param: u32 = 0;
         let mut call_name: Option<String> = None;
@@ -490,29 +505,7 @@ impl Backend {
             return Ok(None);
         }
 
-        let raw = params_text.trim_matches(|c| c == '(' || c == ')');
-        let param_parts: Vec<&str> = raw.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
-
-        let parameters: Vec<ParameterInformation> = param_parts.iter().map(|p| {
-            ParameterInformation {
-                label: ParameterLabel::Simple(p.to_string()),
-                documentation: None,
-            }
-        }).collect();
-
-        let label = format!("{}({})", name, param_parts.join(", "));
-        let active_param = active_param.min(parameters.len().saturating_sub(1) as u32);
-
-        Ok(Some(SignatureHelp {
-            signatures: vec![SignatureInformation {
-                label,
-                documentation: None,
-                parameters: Some(parameters),
-                active_parameter: Some(active_param),
-            }],
-            active_signature: Some(0),
-            active_parameter: Some(active_param),
-        }))
+        Ok(build_signature_help(&name, &params_text, active_param))
     }
 
     pub(super) async fn folding_range_impl(
@@ -580,4 +573,129 @@ impl Backend {
 
         Ok(if ranges.is_empty() { None } else { Some(ranges) })
     }
+}
+
+// ─── Private helpers for signature_help_impl ─────────────────────────────────
+
+/// Build a `SignatureHelp` response from pre-computed parts.
+fn build_signature_help(fn_name: &str, params_text: &str, active_param: u32) -> Option<SignatureHelp> {
+    let raw = params_text.trim_matches(|c| c == '(' || c == ')');
+    let param_parts: Vec<&str> = raw.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+    let parameters: Vec<ParameterInformation> = param_parts.iter().map(|p| {
+        ParameterInformation {
+            label: ParameterLabel::Simple(p.to_string()),
+            documentation: None,
+        }
+    }).collect();
+    let label = format!("{}({})", fn_name, param_parts.join(", "));
+    let active_param = active_param.min(parameters.len().saturating_sub(1) as u32);
+    Some(SignatureHelp {
+        signatures: vec![SignatureInformation {
+            label,
+            documentation: None,
+            parameters: Some(parameters),
+            active_parameter: Some(active_param),
+        }],
+        active_signature: Some(0),
+        active_parameter: Some(active_param),
+    })
+}
+
+/// CST fast path for signature help.
+///
+/// Walks from the cursor node upward to find the nearest `call_expression`
+/// ancestor, then extracts `(fn_name, qualifier, active_param)`.  Returns
+/// `None` when:
+/// - no live tree is available (text path runs instead)
+/// - the cursor is inside a lambda literal rather than an argument list
+/// - the callee is not a simple or navigation expression
+fn cst_signature_help_data(
+    pos:     Position,
+    indexer: &crate::indexer::Indexer,
+    uri:     &Url,
+) -> Option<(String, Option<String>, u32)> {
+    use tree_sitter::Point;
+    use crate::indexer::live_tree::utf16_col_to_byte;
+
+    let doc = indexer.live_doc(uri)?;
+    let bytes = &doc.bytes;
+    let full_text = std::str::from_utf8(bytes).ok()?;
+
+    let line_idx = pos.line as usize;
+    let line_text = full_text.lines().nth(line_idx)?;
+    let byte_col = utf16_col_to_byte(line_text, pos.character as usize);
+    let point = Point { row: line_idx, column: byte_col };
+    let start_node = doc.tree.root_node().descendant_for_point_range(point, point)?;
+
+    // Walk up: find call_expression; bail out if we cross into a lambda literal.
+    let mut cur = start_node;
+    let call_expr = loop {
+        match cur.kind() {
+            "call_expression" => break Some(cur),
+            "lambda_literal" => break None,
+            _ => match cur.parent() {
+                Some(p) => cur = p,
+                None => break None,
+            }
+        }
+    }?;
+
+    // Extract function name and optional qualifier from the callee.
+    let callee = call_expr.child(0)?;
+    let (fn_name, qualifier) = match callee.kind() {
+        "simple_identifier" | "type_identifier" => {
+            let name = std::str::from_utf8(&bytes[callee.byte_range()]).ok()?.to_string();
+            (name, None)
+        }
+        "navigation_expression" => {
+            let mut walker = callee.walk();
+            let idents: Vec<_> = callee.children(&mut walker)
+                .filter(|c| c.kind() == "simple_identifier" || c.kind() == "type_identifier")
+                .collect();
+            let fn_node = idents.last()?;
+            let fn_name = std::str::from_utf8(&bytes[fn_node.byte_range()]).ok()?.to_string();
+            let qualifier = idents.len().checked_sub(2).and_then(|qi| {
+                std::str::from_utf8(&bytes[idents[qi].byte_range()]).ok().map(|s| s.to_string())
+            });
+            (fn_name, qualifier)
+        }
+        _ => return None,
+    };
+
+    // Find the value_arguments node (may be inside call_suffix).
+    let value_arguments = cst_find_value_arguments(call_expr)?;
+
+    // Count active param: how many value_argument children end before the cursor.
+    let cursor_byte = full_text.lines()
+        .take(line_idx)
+        .map(|l| l.len() + 1) // +1 for the newline
+        .sum::<usize>() + byte_col;
+    let active_param = {
+        let mut count = 0u32;
+        let mut walker = value_arguments.walk();
+        for child in value_arguments.children(&mut walker) {
+            if child.kind() == "value_argument" {
+                if child.end_byte() <= cursor_byte { count += 1; } else { break; }
+            }
+        }
+        count
+    };
+
+    Some((fn_name, qualifier, active_param))
+}
+
+/// Find the `value_arguments` node within a `call_expression`, searching
+/// through the optional `call_suffix` intermediate node.
+fn cst_find_value_arguments(call_expr: tree_sitter::Node<'_>) -> Option<tree_sitter::Node<'_>> {
+    let mut walker = call_expr.walk();
+    for child in call_expr.children(&mut walker) {
+        if child.kind() == "value_arguments" { return Some(child); }
+        if child.kind() == "call_suffix" {
+            let mut w2 = child.walk();
+            for gc in child.children(&mut w2) {
+                if gc.kind() == "value_arguments" { return Some(gc); }
+            }
+        }
+    }
+    None
 }
