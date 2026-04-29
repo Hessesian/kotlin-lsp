@@ -415,6 +415,7 @@ impl LanguageServer for Backend {
                 opened_path_opt.as_deref().map(|p| p.display().to_string()).unwrap_or_default()
             );
             self.indexer.set_live_lines(&uri, &text);
+            self.indexer.store_live_tree(&uri, &text);
             // Index just this file so hover/go-to-def work, then return.
             let idx = Arc::clone(&self.indexer);
             let sem = idx.parse_sem();
@@ -432,6 +433,7 @@ impl LanguageServer for Backend {
         // Set live_lines immediately so completion can read the current file content
         // even before the async index_content task finishes.
         self.indexer.set_live_lines(&uri, &text);
+        self.indexer.store_live_tree(&uri, &text);
 
         let idx  = Arc::clone(&self.indexer);
         let sem  = idx.parse_sem();
@@ -474,6 +476,7 @@ impl LanguageServer for Backend {
             // Update live_lines immediately (no debounce) so completions()
             // always sees the current line text even before re-indexing.
             self.indexer.set_live_lines(&uri, &text);
+            self.indexer.store_live_tree(&uri, &text);
 
             // True debounce: cancel any pending reindex for this file.
             let key = uri.to_string();
@@ -508,6 +511,9 @@ impl LanguageServer for Backend {
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
+        let uri = &params.text_document.uri;
+        self.indexer.remove_live_tree(uri);
+        self.indexer.live_lines.remove(uri.as_str());
         // Clear diagnostics so stale errors don't linger after the file is closed.
         self.client.publish_diagnostics(params.text_document.uri, Vec::new(), None).await;
     }

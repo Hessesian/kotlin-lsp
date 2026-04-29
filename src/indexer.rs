@@ -65,6 +65,10 @@ mod scope;
 pub(crate) use scope::is_id_char;
 pub(crate) use scope::find_enclosing_call_name;
 
+pub(crate) mod live_tree;
+pub(crate) use live_tree::LiveDoc;
+mod live_tree_impl;
+
 // Re-export cache/scan items needed by the inline test module below.
 #[cfg(test)]
 use self::cache::{FileCacheEntry, cache_entry_to_file_result};
@@ -181,6 +185,10 @@ pub struct Indexer {
     /// Built from top-level symbols only (no synthetic file-stem keys).
     /// Rebuilt in rebuild_bare_name_cache(); used by complete_bare for auto-import edits.
     pub(crate) importable_fqns: std::sync::RwLock<std::collections::HashMap<String, Vec<String>>>,
+    /// URI string → live parse tree for currently-open editor files.
+    /// Updated synchronously on every `did_open` / `did_change`; removed on `did_close`.
+    /// Not cleared on `reset_index_state` — open-file trees survive workspace reindex.
+    pub(crate) live_trees: DashMap<String, Arc<LiveDoc>>,
 }
 
 impl Indexer {
@@ -227,6 +235,7 @@ impl Indexer {
             source_paths_raw: RwLock::new(Vec::new()),
             library_uris: DashSet::new(),
             importable_fqns: std::sync::RwLock::new(std::collections::HashMap::new()),
+            live_trees: DashMap::new(),
         }
     }
 
