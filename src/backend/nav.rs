@@ -1,6 +1,7 @@
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use super::Backend;
+use crate::resolver::{ReceiverKind, infer_receiver_type};
 
 fn locs_to_response(locs: Vec<Location>) -> GotoDefinitionResponse {
     match locs.len() {
@@ -77,21 +78,14 @@ impl Backend {
 
         // `this.field` / `it.field` — resolve the implicit receiver/lambda type and
         // use it as the real qualifier so definition lookup finds the correct file.
-        // `resolve_qualified("this", …)` only searches the current file + hierarchy,
-        // which misses members declared on a lambda receiver type (e.g. `Address`
-        // inside `cardAddress?.run { this.descriptiveNumber }`).
-        // `it` is never in declared_names, so `infer_variable_type` always returns
-        // None; we must go through `infer_lambda_param_type_at` here too.
         if let Some(qual) = qualifier.as_deref() {
             if qual == "this" || qual == "it" {
-                if let Some(type_name) = self.indexer.infer_lambda_param_type_at(qual, uri, position) {
-                    // Try full qualified name first (e.g. `Outer.Inner`), then short segment.
-                    let locs = self.indexer.find_definition_qualified(&word, Some(&type_name), uri);
-                    let locs = if locs.is_empty() {
-                        let short = type_name.rsplit('.').next().unwrap_or(&type_name);
-                        if short != type_name {
-                            self.indexer.find_definition_qualified(&word, Some(short), uri)
-                        } else { locs }
+                let kind = ReceiverKind::Contextual { name: qual, position };
+                if let Some(rt) = infer_receiver_type(&self.indexer, kind, uri) {
+                    // Try full qualified type first (e.g. `Outer.Inner`), then leaf segment.
+                    let locs = self.indexer.find_definition_qualified(&word, Some(&rt.qualified), uri);
+                    let locs = if locs.is_empty() && rt.leaf != rt.qualified {
+                        self.indexer.find_definition_qualified(&word, Some(&rt.leaf), uri)
                     } else { locs };
                     if !locs.is_empty() {
                         return Ok(Some(locs_to_response(locs)));

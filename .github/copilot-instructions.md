@@ -134,6 +134,78 @@ The skill extension provides:
 - `kotlin_lsp_set_workspace` — write config file and restart LSP for a new project
 - `kotlin_lsp_info` — capabilities and known limitations
 
+## Rust coding guidelines
+
+These rules are distilled from the actionbook/rust-skills layer framework and leonardomso/rust-skills,
+cherry-picked for relevance to kotlin-lsp's architecture.
+
+### Design tracing (actionbook layer model)
+
+Before making a design decision, trace through three layers top-down:
+
+1. **WHY (Domain)** — What constraint does this solve? (e.g. "infer functions are pure reads over a snapshot")
+2. **WHAT (Design)** — What pattern fits? (e.g. `InferDeps` trait, `CursorPos` newtype)
+3. **HOW (Mechanics)** — Which Rust feature? (e.g. generic bound, struct, method)
+
+Never jump straight to HOW. A misdiagnosed WHY produces technically correct but wrong abstractions.
+
+### Newtypes for semantic safety
+
+Adjacent `usize` params like `(cursor_line, cursor_col)` are a transposition bug waiting to happen.
+Wrap them in a named struct with documented units:
+
+```rust
+/// Cursor position in a document. `col` is UTF-16 code units (LSP protocol).
+pub struct CursorPos { pub line: usize, pub col: usize }
+```
+
+Apply when: two same-type params appear together in ≥2 function signatures with swappable semantics.
+
+### Rule of Three before abstracting
+
+Don't introduce a generic bound until you have ≥2 distinct concrete implementations that actually
+differ. For the `InferDeps` trait pattern: the rule is met — `Indexer` (production) and `TestDeps`
+(test stub) are genuinely different. If only one concrete type exists, keep the function concrete.
+
+### Prefer generics over `Box<dyn Trait>`
+
+Use `impl Trait` or `<T: Trait>` for infer functions (static dispatch, zero cost, no heap).
+Reserve `Box<dyn Trait>` only for heterogeneous runtime collections or plugin-style registries.
+
+```rust
+// Good: infer function with generic bound
+fn infer_it_type<D: InferDeps>(deps: &D, pos: CursorPos) -> Option<String> { ... }
+
+// Avoid: dyn Trait adds vtable overhead and heap allocation for no benefit here
+fn infer_it_type(deps: &dyn InferDeps, pos: CursorPos) -> Option<String> { ... }
+```
+
+### Traits for testability
+
+Extract snapshot access behind a trait so infer functions can be tested without a full `Indexer`:
+
+```rust
+pub trait InferDeps {
+    fn lines(&self, uri: &str) -> Option<Arc<Vec<String>>>;
+    fn live_doc(&self, uri: &str) -> Option<Arc<LiveDoc>>;
+    fn symbol_detail(&self, name: &str, container: &str) -> Option<String>;
+}
+```
+
+Unit tests implement `TestDeps` as a simple struct — no DashMap, no disk, fast.
+
+### Purity in infer functions
+
+Functions that read doc/index data and return inference results are pure: `(inputs) -> output`.
+Do not let them mutate index state. Mutation (on-demand indexing, cache fills) belongs on `Indexer`,
+not inside the infer call graph.
+
+### Dedup before abstracting
+
+Before introducing a new utility function, check if it already exists:
+- `utf16_col_to_byte` — in `src/indexer/live_tree.rs`; don't inline the loop
+- `lines_for(uri)` — in `src/indexer/scope.rs` (moving to `indexer.rs`); don't duplicate the pattern
+
 ## Known limitations
 
 - **No type resolution** — tree-sitter gives structure, not type-checked references

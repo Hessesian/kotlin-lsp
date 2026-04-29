@@ -9,6 +9,7 @@
 use tower_lsp::lsp_types::{SymbolKind, Url};
 
 use crate::indexer::Indexer;
+use crate::resolver::{ReceiverKind, infer_receiver_type};
 
 // ─── Multiline signature collector ───────────────────────────────────────────
 
@@ -272,33 +273,35 @@ pub(crate) fn find_fun_signature_with_receiver(
     receiver: Option<&str>,
 ) -> String {
     if let Some(recv) = receiver {
-        // Infer the receiver's type and resolve to its file.
-        if let Some(type_name) = crate::resolver::infer_variable_type_raw(idx, recv, uri) {
-            let outer = type_name.split('.').next().unwrap_or(&type_name);
-            let locs = crate::resolver::resolve_symbol(idx, outer, None, uri);
-            for loc in &locs {
-                if let Some(data) = idx.files.get(loc.uri.as_str()) {
-                    if let Some(sig) = collect_fun_params_text(name, loc.uri.as_str(), idx) {
+        let Some(rt) = infer_receiver_type(idx, ReceiverKind::Variable(recv), uri) else {
+            // Receiver present but type could not be resolved — avoid a global
+            // name-only scan that may return a completely unrelated function.
+            return String::new();
+        };
+        let locs = crate::resolver::resolve_symbol(idx, &rt.outer, None, uri);
+        for loc in &locs {
+            if let Some(data) = idx.files.get(loc.uri.as_str()) {
+                if let Some(sig) = collect_fun_params_text(name, loc.uri.as_str(), idx) {
+                    return sig;
+                }
+                // Also search by line range within the type's body.
+                let type_end = data.symbols.iter()
+                    .find(|s| s.name == rt.outer)
+                    .map(|s| s.range.end.line)
+                    .unwrap_or(u32::MAX);
+                for sym in data.symbols.iter()
+                    .filter(|s| s.name == name && s.range.start.line <= type_end)
+                {
+                    if let Some(sig) = collect_params_from_line(
+                        &data.lines,
+                        sym.range.start.line as usize,
+                    ) {
                         return sig;
-                    }
-                    // Also search by line range within the type's body.
-                    let type_end = data.symbols.iter()
-                        .find(|s| s.name == outer)
-                        .map(|s| s.range.end.line)
-                        .unwrap_or(u32::MAX);
-                    for sym in data.symbols.iter()
-                        .filter(|s| s.name == name && s.range.start.line <= type_end)
-                    {
-                        if let Some(sig) = collect_params_from_line(
-                            &data.lines,
-                            sym.range.start.line as usize,
-                        ) {
-                            return sig;
-                        }
                     }
                 }
             }
         }
+        return String::new();
     }
     find_fun_signature_full(name, idx, uri).unwrap_or_default()
 }
