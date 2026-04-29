@@ -7,9 +7,10 @@ pub struct LiveDoc {
 
 /// Return the tree-sitter `Language` for the given file path, or `None` for
 /// unsupported extensions.  This is the extension→language map used for
-/// live-tree parsing only; it supports a strict subset of extensions checked
-/// in the same order as `parser.rs`'s `parse_by_extension`, but unlike that
-/// function it does not apply any fallback for unknown extensions.
+/// live-tree parsing only; it covers a strict subset of the extensions
+/// recognised by `parser.rs`'s `parse_by_extension`.  Unlike that function,
+/// `lang_for_path` never falls back to a default language for unknown
+/// extensions — it returns `None` so callers can skip live-tree work entirely.
 pub fn lang_for_path(path: &str) -> Option<Language> {
     if path.ends_with(".swift") {
         Some(tree_sitter_swift_bundled::language())

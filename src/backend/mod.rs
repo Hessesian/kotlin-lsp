@@ -415,7 +415,12 @@ impl LanguageServer for Backend {
                 opened_path_opt.as_deref().map(|p| p.display().to_string()).unwrap_or_default()
             );
             self.indexer.set_live_lines(&uri, &text);
-            self.indexer.store_live_tree(&uri, &text);
+            {
+                let idx2 = Arc::clone(&self.indexer);
+                let uri2 = uri.clone();
+                let text2 = text.clone();
+                let _ = tokio::task::spawn_blocking(move || idx2.store_live_tree(&uri2, &text2)).await;
+            }
             // Index just this file so hover/go-to-def work, then return.
             let idx = Arc::clone(&self.indexer);
             let sem = idx.parse_sem();
@@ -433,7 +438,12 @@ impl LanguageServer for Backend {
         // Set live_lines immediately so completion can read the current file content
         // even before the async index_content task finishes.
         self.indexer.set_live_lines(&uri, &text);
-        self.indexer.store_live_tree(&uri, &text);
+        {
+            let idx2 = Arc::clone(&self.indexer);
+            let uri2 = uri.clone();
+            let text2 = text.clone();
+            let _ = tokio::task::spawn_blocking(move || idx2.store_live_tree(&uri2, &text2)).await;
+        }
 
         let idx  = Arc::clone(&self.indexer);
         let sem  = idx.parse_sem();
@@ -476,7 +486,14 @@ impl LanguageServer for Backend {
             // Update live_lines immediately (no debounce) so completions()
             // always sees the current line text even before re-indexing.
             self.indexer.set_live_lines(&uri, &text);
-            self.indexer.store_live_tree(&uri, &text);
+            // Parsing is CPU-bound; run on the blocking pool to avoid
+            // stalling the Tokio worker thread on large files.
+            {
+                let idx2 = Arc::clone(&self.indexer);
+                let uri2 = uri.clone();
+                let text2 = text.clone();
+                let _ = tokio::task::spawn_blocking(move || idx2.store_live_tree(&uri2, &text2)).await;
+            }
 
             // True debounce: cancel any pending reindex for this file.
             let key = uri.to_string();
