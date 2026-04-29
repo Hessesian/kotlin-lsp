@@ -531,3 +531,53 @@ fn lambda_params_at_col_cst_excludes_it() {
     assert!(!params.contains(&"it".to_string()),
         "'it' must never appear in named params, got: {params:?}");
 }
+
+// ── collect_lambda_param_names ───────────────────────────────────────────────
+
+fn parse_kotlin_scope(src: &str) -> tree_sitter::Tree {
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_kotlin::language()).unwrap();
+    parser.parse(src, None).unwrap()
+}
+
+fn find_node_scope<'a>(node: tree_sitter::Node<'a>, kind: &str) -> Option<tree_sitter::Node<'a>> {
+    if node.kind() == kind { return Some(node); }
+    for i in 0..node.child_count() {
+        if let Some(n) = node.child(i).and_then(|c| find_node_scope(c, kind)) {
+            return Some(n);
+        }
+    }
+    None
+}
+
+#[test]
+fn collect_lambda_param_names_named() {
+    let src = "val x = items.map { item -> item.foo }";
+    let bytes = src.as_bytes();
+    let tree = parse_kotlin_scope(src);
+    let lambda = find_node_scope(tree.root_node(), "lambda_literal").unwrap();
+    let names = super::collect_lambda_param_names(lambda, bytes, &[]);
+    assert_eq!(names, vec!["item".to_string()],
+        "should collect 'item', got: {names:?}");
+}
+
+#[test]
+fn collect_lambda_param_names_skips_it() {
+    let src = "val x = items.map { it -> it.foo }";
+    let bytes = src.as_bytes();
+    let tree = parse_kotlin_scope(src);
+    let lambda = find_node_scope(tree.root_node(), "lambda_literal").unwrap();
+    let names = super::collect_lambda_param_names(lambda, bytes, &[]);
+    assert!(names.is_empty(), "should skip 'it', got: {names:?}");
+}
+
+#[test]
+fn collect_lambda_param_names_multi() {
+    let src = "val x = items.zip(other) { a, b -> a.id }";
+    let bytes = src.as_bytes();
+    let tree = parse_kotlin_scope(src);
+    let lambda = find_node_scope(tree.root_node(), "lambda_literal").unwrap();
+    let names = super::collect_lambda_param_names(lambda, bytes, &[]);
+    assert!(names.contains(&"a".to_string()), "should contain 'a', got: {names:?}");
+    assert!(names.contains(&"b".to_string()), "should contain 'b', got: {names:?}");
+}

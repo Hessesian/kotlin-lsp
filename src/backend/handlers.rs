@@ -56,10 +56,7 @@ impl Backend {
         // so hover shows the member from the correct class.
         if ctx.qualifier.is_some() {
             if let Some(ref rt) = ctx.contextual {
-                let locs = self.indexer.find_definition_qualified(&ctx.word, Some(&rt.qualified), uri);
-                let locs = if locs.is_empty() && rt.leaf != rt.qualified {
-                    self.indexer.find_definition_qualified(&ctx.word, Some(&rt.leaf), uri)
-                } else { locs };
+                let locs = self.resolve_with_receiver_fallback(&ctx.word, rt, uri);
                 if let Some(loc) = locs.first() {
                     if let Some(md) = self.indexer.hover_info_at_location(loc, &ctx.word) {
                         return Ok(Some(Hover {
@@ -672,23 +669,18 @@ fn text_call_info(
                 .collect::<Vec<_>>().into_iter().rev()
             {
                 let before_paren = &l[..p];
-                let name: String = before_paren.chars().rev()
-                    .take_while(|&c| c.is_alphanumeric() || c == '_')
-                    .collect::<String>().chars().rev().collect();
-                if !name.is_empty() && !is_non_call_keyword(&name) {
+                let name = crate::indexer::last_ident_in(before_paren);
+                if !name.is_empty() && !is_non_call_keyword(name) {
                     let net: i32 = l[p..].chars()
                         .map(|c| match c { '(' => 1, ')' => -1, _ => 0 }).sum();
                     if net > 0 {
                         // Qualifier before the dot on the same line.
                         let before_name = &before_paren[..before_paren.len() - name.len()];
                         let qualifier = if before_name.ends_with('.') {
-                            let q: String = before_name[..before_name.len() - 1]
-                                .chars().rev()
-                                .take_while(|&c| c.is_alphanumeric() || c == '_')
-                                .collect::<String>().chars().rev().collect();
-                            if q.is_empty() { None } else { Some(q) }
+                            let q = crate::indexer::last_ident_in(&before_name[..before_name.len() - 1]);
+                            if q.is_empty() { None } else { Some(q.to_owned()) }
                         } else { None };
-                        call_name = Some(name);
+                        call_name = Some(name.to_owned());
                         call_qualifier = qualifier;
                         if scan_line + 1 < line_idx {
                             for mid in &lines[(scan_line + 1)..line_idx] {

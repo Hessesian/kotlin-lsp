@@ -6,7 +6,7 @@
 use tower_lsp::lsp_types::Url;
 
 use crate::indexer::{Indexer, is_id_char, find_enclosing_call_name};
-use crate::indexer::infer::sig::{find_fun_signature_full, nth_fun_param_type_str};
+use crate::indexer::infer::sig::{find_fun_signature_full, nth_fun_param_type_str, split_params_at_depth_zero};
 use crate::types::CursorPos;
 
 // ─── Type-directed call-argument inference ────────────────────────────────────
@@ -173,23 +173,7 @@ pub(crate) fn extract_named_arg_name(before_brace: &str) -> Option<&str> {
 /// Handles `val`/`var` prefixes, strips them. Returns the full type string
 /// (may be a functional type like `(String, Boolean) -> Unit`).
 pub(crate) fn find_named_param_type_in_sig(sig: &str, param_name: &str) -> Option<String> {
-    // Split by comma at depth 0, tracking `()`, `[]`, and `<>`.
-    // The `>` in `->` must NOT decrement `<>` depth — skip it when prev char is `-`.
-    let mut parts: Vec<&str> = Vec::new();
-    let mut depth: i32 = 0;
-    let mut start = 0;
-    let mut prev = '\0';
-    for (i, ch) in sig.char_indices() {
-        match ch {
-            '(' | '[' | '<' => depth += 1,
-            ')' | ']' => depth -= 1,
-            '>' if prev != '-' && depth > 0 => depth -= 1,
-            ',' if depth == 0 => { parts.push(&sig[start..i]); start = i + 1; }
-            _ => {}
-        }
-        prev = ch;
-    }
-    if start < sig.len() { parts.push(&sig[start..]); }
+    let parts = split_params_at_depth_zero(sig);
 
     let colon_pat = format!("{param_name}:");
     for part in parts {
