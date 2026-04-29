@@ -6,7 +6,7 @@ use std::sync::{Arc, RwLock};
 use dashmap::{DashMap, DashSet};
 use tower_lsp::lsp_types::*;
 
-use crate::types::FileData;
+use crate::types::{FileData, CursorPos};
 
 // Re-export rg-module items that existing callers reach via `crate::indexer::`.
 pub(crate) use crate::rg::IgnoreMatcher;
@@ -417,11 +417,12 @@ impl Indexer {
                     } else {
                         // Multi-line fallback: lambda opened on a previous line.
                         let lines = self.mem_lines_for(uri.as_str());
+                        let pos = CursorPos { line: cursor_line, utf16_col: cursor_col };
                         let ml = lines.and_then(|ls| {
                             if recv == "this" {
-                                find_this_element_type_in_lines(&ls, cursor_line, cursor_col, self, uri)
+                                find_this_element_type_in_lines(&ls, pos, self, uri)
                             } else {
-                                find_it_element_type_in_lines(&ls, cursor_line, cursor_col, self, uri)
+                                find_it_element_type_in_lines(&ls, pos, self, uri)
                             }
                         });
                         if ml.is_some() {

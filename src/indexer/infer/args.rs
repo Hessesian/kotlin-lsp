@@ -7,6 +7,7 @@ use tower_lsp::lsp_types::Url;
 
 use crate::indexer::{Indexer, is_id_char, find_enclosing_call_name};
 use crate::indexer::infer::sig::{find_fun_signature_full, nth_fun_param_type_str};
+use crate::types::CursorPos;
 
 // ─── Type-directed call-argument inference ────────────────────────────────────
 
@@ -25,16 +26,15 @@ use crate::indexer::infer::sig::{find_fun_signature_full, nth_fun_param_type_str
 ///   `process(it)`           → first param of `process` → e.g. `Item`
 ///   `fn(a, it)`             → second param of `fn` → e.g. `String`
 pub(crate) fn find_as_call_arg_type(
-    lines:       &[String],
-    cursor_line: usize,
-    cursor_col:  usize,
-    idx:         &Indexer,
-    uri:         &Url,
+    lines: &[String],
+    pos:   CursorPos,
+    idx:   &Indexer,
+    uri:   &Url,
 ) -> Option<String> {
-    let line = lines.get(cursor_line)?;
+    let line = lines.get(pos.line)?;
     // Slice the line up to (but not including) the cursor position.
     let before_cursor = {
-        let byte_end = crate::indexer::live_tree::utf16_col_to_byte(line, cursor_col);
+        let byte_end = crate::indexer::live_tree::utf16_col_to_byte(line, pos.utf16_col);
         &line[..byte_end]
     };
     let col = before_cursor.chars().count();
@@ -52,7 +52,7 @@ pub(crate) fn find_as_call_arg_type(
             {
                 let preceding = s[..ident_start].trim_end().chars().last();
                 if matches!(preceding, Some('(') | Some(',')) {
-                    if let Some(fn_full) = find_enclosing_call_name(lines, cursor_line, col) {
+                    if let Some(fn_full) = find_enclosing_call_name(lines, pos.line, col) {
                         if let Some(fn_name) = fn_full.split('.').next_back().filter(|n| !n.is_empty()) {
                             if let Some(sig) = find_fun_signature_full(fn_name, idx, uri) {
                                 if let Some(param_type) = find_named_param_type_in_sig(&sig, named_arg) {
@@ -78,11 +78,11 @@ pub(crate) fn find_as_call_arg_type(
     let mut depth: i32 = 0;
     let mut brace_depth: i32 = 0;
     let mut arg_pos: usize = 0;
-    let scan_start = cursor_line.saturating_sub(20);
+    let scan_start = pos.line.saturating_sub(20);
 
-    for ln in (scan_start..=cursor_line).rev() {
+    for ln in (scan_start..=pos.line).rev() {
         let chars: Vec<char> = lines[ln].chars().collect();
-        let scan_to = if ln == cursor_line { col.min(chars.len()) } else { chars.len() };
+        let scan_to = if ln == pos.line { col.min(chars.len()) } else { chars.len() };
 
         for i in (0..scan_to).rev() {
             match chars[i] {

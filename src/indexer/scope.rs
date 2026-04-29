@@ -14,6 +14,7 @@ use super::{
     line_has_lambda_param,
     lambda_brace_pos_for_param,
 };
+use crate::types::CursorPos;
 
 impl Indexer {
     /// LSP positions are UTF-16; for ASCII-heavy Kotlin/Java identifiers the
@@ -177,24 +178,20 @@ impl Indexer {
         // did_change) over files.lines (refreshed after debounced reindex).
         // Type resolution still uses the index (definitions, files) by name —
         // that data remains valid even before reindex completes.
-        let lines: Arc<Vec<String>> = self.live_lines.get(uri.as_str())
-            .map(|ll| ll.clone())
-            .or_else(|| {
-                self.files.get(uri.as_str()).map(|f| f.lines.clone())
-            })?;
+        let lines: Arc<Vec<String>> = self.mem_lines_for(uri.as_str())?;
 
         if name == "it" || name == "this" {
-            let col = position.character as usize;
+            let pos = CursorPos { line: line_no, utf16_col: position.character as usize };
             let lambda_type = if name == "this" {
-                find_this_element_type_in_lines(&lines, line_no, col, self, uri)
+                find_this_element_type_in_lines(&lines, pos, self, uri)
             } else {
-                find_it_element_type_in_lines(&lines, line_no, col, self, uri)
+                find_it_element_type_in_lines(&lines, pos, self, uri)
             };
             if lambda_type.is_some() { return lambda_type; }
             // Type-directed fallback: if `it`/`this` is a call argument (named or
             // positional), look up the expected parameter type from the function signature.
             // Mimics Kotlin's type-directed implicit-receiver / lambda-param resolution.
-            if let Some(ty) = find_as_call_arg_type(&lines, line_no, col, self, uri) {
+            if let Some(ty) = find_as_call_arg_type(&lines, pos, self, uri) {
                 return Some(ty);
             }
             // Fallback for `this` in a regular class method body (not a lambda):

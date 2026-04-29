@@ -2,6 +2,17 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tower_lsp::lsp_types::{Range, SymbolKind};
 
+/// A position within a document used by infer functions.
+///
+/// `utf16_col` is a UTF-16 code unit offset, matching the LSP `Position.character` field.
+/// Using a named struct (rather than a bare `(usize, usize)` pair) prevents silent
+/// transposition of line and column arguments at call sites.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CursorPos {
+    pub line:      usize,
+    pub utf16_col: usize,
+}
+
 /// Kotlin/Java visibility of a declared symbol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Visibility {
