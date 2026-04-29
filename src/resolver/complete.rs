@@ -8,7 +8,7 @@ use crate::types::Visibility;
 
 use super::{fqns_for_name, already_imported, make_import_edit,
             resolve_symbol_inner, resolve_symbol_no_rg};
-use super::infer::infer_variable_type;
+use super::infer::{infer_variable_type, ReceiverKind, ReceiverType, infer_receiver_type};
 
 // ─── match scoring ────────────────────────────────────────────────────────────
 
@@ -181,33 +181,28 @@ pub(crate) fn complete_dot(idx: &Indexer, receiver: &str, from_uri: &Url, snippe
         return complete_super(idx, from_uri, snippets);
     }
 
-    // Infer type from variable annotation.
-    let type_name = match infer_variable_type(idx, receiver, from_uri) {
-        Some(t) => t,
+    // Infer and normalise the receiver's type.
+    let rt = match infer_receiver_type(idx, ReceiverKind::Variable(receiver), from_uri) {
+        Some(r) => r,
         None => {
             // Could be an uppercase class/object — look it up directly.
             if receiver.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
-                receiver.to_string()
+                ReceiverType::from_raw(receiver.to_string())
             } else {
                 return vec![];
             }
         }
     };
 
-    // Resolve type to its source file, handling dotted types like `Outer.Inner`.
-    let Some(file_uri) = resolve_type_to_file(idx, &type_name, from_uri) else {
-        return vec![];
+    // Resolve the outer type to its source file (no rg — per-keystroke path).
+    let file_uri = match resolve_symbol_no_rg(idx, &rt.outer, from_uri).first() {
+        Some(loc) => loc.uri.to_string(),
+        None      => return vec![],
     };
 
-    // When the type is `Outer.Inner`, show only the inner type's members.
-    // For a plain type like `ProductKey`, also scope to just that type's body —
-    // avoids leaking top-level functions from the same file.
-    let mut items = if let Some(dot) = type_name.find('.') {
-        let inner_name = &type_name[dot + 1..];
-        symbols_from_nested_type(idx, &file_uri, inner_name)
-    } else {
-        symbols_from_nested_type(idx, &file_uri, &type_name)
-    };
+    // For dotted types (e.g. `Outer.Inner`), show only the inner type's members.
+    // `rt.leaf` is the last segment, so it works for both plain and dotted types.
+    let mut items = symbols_from_nested_type(idx, &file_uri, &rt.leaf);
 
     // Filter out private members — they are inaccessible from outside the class.
     items.retain(|i| i.sort_text.as_deref().map(|s| !s.starts_with("prv:")).unwrap_or(true));
@@ -226,17 +221,8 @@ pub(crate) fn complete_dot(idx: &Indexer, receiver: &str, from_uri: &Url, snippe
     // Append stdlib extensions filtered to the receiver type. Only add Kotlin stdlib
     // when the current file is a Kotlin file; add Swift-specific snippets for Swift.
     let from_path = from_uri.path();
-    items.extend(crate::stdlib_tail::dot_completions_for_lang(from_path, &type_name, snippets));
+    items.extend(crate::stdlib_tail::dot_completions_for_lang(from_path, &rt.qualified, snippets));
     items
-}
-
-/// Resolve a (possibly dotted) type name to the URI of its containing file.
-/// `"DashboardProductsReducer.Factory"` → file where `DashboardProductsReducer` lives.
-fn resolve_type_to_file(idx: &Indexer, type_name: &str, from_uri: &Url) -> Option<String> {
-    // For dotted types, resolve the outer class only.
-    let outer = type_name.split('.').next().unwrap_or(type_name);
-    let locs = resolve_symbol_no_rg(idx, outer, from_uri);
-    Some(locs.first()?.uri.to_string())
 }
 
 /// Return completions for symbols declared INSIDE `type_name` within the given file.

@@ -2,6 +2,71 @@ use tower_lsp::lsp_types::{Position, Range, Url};
 
 use crate::indexer::Indexer;
 
+// ─── Receiver type resolution ─────────────────────────────────────────────────
+
+/// How the receiver expression should be resolved.
+///
+/// - `Variable`: a named val/var (e.g. `interactor`, `viewModel`).
+///   Resolved via line-scan type annotation (`val name: Type`).
+/// - `Contextual`: `it`, `this`, or a named lambda parameter.
+///   Requires cursor `position` for scope analysis; falls back to
+///   `infer_variable_type_raw` only if scope analysis returns nothing.
+pub enum ReceiverKind<'a> {
+    Variable(&'a str),
+    Contextual { name: &'a str, position: Position },
+}
+
+/// A fully-normalised receiver type with multiple access forms.
+///
+/// All forms are derived from a single raw string (e.g. `"Outer.Inner<Param>"`):
+/// - `raw`       — original with generics: `"Outer.Inner<Param>"`
+/// - `qualified` — no generics, dots preserved: `"Outer.Inner"`
+/// - `outer`     — first dot-segment: `"Outer"`  (used for file lookup)
+/// - `leaf`      — last dot-segment: `"Inner"`   (used for fallback member lookup)
+pub struct ReceiverType {
+    pub raw:       String,
+    pub qualified: String,
+    pub outer:     String,
+    pub leaf:      String,
+}
+
+impl ReceiverType {
+    pub fn from_raw(raw: String) -> Self {
+        // Strip generics: take chars until first `<`.
+        let qualified: String = raw.chars().take_while(|&c| c != '<').collect();
+        let outer = qualified.split('.').next().unwrap_or(&qualified).to_string();
+        let leaf  = qualified.rsplit('.').next().unwrap_or(&qualified).to_string();
+        ReceiverType { raw, qualified, outer, leaf }
+    }
+}
+
+/// Infer the type of a receiver expression and normalise it into a
+/// [`ReceiverType`].
+///
+/// Returns `None` when type inference fails (no annotation, unindexed file,
+/// or lambda scope not resolvable).  Call sites then decide whether to skip
+/// or fall back; this function never performs a global rg scan.
+pub fn infer_receiver_type(
+    idx:  &Indexer,
+    kind: ReceiverKind<'_>,
+    uri:  &Url,
+) -> Option<ReceiverType> {
+    let raw = match kind {
+        ReceiverKind::Variable(name) => infer_variable_type_raw(idx, name, uri)?,
+        ReceiverKind::Contextual { name, position } => {
+            // Lambda / implicit-receiver path.
+            if let Some(ty) = idx.infer_lambda_param_type_at(name, uri, position) {
+                ty
+            } else {
+                // Contextual fallback: ordinary annotated var that happens to
+                // appear in a lambda context (e.g. captured val with explicit type).
+                infer_variable_type_raw(idx, name, uri)?
+            }
+        }
+    };
+    Some(ReceiverType::from_raw(raw))
+}
+
 /// Scan the current file's lines for a type annotation on `var_name` and return
 /// the declared type name if found.  Delegates to [`infer_type_in_lines`].
 pub(crate) fn infer_variable_type(idx: &Indexer, var_name: &str, uri: &Url) -> Option<String> {

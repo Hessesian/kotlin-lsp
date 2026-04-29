@@ -2,6 +2,7 @@ use std::sync::Arc;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use crate::indexer::find_fun_signature_with_receiver;
+use crate::resolver::{ReceiverKind, infer_receiver_type};
 use super::Backend;
 use super::helpers::resolve_references_scope;
 use super::actions::is_non_call_keyword;
@@ -59,14 +60,12 @@ impl Backend {
         // so hover shows the member from the correct class (mirrors goto_definition fix).
         if let Some(qual) = qualifier.as_deref() {
             if qual == "this" || qual == "it" {
-                if let Some(type_name) = self.indexer.infer_lambda_param_type_at(qual, uri, position) {
-                    // Try full qualified name first (e.g. `Outer.Inner`), then short segment.
-                    let locs = self.indexer.find_definition_qualified(&word, Some(&type_name), uri);
-                    let locs = if locs.is_empty() {
-                        let short = type_name.rsplit('.').next().unwrap_or(&type_name);
-                        if short != type_name {
-                            self.indexer.find_definition_qualified(&word, Some(short), uri)
-                        } else { locs }
+                let kind = ReceiverKind::Contextual { name: qual, position };
+                if let Some(rt) = infer_receiver_type(&self.indexer, kind, uri) {
+                    // Try full qualified type first (e.g. `Outer.Inner`), then leaf segment.
+                    let locs = self.indexer.find_definition_qualified(&word, Some(&rt.qualified), uri);
+                    let locs = if locs.is_empty() && rt.leaf != rt.qualified {
+                        self.indexer.find_definition_qualified(&word, Some(&rt.leaf), uri)
                     } else { locs };
                     if let Some(loc) = locs.first() {
                         if let Some(md) = self.indexer.hover_info_at_location(loc, &word) {
@@ -392,115 +391,16 @@ impl Backend {
         let col = crate::indexer::live_tree::utf16_col_to_byte(line_text, pos.character as usize);
         let before = &line_text[..col];
 
-        // ── CST fast path ────────────────────────────────────────────────────
-        // Walk from the cursor node up to the nearest call_expression ancestor,
-        // then extract fn name, qualifier, and active param from the tree.
-        // O(depth) vs the O(lines × chars) text scan below.
-        if let Some((cst_name, cst_qualifier, cst_active_param)) =
-            cst_signature_help_data(pos, &self.indexer, uri)
-        {
-            let params_text = find_fun_signature_with_receiver(
-                &self.indexer, uri, &cst_name, cst_qualifier.as_deref(),
-            );
-            if !params_text.is_empty() {
-                return Ok(build_signature_help(&cst_name, &params_text, cst_active_param));
-            }
-        }
-
-        // ── Text path ────────────────────────────────────────────────────────
-        let mut depth: i32 = 0;
-        let mut active_param: u32 = 0;
-        let mut call_name: Option<String> = None;
-        let mut call_qualifier: Option<String> = None; // receiver before the dot
-        let chars: Vec<char> = before.chars().collect();
-        let mut i = chars.len();
-        while i > 0 {
-            i -= 1;
-            match chars[i] {
-                ')' | ']' => { depth += 1; }
-                '{' | '}' => {
-                    // Brace means we've exited the current lambda/block scope —
-                    // stop scanning to avoid finding an outer function's paren.
-                    break;
-                }
-                '(' => {
-                    if depth == 0 {
-                        let mut j = i;
-                        while j > 0 && (chars[j - 1].is_alphanumeric() || chars[j - 1] == '_') {
-                            j -= 1;
-                        }
-                        let candidate: String = chars[j..i].iter().collect();
-                        if !candidate.is_empty() && !is_non_call_keyword(&candidate) {
-                            call_name = Some(candidate);
-                            // Capture qualifier: the identifier before a `.` if present.
-                            if j > 0 && chars[j - 1] == '.' {
-                                let mut k = j - 1;
-                                while k > 0 && (chars[k - 1].is_alphanumeric() || chars[k - 1] == '_') {
-                                    k -= 1;
-                                }
-                                let q: String = chars[k..j - 1].iter().collect();
-                                if !q.is_empty() {
-                                    call_qualifier = Some(q);
-                                }
-                            }
-                        }
-                        break;
-                    }
-                    depth -= 1;
-                }
-                ',' if depth == 0 => { active_param += 1; }
-                _ => {}
-            }
-        }
-
-        // If not found on this line, try multiline scan (up to 10 lines up).
-        // Only cross into a previous line if the current line doesn't contain a
-        // closing brace (which would mean we're inside a block body, not an arg list).
-        let in_block_body = before.contains('{') || before.contains('}')
-            || lines[line_idx].trim_start().starts_with('}');
-        if call_name.is_none() && line_idx > 0 && !in_block_body {
-            let scan_start = line_idx.saturating_sub(10);
-            'outer: for scan_line in (scan_start..line_idx).rev() {
-                let l = &lines[scan_line];
-                // Stop if we cross a closing brace — that means we entered a block body.
-                if l.contains('{') || l.contains('}') {
-                    break;
-                }
-                // Find the last `(` on this line.
-                for (p, _) in l.char_indices().filter(|&(_, c)| c == '(').collect::<Vec<_>>().into_iter().rev() {
-                    let before_paren = &l[..p];
-                    let name: String = before_paren.chars()
-                        .rev()
-                        .take_while(|&c| c.is_alphanumeric() || c == '_')
-                        .collect::<String>()
-                        .chars().rev().collect();
-                    if !name.is_empty() && !is_non_call_keyword(&name) {
-                        // Make sure this `(` is unmatched (not closed on the same line).
-                        let after_paren = &l[p..];
-                        let net: i32 = after_paren.chars().map(|c| match c {
-                            '(' => 1, ')' => -1, _ => 0,
-                        }).sum();
-                        if net > 0 {
-                            call_name = Some(name);
-                            if scan_line + 1 < line_idx {
-                                for mid_line in &lines[(scan_line + 1)..line_idx] {
-                                    active_param += mid_line.chars().filter(|&c| c == ',').count() as u32;
-                                }
-                            }
-                            active_param += before.chars().filter(|&c| c == ',').count() as u32;
-                            break 'outer;
-                        }
-                    }
-                }
-            }
-        }
-
-        let name = match call_name {
-            Some(n) if !n.is_empty() => n,
-            _ => return Ok(None),
+        // Extract (fn_name, qualifier, active_param) — CST first, text fallback.
+        let Some((name, qualifier, active_param)) =
+            extract_call_info(pos, &self.indexer, uri, lines, before, line_idx)
+        else {
+            return Ok(None);
         };
 
-        let params_text = find_fun_signature_with_receiver(&self.indexer, uri, &name, call_qualifier.as_deref());
+        let params_text = find_fun_signature_with_receiver(
+            &self.indexer, uri, &name, qualifier.as_deref(),
+        );
         if params_text.is_empty() {
             return Ok(None);
         }
@@ -601,15 +501,35 @@ fn build_signature_help(fn_name: &str, params_text: &str, active_param: u32) -> 
     })
 }
 
-/// CST fast path for signature help.
+/// Extract `(fn_name, qualifier, active_param)` for the call under the cursor.
 ///
-/// Walks from the cursor node upward to find the nearest `call_expression`
-/// ancestor, then extracts `(fn_name, qualifier, active_param)`.  Returns
-/// `None` when:
-/// - no live tree is available (text path runs instead)
-/// - the cursor is inside a lambda literal rather than an argument list
-/// - the callee is not a simple or navigation expression
-fn cst_signature_help_data(
+/// Tries the CST (live tree) first — O(depth), accurate qualifier extraction.
+/// Falls back to a text scan when no live tree is available, when the cursor
+/// is inside a lambda literal, or when the callee shape is not recognised.
+fn extract_call_info(
+    pos:      Position,
+    indexer:  &crate::indexer::Indexer,
+    uri:      &Url,
+    lines:    &[String],
+    before:   &str,
+    line_idx: usize,
+) -> Option<(String, Option<String>, u32)> {
+    // ── CST path ─────────────────────────────────────────────────────────────
+    if let Some(result) = cst_call_info(pos, indexer, uri) {
+        return Some(result);
+    }
+
+    // ── Text path ────────────────────────────────────────────────────────────
+    text_call_info(lines, before, line_idx)
+}
+
+/// CST path: walk from cursor up to `call_expression`, extract name/qualifier/param.
+///
+/// Returns `None` when:
+/// - no live tree available
+/// - cursor is inside a `lambda_literal`
+/// - callee shape not recognised (`simple_identifier` / `navigation_expression`)
+fn cst_call_info(
     pos:     Position,
     indexer: &crate::indexer::Indexer,
     uri:     &Url,
@@ -648,16 +568,39 @@ fn cst_signature_help_data(
             (name, None)
         }
         "navigation_expression" => {
+            // Tree structure: navigation_expression
+            //   simple_identifier "receiver"        ← direct child (the qualifier)
+            //   navigation_suffix                   ← direct child
+            //     "."
+            //     simple_identifier "methodName"    ← fn name lives here
+            //
+            // We must look inside navigation_suffix for the function name, NOT
+            // use direct-children-only iteration which misses the nested identifier.
+            let mut fn_name_opt: Option<String> = None;
+            let mut qualifier_opt: Option<String> = None;
             let mut walker = callee.walk();
-            let idents: Vec<_> = callee.children(&mut walker)
-                .filter(|c| c.kind() == "simple_identifier" || c.kind() == "type_identifier")
-                .collect();
-            let fn_node = idents.last()?;
-            let fn_name = std::str::from_utf8(&bytes[fn_node.byte_range()]).ok()?.to_string();
-            let qualifier = idents.len().checked_sub(2).and_then(|qi| {
-                std::str::from_utf8(&bytes[idents[qi].byte_range()]).ok().map(|s| s.to_string())
-            });
-            (fn_name, qualifier)
+            for child in callee.children(&mut walker) {
+                match child.kind() {
+                    "simple_identifier" | "type_identifier" => {
+                        // First direct identifier = the receiver/qualifier.
+                        qualifier_opt = std::str::from_utf8(&bytes[child.byte_range()])
+                            .ok().map(|s| s.to_string());
+                    }
+                    "navigation_suffix" => {
+                        // The function name is the simple_identifier inside the suffix.
+                        let mut sw = child.walk();
+                        for sc in child.children(&mut sw) {
+                            if sc.kind() == "simple_identifier" || sc.kind() == "type_identifier" {
+                                fn_name_opt = std::str::from_utf8(&bytes[sc.byte_range()])
+                                    .ok().map(|s| s.to_string());
+                                break;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            (fn_name_opt?, qualifier_opt)
         }
         _ => return None,
     };
@@ -698,4 +641,97 @@ fn cst_find_value_arguments(call_expr: tree_sitter::Node<'_>) -> Option<tree_sit
         }
     }
     None
+}
+
+/// Text-scan fallback: extract `(fn_name, qualifier, active_param)` by walking
+/// backwards through `before` (and up to 10 previous lines for multiline calls).
+fn text_call_info(
+    lines:    &[String],
+    before:   &str,
+    line_idx: usize,
+) -> Option<(String, Option<String>, u32)> {
+    let mut depth: i32 = 0;
+    let mut active_param: u32 = 0;
+    let mut call_name: Option<String> = None;
+    let mut call_qualifier: Option<String> = None;
+
+    let chars: Vec<char> = before.chars().collect();
+    let mut i = chars.len();
+    while i > 0 {
+        i -= 1;
+        match chars[i] {
+            ')' | ']' => { depth += 1; }
+            '{' | '}' => { break; }
+            '(' => {
+                if depth == 0 {
+                    let mut j = i;
+                    while j > 0 && (chars[j - 1].is_alphanumeric() || chars[j - 1] == '_') {
+                        j -= 1;
+                    }
+                    let candidate: String = chars[j..i].iter().collect();
+                    if !candidate.is_empty() && !is_non_call_keyword(&candidate) {
+                        call_name = Some(candidate);
+                        if j > 0 && chars[j - 1] == '.' {
+                            let mut k = j - 1;
+                            while k > 0 && (chars[k - 1].is_alphanumeric() || chars[k - 1] == '_') {
+                                k -= 1;
+                            }
+                            let q: String = chars[k..j - 1].iter().collect();
+                            if !q.is_empty() { call_qualifier = Some(q); }
+                        }
+                    }
+                    break;
+                }
+                depth -= 1;
+            }
+            ',' if depth == 0 => { active_param += 1; }
+            _ => {}
+        }
+    }
+
+    // Multiline: scan up to 10 lines back when the call opens on a previous line.
+    let in_block_body = before.contains('{') || before.contains('}')
+        || lines[line_idx].trim_start().starts_with('}');
+    if call_name.is_none() && line_idx > 0 && !in_block_body {
+        let scan_start = line_idx.saturating_sub(10);
+        'outer: for scan_line in (scan_start..line_idx).rev() {
+            let l = &lines[scan_line];
+            if l.contains('{') || l.contains('}') { break; }
+            for (p, _) in l.char_indices().filter(|&(_, c)| c == '(')
+                .collect::<Vec<_>>().into_iter().rev()
+            {
+                let before_paren = &l[..p];
+                let name: String = before_paren.chars().rev()
+                    .take_while(|&c| c.is_alphanumeric() || c == '_')
+                    .collect::<String>().chars().rev().collect();
+                if !name.is_empty() && !is_non_call_keyword(&name) {
+                    let net: i32 = l[p..].chars()
+                        .map(|c| match c { '(' => 1, ')' => -1, _ => 0 }).sum();
+                    if net > 0 {
+                        // Qualifier before the dot on the same line.
+                        let before_name = &before_paren[..before_paren.len() - name.len()];
+                        let qualifier = if before_name.ends_with('.') {
+                            let q: String = before_name[..before_name.len() - 1]
+                                .chars().rev()
+                                .take_while(|&c| c.is_alphanumeric() || c == '_')
+                                .collect::<String>().chars().rev().collect();
+                            if q.is_empty() { None } else { Some(q) }
+                        } else { None };
+                        call_name = Some(name);
+                        call_qualifier = qualifier;
+                        if scan_line + 1 < line_idx {
+                            for mid in &lines[(scan_line + 1)..line_idx] {
+                                active_param += mid.chars().filter(|&c| c == ',').count() as u32;
+                            }
+                        }
+                        active_param += before.chars().filter(|&c| c == ',').count() as u32;
+                        break 'outer;
+                    }
+                }
+            }
+        }
+    }
+
+    let name = call_name.filter(|n| !n.is_empty())?;
+    Some((name, call_qualifier, active_param))
 }

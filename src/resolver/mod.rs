@@ -36,7 +36,7 @@ pub(crate) mod find;
 
 pub use complete::{complete_symbol, complete_symbol_with_context, symbols_from_uri_as_completions_pub};
 pub(crate) use complete::is_annotation_context;
-pub use infer::{infer_variable_type_raw, extract_collection_element_type};
+pub use infer::{infer_variable_type_raw, extract_collection_element_type, ReceiverKind, ReceiverType, infer_receiver_type};
 
 // Re-exports used only in tests.
 #[cfg(test)]
