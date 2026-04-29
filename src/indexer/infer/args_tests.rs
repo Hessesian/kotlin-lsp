@@ -203,3 +203,59 @@ fn named_param_type_default_value_with_gt_operator() {
     let sig = "threshold: Int, name: String";
     assert_eq!(find_named_param_type_in_sig(sig, "name"), Some("String".to_owned()));
 }
+
+// ─── CST fast path for find_as_call_arg_type ─────────────────────────────────
+
+use tower_lsp::lsp_types::Url;
+use crate::indexer::Indexer;
+use crate::types::CursorPos;
+
+fn uri(path: &str) -> Url { Url::parse(&format!("file:///test{path}")).unwrap() }
+
+fn indexed_with_live(path: &str, src: &str) -> (Url, Indexer) {
+    let u = uri(path);
+    let idx = Indexer::new();
+    idx.index_content(&u, src);
+    idx.store_live_tree(&u, src);
+    idx.set_live_lines(&u, src);
+    (u, idx)
+}
+
+fn lines_of(src: &str) -> Vec<String> { src.lines().map(String::from).collect() }
+
+#[test]
+fn cst_positional_arg_first() {
+    // Cursor on `it` — the sole argument to `send(it)`.
+    // Expected: the type of `send`'s first parameter = "Item".
+    let src = "fun send(item: Item): Unit {}\nfun main() { send(it) }";
+    let (u, idx) = indexed_with_live("/t.kt", src);
+    let lines = lines_of(src);
+    // "fun main() { send(" is 18 chars → `it` starts at col 18
+    let pos = CursorPos { line: 1, utf16_col: 18 };
+    assert_eq!(find_as_call_arg_type(&lines, pos, &idx, &u).as_deref(), Some("Item"));
+}
+
+#[test]
+fn cst_positional_arg_second() {
+    // Cursor on `it` — second argument to `zip(a, it)`.
+    // Expected: the type of `zip`'s second parameter = "B".
+    let src = "fun zip(first: A, second: B): Unit {}\nfun main() { zip(a, it) }";
+    let (u, idx) = indexed_with_live("/t.kt", src);
+    let lines = lines_of(src);
+    // "fun main() { zip(a, " is 21 chars → `it` starts at col 21
+    let pos = CursorPos { line: 1, utf16_col: 21 };
+    assert_eq!(find_as_call_arg_type(&lines, pos, &idx, &u).as_deref(), Some("B"));
+}
+
+#[test]
+fn cst_cursor_in_lambda_not_a_call_arg() {
+    // Cursor on `it` inside a lambda body — NOT a direct call argument.
+    // CST path must bail out (returns None for this path).
+    let src = "fun main() { items.map { it.name } }";
+    let (u, idx) = indexed_with_live("/t.kt", src);
+    let lines = lines_of(src);
+    // "fun main() { items.map { " = 25 chars → `it` at col 25
+    let pos = CursorPos { line: 0, utf16_col: 25 };
+    // Should return None since `it` is inside a lambda, not a direct argument.
+    assert_eq!(find_as_call_arg_type(&lines, pos, &idx, &u), None);
+}

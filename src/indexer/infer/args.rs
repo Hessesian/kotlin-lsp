@@ -39,6 +39,13 @@ pub(crate) fn find_as_call_arg_type(
     };
     let col = before_cursor.chars().count();
 
+    // ── CST fast path ────────────────────────────────────────────────────────
+    // Walk from the cursor node upward to find the enclosing `value_argument`,
+    // then up to `call_expression`.  O(depth) vs the O(lines × chars) text scan.
+    if let Some(result) = cst_call_arg_type(pos, idx, uri) {
+        return Some(result);
+    }
+
     // ── Named arg: `param = ` just before cursor ─────────────────────────────
     let s = before_cursor.trim_end();
     if let Some(s) = s.strip_suffix('=') {
@@ -288,6 +295,112 @@ pub(crate) fn extract_first_arg(call_expr: &str) -> Option<&str> {
     }
     let arg = rest[..end].trim();
     if arg.is_empty() { None } else { Some(arg) }
+}
+
+// ─── CST helpers for call-argument type inference ────────────────────────────
+
+/// CST fast path: walk from cursor up to `value_argument`, then to
+/// `call_expression`, and look up the expected parameter type.
+///
+/// Returns `None` when:
+/// - no live tree is available (falls through to text scan)
+/// - cursor is inside a lambda literal rather than a direct call argument
+/// - the enclosing function is not indexed
+fn cst_call_arg_type(pos: CursorPos, idx: &Indexer, uri: &Url) -> Option<String> {
+    use tree_sitter::Point;
+    use crate::indexer::live_tree::utf16_col_to_byte;
+
+    let doc = idx.live_doc(uri)?;
+    let bytes = &doc.bytes;
+
+    // Get the line text to convert UTF-16 col → byte offset.
+    let line_text = std::str::from_utf8(bytes).ok()
+        .and_then(|s| s.lines().nth(pos.line))
+        .unwrap_or("");
+    let byte_col = utf16_col_to_byte(line_text, pos.utf16_col);
+    let point = Point { row: pos.line, column: byte_col };
+    let start_node = doc.tree.root_node().descendant_for_point_range(point, point)?;
+
+    // Walk up: look for value_argument; bail out if we hit lambda_literal first.
+    let mut cur = start_node;
+    let value_arg = loop {
+        match cur.kind() {
+            "value_argument" => break Some(cur),
+            "lambda_literal" => break None,
+            _ => match cur.parent() {
+                Some(p) => cur = p,
+                None => break None,
+            }
+        }
+    }?;
+
+    // Walk up from value_argument to call_expression.
+    let mut node = value_arg;
+    let call_expr = loop {
+        match node.parent() {
+            Some(p) if p.kind() == "call_expression" => break Some(p),
+            Some(p) => node = p,
+            None => break None,
+        }
+    }?;
+
+    let fn_name = cst_call_fn_name(call_expr, bytes)?;
+    let sig = find_fun_signature_full(&fn_name, idx, uri)?;
+
+    // Named arg: value_argument has [simple_identifier "="] prefix in grammar.
+    let param_type = if let Some(arg_name) = cst_named_arg_label(value_arg, bytes) {
+        find_named_param_type_in_sig(&sig, &arg_name)
+    } else {
+        nth_fun_param_type_str(&sig, cst_value_arg_position(value_arg))
+    }?;
+
+    let base: String = param_type.trim().chars().take_while(|&c| is_id_char(c)).collect();
+    if base.is_empty() { None } else { Some(base) }
+}
+
+/// Extract the function name from a `call_expression` node.
+/// Handles simple calls `foo(...)` and navigation chains `foo.bar(...)`.
+fn cst_call_fn_name(call_expr: tree_sitter::Node<'_>, bytes: &[u8]) -> Option<String> {
+    let callee = call_expr.child(0)?;
+    let name_node = match callee.kind() {
+        "simple_identifier" | "type_identifier" => callee,
+        "navigation_expression" => {
+            let mut walker = callee.walk();
+            callee.children(&mut walker)
+                .filter(|c| c.kind() == "simple_identifier" || c.kind() == "type_identifier")
+                .last()?
+        }
+        _ => return None,
+    };
+    std::str::from_utf8(&bytes[name_node.byte_range()]).ok().map(|s| s.to_string())
+}
+
+/// If `value_argument` has a named-arg label (`simple_identifier "="` prefix),
+/// return the label text; otherwise `None`.
+fn cst_named_arg_label(value_arg: tree_sitter::Node<'_>, bytes: &[u8]) -> Option<String> {
+    let count = value_arg.child_count();
+    for i in 0..count.saturating_sub(1) {
+        let (c, next) = (value_arg.child(i)?, value_arg.child(i + 1)?);
+        if c.kind() == "simple_identifier" && next.kind() == "=" {
+            return std::str::from_utf8(&bytes[c.byte_range()]).ok().map(|s| s.to_string());
+        }
+    }
+    None
+}
+
+/// Count how many `value_argument` siblings precede `value_arg` in its parent.
+fn cst_value_arg_position(value_arg: tree_sitter::Node<'_>) -> usize {
+    let parent = match value_arg.parent() { Some(p) => p, None => return 0 };
+    let target_id = value_arg.id();
+    let mut pos = 0usize;
+    let mut cursor = parent.walk();
+    for child in parent.children(&mut cursor) {
+        if child.kind() == "value_argument" {
+            if child.id() == target_id { break; }
+            pos += 1;
+        }
+    }
+    pos
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
