@@ -17,7 +17,13 @@ pub(crate) trait NodeExt<'a>: Sized + Copy {
     fn first_child_of_kind(self, kind: &str) -> Option<Node<'a>>;
 
     /// Collect all direct children whose `kind()` equals `kind`.
+    /// Allocates a `Vec`; child counts are typically small (< 20), so this is acceptable
+    /// for indexing paths. For very hot loops, prefer `for_each_child_of_kind`.
     fn children_of_kind(self, kind: &str) -> Vec<Node<'a>>;
+
+    /// Call `f` for each direct child whose `kind()` equals `kind`.
+    /// Non-allocating alternative to `children_of_kind` for performance-sensitive code.
+    fn for_each_child_of_kind(self, kind: &str, f: impl FnMut(Node<'a>));
 
     /// Extract the function name from a `call_expression` node.
     /// Handles simple calls `foo(...)` and navigation chains `foo.bar(...)`.
@@ -73,6 +79,14 @@ impl<'a> NodeExt<'a> for Node<'a> {
             .filter_map(|i| self.child(i))
             .filter(|c| c.kind() == kind)
             .collect()
+    }
+
+    fn for_each_child_of_kind(self, kind: &str, mut f: impl FnMut(Node<'a>)) {
+        for i in 0..self.child_count() {
+            if let Some(c) = self.child(i) {
+                if c.kind() == kind { f(c); }
+            }
+        }
     }
 
     fn call_fn_name(self, bytes: &[u8]) -> Option<String> {

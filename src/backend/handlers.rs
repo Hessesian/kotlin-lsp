@@ -594,7 +594,6 @@ const MAX_SCAN_BACK_LINES: usize = 10;
 fn scan_multiline_call_open(
     lines: &[String],
     line_idx: usize,
-    before: &str,
 ) -> Option<(String, Option<String>, u32)> {
     let scan_start = line_idx.saturating_sub(MAX_SCAN_BACK_LINES);
     for scan_line in (scan_start..line_idx).rev() {
@@ -671,7 +670,7 @@ fn text_call_info(
     let in_block_body = before.contains('{') || before.contains('}')
         || lines[line_idx].trim_start().starts_with('}');
     if call_name.is_none() && line_idx > 0 && !in_block_body {
-        if let Some((name, qual, extra)) = scan_multiline_call_open(lines, line_idx, before) {
+        if let Some((name, qual, extra)) = scan_multiline_call_open(lines, line_idx) {
             call_name = Some(name);
             call_qualifier = qual;
             active_param += extra;
