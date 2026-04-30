@@ -116,6 +116,7 @@ pub(crate) fn find_local_declaration(idx: &Indexer, name: &str, uri: &Url) -> Ve
 
 // ─── impl Indexer wrappers ────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 impl crate::indexer::Indexer {
     pub(crate) fn find_name_in_uri(&self, name: &str, file_uri: &str) -> Vec<Location> {
         find_name_in_uri(self, name, file_uri)

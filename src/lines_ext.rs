@@ -8,15 +8,19 @@ use crate::types::{ImportEntry, Visibility};
 
 pub(crate) trait LinesExt {
     /// Concatenate lines from `start_line..=end_line` into a single detail string.
+    #[allow(dead_code)]
     fn extract_detail(&self, start_line: u32, end_line: u32) -> String;
 
     /// Kotlin/Java visibility of the declaration on `line_no`.
+    #[allow(dead_code)]
     fn visibility_at(&self, line_no: usize) -> Visibility;
 
     /// Swift visibility of the declaration on `line_no`.
+    #[allow(dead_code)]
     fn swift_visibility_at(&self, line_no: usize) -> Visibility;
 
     /// Names declared in these lines (for fast lookup without full parsing).
+    #[allow(dead_code)]
     fn declared_names(&self) -> Vec<String>;
 
     /// All import entries found in these lines.
@@ -26,9 +30,11 @@ pub(crate) trait LinesExt {
     fn collect_signature(&self, start_line: usize) -> String;
 
     /// Collect parameters from the function starting at `start_line`.
+    #[allow(dead_code)]
     fn collect_params_from_line(&self, start_line: usize) -> Option<String>;
 
     /// Find the name of the call expression that encloses `(line_no, col)`.
+    #[allow(dead_code)]
     fn find_enclosing_call_name(&self, line_no: usize, col: usize) -> Option<String>;
 
     /// Line number at which a new `import` statement should be inserted.

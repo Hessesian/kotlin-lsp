@@ -292,16 +292,6 @@ pub(crate) fn lambda_receiver_type_from_context(
 
 // ─── private helpers ─────────────────────────────────────────────────────────
 
-/// Returns `true` if `lambda_node` (a `lambda_literal` CST node) has a
-/// `lambda_parameters` child that contains at least one named parameter that
-/// is neither `it` nor `_`.
-///
-/// Thin wrapper around [`NodeExt::has_lambda_named_params`] kept for
-/// `super::` access in the companion test module.
-pub(super) fn has_lambda_named_params(lambda_node: tree_sitter::Node<'_>, bytes: &[u8]) -> bool {
-    lambda_node.has_lambda_named_params(bytes)
-}
-
 /// Walk ancestors from `start_node` looking for a `lambda_literal` without
 /// named params, then infer the `it`/`this` type for that lambda.
 ///
@@ -486,10 +476,24 @@ pub(crate) fn find_lambda_brace_for_param(line: &str, param_name: &str) -> Optio
 
 /// 0-based index of `param_name` in a multi-param lambda opening `{ a, b, c ->`.
 /// Returns 0 for single-param lambdas.
+#[allow(dead_code)]
 pub(crate) fn lambda_param_position_on_line(line: &str, param_name: &str) -> usize {
     lambda_brace_arrows(line)
         .find_map(|(_, names)| param_index_in(names, param_name))
         .unwrap_or(0)
+}
+
+// ─── test helpers ─────────────────────────────────────────────────────────────
+
+/// Returns `true` if `lambda_node` (a `lambda_literal` CST node) has a
+/// `lambda_parameters` child with at least one named parameter that is
+/// neither `it` nor `_`.
+///
+/// Thin wrapper around [`NodeExt::has_lambda_named_params`] for `super::` access
+/// in the companion test module.
+#[cfg(test)]
+pub(super) fn has_lambda_named_params(lambda_node: tree_sitter::Node<'_>, bytes: &[u8]) -> bool {
+    lambda_node.has_lambda_named_params(bytes)
 }
 
 ///

@@ -796,6 +796,7 @@ pub(crate) fn is_stdlib(pkg: &str) -> bool {
 
 // ─── impl Indexer wrappers ────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 impl crate::indexer::Indexer {
     pub fn resolve_symbol(&self, name: &str, qualifier: Option<&str>, from_uri: &Url) -> Vec<Location> {
         resolve_symbol(self, name, qualifier, from_uri)

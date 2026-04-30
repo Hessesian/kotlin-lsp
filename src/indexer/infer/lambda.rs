@@ -185,8 +185,3 @@ fn strip_suspend(ty: &str) -> &str {
     if rest.starts_with('(') || rest.starts_with('.') { rest } else { ty }
 }
 
-/// Returns true if `c` is a valid Kotlin/Java identifier character.
-#[inline]
-fn is_id_char(c: char) -> bool {
-    c.is_alphanumeric() || c == '_'
-}

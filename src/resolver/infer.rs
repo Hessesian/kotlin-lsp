@@ -187,6 +187,7 @@ pub(crate) fn infer_field_type(idx: &Indexer, file_uri: &str, field_name: &str) 
 
 // ─── impl Indexer wrappers ────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 impl crate::indexer::Indexer {
     pub(crate) fn infer_variable_type(&self, var_name: &str, uri: &Url) -> Option<String> {
         infer_variable_type(self, var_name, uri)

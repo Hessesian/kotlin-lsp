@@ -413,12 +413,9 @@ impl Indexer {
     }
 }
 
-/// Collect named lambda parameter identifiers from a `lambda_literal` CST node.
-/// Skips `it`, `_`, uppercase-first (type refs), and deduplicates.
-/// Returns an empty `Vec` if the lambda has no `lambda_parameters` child.
-///
-/// Thin wrapper around [`NodeExt::collect_lambda_param_names`] kept for
-/// `super::` access in the companion test module.
+/// Thin wrapper around [`NodeExt::collect_lambda_param_names`] for `super::` access
+/// in the companion test module.
+#[cfg(test)]
 fn collect_lambda_param_names(
     lambda_node: tree_sitter::Node<'_>,
     bytes:       &[u8],

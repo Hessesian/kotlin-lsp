@@ -258,7 +258,7 @@ fn extract_java(node: &Node, bytes: &[u8], data: &mut FileData) {
 
 fn push_field_declaration(node: &Node, bytes: &[u8], data: &mut FileData) {
     // Detect `static final` → CONSTANT, anything else → FIELD.
-    let kind = if node.first_child_of_kind("modifiers").map_or(false, |mods| {
+    let kind = if node.first_child_of_kind("modifiers").is_some_and(|mods| {
         let found_kinds: Vec<&str> = (0..mods.child_count())
             .filter_map(|i| mods.child(i))
             .map(|c| c.kind())

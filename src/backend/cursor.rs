@@ -5,15 +5,13 @@
 //! - extracting the word + optional dot-qualifier under the cursor
 //! - resolving the contextual receiver type for `it` / `this` / named lambda params
 //! - pre-resolving the lambda-param declaration location (for goto-def)
-//! - fetching the live parse tree once
 //!
 //! Features that do NOT need an identifier under the cursor (sig-help, bare
 //! completion) build their own context — this struct is not for them.
 
-use std::sync::Arc;
 use tower_lsp::lsp_types::{Location, Position, Url};
 
-use crate::indexer::{Indexer, live_tree::LiveDoc};
+use crate::indexer::Indexer;
 use crate::resolver::{ReceiverKind, ReceiverType, infer_receiver_type};
 
 /// Cursor context for identifier-based LSP features (hover, goto-def, completion).
@@ -33,8 +31,6 @@ pub struct CursorContext {
     /// parameter in scope, this holds the jump-target declaration location so
     /// goto-def can navigate to `{ name -> }` without a type.
     pub lambda_decl: Option<Location>,
-    /// Live parse tree for the open file, if the editor has it open.
-    pub live_doc: Option<Arc<LiveDoc>>,
 }
 
 impl CursorContext {
@@ -44,8 +40,6 @@ impl CursorContext {
     /// (e.g. cursor is in whitespace or on a non-identifier token).
     pub fn build(idx: &Indexer, uri: &Url, position: Position) -> Option<Self> {
         let (word, qualifier) = idx.word_and_qualifier_at(uri, position)?;
-
-        let live_doc = idx.live_doc(uri);
 
         let line = position.line as usize;
         let col  = position.character as usize;
@@ -95,6 +89,6 @@ impl CursorContext {
             None
         };
 
-        Some(CursorContext { word, qualifier, contextual, lambda_decl, live_doc })
+        Some(CursorContext { word, qualifier, contextual, lambda_decl })
     }
 }

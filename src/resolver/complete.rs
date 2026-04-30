@@ -665,6 +665,7 @@ fn trigger_parameter_hints() -> tower_lsp::lsp_types::Command {
 
 // ─── impl Indexer wrappers ────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 impl crate::indexer::Indexer {
     pub(crate) fn complete_dot(&self, receiver: &str, from_uri: &Url, snippets: bool) -> Vec<CompletionItem> {
         complete_dot(self, receiver, from_uri, snippets)
