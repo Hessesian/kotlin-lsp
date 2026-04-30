@@ -18,6 +18,7 @@ use crate::indexer::NodeExt;
 use crate::indexer::live_tree::{lang_for_path, parse_live};
 use crate::queries::{KIND_LAMBDA_PARAMS, KIND_CALL_EXPR};
 use crate::resolver::{ReceiverKind, infer_receiver_type};
+use crate::StrExt;
 
 pub fn compute_inlay_hints(idx: &Arc<Indexer>, uri: &Url, range: Range) -> Vec<InlayHint> {
     // Fast path: editor has the file open → use pre-parsed live tree.
@@ -157,7 +158,7 @@ fn hint_lambda(
             let Ok(name)     = name_n.utf8_text(bytes)      else { continue };
             let name = name.trim();
             if name.is_empty() || name == "_" { continue; }
-            if !crate::indexer::starts_with_lowercase(name) { continue; }
+            if !name.starts_with_lowercase() { continue; }
 
             let start_pos = ts_pos_to_lsp(name_n.start_position(), starts, bytes);
             let end_pos   = ts_pos_to_lsp(name_n.end_position(),   starts, bytes);

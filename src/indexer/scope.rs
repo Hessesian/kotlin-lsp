@@ -17,6 +17,7 @@ use super::{
 use crate::indexer::NodeExt;
 use crate::queries::KIND_LAMBDA_LIT;
 use crate::types::CursorPos;
+use crate::StrExt;
 
 /// Lines to scan backward when resolving variable types and lambda receivers from scope.
 const SCOPE_SCAN_BACK_LINES: usize = 50;
@@ -301,9 +302,9 @@ impl Indexer {
                             if let Some(arrow_pos) = after.find("->") {
                                 let names_str = &after[..arrow_pos];
                                 for tok in names_str.split(',') {
-                                    let name = crate::indexer::ident_prefix(tok.trim());
+                                    let name = tok.trim().ident_prefix();
                                     if !name.is_empty() && name != "it" && name != "_"
-                                        && crate::indexer::starts_with_lowercase(&name)
+                                        && name.starts_with_lowercase()
                                         && !params.contains(&name) { params.push(name.clone()); }
                                 }
                             }
@@ -455,7 +456,7 @@ pub(super) fn extract_class_decl_name(line: &str) -> Option<String> {
         .or_else(|| rest.strip_prefix("extension "))?;
     // Extract the identifier
     let name: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
-    if name.is_empty() || !crate::indexer::starts_with_uppercase(&name) {
+    if name.is_empty() || !name.starts_with_uppercase() {
         return None;
     }
     Some(name)
@@ -539,7 +540,7 @@ fn callee_to_qualifier(full_callee: &str) -> Option<String> {
     let last = *segments.last()?;
 
     // Constructor call: last segment is a type name (uppercase first char).
-    if crate::indexer::starts_with_uppercase(last) {
+    if last.starts_with_uppercase() {
         return Some(last.to_string());
     }
 
@@ -548,7 +549,7 @@ fn callee_to_qualifier(full_callee: &str) -> Option<String> {
     // `viewModel.state.copy`   → no uppercase in receiver → None
     let receiver = &segments[..segments.len() - 1];
     receiver.iter().rev()
-        .find(|s| crate::indexer::starts_with_uppercase(s))
+        .find(|s| s.starts_with_uppercase())
         .map(|s| s.to_string())
 }
 

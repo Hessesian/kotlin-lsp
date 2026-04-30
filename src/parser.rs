@@ -1,7 +1,8 @@
 use tree_sitter::{Node, Parser, Query, QueryCursor};
 use tower_lsp::lsp_types::{Position, Range, SymbolKind};
 
-use crate::indexer::{last_segment, NodeExt};
+use crate::indexer::NodeExt;
+use crate::StrExt;
 use crate::queries::{self, KOTLIN_DEFINITIONS, SWIFT_DEFINITIONS,
     KIND_SIMPLE_IDENT, KIND_TYPE_IDENT, KIND_IDENTIFIER,
     KIND_USER_TYPE, KIND_FUN_DECL};
@@ -295,7 +296,7 @@ fn push_java_import(node: &Node, bytes: &[u8], data: &mut FileData) {
         if matches!(child.kind(), "scoped_identifier" | "identifier") {
             if let Ok(txt) = child.utf8_text(bytes) {
                 let full_path  = txt.to_owned();
-                let local_name = last_segment(&full_path).to_owned();
+                let local_name = full_path.last_segment().to_owned();
                 data.imports.push(ImportEntry { full_path, local_name, is_star: false });
             }
             return;
@@ -655,7 +656,7 @@ fn parse_import_header(header: &tree_sitter::Node, bytes: &[u8], data: &mut File
         let local_name = if is_star {
             "*".to_owned()
         } else {
-            alias_text.unwrap_or_else(|| last_segment(&full_path).to_owned())
+            alias_text.unwrap_or_else(|| full_path.last_segment().to_owned())
         };
         data.imports.push(ImportEntry { full_path, local_name, is_star });
     }
@@ -717,7 +718,7 @@ fn extract_swift_imports(root: tree_sitter::Node, bytes: &[u8], data: &mut FileD
     for node in root.children(&mut cur) {
         if node.kind() == "import_declaration" {
             if let Some(txt) = swift_import_path(node, bytes) {
-                let local = last_segment(txt);
+                let local = txt.last_segment();
                 data.imports.push(ImportEntry {
                     full_path:  txt.to_owned(),
                     local_name: local.to_owned(),
@@ -826,7 +827,7 @@ pub(crate) fn extract_declared_names(lines: &[String]) -> Vec<String> {
                 .rev()
                 .collect();
             if word.len() > 1
-                && crate::indexer::starts_with_lowercase(&word)
+                && word.starts_with_lowercase()
                 && seen.insert(word.clone())
             {
                 names.push(word);

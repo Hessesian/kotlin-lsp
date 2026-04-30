@@ -17,6 +17,7 @@ use tower_lsp::lsp_types::*;
 
 use crate::types::SymbolEntry;
 use crate::LinesExt;
+use crate::StrExt;
 use super::Indexer;
 use super::doc::extract_doc_comment;
 
@@ -170,7 +171,7 @@ impl Indexer {
             if last == name && segments.len() >= 2 {
                 let pkg = segments[..segments.len() - 1].join(".");
                 let parent = segments.get(segments.len() - 2)
-                    .filter(|s| crate::indexer::starts_with_uppercase(s))
+                    .filter(|s| s.starts_with_uppercase())
                     .map(|s| s.to_string());
                 return (parent, Some(pkg));
             }

@@ -25,6 +25,7 @@ use tower_lsp::lsp_types::*;
 
 use crate::indexer::discover::find_source_files_unconstrained;
 use crate::types::{FileData, FileIndexResult, WorkspaceIndexResult};
+use crate::StrExt;
 use super::{FileContributions, StaleKeys, Indexer};
 
 // ─── hash helper ─────────────────────────────────────────────────────────────
@@ -436,9 +437,9 @@ impl Indexer {
                 let mut rest = t;
                 while let Some(ci) = rest.find(':') {
                     let after = rest[ci + 1..].trim_start();
-                    let type_name = crate::indexer::ident_prefix(after);
+                    let type_name = after.ident_prefix();
                     if !type_name.is_empty()
-                        && crate::indexer::starts_with_uppercase(&type_name)
+                        && type_name.starts_with_uppercase()
                         && seen.insert(type_name.clone())
                     {
                         type_names.push(type_name);

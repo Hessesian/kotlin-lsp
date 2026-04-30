@@ -7,6 +7,8 @@
 #[path = "lambda_tests.rs"]
 mod tests;
 
+use crate::StrExt;
+
 /// Kotlin stdlib scope functions whose lambda receives the object as `this` (receiver lambdas).
 /// For these, `this` inside the lambda refers to `T` (the receiver), so a type hint is valid.
 ///
@@ -69,10 +71,10 @@ pub(crate) fn lambda_type_nth_input(ty: &str, n: usize) -> Option<String> {
     // Strip `suspend` keyword from function-type args like `suspend (T) -> Unit`.
     let arg = strip_suspend(arg);
     // Allow dots for qualified types like `CreditCardDashboardInteractor.CardProduct`.
-    let base: String = crate::indexer::dotted_ident_prefix(arg);
+    let base: String = arg.dotted_ident_prefix();
     // Trim any trailing dots.
     let base = base.trim_end_matches('.');
-    if base.is_empty() || !crate::indexer::starts_with_uppercase(base) {
+    if base.is_empty() || !base.starts_with_uppercase() {
         return None;
     }
     Some(base.to_owned())
@@ -85,7 +87,7 @@ pub(crate) fn lambda_type_receiver(ty: &str) -> Option<String> {
     let ty = strip_suspend(ty.trim());
     if let Some(dot_paren) = ty.find(".(") {
         let receiver = ty[..dot_paren].trim();
-        let base: String = crate::indexer::dotted_ident_prefix(receiver);
+        let base: String = receiver.dotted_ident_prefix();
         let base = base.trim_end_matches('.');
         if !base.is_empty() {
             return Some(base.to_owned());
@@ -110,9 +112,9 @@ pub(crate) fn lambda_type_first_input(ty: &str) -> Option<String> {
     // The implicit receiver is the `it`/`this`-equivalent inside the lambda.
     if let Some(dot_paren) = ty.find(".(") {
         let receiver = ty[..dot_paren].trim();
-        let base: String = crate::indexer::dotted_ident_prefix(receiver);
+        let base: String = receiver.dotted_ident_prefix();
         let base = base.trim_end_matches('.');
-        if !base.is_empty() && crate::indexer::starts_with_uppercase(base) {
+        if !base.is_empty() && base.starts_with_uppercase() {
             return Some(base.to_owned());
         }
     }
@@ -164,9 +166,9 @@ pub(crate) fn lambda_type_first_input(ty: &str) -> Option<String> {
     };
 
     // Return the base type name (allow qualified names like `Outer.Inner`, strip generics).
-    let base: String = crate::indexer::dotted_ident_prefix(first);
+    let base: String = first.dotted_ident_prefix();
     let base = base.trim_end_matches('.');
-    if base.is_empty() || !crate::indexer::starts_with_uppercase(base) {
+    if base.is_empty() || !base.starts_with_uppercase() {
         return None;
     }
     Some(base.to_owned())

@@ -6,6 +6,7 @@ use std::sync::{Arc, RwLock};
 use dashmap::{DashMap, DashSet};
 use tower_lsp::lsp_types::*;
 
+use crate::StrExt;
 use crate::types::{FileData, CursorPos};
 
 // Re-export rg-module items that existing callers reach via `crate::indexer::`.
@@ -497,50 +498,16 @@ fn dot_receiver(before_prefix: &str) -> Option<String> {
     if inner.is_empty() { return None; }
     let remaining = &before_dot[..before_dot.len() - inner.len()];
     if remaining.ends_with('.')
-        && starts_with_uppercase(inner)
+        && inner.starts_with_uppercase()
     {
         let outer = last_ident_in(&remaining[..remaining.len() - 1]);
         if !outer.is_empty()
-            && starts_with_uppercase(outer)
+            && outer.starts_with_uppercase()
         {
             return Some(format!("{outer}.{inner}"));
         }
     }
     Some(inner.to_owned())
-}
-
-/// Returns `true` if `s` starts with an uppercase letter (Unicode-aware).
-/// Returns `false` for empty strings.
-#[inline]
-pub(crate) fn starts_with_uppercase(s: &str) -> bool {
-    s.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
-}
-
-/// Returns `true` if `s` starts with a lowercase letter (Unicode-aware).
-/// Returns `false` for empty strings.
-#[inline]
-pub(crate) fn starts_with_lowercase(s: &str) -> bool {
-    s.chars().next().map(|c| c.is_lowercase()).unwrap_or(false)
-}
-
-/// Returns the leading identifier portion of `s` — all leading chars satisfying `is_id_char`.
-/// `"foo.bar()"` → `"foo"`;  `"Bar<T>"` → `"Bar"`.
-#[inline]
-pub(crate) fn ident_prefix(s: &str) -> String {
-    s.chars().take_while(|&c| is_id_char(c)).collect()
-}
-
-/// Returns the leading dotted-identifier portion of `s` — all leading chars satisfying `is_id_char` or `.`.
-/// `"foo.Bar.baz()"` → `"foo.Bar.baz"`.
-#[inline]
-pub(crate) fn dotted_ident_prefix(s: &str) -> String {
-    s.chars().take_while(|&c| is_id_char(c) || c == '.').collect()
-}
-
-/// Returns the trailing dot-separated segment of a dotted path.
-/// E.g. `"com.example.Foo"` → `"Foo"`, `"Foo"` → `"Foo"`.
-pub(crate) fn last_segment(dotted: &str) -> &str {
-    dotted.rsplit('.').next().unwrap_or(dotted)
 }
 
 // ─── rg cross-file fallback ──────────────────────────────────────────────────

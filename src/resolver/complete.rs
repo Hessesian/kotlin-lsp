@@ -6,6 +6,7 @@ use tower_lsp::lsp_types::{
 use crate::indexer::Indexer;
 use crate::types::Visibility;
 use crate::LinesExt;
+use crate::StrExt;
 
 use super::{fqns_for_name, already_imported,
             resolve_symbol_inner, resolve_symbol_no_rg};
@@ -193,7 +194,7 @@ pub(crate) fn complete_dot(idx: &Indexer, receiver: &str, from_uri: &Url, snippe
         Some(r) => r,
         None => {
             // Could be an uppercase class/object — look it up directly.
-            if crate::indexer::starts_with_uppercase(receiver) {
+            if receiver.starts_with_uppercase() {
                 ReceiverType::from_raw(receiver.to_string())
             } else {
                 return vec![];
@@ -370,10 +371,10 @@ pub(crate) fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippet
             return;
         }
         // Case gates: match user intent by the capitalisation of what they typed.
-        if lowercase_mode && crate::indexer::starts_with_uppercase(name) {
+        if lowercase_mode && name.starts_with_uppercase() {
             return;
         }
-        if uppercase_mode && crate::indexer::starts_with_lowercase(name) {
+        if uppercase_mode && name.starts_with_lowercase() {
             return;
         }
         // CamelCase prefix → hide SCREAMING_SNAKE_CASE names (constants, enum variants).
@@ -455,7 +456,7 @@ pub(crate) fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippet
         if let Ok(cache) = idx.bare_name_cache.read() {
             for name in cache.iter() {
                 // Case gate + match quality gate (prefix or acronym only).
-                if crate::indexer::starts_with_lowercase(name) { continue; }
+                if name.starts_with_lowercase() { continue; }
                 if camel_mode && is_screaming_snake(name) { continue; }
                 let score = match match_score(name, prefix) {
                     Some(s) if s <= 1 => s,
@@ -517,7 +518,7 @@ pub(crate) fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippet
     // 4. Stdlib top-level / scope functions — src_tier 3.
     for mut item in crate::stdlib::bare_completions(snippets) {
         let label = item.label.clone();
-        if lowercase_mode && crate::indexer::starts_with_uppercase(&label) {
+        if lowercase_mode && label.starts_with_uppercase() {
             continue;
         }
         if camel_mode && is_screaming_snake(&label) { continue; }

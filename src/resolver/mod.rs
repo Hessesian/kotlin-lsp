@@ -23,7 +23,8 @@ use std::process::Command;
 
 use tower_lsp::lsp_types::{Location, Range, TextEdit, Url};
 
-use crate::indexer::{last_segment, Indexer};
+use crate::indexer::Indexer;
+use crate::StrExt;
 use crate::rg::{build_rg_pattern, parse_rg_line, rg_find_definition};
 use crate::types::ImportEntry;
 use crate::LinesExt;
@@ -181,7 +182,7 @@ pub(crate) fn resolve_symbol_inner(idx: &Indexer, name: &str, from_uri: &Url, wi
     // Catches function parameters without val/var that aren't in the symbol index.
     // Also catches named lambda parameters: `{ item -> ...}` found via the
     // `name ->` pattern in find_declaration_range_in_lines.
-    if !crate::indexer::starts_with_uppercase(name) {
+    if !name.starts_with_uppercase() {
         let decl = find_local_declaration(idx, name, from_uri);
         if !decl.is_empty() { return decl; }
     }
@@ -194,7 +195,7 @@ pub(crate) fn resolve_symbol_inner(idx: &Indexer, name: &str, from_uri: &Url, wi
     // Swift files have no package declarations, so same-package and star-import
     // steps return empty. Use the in-memory definitions index directly to avoid
     // expensive project-wide rg fallback at step 5.
-    if from_uri.path().ends_with(".swift") && crate::indexer::starts_with_uppercase(name) {
+    if from_uri.path().ends_with(".swift") && name.starts_with_uppercase() {
         if let Some(locs_ref) = idx.definitions.get(name) {
             let locs: Vec<Location> = locs_ref.clone();
             // Prefer definitions from .swift files when available.
@@ -314,7 +315,7 @@ fn resolve_qualified(idx: &Indexer, name: &str, qualifier: &str, from_uri: &Url)
         return resolve_from_class_hierarchy(idx, name, from_uri, 0, &mut visited);
     }
 
-    if crate::indexer::starts_with_uppercase(root) {
+    if root.starts_with_uppercase() {
         // ── Uppercase chain: find the root's file and search it for `name` ──
         // Pass the qualifier's own line as a hint so that when the same field name
         // appears in multiple classes in the same file (e.g. State and Effect both
@@ -354,7 +355,7 @@ fn resolve_qualified(idx: &Indexer, name: &str, qualifier: &str, from_uri: &Url)
     // Traverse remaining qualifier segments (plus any from the nested type).
     for &seg in extra_segments.iter().chain(segments[1..].iter()) {
         let Some(ref uri) = current_file else { return vec![]; };
-        if crate::indexer::starts_with_uppercase(seg) {
+        if seg.starts_with_uppercase() {
             // Nested class / companion object — likely in the same file.
             // Search current file first; fall back to a global resolve.
             let locs = find_name_in_uri(idx, seg, uri);
@@ -426,7 +427,7 @@ fn resolve_via_imports(idx: &Indexer, name: &str, uri: &Url) -> Vec<Location> {
         //     For `…AccountPickerContract.Event` the expected package is
         //     `…accountpicker` (all-lowercase prefix segments).
         //     This avoids returning an unrelated `Event` from another package.
-        let short       = last_segment(&imp.full_path);
+        let short       = imp.full_path.last_segment();
         let expected_pkg = package_prefix(&imp.full_path);
         if let Some(locs) = idx.definitions.get(short) {
             let filtered: Vec<_> = locs.iter()
@@ -458,7 +459,7 @@ fn resolve_via_imports(idx: &Indexer, name: &str, uri: &Url) -> Vec<Location> {
 fn package_prefix(import_path: &str) -> String {
     import_path
         .split('.')
-        .take_while(|s| crate::indexer::starts_with_lowercase(s))
+        .take_while(|s| s.starts_with_lowercase())
         .collect::<Vec<_>>()
         .join(".")
 }
@@ -470,7 +471,7 @@ fn package_prefix(import_path: &str) -> String {
 fn import_file_stems(import_path: &str) -> Vec<String> {
     let upper: Vec<&str> = import_path
         .split('.')
-        .filter(|s| crate::indexer::starts_with_uppercase(s))
+        .filter(|s| s.starts_with_uppercase())
         .collect();
     match upper.as_slice() {
         []             => vec![],

@@ -242,6 +242,7 @@ pub fn hover(name: &str) -> Option<String> {
 // files. Cache the two variants (snippets=true / snippets=false) statically.
 
 use std::sync::OnceLock;
+use crate::StrExt;
 
 static BARE_COMPLETIONS_SNIPPETS:    OnceLock<Vec<tower_lsp::lsp_types::CompletionItem>> = OnceLock::new();
 static BARE_COMPLETIONS_NO_SNIPPETS: OnceLock<Vec<tower_lsp::lsp_types::CompletionItem>> = OnceLock::new();
@@ -251,7 +252,7 @@ fn build_bare_completions(snippets: bool) -> Vec<tower_lsp::lsp_types::Completio
     let mut items = Vec::new();
     for e in SCOPE_FUNS.iter().chain(TOP_LEVEL_FUNS) {
         if !items.iter().any(|i: &tower_lsp::lsp_types::CompletionItem| i.label == e.name) {
-            let kind = if crate::indexer::starts_with_uppercase(e.name) {
+            let kind = if e.name.starts_with_uppercase() {
                 CompletionItemKind::CLASS
             } else {
                 CompletionItemKind::FUNCTION

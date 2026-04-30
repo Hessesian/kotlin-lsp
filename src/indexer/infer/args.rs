@@ -10,6 +10,7 @@ use crate::indexer::NodeExt;
 use crate::indexer::infer::sig::{find_fun_signature_full, nth_fun_param_type_str, split_params_at_depth_zero};
 use crate::queries::KIND_CALL_EXPR;
 use crate::types::CursorPos;
+use crate::StrExt;
 
 // ─── Type-directed call-argument inference ────────────────────────────────────
 
@@ -68,7 +69,7 @@ pub(crate) fn find_as_call_arg_type(
                         if let Some(fn_name) = fn_full.split('.').next_back().filter(|n| !n.is_empty()) {
                             if let Some(sig) = find_fun_signature_full(fn_name, idx, uri) {
                                 if let Some(param_type) = find_named_param_type_in_sig(&sig, named_arg) {
-                                    let base = crate::indexer::ident_prefix(param_type.trim());
+                                    let base = param_type.trim().ident_prefix();
                                     if !base.is_empty() { return Some(base); }
                                 }
                             }
@@ -125,7 +126,7 @@ pub(crate) fn find_as_call_arg_type(
                             .split('.').next_back().filter(|n| !n.is_empty())?;
                         let sig = find_fun_signature_full(fn_name, idx, uri)?;
                         let param_type = nth_fun_param_type_str(&sig, arg_pos)?;
-                        let base = crate::indexer::ident_prefix(param_type.trim());
+                        let base = param_type.trim().ident_prefix();
                         return if base.is_empty() { None } else { Some(base) };
                     }
                 }
@@ -161,7 +162,7 @@ pub(crate) fn extract_named_arg_name(before_brace: &str) -> Option<&str> {
     let ident = &s[ident_start..];
     if ident.is_empty() { return None; }
     // Named args start with a lowercase letter
-    if !crate::indexer::starts_with_lowercase(ident) { return None; }
+    if !ident.starts_with_lowercase() { return None; }
     // Require the prefix to be only whitespace (optionally preceded by a comma).
     // This prevents `(isRefresh = {` from matching — the `(` before `isRefresh`
     // makes the prefix non-empty after stripping commas and whitespace.
@@ -322,7 +323,7 @@ fn cst_call_arg_type(pos: CursorPos, idx: &Indexer, uri: &Url) -> Option<String>
         nth_fun_param_type_str(&sig, value_arg.value_arg_position())
     }?;
 
-    let base = crate::indexer::ident_prefix(param_type.trim());
+    let base = param_type.trim().ident_prefix();
     if base.is_empty() { None } else { Some(base) }
 }
 

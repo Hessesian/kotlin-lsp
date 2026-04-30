@@ -2,6 +2,7 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use super::Backend;
 use super::actions::is_non_call_keyword;
+use crate::StrExt;
 
 /// Replace all whole-word occurrences of `word` in `lines` with `replacement`.
 /// Returns the full new file content as a single string (lines joined with `\n`).
@@ -181,7 +182,7 @@ impl Backend {
         };
 
         // ── Resolve scoping (same logic as `references`) ────────────────────
-        let (parent_class, declared_pkg) = if crate::indexer::starts_with_uppercase(&name) {
+        let (parent_class, declared_pkg) = if name.starts_with_uppercase() {
             let on_decl = self.indexer.is_declared_in(uri, &name)
                 && self.indexer.definitions.get(&name)
                     .map(|locs| locs.iter().any(|l| l.uri == *uri && l.range.start.line == pos.line))

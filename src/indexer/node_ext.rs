@@ -3,6 +3,7 @@
 //! These methods are lightweight convenience wrappers around tree-sitter node
 //! traversal; their bodies were extracted from the free functions they replace.
 use tree_sitter::Node;
+use crate::StrExt;
 use crate::queries::{
     KIND_SIMPLE_IDENT, KIND_TYPE_IDENT, KIND_VALUE_ARG, KIND_VALUE_ARGS,
     KIND_LAMBDA_PARAMS, KIND_CALL_EXPR, KIND_NAV_EXPR,
@@ -177,7 +178,7 @@ impl<'a> NodeExt<'a> for Node<'a> {
             .filter(|name| {
                 name != "it"
                     && name != "_"
-                    && crate::indexer::starts_with_lowercase(name)
+                    && name.starts_with_lowercase()
                     && !existing.contains(name)
             })
             .collect()
@@ -186,7 +187,7 @@ impl<'a> NodeExt<'a> for Node<'a> {
     fn extract_type_name(self, bytes: &[u8]) -> Option<String> {
         if let Some(n) = self.child_by_field_name("name") {
             if let Some(s) = n.utf8_text_owned(bytes) {
-                if crate::indexer::starts_with_uppercase(&s) {
+                if s.starts_with_uppercase() {
                     return Some(s);
                 }
             }
@@ -198,7 +199,7 @@ impl<'a> NodeExt<'a> for Node<'a> {
                     "type_identifier" | "simple_identifier" | "identifier"
                 ) {
                     if let Some(s) = child.utf8_text_owned(bytes) {
-                        if crate::indexer::starts_with_uppercase(&s) {
+                        if s.starts_with_uppercase() {
                             return Some(s);
                         }
                     }
