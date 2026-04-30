@@ -105,7 +105,7 @@ pub fn parse_swift(content: &str) -> FileData {
         .matches(&def_q, root, bytes)
         .map(|m| {
             let (pidx, slot) = map_def_captures(&m, def_idx, name_idx, bytes);
-            if pidx == 8 && slot[0].is_none() {
+            if pidx == queries::SWIFT_INIT_PATTERN_IDX && slot[0].is_none() {
                 // init_declaration — no @name, synthesize "init"
                 let def_range = m.captures.iter()
                     .find(|cap| cap.index == def_idx)
@@ -113,9 +113,9 @@ pub fn parse_swift(content: &str) -> FileData {
                 if let Some(dr) = def_range {
                     let sel = Range::new(
                         Position::new(dr.start.line, dr.start.character),
-                        Position::new(dr.start.line, dr.start.character + 4),
+                        Position::new(dr.start.line, dr.start.character + queries::SWIFT_INIT_NAME.len() as u32),
                     );
-                    return (pidx, [Some(("init".to_owned(), dr, sel)), None]);
+                    return (pidx, [Some((queries::SWIFT_INIT_NAME.to_owned(), dr, sel)), None]);
                 }
             }
             (pidx, slot)
@@ -726,29 +726,42 @@ pub fn parse_imports_from_lines(lines: &[String]) -> Vec<crate::types::ImportEnt
 
 // ─── Swift import extraction ─────────────────────────────────────────────────
 
+/// Extract the import path text from an `import_declaration` node, if present.
+fn swift_import_path<'a>(node: tree_sitter::Node<'a>, bytes: &'a [u8]) -> Option<&'a str> {
+    let mut cur = node.walk();
+    for child in node.children(&mut cur) {
+        if child.kind() == "identifier" {
+            return child.utf8_text(bytes).ok();
+        }
+    }
+    None
+}
+
 fn extract_swift_imports(root: tree_sitter::Node, bytes: &[u8], data: &mut FileData) {
     let mut cur = root.walk();
     for node in root.children(&mut cur) {
         if node.kind() == "import_declaration" {
-            let mut ic = node.walk();
-            for child in node.children(&mut ic) {
-                if child.kind() == "identifier" {
-                    if let Ok(txt) = child.utf8_text(bytes) {
-                        let local = last_segment(txt);
-                        data.imports.push(ImportEntry {
-                            full_path:  txt.to_owned(),
-                            local_name: local.to_owned(),
-                            is_star:    false,
-                        });
-                    }
-                    break;
-                }
+            if let Some(txt) = swift_import_path(node, bytes) {
+                let local = last_segment(txt);
+                data.imports.push(ImportEntry {
+                    full_path:  txt.to_owned(),
+                    local_name: local.to_owned(),
+                    is_star:    false,
+                });
             }
         }
     }
 }
 
 // ─── visibility detection ────────────────────────────────────────────────────
+
+/// Returns the portion of `line` before any `{` or `=` — the modifiers region.
+fn decl_prefix(line: &str) -> &str {
+    line.split_once('{').map(|(l, _)| l)
+        .unwrap_or(line)
+        .split_once('=').map(|(l, _)| l)
+        .unwrap_or(line)
+}
 
 /// Detect the Kotlin/Java visibility modifier on `line_no` by scanning that
 /// source line for modifier keywords.
@@ -772,10 +785,7 @@ pub(crate) fn visibility_at_line(lines: &[String], line_no: usize) -> Visibility
     };
     // Work only on the part before any `=`, `{`, or `(` to avoid false positives
     // from string literals / bodies.
-    let decl = line.split_once('{').map(|(l, _)| l)
-        .unwrap_or(line)
-        .split_once('=').map(|(l, _)| l)
-        .unwrap_or(line);
+    let decl = decl_prefix(line);
 
     // Check whole-word tokens.
     if contains_word(decl, "private")   { return Visibility::Private; }
@@ -793,10 +803,7 @@ pub(crate) fn swift_visibility_at_line(lines: &[String], line_no: usize) -> Visi
         Some(l) => l,
         None    => return Visibility::Internal,
     };
-    let decl = line.split_once('{').map(|(l, _)| l)
-        .unwrap_or(line)
-        .split_once('=').map(|(l, _)| l)
-        .unwrap_or(line);
+    let decl = decl_prefix(line);
 
     if contains_word(decl, "private")     { return Visibility::Private; }
     if contains_word(decl, "fileprivate") { return Visibility::Private; }
