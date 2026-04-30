@@ -232,15 +232,8 @@ fn find_in_star_imports(
     star_pkgs: &[String],
 ) -> Option<Location> {
     for pkg in star_pkgs {
-        let peer_uris: Vec<String> = idx.packages.get(pkg).map(|u| u.clone()).unwrap_or_default();
-        for peer_uri_str in peer_uris {
-            if let Some(f) = idx.files.get(&peer_uri_str) {
-                for sym in f.symbols.iter().filter(|s| s.name == name) {
-                    if let Ok(u) = Url::parse(&peer_uri_str) {
-                        return Some(Location { uri: u, range: sym.selection_range });
-                    }
-                }
-            }
+        if let Some(loc) = find_symbol_in_package(idx, name, pkg) {
+            return Some(loc);
         }
     }
     None
@@ -623,23 +616,28 @@ fn resolve_same_package(idx: &Indexer, name: &str, uri: &Url) -> Vec<Location> {
     vec![]
 }
 
-/// Check all indexed files whose package starts with `pkg_prefix` for a symbol named `name`.
+/// Check all indexed files in the exact package `pkg` for a symbol named `name`.
 fn symbols_in_package(
     idx: &Indexer,
     name: &str,
-    pkg_prefix: &str,
+    pkg: &str,
 ) -> Vec<Location> {
-    let peer_uris: Vec<String> = idx.packages.get(pkg_prefix).map(|u| u.clone()).unwrap_or_default();
+    find_symbol_in_package(idx, name, pkg).map_or(vec![], |l| vec![l])
+}
+
+/// Scan all indexed files in `pkg` for the first symbol named `name`.
+fn find_symbol_in_package(idx: &Indexer, name: &str, pkg: &str) -> Option<Location> {
+    let peer_uris: Vec<String> = idx.packages.get(pkg).map(|u| u.clone()).unwrap_or_default();
     for peer_uri_str in peer_uris {
         if let Some(f) = idx.files.get(&peer_uri_str) {
             for sym in f.symbols.iter().filter(|s| s.name == name) {
                 if let Ok(u) = Url::parse(&peer_uri_str) {
-                    return vec![Location { uri: u, range: sym.selection_range }];
+                    return Some(Location { uri: u, range: sym.selection_range });
                 }
             }
         }
     }
-    vec![]
+    None
 }
 
 /// Step 4 — star imports: `import com.example.*`.

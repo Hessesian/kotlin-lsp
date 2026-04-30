@@ -45,43 +45,7 @@ pub(crate) trait NodeExt<'a>: Sized + Copy {
 
 impl<'a> NodeExt<'a> for Node<'a> {
     fn call_fn_name(self, bytes: &[u8]) -> Option<String> {
-        let callee = self.child(0)?;
-        let name_node = match callee.kind() {
-            "simple_identifier" | "type_identifier" => callee,
-            "navigation_expression" => {
-                // Single-pass scan: track the last direct identifier and the last
-                // identifier inside a navigation_suffix. Prefer the suffix identifier
-                // (member name, e.g. "bar" in `obj.bar(…)`); fall back to the direct
-                // identifier for bare qualified names with no suffix.
-                let mut walker = callee.walk();
-                let mut last_identifier = None;
-                let mut last_suffix_identifier = None;
-                for child in callee.children(&mut walker) {
-                    match child.kind() {
-                        "simple_identifier" | "type_identifier" => {
-                            last_identifier = Some(child);
-                        }
-                        "navigation_suffix" => {
-                            let suffix_id = (0..child.child_count())
-                                .filter_map(|i| child.child(i))
-                                .find(|c| {
-                                    c.kind() == "simple_identifier"
-                                        || c.kind() == "type_identifier"
-                                });
-                            if let Some(id) = suffix_id {
-                                last_suffix_identifier = Some(id);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                last_suffix_identifier.or(last_identifier)?
-            }
-            _ => return None,
-        };
-        std::str::from_utf8(&bytes[name_node.byte_range()])
-            .ok()
-            .map(|s| s.to_string())
+        self.call_fn_and_qualifier(bytes).map(|(name, _)| name)
     }
 
     fn named_arg_label(self, bytes: &[u8]) -> Option<String> {
@@ -366,5 +330,34 @@ mod tests {
         let call = find_node_kind(tree.root_node(), "call_expression").unwrap();
         let va = find_node_kind(call, "value_argument").unwrap();
         assert_eq!(va.named_arg_label(&bytes), None);
+    }
+
+    #[test]
+    fn call_fn_and_qualifier_simple_call() {
+        let (tree, bytes) = parse_kotlin("val x = foo(1)");
+        let call = find_node_kind(tree.root_node(), "call_expression").unwrap();
+        assert_eq!(call.call_fn_and_qualifier(&bytes), Some(("foo".to_string(), None)));
+    }
+
+    #[test]
+    fn call_fn_and_qualifier_navigation_call() {
+        let (tree, bytes) = parse_kotlin("val x = obj.bar(1)");
+        let call = find_node_kind(tree.root_node(), "call_expression").unwrap();
+        assert_eq!(
+            call.call_fn_and_qualifier(&bytes),
+            Some(("bar".to_string(), Some("obj".to_string())))
+        );
+    }
+
+    #[test]
+    fn call_fn_name_delegates_to_and_qualifier() {
+        // call_fn_name is now implemented via call_fn_and_qualifier —
+        // verify both return the same name for navigation and simple calls.
+        let (tree, bytes) = parse_kotlin("val x = obj.bar(1)");
+        let call = find_node_kind(tree.root_node(), "call_expression").unwrap();
+        let via_and_qualifier = call.call_fn_and_qualifier(&bytes).map(|(n, _)| n);
+        let via_name = call.call_fn_name(&bytes);
+        assert_eq!(via_name, via_and_qualifier);
+        assert_eq!(via_name, Some("bar".to_string()));
     }
 }
