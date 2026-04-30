@@ -436,9 +436,7 @@ impl Indexer {
                 let mut rest = t;
                 while let Some(ci) = rest.find(':') {
                     let after = rest[ci + 1..].trim_start();
-                    let type_name: String = after.chars()
-                        .take_while(|&c| c.is_alphanumeric() || c == '_')
-                        .collect();
+                    let type_name = crate::indexer::ident_prefix(after);
                     if !type_name.is_empty()
                         && crate::indexer::starts_with_uppercase(&type_name)
                         && seen.insert(type_name.clone())

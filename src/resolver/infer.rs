@@ -136,7 +136,7 @@ pub fn extract_collection_element_type(raw_type: &str) -> Option<String> {
         "Array",
     ];
 
-    let base: String = raw_type.chars().take_while(|&c| c.is_alphanumeric() || c == '_').collect();
+    let base = crate::indexer::ident_prefix(raw_type);
     if !COLLECTION_TYPES.contains(&base.as_str()) { return None; }
 
     let open  = raw_type.find('<')?;
@@ -148,7 +148,7 @@ pub fn extract_collection_element_type(raw_type: &str) -> Option<String> {
     let first = first_type_arg(inner).trim().trim_matches('?');
 
     // Strip to the base class name only.
-    let elem: String = first.chars().take_while(|&c| c.is_alphanumeric() || c == '_').collect();
+    let elem = crate::indexer::ident_prefix(first);
     if elem.is_empty() || !crate::indexer::starts_with_uppercase(&elem) {
         return None;
     }

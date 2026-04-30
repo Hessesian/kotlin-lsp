@@ -445,14 +445,14 @@ fn lambda_brace_arrows(line: &str) -> impl Iterator<Item = (usize, &str)> {
 
 fn names_has_param(names_str: &str, param_name: &str) -> bool {
     names_str.split(',').any(|tok| {
-        let n: String = tok.trim().chars().take_while(|&c| c.is_alphanumeric() || c == '_').collect();
+        let n = crate::indexer::ident_prefix(tok.trim());
         n == param_name
     })
 }
 
 fn param_index_in(names_str: &str, param_name: &str) -> Option<usize> {
     names_str.split(',').enumerate().find_map(|(i, tok)| {
-        let n: String = tok.trim().chars().take_while(|&c| c.is_alphanumeric() || c == '_').collect();
+        let n = crate::indexer::ident_prefix(tok.trim());
         if n == param_name { Some(i) } else { None }
     })
 }

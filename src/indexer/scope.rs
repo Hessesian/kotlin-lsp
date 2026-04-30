@@ -300,9 +300,7 @@ impl Indexer {
                             if let Some(arrow_pos) = after.find("->") {
                                 let names_str = &after[..arrow_pos];
                                 for tok in names_str.split(',') {
-                                    let name: String = tok.trim()
-                                        .chars().take_while(|&c| c.is_alphanumeric() || c == '_')
-                                        .collect();
+                                    let name = crate::indexer::ident_prefix(tok.trim());
                                     if !name.is_empty() && name != "it" && name != "_"
                                         && crate::indexer::starts_with_lowercase(&name)
                                         && !params.contains(&name) { params.push(name.clone()); }
