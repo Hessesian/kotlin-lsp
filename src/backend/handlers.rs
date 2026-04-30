@@ -2,6 +2,7 @@ use std::sync::Arc;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use crate::indexer::find_fun_signature_with_receiver;
+use crate::indexer::NodeExt;
 use super::Backend;
 use super::cursor::CursorContext;
 use super::helpers::resolve_references_scope;
@@ -574,7 +575,7 @@ fn cst_call_info(
     };
 
     // Find the value_arguments node (may be inside call_suffix).
-    let value_arguments = cst_find_value_arguments(call_expr)?;
+    let value_arguments = call_expr.find_value_arguments()?;
 
     // Count active param: how many value_argument children end before the cursor.
     let cursor_byte = full_text.lines()
@@ -593,22 +594,6 @@ fn cst_call_info(
     };
 
     Some((fn_name, qualifier, active_param))
-}
-
-/// Find the `value_arguments` node within a `call_expression`, searching
-/// through the optional `call_suffix` intermediate node.
-fn cst_find_value_arguments(call_expr: tree_sitter::Node<'_>) -> Option<tree_sitter::Node<'_>> {
-    let mut walker = call_expr.walk();
-    for child in call_expr.children(&mut walker) {
-        if child.kind() == "value_arguments" { return Some(child); }
-        if child.kind() == "call_suffix" {
-            let mut w2 = child.walk();
-            for gc in child.children(&mut w2) {
-                if gc.kind() == "value_arguments" { return Some(gc); }
-            }
-        }
-    }
-    None
 }
 
 /// Text-scan fallback: extract `(fn_name, qualifier, active_param)` by walking

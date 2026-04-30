@@ -40,9 +40,6 @@ pub(crate) use args::{
     extract_named_arg_name,
     find_named_param_type_in_sig,
     has_named_params_not_it,
-    cst_call_fn_name,
-    cst_named_arg_label,
-    cst_value_arg_position,
 };
 
 pub(crate) use it_this::{

@@ -14,6 +14,7 @@ use super::{
     line_has_lambda_param,
     lambda_brace_pos_for_param,
 };
+use crate::indexer::NodeExt;
 use crate::types::CursorPos;
 
 impl Indexer {
@@ -246,7 +247,7 @@ impl Indexer {
                 let mut cur = node;
                 loop {
                     if cur.kind() == "lambda_literal" {
-                        let new_names = collect_lambda_param_names(cur, &doc.bytes, &params);
+                        let new_names = cur.collect_lambda_param_names(&doc.bytes, &params);
                         params.extend(new_names);
                     }
                     let Some(p) = cur.parent() else { break; };
@@ -361,7 +362,7 @@ impl Indexer {
                             // declaration starts on the query row (cursor is on the
                             // class's own declaration line).
                             if cur.start_position().row < row {
-                                if let Some(name) = cst_extract_type_name(&cur, &doc.bytes) {
+                                if let Some(name) = cur.extract_type_name(&doc.bytes) {
                                     return Some(name);
                                 }
                             }
@@ -406,55 +407,15 @@ impl Indexer {
 /// Collect named lambda parameter identifiers from a `lambda_literal` CST node.
 /// Skips `it`, `_`, uppercase-first (type refs), and deduplicates.
 /// Returns an empty `Vec` if the lambda has no `lambda_parameters` child.
+///
+/// Thin wrapper around [`NodeExt::collect_lambda_param_names`] kept for
+/// `super::` access in the companion test module.
 fn collect_lambda_param_names(
     lambda_node: tree_sitter::Node<'_>,
     bytes:       &[u8],
     existing:    &[String],
 ) -> Vec<String> {
-    let Some(lp) = (0..lambda_node.child_count())
-        .filter_map(|i| lambda_node.child(i))
-        .find(|c| c.kind() == "lambda_parameters")
-    else { return Vec::new(); };
-
-    (0..lp.child_count())
-        .filter_map(|i| lp.child(i))
-        .filter(|c| c.kind() == "variable_declaration")
-        .filter_map(|vd| {
-            let si = vd.child(0).filter(|n| n.kind() == "simple_identifier")?;
-            std::str::from_utf8(&bytes[si.byte_range()]).ok().map(|s| s.to_string())
-        })
-        .filter(|name| {
-            name != "it" && name != "_"
-            && name.chars().next().map(|c| c.is_lowercase()).unwrap_or(false)
-            && !existing.contains(name)
-        })
-        .collect()
-}
-
-/// Extract the type/class name from a CST class/interface/object/companion_object node.
-/// Tries `child_by_field_name("name")` first, then walks direct children for
-/// `type_identifier` or `simple_identifier` that starts with an uppercase letter.
-fn cst_extract_type_name(node: &tree_sitter::Node, bytes: &[u8]) -> Option<String> {
-    if let Some(n) = node.child_by_field_name("name") {
-        if let Ok(s) = std::str::from_utf8(&bytes[n.byte_range()]) {
-            let s = s.to_string();
-            if s.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
-                return Some(s);
-            }
-        }
-    }
-    for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
-            if matches!(child.kind(), "type_identifier" | "simple_identifier" | "identifier") {
-                if let Ok(s) = std::str::from_utf8(&bytes[child.byte_range()]) {
-                    if s.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
-                        return Some(s.to_string());
-                    }
-                }
-            }
-        }
-    }
-    None
+    lambda_node.collect_lambda_param_names(bytes, existing)
 }
 
 /// If `line` is a class/interface/object/sealed declaration, return the type name.
