@@ -247,7 +247,7 @@ fn completion_item_for_nested_symbol(s: &crate::types::SymbolEntry, uri_str: &st
         insert_text_format: if is_fn { Some(InsertTextFormat::SNIPPET) } else { None },
         sort_text:          Some(format!("{:02}:{}", kind_sort_rank(Some(kind)), s.name)),
         detail:             if s.detail.is_empty() { None } else { Some(s.detail.clone()) },
-        data:               Some(serde_json::json!({"u": uri_str, "l": s.selection_range.start.line})),
+        data:               Some(serde_json::json!({"u": uri_str, "l": s.selection_range.start.line, "c": s.selection_range.start.character})),
         ..Default::default()
     }
 }
@@ -406,7 +406,7 @@ pub(crate) fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippet
         for sym in &f.symbols {
             add(&sym.name, symbol_kind_to_completion(sym.kind), 0, local_max_score,
                 &sym.detail,
-                Some(serde_json::json!({"u": from_uri.as_str(), "l": sym.selection_range.start.line})));
+                Some(serde_json::json!({"u": from_uri.as_str(), "l": sym.selection_range.start.line, "c": sym.selection_range.start.character})));
         }
         // Constructor params / local vars from declared_names (lowercase only).
         if lowercase_mode {
@@ -428,7 +428,7 @@ pub(crate) fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippet
                     for sym in &f.symbols {
                         add(&sym.name, symbol_kind_to_completion(sym.kind), 1, local_max_score,
                             &sym.detail,
-                            Some(serde_json::json!({"u": uri_str.as_str(), "l": sym.selection_range.start.line})));
+                            Some(serde_json::json!({"u": uri_str.as_str(), "l": sym.selection_range.start.line, "c": sym.selection_range.start.character})));
                     }
                 }
             }

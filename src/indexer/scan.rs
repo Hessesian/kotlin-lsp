@@ -449,9 +449,10 @@ impl Indexer {
                     if entry.mtime_secs == mtime && entry.file_size == on_disk_size {
                         if let Ok(uri) = Url::from_file_path(path) {
                             cached_results.push(cache_entry_to_file_result(&uri, entry));
+                            cache_hits += 1;
+                            continue;
                         }
-                        cache_hits += 1;
-                        continue;
+                        // URL conversion failed — treat as cache miss so the file gets parsed.
                     }
                 }
             }

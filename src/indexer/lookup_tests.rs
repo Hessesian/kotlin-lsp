@@ -124,3 +124,66 @@ internal class ContactAddressInteractor @Inject constructor(
     assert!(md.contains("repo"), "hover should mention repo: {md}");
     assert!(md.contains("IGoldConversionRepository"), "hover should show type: {md}");
 }
+
+// ── completion_docs_for ──────────────────────────────────────────────────────
+
+#[test]
+fn completion_docs_for_returns_kdoc_and_detail() {
+    let idx = Indexer::new();
+    let u = uri("/Foo.kt");
+    idx.index_content(&u, "\
+package com.example
+
+/**
+ * Adds two numbers together.
+ * @param a first number
+ */
+fun add(a: Int, b: Int): Int = a + b
+");
+    // `add` is declared at line 6 (0-based)
+    let sym = {
+        let f = idx.files.get(u.as_str()).unwrap();
+        f.symbols.iter().find(|s| s.name == "add").cloned().unwrap()
+    };
+    let line = sym.selection_range.start.line;
+    let col  = sym.selection_range.start.character;
+
+    let result = idx.completion_docs_for(u.as_str(), line, col);
+    assert!(result.is_some(), "completion_docs_for should return Some for documented function");
+    let (doc_md, detail) = result.unwrap();
+    assert!(doc_md.contains("Adds two numbers"), "doc should contain KDoc text, got: {doc_md}");
+    assert!(!doc_md.contains("```"), "doc should NOT include a code block (detail carries the sig), got: {doc_md}");
+    assert!(!detail.is_empty(), "detail should be non-empty");
+}
+
+#[test]
+fn completion_docs_for_returns_none_without_kdoc() {
+    let idx = Indexer::new();
+    let u = uri("/Bar.kt");
+    idx.index_content(&u, "fun multiply(x: Int, y: Int): Int = x * y\n");
+    let sym = {
+        let f = idx.files.get(u.as_str()).unwrap();
+        f.symbols.iter().find(|s| s.name == "multiply").cloned().unwrap()
+    };
+    let line = sym.selection_range.start.line;
+    let col  = sym.selection_range.start.character;
+    // No KDoc → None (caller skips setting documentation)
+    assert!(idx.completion_docs_for(u.as_str(), line, col).is_none());
+}
+
+#[test]
+fn completion_docs_for_kts_uses_kotlin_lang() {
+    let idx = Indexer::new();
+    let u = uri("/build.gradle.kts");
+    idx.index_content(&u, "\
+/** Configure something. */
+fun configure() {}\n");
+    let sym = {
+        let f = idx.files.get(u.as_str()).unwrap();
+        f.symbols.iter().find(|s| s.name == "configure").cloned().unwrap()
+    };
+    let line = sym.selection_range.start.line;
+    let col  = sym.selection_range.start.character;
+    let (doc_md, _detail) = idx.completion_docs_for(u.as_str(), line, col).unwrap();
+    assert!(doc_md.contains("Configure something"));
+}
