@@ -12,6 +12,9 @@ use crate::types::CursorPos;
 
 // ─── Type-directed call-argument inference ────────────────────────────────────
 
+/// Lines to scan backward when searching for the enclosing function call in inlay-hint inference.
+const ARG_SCAN_BACK_LINES: usize = 20;
+
 /// Type-directed inference for `it` or `this` used as a call argument.
 ///
 /// When `it`/`this` appears as an argument to a function — either as a **named arg**
@@ -86,7 +89,7 @@ pub(crate) fn find_as_call_arg_type(
     let mut depth: i32 = 0;
     let mut brace_depth: i32 = 0;
     let mut arg_pos: usize = 0;
-    let scan_start = pos.line.saturating_sub(20);
+    let scan_start = pos.line.saturating_sub(ARG_SCAN_BACK_LINES);
 
     for ln in (scan_start..=pos.line).rev() {
         let chars: Vec<char> = lines[ln].chars().collect();

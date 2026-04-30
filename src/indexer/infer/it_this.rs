@@ -48,6 +48,18 @@ use super::super::{
 
 use crate::types::CursorPos;
 
+/// Lines to scan backward for `{ param_name ->` in the multiline hover/goto path
+/// (full-file scan from `find_named_lambda_param_type_in_lines`).
+const LAMBDA_PARAM_SCAN_BACK_LINES: usize = 40;
+
+/// Lines to scan backward for `{ param_name ->` in the single-line completion path
+/// (from `find_named_lambda_param_type`).
+const LAMBDA_PARAM_SCAN_BACK: usize = 20;
+
+/// Lines to scan backward when searching for the enclosing lambda opener
+/// in the text-fallback path of `find_it_element_type_in_lines_impl`.
+const IT_SCAN_BACK_LINES: usize = 15;
+
 // ─── public API ──────────────────────────────────────────────────────────────
 
 /// Resolve the element type of `it` when inside a lambda.
@@ -104,7 +116,7 @@ pub(crate) fn find_named_lambda_param_type_in_lines(
     idx:         &Indexer,
     uri:         &Url,
 ) -> Option<String> {
-    let scan_start = cursor_line.saturating_sub(40);
+    let scan_start = cursor_line.saturating_sub(LAMBDA_PARAM_SCAN_BACK_LINES);
     // Include cursor_line itself (different from completion path which is exclusive).
     for ln in (scan_start..=cursor_line).rev() {
         let line = match lines.get(ln) { Some(l) => l, None => continue };
@@ -148,7 +160,7 @@ pub(crate) fn find_named_lambda_param_type(
 
     // 2. Scan backward through previous lines.
     let lines = lines?;
-    let scan_start = cursor_line.saturating_sub(20);
+    let scan_start = cursor_line.saturating_sub(LAMBDA_PARAM_SCAN_BACK);
     for ln in (scan_start..cursor_line).rev() {
         let line = match lines.get(ln) { Some(l) => l, None => continue };
         let Some((brace_pos, pos)) = find_lambda_brace_for_param(line, param_name) else { continue; };
@@ -368,7 +380,7 @@ fn find_it_element_type_in_lines_impl(
     // Characters to the right of the cursor (e.g., closing `}`) must not affect
     // the depth; otherwise a balanced `{ it.name }` would never trigger depth < 0.
     let mut depth: i32 = 0;
-    let scan_start = pos.line.saturating_sub(15);
+    let scan_start = pos.line.saturating_sub(IT_SCAN_BACK_LINES);
 
     for ln in (scan_start..=pos.line).rev() {
         let line = match lines.get(ln) { Some(l) => l, None => continue };
