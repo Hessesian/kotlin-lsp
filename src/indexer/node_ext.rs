@@ -39,13 +39,27 @@ impl<'a> NodeExt<'a> for Node<'a> {
         let name_node = match callee.kind() {
             "simple_identifier" | "type_identifier" => callee,
             "navigation_expression" => {
+                // Prefer the identifier inside the last navigation_suffix (the member name,
+                // e.g. "bar" in `obj.bar(...)`). Fall back to the last direct identifier
+                // for bare qualified names with no suffix.
                 let mut walker = callee.walk();
-                callee
-                    .children(&mut walker)
-                    .filter(|c| {
-                        c.kind() == "simple_identifier" || c.kind() == "type_identifier"
-                    })
-                    .last()?
+                let children: Vec<Node<'a>> = callee.children(&mut walker).collect();
+                if let Some(suffix) =
+                    children.iter().rev().find(|c| c.kind() == "navigation_suffix")
+                {
+                    (0..suffix.child_count())
+                        .filter_map(|i| suffix.child(i))
+                        .find(|c| {
+                            c.kind() == "simple_identifier" || c.kind() == "type_identifier"
+                        })?
+                } else {
+                    children
+                        .into_iter()
+                        .filter(|c| {
+                            c.kind() == "simple_identifier" || c.kind() == "type_identifier"
+                        })
+                        .last()?
+                }
             }
             _ => return None,
         };
@@ -221,12 +235,12 @@ mod tests {
     fn call_fn_name_navigation() {
         // In tree-sitter-kotlin, `obj.bar` is:
         //   navigation_expression
-        //     simple_identifier: obj   ← direct child
-        //     navigation_suffix: .bar  ← `bar` is nested here, not a direct child
-        // So `call_fn_name` returns the last direct `simple_identifier`, which is "obj".
+        //     simple_identifier: obj
+        //     navigation_suffix: .bar  ← `bar` is nested here
+        // `call_fn_name` should return the member name "bar", not the receiver "obj".
         let (tree, bytes) = parse_kotlin("val x = obj.bar(1)");
         let call = find_node_kind(tree.root_node(), "call_expression").unwrap();
-        assert_eq!(call.call_fn_name(&bytes), Some("obj".to_string()));
+        assert_eq!(call.call_fn_name(&bytes), Some("bar".to_string()));
     }
 
     #[test]

@@ -280,9 +280,15 @@ fn push_field_declaration(node: &Node, bytes: &[u8], data: &mut FileData) {
     for child in node.children(&mut cur) {
         if child.kind() == "variable_declarator" {
             if let Some((name, sel)) = first_identifier(&child, bytes) {
-                data.symbols.push(SymbolEntry { name, kind, visibility: vis, range: nr, selection_range: sel, detail });
+                data.symbols.push(SymbolEntry {
+                    name,
+                    kind: kind.clone(),
+                    visibility: vis.clone(),
+                    range: nr.clone(),
+                    selection_range: sel,
+                    detail: detail.clone(),
+                });
             }
-            return;
         }
     }
 }
