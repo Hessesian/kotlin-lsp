@@ -412,6 +412,14 @@ fn fun_interface_name_from_fn_decl(node: &Node, bytes: &[u8]) -> Option<(usize, 
     None
 }
 
+fn push_interface_symbol(name: &str, node: &Node, sel_node_range: tree_sitter::Range, data: &mut FileData) {
+    let visibility = visibility_at_line(&data.lines, node.range().start_point.row);
+    let range      = ts_to_lsp(node.range());
+    let sel        = ts_to_lsp(sel_node_range);
+    let detail     = extract_detail(&data.lines, range.start.line, range.end.line);
+    data.symbols.push(SymbolEntry { name: name.to_owned(), kind: SymbolKind::INTERFACE, visibility, range, selection_range: sel, detail });
+}
+
 /// Walk the parse tree and emit INTERFACE symbols for every `fun interface Foo` declaration.
 ///
 /// Tree-sitter produces two different misparsings depending on whether modifiers precede:
@@ -428,18 +436,7 @@ fn extract_fun_interfaces(root: Node, bytes: &[u8], data: &mut FileData) {
             for child in node.children(&mut cur) {
                 if child.kind() == "simple_identifier" {
                     if let Ok(name) = child.utf8_text(bytes) {
-                        let visibility = visibility_at_line(&data.lines, node.range().start_point.row);
-                        let range      = ts_to_lsp(node.range());
-                        let sel        = ts_to_lsp(child.range());
-                        let detail     = extract_detail(&data.lines, range.start.line, range.end.line);
-                        data.symbols.push(SymbolEntry {
-                            name: name.to_owned(),
-                            kind: SymbolKind::INTERFACE,
-                            visibility,
-                            range,
-                            selection_range: sel,
-                            detail,
-                        });
+                        push_interface_symbol(name, &node, child.range(), data);
                     }
                     break;
                 }
@@ -450,23 +447,13 @@ fn extract_fun_interfaces(root: Node, bytes: &[u8], data: &mut FileData) {
         // Case 2: modifier-prefixed `fun interface` → misparse as function_declaration
         if let Some((name_start, name_end, name_ts_range)) = fun_interface_name_from_fn_decl(&node, bytes) {
             if let Ok(name) = std::str::from_utf8(&bytes[name_start..name_end]) {
-                let visibility = visibility_at_line(&data.lines, node.range().start_point.row);
-                let range      = ts_to_lsp(node.range());
-                let sel        = ts_to_lsp(name_ts_range);
-                let detail     = extract_detail(&data.lines, range.start.line, range.end.line);
+                let sel = ts_to_lsp(name_ts_range);
                 // Remove the incorrectly-added function/method symbol (same name, same line).
                 data.symbols.retain(|s| {
                     !(s.name == name && s.selection_range.start.line == sel.start.line
                       && matches!(s.kind, SymbolKind::FUNCTION | SymbolKind::METHOD))
                 });
-                data.symbols.push(SymbolEntry {
-                    name: name.to_owned(),
-                    kind: SymbolKind::INTERFACE,
-                    visibility,
-                    range,
-                    selection_range: sel,
-                    detail,
-                });
+                push_interface_symbol(name, &node, name_ts_range, data);
             }
             // Still recurse into children to find nested fun interfaces.
         }
@@ -496,6 +483,28 @@ fn has_fun_interface_descendant(node: &Node, bytes: &[u8]) -> bool {
     children.iter().any(|c| has_fun_interface_descendant(c, bytes))
 }
 
+fn report_missing_node(node: &Node, seen: &mut std::collections::HashSet<(u32, u32)>, errors: &mut Vec<SyntaxError>) {
+    let range = ts_to_lsp(node.range());
+    let key = (range.start.line, range.start.character);
+    if seen.insert(key) {
+        let kind = node.kind();
+        errors.push(SyntaxError { range, message: format!("missing `{kind}`") });
+    }
+}
+
+fn report_error_node(node: &Node, bytes: &[u8], seen: &mut std::collections::HashSet<(u32, u32)>, errors: &mut Vec<SyntaxError>) {
+    let range = ts_to_lsp(node.range());
+    let key = (range.start.line, range.start.character);
+    if seen.insert(key) {
+        let text: String = node.utf8_text(bytes).unwrap_or("").chars().take(30).collect();
+        let text = text.lines().next().unwrap_or(&text);
+        errors.push(SyntaxError {
+            range,
+            message: if text.is_empty() { "syntax error".into() } else { format!("unexpected `{text}`") },
+        });
+    }
+}
+
 fn collect_syntax_errors(root: Node, bytes: &[u8]) -> Vec<SyntaxError> {
     if !root.has_error() { return Vec::new(); }
 
@@ -507,37 +516,13 @@ fn collect_syntax_errors(root: Node, bytes: &[u8]) -> Vec<SyntaxError> {
         if errors.len() >= MAX_SYNTAX_ERRORS { break; }
 
         if node.is_missing() {
-            let range = ts_to_lsp(node.range());
-            let key = (range.start.line, range.start.character);
-            if seen.insert(key) {
-                let kind = node.kind();
-                errors.push(SyntaxError {
-                    range,
-                    message: format!("missing `{kind}`"),
-                });
-            }
+            report_missing_node(&node, &mut seen, &mut errors);
         } else if node.is_error() {
             // Skip errors that are actually valid `fun interface` declarations.
             if is_fun_interface_error(&node, bytes) {
                 continue;
             }
-            let range = ts_to_lsp(node.range());
-            let key = (range.start.line, range.start.character);
-            if seen.insert(key) {
-                let text: String = node.utf8_text(bytes).unwrap_or("")
-                    .chars()
-                    .take(30)
-                    .collect();
-                let text = text.lines().next().unwrap_or(&text);
-                errors.push(SyntaxError {
-                    range,
-                    message: if text.is_empty() {
-                        "syntax error".into()
-                    } else {
-                        format!("unexpected `{text}`")
-                    },
-                });
-            }
+            report_error_node(&node, bytes, &mut seen, &mut errors);
             // Recurse into ERROR children to find nested MISSING nodes.
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
