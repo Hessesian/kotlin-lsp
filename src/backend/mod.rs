@@ -205,6 +205,7 @@ impl LanguageServer for Backend {
                 }),
                 hover_provider:          Some(HoverProviderCapability::Simple(true)),
                 definition_provider:     Some(OneOf::Left(true)),
+                declaration_provider:    Some(DeclarationCapability::Simple(true)),
                 implementation_provider: Some(ImplementationProviderCapability::Simple(true)),
                 references_provider:          Some(OneOf::Left(true)),
                 document_highlight_provider:  Some(OneOf::Left(true)),
@@ -623,6 +624,17 @@ impl LanguageServer for Backend {
     // ── textDocument/definition ──────────────────────────────────────────────
 
     async fn goto_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> Result<Option<GotoDefinitionResponse>> {
+        self.goto_definition_impl(params).await
+    }
+
+    // ── textDocument/declaration ─────────────────────────────────────────────
+    // In Kotlin/Java there is no separate declaration/definition concept,
+    // so we delegate to the same implementation.
+
+    async fn goto_declaration(
         &self,
         params: GotoDefinitionParams,
     ) -> Result<Option<GotoDefinitionResponse>> {
