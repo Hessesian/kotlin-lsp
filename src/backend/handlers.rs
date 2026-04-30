@@ -583,10 +583,10 @@ fn find_call_open_on_line(line: &str) -> Option<(String, Option<String>)> {
     None
 }
 
-/// Scans up to 10 lines before `line_idx` for an unclosed `fn(` call site.
-/// Returns `(call_name, qualifier, extra_commas)` where `extra_commas` is
-/// the count of commas on the intermediate lines plus the commas in `before`
-/// (to add to `active_param`).
+/// Scans up to `MAX_SCAN_BACK_LINES` lines before `line_idx` for an unclosed `fn(` call site.
+/// Returns `(call_name, qualifier, extra_commas)` where `extra_commas` counts commas on the
+/// intermediate lines only (between the opening line and `line_idx`, exclusive). Commas on
+/// `line_idx` itself (in `before`) are already counted by the caller.
 /// Maximum number of lines to scan backward when looking for a multi-line call opener.
 const MAX_SCAN_BACK_LINES: usize = 10;
 
@@ -606,7 +606,6 @@ fn scan_multiline_call_open(
                     extra += mid.chars().filter(|&c| c == ',').count() as u32;
                 }
             }
-            extra += before.chars().filter(|&c| c == ',').count() as u32;
             return Some((name, qualifier, extra));
         }
     }

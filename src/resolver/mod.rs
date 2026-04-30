@@ -616,7 +616,8 @@ fn resolve_same_package(idx: &Indexer, name: &str, uri: &Url) -> Vec<Location> {
     vec![]
 }
 
-/// Check all indexed files in the exact package `pkg` for a symbol named `name`.
+/// Returns the first symbol named `name` found in the exact package `pkg`,
+/// or an empty Vec if none is found.
 fn symbols_in_package(
     idx: &Indexer,
     name: &str,

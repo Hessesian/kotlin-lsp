@@ -23,8 +23,8 @@ const SCOPE_SCAN_BACK_LINES: usize = 50;
 /// Lines to scan upward when looking for a local variable declaration.
 const DECL_SCAN_UP_LINES: usize = 15;
 
-/// Lines to scan backward when looking for a visibility modifier.
-const VISIBILITY_SCAN_BACK: usize = 20;
+/// Lines to scan backward when looking for an enclosing call during named-argument scanning.
+const ENCLOSING_CALL_SCAN_BACK: usize = 20;
 
 impl Indexer {
     /// LSP positions are UTF-16; for ASCII-heavy Kotlin/Java identifiers the
@@ -490,7 +490,7 @@ pub(crate) fn last_ident_in(s: &str) -> &str {
 /// `()` still balance) so we don't need special-case brace handling.
 pub(crate) fn find_enclosing_call_name(lines: &[String], line_no: usize, col: usize) -> Option<String> {
     let mut depth: i32 = 0;
-    let scan_range_start = line_no.saturating_sub(VISIBILITY_SCAN_BACK);
+    let scan_range_start = line_no.saturating_sub(ENCLOSING_CALL_SCAN_BACK);
 
     for ln in (scan_range_start..=line_no).rev() {
         let line_chars: Vec<char> = lines[ln].chars().collect();
