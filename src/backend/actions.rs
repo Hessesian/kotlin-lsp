@@ -61,8 +61,8 @@ fn derive_var_name(expr: &str) -> String {
 
     // Strip common accessor prefixes: getXxx → xxx, isXxx → isXxx (keep),
     // hasXxx → hasXxx (keep), setXxx → skip (nothing useful).
-    let result = if seg.starts_with("get") && seg.len() > 3 {
-        let rest = &seg[3..];
+    let result = if seg.starts_with("get") && seg.len() > "get".len() {
+        let rest = &seg["get".len()..];
         // Only strip if next char is uppercase (proper camelCase).
         if rest.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
             let r = if let Some(first) = rest.chars().next() {
