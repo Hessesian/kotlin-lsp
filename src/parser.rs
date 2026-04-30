@@ -1,6 +1,7 @@
 use tree_sitter::{Node, Parser, Query, QueryCursor};
 use tower_lsp::lsp_types::{Position, Range, SymbolKind};
 
+use crate::indexer::NodeExt;
 use crate::queries::{self, KOTLIN_DEFINITIONS, SWIFT_DEFINITIONS};
 use crate::types::{FileData, ImportEntry, SymbolEntry, SyntaxError, Visibility};
 
@@ -104,7 +105,7 @@ pub fn parse_swift(content: &str) -> FileData {
         .matches(&def_q, root, bytes)
         .map(|m| {
             let (pidx, slot) = map_def_captures(&m, def_idx, name_idx, bytes);
-            if pidx == 8 && slot[0].is_none() {
+            if pidx == queries::SWIFT_INIT_PATTERN_IDX && slot[0].is_none() {
                 // init_declaration — no @name, synthesize "init"
                 let def_range = m.captures.iter()
                     .find(|cap| cap.index == def_idx)
@@ -112,9 +113,9 @@ pub fn parse_swift(content: &str) -> FileData {
                 if let Some(dr) = def_range {
                     let sel = Range::new(
                         Position::new(dr.start.line, dr.start.character),
-                        Position::new(dr.start.line, dr.start.character + 4),
+                        Position::new(dr.start.line, dr.start.character + queries::SWIFT_INIT_NAME.len() as u32),
                     );
-                    return (pidx, [Some(("init".to_owned(), dr, sel)), None]);
+                    return (pidx, [Some((queries::SWIFT_INIT_NAME.to_owned(), dr, sel)), None]);
                 }
             }
             (pidx, slot)
@@ -412,6 +413,14 @@ fn fun_interface_name_from_fn_decl(node: &Node, bytes: &[u8]) -> Option<(usize, 
     None
 }
 
+fn push_interface_symbol(name: &str, node: &Node, sel_node_range: tree_sitter::Range, data: &mut FileData) {
+    let visibility = visibility_at_line(&data.lines, node.range().start_point.row);
+    let range      = ts_to_lsp(node.range());
+    let sel        = ts_to_lsp(sel_node_range);
+    let detail     = extract_detail(&data.lines, range.start.line, range.end.line);
+    data.symbols.push(SymbolEntry { name: name.to_owned(), kind: SymbolKind::INTERFACE, visibility, range, selection_range: sel, detail });
+}
+
 /// Walk the parse tree and emit INTERFACE symbols for every `fun interface Foo` declaration.
 ///
 /// Tree-sitter produces two different misparsings depending on whether modifiers precede:
@@ -428,18 +437,7 @@ fn extract_fun_interfaces(root: Node, bytes: &[u8], data: &mut FileData) {
             for child in node.children(&mut cur) {
                 if child.kind() == "simple_identifier" {
                     if let Ok(name) = child.utf8_text(bytes) {
-                        let visibility = visibility_at_line(&data.lines, node.range().start_point.row);
-                        let range      = ts_to_lsp(node.range());
-                        let sel        = ts_to_lsp(child.range());
-                        let detail     = extract_detail(&data.lines, range.start.line, range.end.line);
-                        data.symbols.push(SymbolEntry {
-                            name: name.to_owned(),
-                            kind: SymbolKind::INTERFACE,
-                            visibility,
-                            range,
-                            selection_range: sel,
-                            detail,
-                        });
+                        push_interface_symbol(name, &node, child.range(), data);
                     }
                     break;
                 }
@@ -450,23 +448,13 @@ fn extract_fun_interfaces(root: Node, bytes: &[u8], data: &mut FileData) {
         // Case 2: modifier-prefixed `fun interface` → misparse as function_declaration
         if let Some((name_start, name_end, name_ts_range)) = fun_interface_name_from_fn_decl(&node, bytes) {
             if let Ok(name) = std::str::from_utf8(&bytes[name_start..name_end]) {
-                let visibility = visibility_at_line(&data.lines, node.range().start_point.row);
-                let range      = ts_to_lsp(node.range());
-                let sel        = ts_to_lsp(name_ts_range);
-                let detail     = extract_detail(&data.lines, range.start.line, range.end.line);
+                let sel = ts_to_lsp(name_ts_range);
                 // Remove the incorrectly-added function/method symbol (same name, same line).
                 data.symbols.retain(|s| {
                     !(s.name == name && s.selection_range.start.line == sel.start.line
                       && matches!(s.kind, SymbolKind::FUNCTION | SymbolKind::METHOD))
                 });
-                data.symbols.push(SymbolEntry {
-                    name: name.to_owned(),
-                    kind: SymbolKind::INTERFACE,
-                    visibility,
-                    range,
-                    selection_range: sel,
-                    detail,
-                });
+                push_interface_symbol(name, &node, name_ts_range, data);
             }
             // Still recurse into children to find nested fun interfaces.
         }
@@ -496,6 +484,28 @@ fn has_fun_interface_descendant(node: &Node, bytes: &[u8]) -> bool {
     children.iter().any(|c| has_fun_interface_descendant(c, bytes))
 }
 
+fn report_missing_node(node: &Node, seen: &mut std::collections::HashSet<(u32, u32)>, errors: &mut Vec<SyntaxError>) {
+    let range = ts_to_lsp(node.range());
+    let key = (range.start.line, range.start.character);
+    if seen.insert(key) {
+        let kind = node.kind();
+        errors.push(SyntaxError { range, message: format!("missing `{kind}`") });
+    }
+}
+
+fn report_error_node(node: &Node, bytes: &[u8], seen: &mut std::collections::HashSet<(u32, u32)>, errors: &mut Vec<SyntaxError>) {
+    let range = ts_to_lsp(node.range());
+    let key = (range.start.line, range.start.character);
+    if seen.insert(key) {
+        let text: String = node.utf8_text(bytes).unwrap_or("").chars().take(30).collect();
+        let text = text.lines().next().unwrap_or(&text);
+        errors.push(SyntaxError {
+            range,
+            message: if text.is_empty() { "syntax error".into() } else { format!("unexpected `{text}`") },
+        });
+    }
+}
+
 fn collect_syntax_errors(root: Node, bytes: &[u8]) -> Vec<SyntaxError> {
     if !root.has_error() { return Vec::new(); }
 
@@ -507,37 +517,13 @@ fn collect_syntax_errors(root: Node, bytes: &[u8]) -> Vec<SyntaxError> {
         if errors.len() >= MAX_SYNTAX_ERRORS { break; }
 
         if node.is_missing() {
-            let range = ts_to_lsp(node.range());
-            let key = (range.start.line, range.start.character);
-            if seen.insert(key) {
-                let kind = node.kind();
-                errors.push(SyntaxError {
-                    range,
-                    message: format!("missing `{kind}`"),
-                });
-            }
+            report_missing_node(&node, &mut seen, &mut errors);
         } else if node.is_error() {
             // Skip errors that are actually valid `fun interface` declarations.
             if is_fun_interface_error(&node, bytes) {
                 continue;
             }
-            let range = ts_to_lsp(node.range());
-            let key = (range.start.line, range.start.character);
-            if seen.insert(key) {
-                let text: String = node.utf8_text(bytes).unwrap_or("")
-                    .chars()
-                    .take(30)
-                    .collect();
-                let text = text.lines().next().unwrap_or(&text);
-                errors.push(SyntaxError {
-                    range,
-                    message: if text.is_empty() {
-                        "syntax error".into()
-                    } else {
-                        format!("unexpected `{text}`")
-                    },
-                });
-            }
+            report_error_node(&node, bytes, &mut seen, &mut errors);
             // Recurse into ERROR children to find nested MISSING nodes.
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
@@ -740,29 +726,42 @@ pub fn parse_imports_from_lines(lines: &[String]) -> Vec<crate::types::ImportEnt
 
 // ─── Swift import extraction ─────────────────────────────────────────────────
 
+/// Extract the import path text from an `import_declaration` node, if present.
+fn swift_import_path<'a>(node: tree_sitter::Node<'a>, bytes: &'a [u8]) -> Option<&'a str> {
+    let mut cur = node.walk();
+    for child in node.children(&mut cur) {
+        if child.kind() == "identifier" {
+            return child.utf8_text(bytes).ok();
+        }
+    }
+    None
+}
+
 fn extract_swift_imports(root: tree_sitter::Node, bytes: &[u8], data: &mut FileData) {
     let mut cur = root.walk();
     for node in root.children(&mut cur) {
         if node.kind() == "import_declaration" {
-            let mut ic = node.walk();
-            for child in node.children(&mut ic) {
-                if child.kind() == "identifier" {
-                    if let Ok(txt) = child.utf8_text(bytes) {
-                        let local = last_segment(txt);
-                        data.imports.push(ImportEntry {
-                            full_path:  txt.to_owned(),
-                            local_name: local.to_owned(),
-                            is_star:    false,
-                        });
-                    }
-                    break;
-                }
+            if let Some(txt) = swift_import_path(node, bytes) {
+                let local = last_segment(txt);
+                data.imports.push(ImportEntry {
+                    full_path:  txt.to_owned(),
+                    local_name: local.to_owned(),
+                    is_star:    false,
+                });
             }
         }
     }
 }
 
 // ─── visibility detection ────────────────────────────────────────────────────
+
+/// Returns the portion of `line` before any `{` or `=` — the modifiers region.
+fn decl_prefix(line: &str) -> &str {
+    line.split_once('{').map(|(l, _)| l)
+        .unwrap_or(line)
+        .split_once('=').map(|(l, _)| l)
+        .unwrap_or(line)
+}
 
 /// Detect the Kotlin/Java visibility modifier on `line_no` by scanning that
 /// source line for modifier keywords.
@@ -786,10 +785,7 @@ pub(crate) fn visibility_at_line(lines: &[String], line_no: usize) -> Visibility
     };
     // Work only on the part before any `=`, `{`, or `(` to avoid false positives
     // from string literals / bodies.
-    let decl = line.split_once('{').map(|(l, _)| l)
-        .unwrap_or(line)
-        .split_once('=').map(|(l, _)| l)
-        .unwrap_or(line);
+    let decl = decl_prefix(line);
 
     // Check whole-word tokens.
     if contains_word(decl, "private")   { return Visibility::Private; }
@@ -807,10 +803,7 @@ pub(crate) fn swift_visibility_at_line(lines: &[String], line_no: usize) -> Visi
         Some(l) => l,
         None    => return Visibility::Internal,
     };
-    let decl = line.split_once('{').map(|(l, _)| l)
-        .unwrap_or(line)
-        .split_once('=').map(|(l, _)| l)
-        .unwrap_or(line);
+    let decl = decl_prefix(line);
 
     if contains_word(decl, "private")     { return Visibility::Private; }
     if contains_word(decl, "fileprivate") { return Visibility::Private; }
@@ -879,7 +872,7 @@ fn extract_supers_kotlin(root: Node, bytes: &[u8], data: &mut FileData) {
     while let Some(node) = stack.pop() {
         match node.kind() {
             "class_declaration" | "object_declaration" => {
-                let name_line = node_name_line(&node);
+                let name_line = node.name_line();
                 let mut cur = node.walk();
                 for child in node.children(&mut cur) {
                     if child.kind() == "delegation_specifier" {
@@ -901,7 +894,7 @@ fn extract_supers_kotlin(root: Node, bytes: &[u8], data: &mut FileData) {
 fn extract_supers_java(node: &Node, bytes: &[u8], data: &mut FileData) {
     match node.kind() {
         "class_declaration" | "record_declaration" | "enum_declaration" => {
-            let name_line = node_name_line(node);
+            let name_line = node.name_line();
             let mut cur = node.walk();
             for child in node.children(&mut cur) {
                 match child.kind() {
@@ -920,7 +913,7 @@ fn extract_supers_java(node: &Node, bytes: &[u8], data: &mut FileData) {
             }
         }
         "interface_declaration" => {
-            let name_line = node_name_line(node);
+            let name_line = node.name_line();
             let mut cur = node.walk();
             for child in node.children(&mut cur) {
                 if child.kind() == "extends_interfaces" {
@@ -931,21 +924,6 @@ fn extract_supers_java(node: &Node, bytes: &[u8], data: &mut FileData) {
         }
         _ => {}
     }
-}
-
-/// Get the start line of the class-name identifier — matches `SymbolEntry::selection_range.start.line`.
-fn node_name_line(node: &Node) -> u32 {
-    // Java uses field "name"; Kotlin has type_identifier as a direct child.
-    if let Some(n) = node.child_by_field_name("name") {
-        return n.start_position().row as u32;
-    }
-    let mut cur = node.walk();
-    for child in node.children(&mut cur) {
-        if matches!(child.kind(), "type_identifier" | "simple_identifier" | "identifier") {
-            return child.start_position().row as u32;
-        }
-    }
-    node.start_position().row as u32
 }
 
 /// Extract the supertype name from a `delegation_specifier` node.

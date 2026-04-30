@@ -31,6 +31,16 @@ pub(crate) trait NodeExt<'a>: Sized + Copy {
 
     /// Extract the type/class name from a CST class/interface/object/companion_object node.
     fn extract_type_name(self, bytes: &[u8]) -> Option<String>;
+
+    /// For a `call_expression` node, returns `(fn_name, qualifier)`.
+    /// - Simple call `foo(...)` → `("foo", None)`
+    /// - Navigation call `obj.bar(...)` → `("bar", Some("obj"))`
+    /// - Returns `None` if the callee kind is not recognized.
+    fn call_fn_and_qualifier(self, bytes: &[u8]) -> Option<(String, Option<String>)>;
+
+    /// Returns the line number (0-based) of the first named identifier child,
+    /// or the node's own start line if no named child is found.
+    fn name_line(self) -> u32;
 }
 
 impl<'a> NodeExt<'a> for Node<'a> {
@@ -196,6 +206,52 @@ impl<'a> NodeExt<'a> for Node<'a> {
             }
         }
         None
+    }
+
+    fn call_fn_and_qualifier(self, bytes: &[u8]) -> Option<(String, Option<String>)> {
+        let callee = self.child(0)?;
+        match callee.kind() {
+            "simple_identifier" | "type_identifier" => {
+                let name = std::str::from_utf8(&bytes[callee.byte_range()]).ok()?.to_string();
+                Some((name, None))
+            }
+            "navigation_expression" => {
+                let mut walker = callee.walk();
+                let mut qualifier_opt: Option<String> = None;
+                let mut fn_name_opt: Option<String> = None;
+                for child in callee.children(&mut walker) {
+                    match child.kind() {
+                        "simple_identifier" | "type_identifier" => {
+                            qualifier_opt = std::str::from_utf8(&bytes[child.byte_range()])
+                                .ok().map(|s| s.to_string());
+                        }
+                        "navigation_suffix" => {
+                            fn_name_opt = (0..child.child_count())
+                                .filter_map(|i| child.child(i))
+                                .find(|c| c.kind() == "simple_identifier" || c.kind() == "type_identifier")
+                                .and_then(|c| std::str::from_utf8(&bytes[c.byte_range()]).ok().map(|s| s.to_string()));
+                        }
+                        _ => {}
+                    }
+                }
+                Some((fn_name_opt?, qualifier_opt))
+            }
+            _ => None,
+        }
+    }
+
+    fn name_line(self) -> u32 {
+        // Java uses field "name"; Kotlin has type_identifier as a direct child.
+        if let Some(n) = self.child_by_field_name("name") {
+            return n.start_position().row as u32;
+        }
+        let mut cur = self.walk();
+        for child in self.children(&mut cur) {
+            if matches!(child.kind(), "type_identifier" | "simple_identifier" | "identifier") {
+                return child.start_position().row as u32;
+            }
+        }
+        self.start_position().row as u32
     }
 }
 

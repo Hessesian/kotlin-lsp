@@ -530,49 +530,7 @@ fn cst_call_info(
     }?;
 
     // Extract function name and optional qualifier from the callee.
-    let callee = call_expr.child(0)?;
-    let (fn_name, qualifier) = match callee.kind() {
-        "simple_identifier" | "type_identifier" => {
-            let name = std::str::from_utf8(&bytes[callee.byte_range()]).ok()?.to_string();
-            (name, None)
-        }
-        "navigation_expression" => {
-            // Tree structure: navigation_expression
-            //   simple_identifier "receiver"        ← direct child (the qualifier)
-            //   navigation_suffix                   ← direct child
-            //     "."
-            //     simple_identifier "methodName"    ← fn name lives here
-            //
-            // We must look inside navigation_suffix for the function name, NOT
-            // use direct-children-only iteration which misses the nested identifier.
-            let mut fn_name_opt: Option<String> = None;
-            let mut qualifier_opt: Option<String> = None;
-            let mut walker = callee.walk();
-            for child in callee.children(&mut walker) {
-                match child.kind() {
-                    "simple_identifier" | "type_identifier" => {
-                        // First direct identifier = the receiver/qualifier.
-                        qualifier_opt = std::str::from_utf8(&bytes[child.byte_range()])
-                            .ok().map(|s| s.to_string());
-                    }
-                    "navigation_suffix" => {
-                        // The function name is the simple_identifier inside the suffix.
-                        let mut sw = child.walk();
-                        for sc in child.children(&mut sw) {
-                            if sc.kind() == "simple_identifier" || sc.kind() == "type_identifier" {
-                                fn_name_opt = std::str::from_utf8(&bytes[sc.byte_range()])
-                                    .ok().map(|s| s.to_string());
-                                break;
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            (fn_name_opt?, qualifier_opt)
-        }
-        _ => return None,
-    };
+    let (fn_name, qualifier) = call_expr.call_fn_and_qualifier(bytes)?;
 
     // Find the value_arguments node (may be inside call_suffix).
     let value_arguments = call_expr.find_value_arguments()?;
@@ -594,6 +552,74 @@ fn cst_call_info(
     };
 
     Some((fn_name, qualifier, active_param))
+}
+
+/// Scans a single source line for an unclosed call-site opening.
+/// Returns `(call_name, qualifier)` if an unbalanced `name(` is found,
+/// where net > 0 means more opens than closes on this line.
+fn find_call_open_on_line(line: &str) -> Option<(String, Option<String>)> {
+    for (p, _) in line.char_indices().filter(|&(_, c)| c == '(')
+        .collect::<Vec<_>>().into_iter().rev()
+    {
+        let before_paren = &line[..p];
+        let name = crate::indexer::last_ident_in(before_paren);
+        if !name.is_empty() && !is_non_call_keyword(name) {
+            let net: i32 = line[p..].chars()
+                .map(|c| match c { '(' => 1, ')' => -1, _ => 0 }).sum();
+            if net > 0 {
+                // Qualifier before the dot on the same line.
+                let before_name = &before_paren[..before_paren.len() - name.len()];
+                let qualifier = if before_name.ends_with('.') {
+                    let q = crate::indexer::last_ident_in(before_name.strip_suffix('.').unwrap_or(before_name));
+                    if q.is_empty() { None } else { Some(q.to_owned()) }
+                } else { None };
+                return Some((name.to_owned(), qualifier));
+            }
+        }
+    }
+    None
+}
+
+/// Scans up to 10 lines before `line_idx` for an unclosed `fn(` call site.
+/// Returns `(call_name, qualifier, extra_commas)` where `extra_commas` is
+/// the count of commas on the intermediate lines plus the commas in `before`
+/// (to add to `active_param`).
+fn scan_multiline_call_open(
+    lines: &[String],
+    line_idx: usize,
+    before: &str,
+) -> Option<(String, Option<String>, u32)> {
+    let scan_start = line_idx.saturating_sub(10);
+    for scan_line in (scan_start..line_idx).rev() {
+        let l = &lines[scan_line];
+        if l.contains('{') || l.contains('}') { break; }
+        if let Some((name, qualifier)) = find_call_open_on_line(l) {
+            let mut extra: u32 = 0;
+            if scan_line + 1 < line_idx {
+                for mid in &lines[(scan_line + 1)..line_idx] {
+                    extra += mid.chars().filter(|&c| c == ',').count() as u32;
+                }
+            }
+            extra += before.chars().filter(|&c| c == ',').count() as u32;
+            return Some((name, qualifier, extra));
+        }
+    }
+    None
+}
+
+/// Given `chars` and position `j` (start of the identifier), extract
+/// the qualifier immediately before a `.` if present.
+fn extract_dot_qualifier(chars: &[char], j: usize) -> Option<String> {
+    if j > 0 && chars[j - 1] == '.' {
+        let mut k = j - 1;
+        while k > 0 && (chars[k - 1].is_alphanumeric() || chars[k - 1] == '_') {
+            k -= 1;
+        }
+        let q: String = chars[k..j - 1].iter().collect();
+        if !q.is_empty() { Some(q) } else { None }
+    } else {
+        None
+    }
 }
 
 /// Text-scan fallback: extract `(fn_name, qualifier, active_param)` by walking
@@ -624,14 +650,7 @@ fn text_call_info(
                     let candidate: String = chars[j..i].iter().collect();
                     if !candidate.is_empty() && !is_non_call_keyword(&candidate) {
                         call_name = Some(candidate);
-                        if j > 0 && chars[j - 1] == '.' {
-                            let mut k = j - 1;
-                            while k > 0 && (chars[k - 1].is_alphanumeric() || chars[k - 1] == '_') {
-                                k -= 1;
-                            }
-                            let q: String = chars[k..j - 1].iter().collect();
-                            if !q.is_empty() { call_qualifier = Some(q); }
-                        }
+                        call_qualifier = extract_dot_qualifier(&chars, j);
                     }
                     break;
                 }
@@ -646,37 +665,10 @@ fn text_call_info(
     let in_block_body = before.contains('{') || before.contains('}')
         || lines[line_idx].trim_start().starts_with('}');
     if call_name.is_none() && line_idx > 0 && !in_block_body {
-        let scan_start = line_idx.saturating_sub(10);
-        'outer: for scan_line in (scan_start..line_idx).rev() {
-            let l = &lines[scan_line];
-            if l.contains('{') || l.contains('}') { break; }
-            for (p, _) in l.char_indices().filter(|&(_, c)| c == '(')
-                .collect::<Vec<_>>().into_iter().rev()
-            {
-                let before_paren = &l[..p];
-                let name = crate::indexer::last_ident_in(before_paren);
-                if !name.is_empty() && !is_non_call_keyword(name) {
-                    let net: i32 = l[p..].chars()
-                        .map(|c| match c { '(' => 1, ')' => -1, _ => 0 }).sum();
-                    if net > 0 {
-                        // Qualifier before the dot on the same line.
-                        let before_name = &before_paren[..before_paren.len() - name.len()];
-                        let qualifier = if before_name.ends_with('.') {
-                            let q = crate::indexer::last_ident_in(before_name.strip_suffix('.').unwrap_or(before_name));
-                            if q.is_empty() { None } else { Some(q.to_owned()) }
-                        } else { None };
-                        call_name = Some(name.to_owned());
-                        call_qualifier = qualifier;
-                        if scan_line + 1 < line_idx {
-                            for mid in &lines[(scan_line + 1)..line_idx] {
-                                active_param += mid.chars().filter(|&c| c == ',').count() as u32;
-                            }
-                        }
-                        active_param += before.chars().filter(|&c| c == ',').count() as u32;
-                        break 'outer;
-                    }
-                }
-            }
+        if let Some((name, qual, extra)) = scan_multiline_call_open(lines, line_idx, before) {
+            call_name = Some(name);
+            call_qualifier = qual;
+            active_param += extra;
         }
     }
 

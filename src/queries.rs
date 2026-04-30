@@ -332,3 +332,10 @@ pub fn swift_def_pattern_meta(pattern_index: usize) -> (SymbolKind, Option<&'sta
         _  => (SymbolKind::NULL,            None),
     }
 }
+
+/// Pattern index of `init_declaration` in `SWIFT_DEFINITIONS`.
+/// Pattern 8 has no `@name` capture — the parser synthesises `"init"` instead.
+pub const SWIFT_INIT_PATTERN_IDX: usize = 8;
+
+/// Synthesised name for Swift init declarations.
+pub const SWIFT_INIT_NAME: &str = "init";

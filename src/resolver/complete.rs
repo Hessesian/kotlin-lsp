@@ -7,7 +7,7 @@ use crate::indexer::Indexer;
 use crate::types::Visibility;
 use crate::LinesExt;
 
-use super::{fqns_for_name, already_imported, make_import_edit,
+use super::{fqns_for_name, already_imported,
             resolve_symbol_inner, resolve_symbol_no_rg};
 use super::infer::{infer_variable_type, ReceiverKind, ReceiverType, infer_receiver_type};
 
@@ -226,6 +226,24 @@ pub(crate) fn complete_dot(idx: &Indexer, receiver: &str, from_uri: &Url, snippe
     items
 }
 
+/// Build a `CompletionItem` for a symbol found inside a nested type body.
+///
+/// Functions/methods get a snippet `name($1)`; all other kinds are plain-text.
+/// The `sort_text` prefix is the `kind_sort_rank` value so the list is ordered
+/// consistently with the rest of the completion results.
+fn completion_item_for_nested_symbol(s: &crate::types::SymbolEntry) -> CompletionItem {
+    let kind  = symbol_kind_to_completion(s.kind);
+    let is_fn = matches!(kind, CompletionItemKind::FUNCTION | CompletionItemKind::METHOD);
+    CompletionItem {
+        label:              s.name.clone(),
+        kind:               Some(kind),
+        insert_text:        if is_fn { Some(format!("{}($1)", s.name)) } else { None },
+        insert_text_format: if is_fn { Some(InsertTextFormat::SNIPPET) } else { None },
+        sort_text:          Some(format!("{:02}:{}", kind_sort_rank(Some(kind)), s.name)),
+        ..Default::default()
+    }
+}
+
 /// Return completions for symbols declared INSIDE `type_name` within the given file.
 /// Uses the symbol's range end (the closing `}` of the class body) to determine
 /// membership — no indentation heuristics needed.
@@ -256,18 +274,7 @@ fn symbols_from_nested_type(
             // Unknown type — return all non-private symbols as a fallback.
             return symbols_ref.iter()
                 .filter(|s| s.visibility != Visibility::Private)
-                .map(|s| {
-                    let kind = symbol_kind_to_completion(s.kind);
-                    let is_fn = matches!(kind, CompletionItemKind::FUNCTION | CompletionItemKind::METHOD);
-                    CompletionItem {
-                        label:              s.name.clone(),
-                        kind:               Some(kind),
-                        insert_text:        if is_fn { Some(format!("{}($1)", s.name)) } else { None },
-                        insert_text_format: if is_fn { Some(InsertTextFormat::SNIPPET) } else { None },
-                        sort_text:          Some(format!("{:02}:{}", kind_sort_rank(Some(kind)), s.name)),
-                        ..Default::default()
-                    }
-                })
+                .map(|s| completion_item_for_nested_symbol(s))
                 .collect();
         }
     };
@@ -288,18 +295,7 @@ fn symbols_from_nested_type(
             starts_after && starts_before
         })
         .filter(|s| s.visibility != Visibility::Private)
-        .map(|s| {
-            let kind = symbol_kind_to_completion(s.kind);
-            let is_fn = matches!(kind, CompletionItemKind::FUNCTION | CompletionItemKind::METHOD);
-            CompletionItem {
-                label:              s.name.clone(),
-                kind:               Some(kind),
-                insert_text:        if is_fn { Some(format!("{}($1)", s.name)) } else { None },
-                insert_text_format: if is_fn { Some(InsertTextFormat::SNIPPET) } else { None },
-                sort_text:          Some(format!("{:02}:{}", kind_sort_rank(Some(kind)), s.name)),
-                ..Default::default()
-            }
-        })
+        .map(|s| completion_item_for_nested_symbol(s))
         .collect()
 }
 
@@ -492,7 +488,7 @@ pub(crate) fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippet
                     if !seen.insert(item_key) { continue; }
 
                     let import_edit = if needs_import {
-                        Some(vec![make_import_edit(fqn, &cur_lines, is_java)])
+                        Some(vec![cur_lines.make_import_edit(fqn, is_java)])
                     } else {
                         None
                     };
