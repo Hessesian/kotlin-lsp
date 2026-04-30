@@ -498,10 +498,10 @@ fn report_error_node(node: &Node, bytes: &[u8], seen: &mut std::collections::Has
     let key = (range.start.line, range.start.character);
     if seen.insert(key) {
         let text: String = node.utf8_text(bytes).unwrap_or("").chars().take(30).collect();
-        let text = text.lines().next().unwrap_or(&text);
+        let first_line = text.lines().next().unwrap_or(&text);
         errors.push(SyntaxError {
             range,
-            message: if text.is_empty() { "syntax error".into() } else { format!("unexpected `{text}`") },
+            message: if first_line.is_empty() { "syntax error".into() } else { format!("unexpected `{first_line}`") },
         });
     }
 }
