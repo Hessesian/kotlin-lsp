@@ -34,6 +34,7 @@ pub(crate) use self::infer::{
     find_named_param_type_in_sig,
     lambda_param_position_on_line,
     has_named_params_not_it,
+    cst_call_fn_name,
     // it_this.rs
     find_it_element_type,
     find_it_element_type_in_lines,
@@ -63,6 +64,7 @@ mod lookup;
 
 mod scope;
 pub(crate) use scope::is_id_char;
+pub(crate) use scope::last_ident_in;
 pub(crate) use scope::find_enclosing_call_name;
 
 pub(crate) mod live_tree;
@@ -2065,6 +2067,29 @@ class Foo @Inject constructor(
             !indexer.definitions.contains_key("VendorClass"),
             "VendorClass (under third-party/) must be excluded"
         );
+    }
+
+    // ── last_ident_in ────────────────────────────────────────────────────────
+
+    #[test]
+    fn last_ident_in_simple() {
+        assert_eq!(crate::indexer::last_ident_in("foo.barBaz"), "barBaz");
+    }
+    #[test]
+    fn last_ident_in_whole_string() {
+        assert_eq!(crate::indexer::last_ident_in("identifier"), "identifier");
+    }
+    #[test]
+    fn last_ident_in_empty() {
+        assert_eq!(crate::indexer::last_ident_in(""), "");
+    }
+    #[test]
+    fn last_ident_in_no_ident() {
+        assert_eq!(crate::indexer::last_ident_in("foo.bar("), "");
+    }
+    #[test]
+    fn last_ident_in_with_spaces() {
+        assert_eq!(crate::indexer::last_ident_in("  someIdent"), "someIdent");
     }
 }
 

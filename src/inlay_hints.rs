@@ -243,22 +243,9 @@ fn hint_property(
 fn infer_type_from_init(init: tree_sitter::Node<'_>, bytes: &[u8]) -> Option<String> {
     // call_expression: callee(...) or callee<T>(...)
     if init.kind() == "call_expression" {
-        let callee = init.child(0)?;
-        // Callee may be a navigation chain: `Pkg.Type(...)` — use last segment.
-        let name_node = match callee.kind() {
-            "simple_identifier" | "type_identifier" => callee,
-            "navigation_expression" => {
-                // last child that is an identifier
-                let mut nc = callee.walk();
-                callee.children(&mut nc)
-                    .filter(|c| c.kind() == "simple_identifier" || c.kind() == "type_identifier")
-                    .last()?
-            }
-            _ => return None,
-        };
-        let name = name_node.utf8_text(bytes).ok()?.trim();
+        let name = crate::indexer::cst_call_fn_name(init, bytes)?;
         if name.starts_with(|c: char| c.is_uppercase()) {
-            return Some(name.to_string());
+            return Some(name);
         }
     }
     None

@@ -38,6 +38,22 @@ impl Backend {
             snippet_support: Arc::new(AtomicBool::new(false)),
         }
     }
+
+    /// Try `find_definition_qualified` with `rt.qualified`, falling back to `rt.leaf`
+    /// when the first lookup is empty and the two names differ.
+    pub(super) fn resolve_with_receiver_fallback(
+        &self,
+        word: &str,
+        rt: &crate::resolver::ReceiverType,
+        uri: &Url,
+    ) -> Vec<Location> {
+        let locs = self.indexer.find_definition_qualified(word, Some(&rt.qualified), uri);
+        if locs.is_empty() && rt.leaf != rt.qualified {
+            self.indexer.find_definition_qualified(word, Some(&rt.leaf), uri)
+        } else {
+            locs
+        }
+    }
 }
 
 #[async_trait]

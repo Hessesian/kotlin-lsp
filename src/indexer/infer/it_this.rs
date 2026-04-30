@@ -43,6 +43,7 @@ use super::{
 use super::super::{
     Indexer,
     is_id_char,
+    last_ident_in,
     find_enclosing_call_name,
 };
 
@@ -215,19 +216,14 @@ pub(crate) fn lambda_receiver_type_from_context(
     // (e.g., `fn(Enum.VALUE, {` must not match the dot inside `Enum.VALUE`).
     if let Some(dot_pos) = find_last_dot_at_depth_zero(callee) {
         let receiver_expr = callee[..dot_pos].trim_end();
-        let receiver_var: String = receiver_expr
-            .chars().rev()
-            .take_while(|&c| is_id_char(c))
-            .collect::<String>()
-            .chars().rev()
-            .collect();
+        let receiver_var = last_ident_in(receiver_expr);
         // Extract method name (everything after the dot up to the first non-id char).
         let method: String = callee[dot_pos + 1..].trim_start()
             .chars().take_while(|&c| is_id_char(c))
             .collect();
 
         if !receiver_var.is_empty() {
-            if let Some(raw) = deps.find_var_type(&receiver_var, uri) {
+            if let Some(raw) = deps.find_var_type(receiver_var, uri) {
                 if let Some(elem) = crate::resolver::extract_collection_element_type(&raw) {
                     return Some(elem);
                 }
@@ -246,7 +242,7 @@ pub(crate) fn lambda_receiver_type_from_context(
                 }
             }
             if receiver_var.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
-                return Some(receiver_var);
+                return Some(receiver_var.to_owned());
             }
         }
     }
@@ -255,11 +251,7 @@ pub(crate) fn lambda_receiver_type_from_context(
     // Extract the trailing identifier from callee — handles cases where callee
     // is prefixed by outer-lambda context like `{ setState` (the `{` belongs
     // to an enclosing lambda, not this call).
-    let trailing_fn: String = callee.chars().rev()
-        .take_while(|&c| is_id_char(c))
-        .collect::<String>()
-        .chars().rev()
-        .collect();
+    let trailing_fn = last_ident_in(callee);
     if !trailing_fn.is_empty() {
         // Known stdlib scope function `with(receiver) { this }` — extract the
         // first argument as the receiver and infer its type directly.
@@ -276,7 +268,7 @@ pub(crate) fn lambda_receiver_type_from_context(
                 }
             }
         }
-        if let Some(ty) = fun_trailing_lambda_it_type(&trailing_fn, deps, uri) {
+        if let Some(ty) = fun_trailing_lambda_it_type(trailing_fn, deps, uri) {
             return Some(ty);
         }
     }
@@ -523,12 +515,7 @@ fn lambda_receiver_this_type_from_context(
     // ── Case A: `receiver.method` ────────────────────────────────────────────
     if let Some(dot_pos) = find_last_dot_at_depth_zero(callee) {
         let receiver_expr = callee[..dot_pos].trim_end();
-        let receiver_var: String = receiver_expr
-            .chars().rev()
-            .take_while(|&c| is_id_char(c))
-            .collect::<String>()
-            .chars().rev()
-            .collect();
+        let receiver_var = last_ident_in(receiver_expr);
         let method: String = callee[dot_pos + 1..].trim_start()
             .chars().take_while(|&c| is_id_char(c))
             .collect();
@@ -541,12 +528,12 @@ fn lambda_receiver_this_type_from_context(
             // Only functions listed in `RECEIVER_THIS_FNS` (`run`, `apply`) are treated as
             // receiver-`this` lambdas; `also`/`let` are intentionally excluded.
             if RECEIVER_THIS_FNS.contains(&method.as_str()) {
-                if let Some(raw) = deps.find_var_type(&receiver_var, uri) {
+                if let Some(raw) = deps.find_var_type(receiver_var, uri) {
                     let base: String = raw.chars().take_while(|&c| is_id_char(c)).collect();
                     if !base.is_empty() { return Some(base); }
                 }
                 if receiver_var.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
-                    return Some(receiver_var);
+                    return Some(receiver_var.to_owned());
                 }
             }
         }
@@ -554,11 +541,7 @@ fn lambda_receiver_this_type_from_context(
     }
 
     // ── Case B: `with(receiver) { this }` ───────────────────────────────────
-    let trailing_fn: String = callee.chars().rev()
-        .take_while(|&c| is_id_char(c))
-        .collect::<String>()
-        .chars().rev()
-        .collect();
+    let trailing_fn = last_ident_in(callee);
     if trailing_fn == "with" {
         if let Some(recv_name) = extract_first_arg(trimmed) {
             if let Some(raw) = deps.find_var_type(recv_name, uri) {
@@ -725,17 +708,11 @@ fn inline_lambda_param_type(before_brace: &str, deps: &impl InferDeps, uri: &Url
     }
 
     let open_pos = open_paren_byte?;
-    let fn_name: String = before_brace[..open_pos]
-        .trim_end()
-        .chars().rev()
-        .take_while(|&c| is_id_char(c))
-        .collect::<String>()
-        .chars().rev()
-        .collect();
+    let fn_name = last_ident_in(before_brace[..open_pos].trim_end());
 
     if fn_name.is_empty() { return None; }
 
-    let sig = deps.find_fun_params_text(&fn_name, uri)?;
+    let sig = deps.find_fun_params_text(fn_name, uri)?;
     let param_type = nth_fun_param_type_str(&sig, comma_count)?;
     lambda_type_first_input(&param_type)
 }

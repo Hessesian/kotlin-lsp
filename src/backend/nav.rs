@@ -69,10 +69,7 @@ impl Backend {
         // so lookup finds the member in the correct class.
         if ctx.qualifier.is_some() {
             if let Some(ref rt) = ctx.contextual {
-                let locs = self.indexer.find_definition_qualified(&ctx.word, Some(&rt.qualified), uri);
-                let locs = if locs.is_empty() && rt.leaf != rt.qualified {
-                    self.indexer.find_definition_qualified(&ctx.word, Some(&rt.leaf), uri)
-                } else { locs };
+                let locs = self.resolve_with_receiver_fallback(&ctx.word, rt, uri);
                 if !locs.is_empty() {
                     return Ok(Some(locs_to_response(locs)));
                 }

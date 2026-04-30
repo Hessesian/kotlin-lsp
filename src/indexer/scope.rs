@@ -246,35 +246,11 @@ impl Indexer {
                 let mut cur = node;
                 loop {
                     if cur.kind() == "lambda_literal" {
-                        for i in 0..cur.child_count() {
-                            if let Some(lp) = cur.child(i) {
-                                if lp.kind() == "lambda_parameters" {
-                                    for j in 0..lp.child_count() {
-                                        if let Some(vd) = lp.child(j) {
-                                            if vd.kind() == "variable_declaration" {
-                                                if let Some(si) = vd.child(0) {
-                                                    if si.kind() == "simple_identifier" {
-                                                        if let Ok(name) = std::str::from_utf8(&doc.bytes[si.byte_range()]) {
-                                                            if name != "it" && name != "_"
-                                                                && name.chars().next().map(|c| c.is_lowercase()).unwrap_or(false)
-                                                                && !params.contains(&name.to_string())
-                                                            {
-                                                                params.push(name.to_string());
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        let new_names = collect_lambda_param_names(cur, &doc.bytes, &params);
+                        params.extend(new_names);
                     }
-                    match cur.parent() {
-                        Some(p) => cur = p,
-                        None    => break,
-                    }
+                    let Some(p) = cur.parent() else { break; };
+                    cur = p;
                 }
                 return params;
             }
@@ -427,6 +403,34 @@ impl Indexer {
     }
 }
 
+/// Collect named lambda parameter identifiers from a `lambda_literal` CST node.
+/// Skips `it`, `_`, uppercase-first (type refs), and deduplicates.
+/// Returns an empty `Vec` if the lambda has no `lambda_parameters` child.
+fn collect_lambda_param_names(
+    lambda_node: tree_sitter::Node<'_>,
+    bytes:       &[u8],
+    existing:    &[String],
+) -> Vec<String> {
+    let Some(lp) = (0..lambda_node.child_count())
+        .filter_map(|i| lambda_node.child(i))
+        .find(|c| c.kind() == "lambda_parameters")
+    else { return Vec::new(); };
+
+    (0..lp.child_count())
+        .filter_map(|i| lp.child(i))
+        .filter(|c| c.kind() == "variable_declaration")
+        .filter_map(|vd| {
+            let si = vd.child(0).filter(|n| n.kind() == "simple_identifier")?;
+            std::str::from_utf8(&bytes[si.byte_range()]).ok().map(|s| s.to_string())
+        })
+        .filter(|name| {
+            name != "it" && name != "_"
+            && name.chars().next().map(|c| c.is_lowercase()).unwrap_or(false)
+            && !existing.contains(name)
+        })
+        .collect()
+}
+
 /// Extract the type/class name from a CST class/interface/object/companion_object node.
 /// Tries `child_by_field_name("name")` first, then walks direct children for
 /// `type_identifier` or `simple_identifier` that starts with an uppercase letter.
@@ -490,6 +494,18 @@ pub(super) fn extract_class_decl_name(line: &str) -> Option<String> {
 
 pub(crate) fn is_id_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
+}
+
+/// Return the trailing contiguous identifier slice in `s` — the longest
+/// suffix whose characters all satisfy `is_id_char`.  Returns `""` if none.
+///
+/// Example: `last_ident_in("foo.barBaz")` → `"barBaz"`
+pub(crate) fn last_ident_in(s: &str) -> &str {
+    let ident_bytes: usize = s.chars().rev()
+        .take_while(|&c| is_id_char(c))
+        .map(|c| c.len_utf8())
+        .sum();
+    &s[s.len() - ident_bytes..]
 }
 
 /// Scan backward from `(line_no, col)` — where `col` is the START of the cursor
