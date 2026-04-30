@@ -13,6 +13,9 @@ use std::sync::Arc;
 
 use tower_lsp::lsp_types::*;
 
+/// Maximum number of file-read failures to log before suppressing further warnings.
+const MAX_READ_FAILURES_LOGGED: usize = 5;
+
 use crate::indexer::{
     Indexer, MAX_FILES_UNLIMITED,
     cache::{try_load_cache, save_cache, cache_entry_to_file_result, write_status_file},
@@ -643,7 +646,7 @@ impl Indexer {
                         Err(e) => {
                             let n =
                                 read_failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            if n < 5 {
+                            if n < MAX_READ_FAILURES_LOGGED {
                                 log::warn!(
                                     "Could not read {}: {}",
                                     item.path.display(),
