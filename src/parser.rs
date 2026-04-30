@@ -40,13 +40,13 @@ pub fn parse_kotlin(content: &str) -> FileData {
     push_def_symbols(best, queries::def_pattern_meta, visibility_at_line, &data.lines, &mut data.symbols);
 
     // ── package + imports (manual tree walk — avoids query overlap issues) ────
-    extract_package_and_imports(root, bytes, &mut data);
+    data.extract_package_and_imports(root, bytes);
 
     // ── fun interface (tree-sitter parses these as ERROR + lambda_literal) ───
-    extract_fun_interfaces(root, bytes, &mut data);
+    data.extract_fun_interfaces(root, bytes);
 
     // ── supertype relationships (delegation specifiers) ──────────────────────
-    extract_supers_kotlin(root, bytes, &mut data);
+    data.extract_supers_kotlin(root, bytes);
 
     // ── declared_names: scan lines once for `ident:` patterns ───────────────
     data.declared_names = extract_declared_names(&data.lines);
@@ -69,8 +69,8 @@ pub fn parse_java(content: &str) -> FileData {
     let bytes = content.as_bytes();
     let mut queue = vec![tree.root_node()];
     while let Some(node) = queue.pop() {
-        extract_java(&node, bytes, &mut data);
-        extract_supers_java(&node, bytes, &mut data);
+        data.extract_java(&node, bytes);
+        data.extract_supers_java(&node, bytes);
         let mut cur = node.walk();
         for child in node.children(&mut cur) { queue.push(child); }
     }
@@ -126,7 +126,7 @@ pub fn parse_swift(content: &str) -> FileData {
     push_def_symbols(best, queries::swift_def_pattern_meta, swift_visibility_at_line, &data.lines, &mut data.symbols);
 
     // ── imports (manual tree walk — Swift imports are simpler) ────────────────
-    extract_swift_imports(root, bytes, &mut data);
+    data.extract_swift_imports(root, bytes);
 
     // ── declared_names ───────────────────────────────────────────────────────
     data.declared_names = extract_declared_names(&data.lines);
@@ -1053,6 +1053,29 @@ fn java_collect_type_list(node: &Node, bytes: &[u8], name_line: u32, data: &mut 
                 if let Some(n) = name { data.supers.push((name_line, n)); }
             }
         }
+    }
+}
+
+// ─── FileData methods (thin wrappers around the free functions above) ────────
+
+impl crate::types::FileData {
+    fn extract_package_and_imports(&mut self, root: tree_sitter::Node, bytes: &[u8]) {
+        extract_package_and_imports(root, bytes, self)
+    }
+    fn extract_fun_interfaces(&mut self, root: tree_sitter::Node, bytes: &[u8]) {
+        extract_fun_interfaces(root, bytes, self)
+    }
+    fn extract_supers_kotlin(&mut self, root: tree_sitter::Node, bytes: &[u8]) {
+        extract_supers_kotlin(root, bytes, self)
+    }
+    fn extract_java(&mut self, node: &Node, bytes: &[u8]) {
+        extract_java(node, bytes, self)
+    }
+    fn extract_supers_java(&mut self, node: &Node, bytes: &[u8]) {
+        extract_supers_java(node, bytes, self)
+    }
+    fn extract_swift_imports(&mut self, root: tree_sitter::Node, bytes: &[u8]) {
+        extract_swift_imports(root, bytes, self)
     }
 }
 
