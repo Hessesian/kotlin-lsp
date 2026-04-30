@@ -225,6 +225,27 @@ pub(crate) fn resolve_symbol_inner(idx: &Indexer, name: &str, from_uri: &Url, wi
     rg_find_definition(name, root.as_deref(), matcher.as_deref())
 }
 
+/// Returns the first Location found by scanning star-import packages.
+fn find_in_star_imports(
+    idx: &Indexer,
+    name: &str,
+    star_pkgs: &[String],
+) -> Option<Location> {
+    for pkg in star_pkgs {
+        let peer_uris: Vec<String> = idx.packages.get(pkg).map(|u| u.clone()).unwrap_or_default();
+        for peer_uri_str in peer_uris {
+            if let Some(f) = idx.files.get(&peer_uri_str) {
+                for sym in f.symbols.iter().filter(|s| s.name == name) {
+                    if let Ok(u) = Url::parse(&peer_uri_str) {
+                        return Some(Location { uri: u, range: sym.selection_range });
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Index-only resolver for use in completion paths.
 ///
 /// Identical to `resolve_symbol_inner` but omits:
@@ -252,17 +273,8 @@ pub(crate) fn resolve_symbol_no_rg(idx: &Indexer, name: &str, from_uri: &Url) ->
             .collect(),
         None => vec![],
     };
-    for pkg in star_pkgs {
-        let peer_uris: Vec<String> = idx.packages.get(&pkg).map(|u| u.clone()).unwrap_or_default();
-        for peer_uri_str in peer_uris {
-            if let Some(f) = idx.files.get(&peer_uri_str) {
-                for sym in f.symbols.iter().filter(|s| s.name == name) {
-                    if let Ok(u) = Url::parse(&peer_uri_str) {
-                        return vec![Location { uri: u, range: sym.selection_range }];
-                    }
-                }
-            }
-        }
+    if let Some(loc) = find_in_star_imports(idx, name, &star_pkgs) {
+        return vec![loc];
     }
 
     // Check the global definitions index as a final fast fallback.
@@ -611,6 +623,25 @@ fn resolve_same_package(idx: &Indexer, name: &str, uri: &Url) -> Vec<Location> {
     vec![]
 }
 
+/// Check all indexed files whose package starts with `pkg_prefix` for a symbol named `name`.
+fn symbols_in_package(
+    idx: &Indexer,
+    name: &str,
+    pkg_prefix: &str,
+) -> Vec<Location> {
+    let peer_uris: Vec<String> = idx.packages.get(pkg_prefix).map(|u| u.clone()).unwrap_or_default();
+    for peer_uri_str in peer_uris {
+        if let Some(f) = idx.files.get(&peer_uri_str) {
+            for sym in f.symbols.iter().filter(|s| s.name == name) {
+                if let Ok(u) = Url::parse(&peer_uri_str) {
+                    return vec![Location { uri: u, range: sym.selection_range }];
+                }
+            }
+        }
+    }
+    vec![]
+}
+
 /// Step 4 — star imports: `import com.example.*`.
 ///
 /// For each star import:
@@ -630,16 +661,8 @@ fn resolve_star_imports(idx: &Indexer, name: &str, uri: &Url) -> Vec<Location> {
 
     for pkg in star_pkgs {
         // a) indexed files in this package
-        let peer_uris: Vec<String> = idx.packages.get(&pkg).map(|u| u.clone()).unwrap_or_default();
-        for peer_uri_str in peer_uris {
-            if let Some(f) = idx.files.get(&peer_uri_str) {
-                for sym in f.symbols.iter().filter(|s| s.name == name) {
-                    if let Ok(u) = Url::parse(&peer_uri_str) {
-                        return vec![Location { uri: u, range: sym.selection_range }];
-                    }
-                }
-            }
-        }
+        let locs = symbols_in_package(idx, name, &pkg);
+        if !locs.is_empty() { return locs; }
 
         // b) rg scoped to the package directory for unindexed files
         let root_guard = idx.workspace_root.read().unwrap();
