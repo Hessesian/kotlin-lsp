@@ -1,7 +1,7 @@
 use tree_sitter::{Node, Parser, Query, QueryCursor};
 use tower_lsp::lsp_types::{Position, Range, SymbolKind};
 
-use crate::indexer::NodeExt;
+use crate::indexer::{last_segment, NodeExt};
 use crate::queries::{self, KOTLIN_DEFINITIONS, SWIFT_DEFINITIONS};
 use crate::types::{FileData, ImportEntry, SymbolEntry, SyntaxError, Visibility};
 
@@ -606,14 +606,14 @@ fn is_ident(s: &str) -> bool {
         && s.chars().all(|c| c.is_alphanumeric() || c == '_')
 }
 
-fn last_segment(dotted: &str) -> &str {
-    dotted.rsplit('.').next().unwrap_or(dotted)
-}
-
 // ─── package + import extraction ─────────────────────────────────────────────
 //
 // Uses a manual BFS rather than queries to avoid the pattern-overlap problem
 // (plain-import query would also fire on star / alias imports).
+
+const IMPORT_KW: &str = "import ";
+const STATIC_KW: &str = "static ";
+const IMPORT_ALIAS_KW: &str = " as ";
 
 fn extract_package_and_imports(root: tree_sitter::Node, bytes: &[u8], data: &mut FileData) {
     // Only need the top of the file: package_header and import_list are always
@@ -691,8 +691,8 @@ pub fn parse_imports_from_lines(lines: &[String]) -> Vec<crate::types::ImportEnt
     let mut imports = Vec::new();
     for line in lines {
         let trimmed = line.trim_start();
-        if !trimmed.starts_with("import ") { continue; }
-        let rest_raw = trimmed["import ".len()..].trim();
+        if !trimmed.starts_with(IMPORT_KW) { continue; }
+        let rest_raw = trimmed[IMPORT_KW.len()..].trim();
         if rest_raw.is_empty() { continue; }
         // Strip inline comments (e.g. `import foo.Bar // generated`)
         let rest = if let Some(ci) = rest_raw.find("//") {
@@ -703,10 +703,10 @@ pub fn parse_imports_from_lines(lines: &[String]) -> Vec<crate::types::ImportEnt
         if rest.is_empty() { continue; }
         // Trim optional trailing `;` (Java-style imports) and skip Java's `static` modifier.
         let rest = rest.trim_end_matches(';').trim_end();
-        let rest = rest.strip_prefix("static ").map(str::trim_start).unwrap_or(rest);
+        let rest = rest.strip_prefix(STATIC_KW).map(str::trim_start).unwrap_or(rest);
         let is_star = rest.ends_with(".*");
-        let (path_part, alias) = if let Some(idx) = rest.find(" as ") {
-            (&rest[..idx], Some(rest[idx + " as ".len()..].trim().to_owned()))
+        let (path_part, alias) = if let Some(idx) = rest.find(IMPORT_ALIAS_KW) {
+            (&rest[..idx], Some(rest[idx + IMPORT_ALIAS_KW.len()..].trim().to_owned()))
         } else {
             (rest, None)
         };

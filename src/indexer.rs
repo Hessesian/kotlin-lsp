@@ -537,6 +537,12 @@ pub(crate) fn dotted_ident_prefix(s: &str) -> String {
     s.chars().take_while(|&c| is_id_char(c) || c == '.').collect()
 }
 
+/// Returns the trailing dot-separated segment of a dotted path.
+/// E.g. `"com.example.Foo"` → `"Foo"`, `"Foo"` → `"Foo"`.
+pub(crate) fn last_segment(dotted: &str) -> &str {
+    dotted.rsplit('.').next().unwrap_or(dotted)
+}
+
 // ─── rg cross-file fallback ──────────────────────────────────────────────────
 
 // ─── tests ───────────────────────────────────────────────────────────────────

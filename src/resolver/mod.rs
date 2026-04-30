@@ -23,7 +23,7 @@ use std::process::Command;
 
 use tower_lsp::lsp_types::{Location, Range, TextEdit, Url};
 
-use crate::indexer::Indexer;
+use crate::indexer::{last_segment, Indexer};
 use crate::rg::{build_rg_pattern, parse_rg_line, rg_find_definition};
 use crate::types::ImportEntry;
 use crate::LinesExt;
@@ -770,10 +770,6 @@ fn rg_in_package_dir(name: &str, package: &str, root: Option<&Path>, matcher: Op
 }
 
 // ─── shared helpers ───────────────────────────────────────────────────────────
-
-fn last_segment(dotted: &str) -> &str {
-    dotted.rsplit('.').next().unwrap_or(dotted)
-}
 
 /// Returns true for packages whose sources aren't present in a typical project.
 ///
