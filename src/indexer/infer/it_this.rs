@@ -32,12 +32,11 @@ use super::{
     find_named_param_type_in_sig,
     has_named_params_not_it,
     extract_first_arg,
-    cst_call_fn_name,
-    cst_named_arg_label,
-    cst_value_arg_position,
     // deps.rs
     InferDeps,
 };
+
+use crate::indexer::NodeExt;
 
 // ── from indexer.rs (parent of infer; descendants can access private items) ──
 use super::super::{
@@ -284,20 +283,11 @@ pub(crate) fn lambda_receiver_type_from_context(
 /// Returns `true` if `lambda_node` (a `lambda_literal` CST node) has a
 /// `lambda_parameters` child that contains at least one named parameter that
 /// is neither `it` nor `_`.
+///
+/// Thin wrapper around [`NodeExt::has_lambda_named_params`] kept for
+/// `super::` access in the companion test module.
 pub(super) fn has_lambda_named_params(lambda_node: tree_sitter::Node<'_>, bytes: &[u8]) -> bool {
-    let Some(lp) = (0..lambda_node.child_count())
-        .filter_map(|i| lambda_node.child(i))
-        .find(|c| c.kind() == "lambda_parameters")
-    else { return false; };
-
-    (0..lp.child_count())
-        .filter_map(|i| lp.child(i))
-        .filter(|c| c.kind() == "variable_declaration")
-        .any(|vd| {
-            let Some(si) = vd.child(0).filter(|n| n.kind() == "simple_identifier") else { return false; };
-            let Ok(name) = std::str::from_utf8(&bytes[si.byte_range()]) else { return false; };
-            name != "it" && name != "_"
-        })
+    lambda_node.has_lambda_named_params(bytes)
 }
 
 /// Walk ancestors from `start_node` looking for a `lambda_literal` without
@@ -315,7 +305,7 @@ fn cst_it_or_this_type(
 ) -> Option<String> {
     let mut cur = start_node;
     loop {
-        if cur.kind() == "lambda_literal" && !has_lambda_named_params(cur, &doc.bytes) {
+        if cur.kind() == "lambda_literal" && !cur.has_lambda_named_params(&doc.bytes) {
             // Extract text of the lambda-opening line up to the `{`.
             let brace_byte = cur.start_byte();
             let line_start = doc.bytes[..brace_byte]
@@ -345,7 +335,7 @@ fn cst_it_or_this_type(
                 if result.is_some() { return result; }
             }
         }
-        let Some(p) = cur.parent() else { return None; };
+        let p = cur.parent()?;
         cur = p;
     }
 }
@@ -590,7 +580,7 @@ fn lambda_receiver_type_named_arg_ml(
         let outer = &callee_full[..dot];
         // Find outer class file; try indexed files first (no rg), then rg fallback.
         let outer_file: Option<String> = {
-            let locs = crate::resolver::resolve_symbol_no_rg(idx, outer, uri);
+            let locs = idx.resolve_symbol_no_rg(outer, uri);
             locs.first().map(|l| l.uri.to_string())
                 .or_else(|| {
                     // On-demand: use rg to find and index the outer class.
@@ -660,12 +650,12 @@ fn cst_lambda_param_type_via_call(
                     if p.kind() == "call_expression" { break p; }
                     node = p;
                 };
-                let fn_name = cst_call_fn_name(call_expr, bytes)?;
+                let fn_name = call_expr.call_fn_name(bytes)?;
                 let sig = deps.find_fun_params_text(&fn_name, uri)?;
-                let param_type = if let Some(label) = cst_named_arg_label(parent, bytes) {
+                let param_type = if let Some(label) = parent.named_arg_label(bytes) {
                     find_named_param_type_in_sig(&sig, &label)
                 } else {
-                    nth_fun_param_type_str(&sig, cst_value_arg_position(parent))
+                    nth_fun_param_type_str(&sig, parent.value_arg_position())
                 }?;
                 return lambda_type_first_input(&param_type);
             }
@@ -673,7 +663,7 @@ fn cst_lambda_param_type_via_call(
                 // Trailing lambda: `fn(...) { it }` or `fn { it }`.
                 let call_expr = parent.parent()?;
                 if call_expr.kind() != "call_expression" { cur = parent; continue; }
-                let fn_name = cst_call_fn_name(call_expr, bytes)?;
+                let fn_name = call_expr.call_fn_name(bytes)?;
                 let sig = deps.find_fun_params_text(&fn_name, uri)?;
                 let last_type = last_fun_param_type_str(&sig)?;
                 return lambda_type_first_input(&last_type);

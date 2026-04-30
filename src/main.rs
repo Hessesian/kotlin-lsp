@@ -1,6 +1,7 @@
 mod backend;
 mod inlay_hints;
 mod indexer;
+mod lines_ext;
 mod parser;
 mod queries;
 mod resolver;
@@ -9,6 +10,8 @@ mod stdlib;
 mod stdlib_tail;
 mod task_runner;
 mod types;
+
+pub(crate) use lines_ext::LinesExt;
 
 use tower_lsp::{LspService, Server};
 

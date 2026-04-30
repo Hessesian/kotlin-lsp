@@ -460,7 +460,7 @@ impl Indexer {
             tokio::spawn(async move {
                 let _permit = sem.acquire_owned().await.expect("semaphore closed");
                 tokio::task::spawn_blocking(move || {
-                    let locs = crate::resolver::resolve_symbol(&idx, &type_name, None, &uri2);
+                    let locs = idx.resolve_symbol(&type_name, None, &uri2);
                     if let Some(loc) = locs.first() {
                         let file_uri = loc.uri.to_string();
                         if idx.completion_cache.contains_key(&file_uri) { return; }

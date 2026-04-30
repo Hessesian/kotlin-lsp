@@ -26,6 +26,7 @@ pub(crate) use lambda::{
 
 pub(crate) use sig::{
     collect_signature,
+    collect_params_from_line,
     find_fun_signature_full,
     find_fun_signature_with_receiver,
     collect_all_fun_params_texts,
@@ -40,9 +41,6 @@ pub(crate) use args::{
     extract_named_arg_name,
     find_named_param_type_in_sig,
     has_named_params_not_it,
-    cst_call_fn_name,
-    cst_named_arg_label,
-    cst_value_arg_position,
 };
 
 pub(crate) use it_this::{

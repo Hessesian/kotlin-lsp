@@ -1,6 +1,7 @@
 use tower_lsp::lsp_types::{Position, Range, Url};
 
 use crate::indexer::Indexer;
+use crate::LinesExt;
 
 // ─── Receiver type resolution ─────────────────────────────────────────────────
 
@@ -73,7 +74,7 @@ pub(crate) fn infer_variable_type(idx: &Indexer, var_name: &str, uri: &Url) -> O
     // Prefer live_lines: updated synchronously on every keystroke, so they
     // reflect unsaved edits that the indexed snapshot may not yet contain.
     if let Some(ll) = idx.live_lines.get(uri.as_str()) {
-        if let result @ Some(_) = infer_type_in_lines(&ll, var_name) {
+        if let result @ Some(_) = ll.infer_type(var_name) {
             return result;
         }
     }
@@ -84,13 +85,13 @@ pub(crate) fn infer_variable_type(idx: &Indexer, var_name: &str, uri: &Url) -> O
         if !data.declared_names.iter().any(|n| n == var_name) {
             return None;
         }
-        return infer_type_in_lines(&data.lines, var_name);
+        return data.lines.infer_type(var_name);
     }
     // File not indexed yet — read from disk.
     let path = uri.to_file_path().ok()?;
     let content = std::fs::read_to_string(&path).ok()?;
     let lines: Vec<String> = content.lines().map(String::from).collect();
-    infer_type_in_lines(&lines, var_name)
+    lines.infer_type(var_name)
 }
 
 /// Like [`infer_variable_type`] but preserves generic parameters in the returned
@@ -99,17 +100,17 @@ pub(crate) fn infer_variable_type(idx: &Indexer, var_name: &str, uri: &Url) -> O
 /// Used by the `it`-completion path to extract the collection element type.
 pub fn infer_variable_type_raw(idx: &Indexer, var_name: &str, uri: &Url) -> Option<String> {
     if let Some(ll) = idx.live_lines.get(uri.as_str()) {
-        if let result @ Some(_) = infer_type_in_lines_raw(&ll, var_name) {
+        if let result @ Some(_) = ll.infer_type_raw(var_name) {
             return result;
         }
     }
     if let Some(data) = idx.files.get(uri.as_str()) {
-        return infer_type_in_lines_raw(&data.lines, var_name);
+        return data.lines.infer_type_raw(var_name);
     }
     let path = uri.to_file_path().ok()?;
     let content = std::fs::read_to_string(&path).ok()?;
     let lines: Vec<String> = content.lines().map(String::from).collect();
-    infer_type_in_lines_raw(&lines, var_name)
+    lines.infer_type_raw(var_name)
 }
 
 /// Extract the Kotlin/Android collection element type from a raw generic type string.
@@ -175,12 +176,26 @@ fn first_type_arg(s: &str) -> &str {
 /// the file from disk when it isn't indexed yet.
 pub(crate) fn infer_field_type(idx: &Indexer, file_uri: &str, field_name: &str) -> Option<String> {
     if let Some(data) = idx.files.get(file_uri) {
-        return infer_type_in_lines(&data.lines, field_name);
+        return data.lines.infer_type(field_name);
     }
     let path = tower_lsp::lsp_types::Url::parse(file_uri).ok()?.to_file_path().ok()?;
     let content = std::fs::read_to_string(&path).ok()?;
     let lines: Vec<String> = content.lines().map(String::from).collect();
-    infer_type_in_lines(&lines, field_name)
+    lines.infer_type(field_name)
+}
+
+// ─── impl Indexer wrappers ────────────────────────────────────────────────────
+
+impl crate::indexer::Indexer {
+    pub(crate) fn infer_variable_type(&self, var_name: &str, uri: &Url) -> Option<String> {
+        infer_variable_type(self, var_name, uri)
+    }
+    pub fn infer_variable_type_raw(&self, var_name: &str, uri: &Url) -> Option<String> {
+        infer_variable_type_raw(self, var_name, uri)
+    }
+    pub(crate) fn infer_field_type(&self, file_uri: &str, field_name: &str) -> Option<String> {
+        infer_field_type(self, file_uri, field_name)
+    }
 }
 
 /// Core line scanner: find `var_name:` in `lines` and return the type that follows.

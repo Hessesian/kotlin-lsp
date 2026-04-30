@@ -6,6 +6,7 @@
 use tower_lsp::lsp_types::Url;
 
 use crate::indexer::{Indexer, is_id_char, find_enclosing_call_name};
+use crate::indexer::NodeExt;
 use crate::indexer::infer::sig::{find_fun_signature_full, nth_fun_param_type_str, split_params_at_depth_zero};
 use crate::types::CursorPos;
 
@@ -309,63 +310,18 @@ fn cst_call_arg_type(pos: CursorPos, idx: &Indexer, uri: &Url) -> Option<String>
         }
     }?;
 
-    let fn_name = cst_call_fn_name(call_expr, bytes)?;
+    let fn_name = call_expr.call_fn_name(bytes)?;
     let sig = find_fun_signature_full(&fn_name, idx, uri)?;
 
     // Named arg: value_argument has [simple_identifier "="] prefix in grammar.
-    let param_type = if let Some(arg_name) = cst_named_arg_label(value_arg, bytes) {
+    let param_type = if let Some(arg_name) = value_arg.named_arg_label(bytes) {
         find_named_param_type_in_sig(&sig, &arg_name)
     } else {
-        nth_fun_param_type_str(&sig, cst_value_arg_position(value_arg))
+        nth_fun_param_type_str(&sig, value_arg.value_arg_position())
     }?;
 
     let base: String = param_type.trim().chars().take_while(|&c| is_id_char(c)).collect();
     if base.is_empty() { None } else { Some(base) }
-}
-
-/// Extract the function name from a `call_expression` node.
-/// Handles simple calls `foo(...)` and navigation chains `foo.bar(...)`.
-pub(crate) fn cst_call_fn_name(call_expr: tree_sitter::Node<'_>, bytes: &[u8]) -> Option<String> {
-    let callee = call_expr.child(0)?;
-    let name_node = match callee.kind() {
-        "simple_identifier" | "type_identifier" => callee,
-        "navigation_expression" => {
-            let mut walker = callee.walk();
-            callee.children(&mut walker)
-                .filter(|c| c.kind() == "simple_identifier" || c.kind() == "type_identifier")
-                .last()?
-        }
-        _ => return None,
-    };
-    std::str::from_utf8(&bytes[name_node.byte_range()]).ok().map(|s| s.to_string())
-}
-
-/// If `value_argument` has a named-arg label (`simple_identifier "="` prefix),
-/// return the label text; otherwise `None`.
-pub(crate) fn cst_named_arg_label(value_arg: tree_sitter::Node<'_>, bytes: &[u8]) -> Option<String> {
-    let count = value_arg.child_count();
-    for i in 0..count.saturating_sub(1) {
-        let (c, next) = (value_arg.child(i)?, value_arg.child(i + 1)?);
-        if c.kind() == "simple_identifier" && next.kind() == "=" {
-            return std::str::from_utf8(&bytes[c.byte_range()]).ok().map(|s| s.to_string());
-        }
-    }
-    None
-}
-
-/// Count how many `value_argument` siblings precede `value_arg` in its parent.
-pub(crate) fn cst_value_arg_position(value_arg: tree_sitter::Node<'_>) -> usize {
-    let parent = match value_arg.parent() { Some(p) => p, None => return 0 };
-    let target_id = value_arg.id();
-    let mut pos = 0usize;
-    let mut cursor = parent.walk();
-    for child in parent.children(&mut cursor) {
-        if child.kind() == "value_argument" {
-            if child.id() == target_id { break; }
-            pos += 1;
-        }
-    }
-    pos
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

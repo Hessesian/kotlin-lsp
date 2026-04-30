@@ -26,6 +26,7 @@ use tower_lsp::lsp_types::{Location, Range, TextEdit, Url};
 use crate::indexer::Indexer;
 use crate::rg::{build_rg_pattern, parse_rg_line, rg_find_definition};
 use crate::types::ImportEntry;
+use crate::LinesExt;
 
 pub mod complete;
 pub(crate) mod infer;
@@ -99,7 +100,7 @@ pub(crate) fn import_insertion_line(lines: &[String]) -> u32 {
 
 /// Build a TextEdit that inserts `import {fqn}\n` at the correct position.
 pub(crate) fn make_import_edit(fqn: &str, lines: &[String], needs_semicolon: bool) -> TextEdit {
-    let line = import_insertion_line(lines);
+    let line = lines.import_insertion_line();
     // When inserting right after the package line (no existing imports), add a blank line.
     let needs_blank = line > 0
         && lines.get((line - 1) as usize)
@@ -771,4 +772,36 @@ pub(crate) fn is_stdlib(pkg: &str) -> bool {
         | "WebKit" | "StoreKit" | "GameKit" | "ARKit" | "RealityKit"
         | "Swift" | "ObjectiveC" | "Darwin" | "Dispatch" | "os"
     )
+}
+
+// ─── impl Indexer wrappers ────────────────────────────────────────────────────
+
+impl crate::indexer::Indexer {
+    pub fn resolve_symbol(&self, name: &str, qualifier: Option<&str>, from_uri: &Url) -> Vec<Location> {
+        resolve_symbol(self, name, qualifier, from_uri)
+    }
+    pub(crate) fn resolve_symbol_inner(&self, name: &str, from_uri: &Url, with_hierarchy: bool) -> Vec<Location> {
+        resolve_symbol_inner(self, name, from_uri, with_hierarchy)
+    }
+    pub(crate) fn resolve_symbol_no_rg(&self, name: &str, from_uri: &Url) -> Vec<Location> {
+        resolve_symbol_no_rg(self, name, from_uri)
+    }
+    pub(super) fn resolve_qualified_w(&self, name: &str, qualifier: &str, from_uri: &Url) -> Vec<Location> {
+        resolve_qualified(self, name, qualifier, from_uri)
+    }
+    pub(super) fn resolve_local_w(&self, name: &str, uri: &Url) -> Vec<Location> {
+        resolve_local(self, name, uri)
+    }
+    pub(super) fn resolve_via_imports_w(&self, name: &str, uri: &Url) -> Vec<Location> {
+        resolve_via_imports(self, name, uri)
+    }
+    pub(super) fn resolve_same_package_w(&self, name: &str, uri: &Url) -> Vec<Location> {
+        resolve_same_package(self, name, uri)
+    }
+    pub(super) fn resolve_star_imports_w(&self, name: &str, uri: &Url) -> Vec<Location> {
+        resolve_star_imports(self, name, uri)
+    }
+    pub(crate) fn fqns_for_name(&self, name: &str) -> Vec<String> {
+        fqns_for_name(self, name)
+    }
 }
