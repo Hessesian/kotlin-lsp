@@ -445,6 +445,61 @@ impl Backend {
 
         Ok(if ranges.is_empty() { None } else { Some(ranges) })
     }
+
+    // ── textDocument/documentHighlight ───────────────────────────────────────
+
+    pub(super) async fn document_highlight_impl(
+        &self,
+        params: DocumentHighlightParams,
+    ) -> Result<Option<Vec<DocumentHighlight>>> {
+        use tower_lsp::lsp_types::{DocumentHighlight, DocumentHighlightKind};
+
+        let uri = &params.text_document_position_params.text_document.uri;
+        let pos = params.text_document_position_params.position;
+
+        let Some((name, _)) = self.indexer.word_and_qualifier_at(uri, pos) else {
+            return Ok(None);
+        };
+
+        // Collect definition line numbers in this file so we can mark them
+        // as Write highlights; all other occurrences are Read.
+        let decl_lines: std::collections::HashSet<u32> = self
+            .indexer
+            .definitions
+            .get(&name)
+            .map(|locs| {
+                locs.iter()
+                    .filter(|l| l.uri == *uri)
+                    .map(|l| l.range.start.line)
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let data = match self.indexer.files.get(uri.as_str()) {
+            Some(d) => d,
+            None    => return Ok(None),
+        };
+
+        let mut highlights = Vec::new();
+        for (line_idx, line) in data.lines.iter().enumerate() {
+            for abs in word_byte_offsets(line, &name) {
+                let col: u32 = line[..abs].chars().map(|c| c.len_utf16() as u32).sum();
+                let col_end: u32 = col + name.chars().map(|c| c.len_utf16() as u32).sum::<u32>();
+                let range = Range::new(
+                    Position::new(line_idx as u32, col),
+                    Position::new(line_idx as u32, col_end),
+                );
+                let kind = if decl_lines.contains(&(line_idx as u32)) {
+                    DocumentHighlightKind::WRITE
+                } else {
+                    DocumentHighlightKind::READ
+                };
+                highlights.push(DocumentHighlight { range, kind: Some(kind) });
+            }
+        }
+
+        Ok(if highlights.is_empty() { None } else { Some(highlights) })
+    }
 }
 
 // ─── Private helpers for signature_help_impl ─────────────────────────────────

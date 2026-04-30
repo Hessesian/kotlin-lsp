@@ -199,8 +199,9 @@ impl LanguageServer for Backend {
                 hover_provider:          Some(HoverProviderCapability::Simple(true)),
                 definition_provider:     Some(OneOf::Left(true)),
                 implementation_provider: Some(ImplementationProviderCapability::Simple(true)),
-                references_provider:     Some(OneOf::Left(true)),
-                document_symbol_provider: Some(OneOf::Left(true)),
+                references_provider:          Some(OneOf::Left(true)),
+                document_highlight_provider:  Some(OneOf::Left(true)),
+                document_symbol_provider:     Some(OneOf::Left(true)),
                 inlay_hint_provider: Some(OneOf::Left(true)),
                 workspace: Some(WorkspaceServerCapabilities {
                     workspace_folders: None,
@@ -560,6 +561,30 @@ impl LanguageServer for Backend {
         self.client.publish_diagnostics(params.text_document.uri, Vec::new(), None).await;
     }
 
+    // ── textDocument/didSave ─────────────────────────────────────────────────
+
+    async fn did_save(&self, params: DidSaveTextDocumentParams) {
+        // Re-index the saved file so the symbol index stays consistent with
+        // what is on disk (e.g. after an external format or code-gen step).
+        let uri = params.text_document.uri;
+        let idx = Arc::clone(&self.indexer);
+        let sem = idx.parse_sem();
+        tokio::task::spawn(async move {
+            if let Ok(path) = uri.to_file_path() {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if let Ok(permit) = sem.acquire_owned().await {
+                        tokio::task::spawn_blocking(move || {
+                            let _permit = permit;
+                            idx.index_content(&uri, &content);
+                        })
+                        .await
+                        .ok();
+                    }
+                }
+            }
+        });
+    }
+
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
         // Re-index any *.kt / *.java file that changed on disk.
         // This fires after workspace/rename edits are applied to closed files,
@@ -646,6 +671,15 @@ impl LanguageServer for Backend {
 
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
         self.references_impl(params).await
+    }
+
+    // ── textDocument/documentHighlight ───────────────────────────────────────
+
+    async fn document_highlight(
+        &self,
+        params: DocumentHighlightParams,
+    ) -> Result<Option<Vec<DocumentHighlight>>> {
+        self.document_highlight_impl(params).await
     }
 
     // ── textDocument/documentSymbol ──────────────────────────────────────────
