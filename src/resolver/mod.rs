@@ -28,6 +28,7 @@ use crate::StrExt;
 use crate::rg::{build_rg_pattern, parse_rg_line, rg_find_definition};
 use crate::types::ImportEntry;
 use crate::LinesExt;
+use crate::parser::parse_by_extension;
 
 pub mod complete;
 pub(crate) mod infer;
@@ -569,7 +570,7 @@ fn parse_fd_hits(stdout: &[u8], symbol_name: &str, expected_pkg: Option<&str>) -
         let Ok(uri) = tower_lsp::lsp_types::Url::from_file_path(path) else { continue };
         let Ok(content) = std::fs::read_to_string(path) else { continue };
 
-        let file_data = crate::parser::parse_by_extension(path_str, &content);
+        let file_data = parse_by_extension(path_str, &content);
         let Some(sym) = file_data.symbols.iter().find(|s| s.name == symbol_name) else { continue };
 
         let loc = tower_lsp::lsp_types::Location { uri, range: sym.selection_range };
@@ -707,7 +708,7 @@ fn resolve_from_class_hierarchy(
         let path = from_uri.to_file_path().ok();
         let content = path.and_then(|p| std::fs::read_to_string(p).ok());
         match content {
-            Some(c) => crate::parser::parse_by_extension(from_uri.path(), &c)
+            Some(c) => parse_by_extension(from_uri.path(), &c)
                 .supers.iter().map(|(_, n)| n.clone()).collect(),
             None => return vec![],
         }

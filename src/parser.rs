@@ -1024,6 +1024,7 @@ impl crate::types::FileData {
 mod tests {
     use super::*;
     use tower_lsp::lsp_types::{Position, SymbolKind};
+    use crate::resolver::complete_symbol;
 
     fn uri(path: &str) -> tower_lsp::lsp_types::Url {
         tower_lsp::lsp_types::Url::parse(&format!("file:///test{path}")).unwrap()
@@ -1335,7 +1336,7 @@ mod tests {
 
         let (items, _) = idx.completions(&vm_uri, tower_lsp::lsp_types::Position::new(2, 24), true); // after "private val repo: Repo"
         // Trigger a dot completion manually through resolver
-        let (items, _) = crate::resolver::complete_symbol(
+        let (items, _) = complete_symbol(
             &idx, "", Some("repo"), &vm_uri, true
         );
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();

@@ -26,6 +26,8 @@ use tower_lsp::lsp_types::*;
 use crate::indexer::discover::find_source_files_unconstrained;
 use crate::types::{FileData, FileIndexResult, WorkspaceIndexResult};
 use crate::StrExt;
+use crate::parser::parse_by_extension;
+use crate::resolver::symbols_from_uri_as_completions_pub;
 use super::{FileContributions, StaleKeys, Indexer};
 
 // ─── hash helper ─────────────────────────────────────────────────────────────
@@ -128,7 +130,7 @@ impl Indexer {
     /// Parse a single file via tree-sitter and extract symbols, supertypes, and a
     /// content hash.  Pure — no writes to any `Indexer` field.
     pub fn parse_file(uri: &Url, content: &str) -> FileIndexResult {
-        let data = crate::parser::parse_by_extension(uri.path(), content);
+        let data = parse_by_extension(uri.path(), content);
         let hash = hash_str(content);
 
         // Extract supertype relationships for goToImplementation.
@@ -463,7 +465,7 @@ impl Indexer {
                     if let Some(loc) = locs.first() {
                         let file_uri = loc.uri.to_string();
                         if idx.completion_cache.contains_key(&file_uri) { return; }
-                        crate::resolver::symbols_from_uri_as_completions_pub(&idx, &file_uri);
+                        symbols_from_uri_as_completions_pub(&idx, &file_uri);
                     }
                 }).await.ok();
             });

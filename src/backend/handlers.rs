@@ -2,6 +2,7 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use crate::indexer::find_fun_signature_with_receiver;
 use crate::indexer::NodeExt;
+use crate::StrExt;
 use crate::queries::KIND_VALUE_ARG;
 use super::Backend;
 use super::cursor::CursorContext;
@@ -565,7 +566,7 @@ fn find_call_open_on_line(line: &str) -> Option<(String, Option<String>)> {
         .collect::<Vec<_>>().into_iter().rev()
     {
         let before_paren = &line[..p];
-        let name = crate::indexer::last_ident_in(before_paren);
+        let name = before_paren.last_ident_in();
         if !name.is_empty() && !is_non_call_keyword(name) {
             let net: i32 = line[p..].chars()
                 .map(|c| match c { '(' => 1, ')' => -1, _ => 0 }).sum();
@@ -573,7 +574,7 @@ fn find_call_open_on_line(line: &str) -> Option<(String, Option<String>)> {
                 // Qualifier before the dot on the same line.
                 let before_name = &before_paren[..before_paren.len() - name.len()];
                 let qualifier = if before_name.ends_with('.') {
-                    let q = crate::indexer::last_ident_in(before_name.strip_suffix('.').unwrap_or(before_name));
+                    let q = before_name.strip_suffix('.').unwrap_or(before_name).last_ident_in();
                     if q.is_empty() { None } else { Some(q.to_owned()) }
                 } else { None };
                 return Some((name.to_owned(), qualifier));

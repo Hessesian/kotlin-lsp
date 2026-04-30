@@ -39,6 +39,7 @@ use super::{
 use crate::indexer::NodeExt;
 use crate::queries::{KIND_LAMBDA_LIT, KIND_CALL_EXPR};
 use crate::StrExt;
+use crate::resolver::extract_collection_element_type;
 
 // ── from indexer.rs (parent of infer; descendants can access private items) ──
 use super::super::{
@@ -234,7 +235,7 @@ pub(crate) fn lambda_receiver_type_from_context(
 
         if !receiver_var.is_empty() {
             if let Some(raw) = deps.find_var_type(receiver_var, uri) {
-                if let Some(elem) = crate::resolver::extract_collection_element_type(&raw) {
+                if let Some(elem) = extract_collection_element_type(&raw) {
                     return Some(elem);
                 }
                 // Non-collection receiver: prefer the method's own lambda param type when

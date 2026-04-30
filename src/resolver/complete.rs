@@ -7,6 +7,7 @@ use crate::indexer::Indexer;
 use crate::types::Visibility;
 use crate::LinesExt;
 use crate::StrExt;
+use crate::parser::parse_by_extension;
 
 use super::{fqns_for_name, already_imported,
             resolve_symbol_inner, resolve_symbol_no_rg};
@@ -270,7 +271,7 @@ fn symbols_from_nested_type(
         let url = match Url::parse(file_uri) { Ok(u) => u, Err(_) => return vec![] };
         let path = match url.to_file_path() { Ok(p) => p, Err(_) => return vec![] };
         let content = match std::fs::read_to_string(&path) { Ok(c) => c, Err(_) => return vec![] };
-        owned = crate::parser::parse_by_extension(file_uri, &content);
+        owned = parse_by_extension(file_uri, &content);
         &owned.symbols
     };
 
@@ -582,7 +583,7 @@ fn build_completion_items(idx: &Indexer, file_uri: &str) -> Vec<CompletionItem> 
     if let Ok(url) = Url::parse(file_uri) {
         if let Ok(path) = url.to_file_path() {
             if let Ok(content) = std::fs::read_to_string(&path) {
-                let file_data = crate::parser::parse_by_extension(file_uri, &content);
+                let file_data = parse_by_extension(file_uri, &content);
                 for sym in &file_data.symbols {
                     let ck       = symbol_kind_to_completion(sym.kind);
                     let vt       = vis_tag(sym.visibility);
