@@ -2,7 +2,10 @@ use tree_sitter::{Node, Parser, Query, QueryCursor};
 use tower_lsp::lsp_types::{Position, Range, SymbolKind};
 
 use crate::indexer::NodeExt;
-use crate::queries::{self, KOTLIN_DEFINITIONS, SWIFT_DEFINITIONS};
+use crate::StrExt;
+use crate::queries::{self, KOTLIN_DEFINITIONS, SWIFT_DEFINITIONS,
+    KIND_SIMPLE_IDENT, KIND_TYPE_IDENT, KIND_IDENTIFIER,
+    KIND_USER_TYPE, KIND_FUN_DECL};
 use crate::types::{FileData, ImportEntry, SymbolEntry, SyntaxError, Visibility};
 
 type MatchEntry = (usize, [Option<(String, Range, Range)>; 2]);
@@ -170,7 +173,7 @@ fn map_def_captures<'c, 't>(
         if cap.index == def_idx {
             def_range = Some(ts_to_lsp(cap.node.range()));
         } else if cap.index == name_idx {
-            name_text  = cap.node.utf8_text(bytes).ok().map(str::to_owned);
+            name_text  = cap.node.utf8_text_owned(bytes);
             name_range = Some(ts_to_lsp(cap.node.range()));
         }
     }
@@ -255,16 +258,12 @@ fn extract_java(node: &Node, bytes: &[u8], data: &mut FileData) {
 
 /// Returns true if the Java node's modifiers child contains ALL of `required` keywords.
 fn java_node_has_modifiers(node: &Node, required: &[&str]) -> bool {
-    let mut cur = node.walk();
-    for child in node.children(&mut cur) {
-        if child.kind() == "modifiers" {
-            // Collect modifier keyword kinds into a Vec first to avoid walker lifetime issues.
-            let mut mc = child.walk();
-            let found_kinds: Vec<&str> = child.children(&mut mc).map(|k| k.kind()).collect();
-            return required.iter().all(|&req| found_kinds.contains(&req));
-        }
-    }
-    false
+    let Some(mods) = node.first_child_of_kind("modifiers") else { return false; };
+    let found_kinds: Vec<&str> = (0..mods.child_count())
+        .filter_map(|i| mods.child(i))
+        .map(|c| c.kind())
+        .collect();
+    required.iter().all(|&req| found_kinds.contains(&req))
 }
 
 fn push_field_declaration(node: &Node, bytes: &[u8], data: &mut FileData) {
@@ -277,19 +276,16 @@ fn push_field_declaration(node: &Node, bytes: &[u8], data: &mut FileData) {
     let nr = ts_to_lsp(node.range());
     let vis = visibility_at_line(&data.lines, node.range().start_point.row);
     let detail = extract_detail(&data.lines, nr.start.line, nr.end.line);
-    let mut cur = node.walk();
-    for child in node.children(&mut cur) {
-        if child.kind() == "variable_declarator" {
-            if let Some((name, sel)) = first_identifier(&child, bytes) {
-                data.symbols.push(SymbolEntry {
-                    name,
-                    kind,
-                    visibility: vis,
-                    range: nr,
-                    selection_range: sel,
-                    detail: detail.clone(),
-                });
-            }
+    for child in node.children_of_kind("variable_declarator") {
+        if let Some((name, sel)) = first_identifier(&child, bytes) {
+            data.symbols.push(SymbolEntry {
+                name,
+                kind,
+                visibility: vis,
+                range: nr,
+                selection_range: sel,
+                detail: detail.clone(),
+            });
         }
     }
 }
@@ -300,7 +296,7 @@ fn push_java_import(node: &Node, bytes: &[u8], data: &mut FileData) {
         if matches!(child.kind(), "scoped_identifier" | "identifier") {
             if let Ok(txt) = child.utf8_text(bytes) {
                 let full_path  = txt.to_owned();
-                let local_name = last_segment(&full_path).to_owned();
+                let local_name = full_path.last_segment().to_owned();
                 data.imports.push(ImportEntry { full_path, local_name, is_star: false });
             }
             return;
@@ -383,14 +379,14 @@ fn is_fun_interface_error(node: &Node, bytes: &[u8]) -> bool {
 /// simple_identifier present after it (directly or as first child of ERROR).
 /// Returns (name_start_byte, name_end_byte, node_range) or None.
 fn fun_interface_name_from_fn_decl(node: &Node, bytes: &[u8]) -> Option<(usize, usize, tree_sitter::Range)> {
-    if node.kind() != "function_declaration" { return None; }
+    if node.kind() != KIND_FUN_DECL { return None; }
     if !node.has_error() { return None; }
     let mut after_interface = false;
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         if after_interface {
             // Direct simple_identifier child (@annotation case: "simple_identifier Factory")
-            if child.kind() == "simple_identifier" {
+            if child.kind() == KIND_SIMPLE_IDENT {
                 return Some((child.start_byte(), child.end_byte(), child.range()));
             }
             // ERROR child containing simple_identifier as first meaningful child
@@ -399,14 +395,14 @@ fn fun_interface_name_from_fn_decl(node: &Node, bytes: &[u8]) -> Option<(usize, 
                 let mut ec = child.walk();
                 let info = child.children(&mut ec)
                     .next()
-                    .filter(|c| c.kind() == "simple_identifier")
+                    .filter(|c| c.kind() == KIND_SIMPLE_IDENT)
                     .map(|c| (c.start_byte(), c.end_byte(), c.range()));
                 if let Some(loc) = info {
                     return Some(loc);
                 }
             }
         }
-        if child.kind() == "user_type" && child.utf8_text(bytes).unwrap_or("") == "interface" {
+        if child.kind() == KIND_USER_TYPE && child.utf8_text(bytes).unwrap_or("") == "interface" {
             after_interface = true;
         }
     }
@@ -433,13 +429,9 @@ fn extract_fun_interfaces(root: Node, bytes: &[u8], data: &mut FileData) {
     while let Some(node) = stack.pop() {
         // Case 1: no-modifier `fun interface` → ERROR node
         if node.is_error() && is_fun_interface_error(&node, bytes) {
-            let mut cur = node.walk();
-            for child in node.children(&mut cur) {
-                if child.kind() == "simple_identifier" {
-                    if let Ok(name) = child.utf8_text(bytes) {
-                        push_interface_symbol(name, &node, child.range(), data);
-                    }
-                    break;
+            if let Some(child) = node.first_child_of_kind(KIND_SIMPLE_IDENT) {
+                if let Ok(name) = child.utf8_text(bytes) {
+                    push_interface_symbol(name, &node, child.range(), data);
                 }
             }
             // Don't recurse further into ERROR children.
@@ -606,14 +598,14 @@ fn is_ident(s: &str) -> bool {
         && s.chars().all(|c| c.is_alphanumeric() || c == '_')
 }
 
-fn last_segment(dotted: &str) -> &str {
-    dotted.rsplit('.').next().unwrap_or(dotted)
-}
-
 // ─── package + import extraction ─────────────────────────────────────────────
 //
 // Uses a manual BFS rather than queries to avoid the pattern-overlap problem
 // (plain-import query would also fire on star / alias imports).
+
+const IMPORT_KW: &str = "import ";
+const STATIC_KW: &str = "static ";
+const IMPORT_ALIAS_KW: &str = " as ";
 
 fn extract_package_and_imports(root: tree_sitter::Node, bytes: &[u8], data: &mut FileData) {
     // Only need the top of the file: package_header and import_list are always
@@ -623,22 +615,13 @@ fn extract_package_and_imports(root: tree_sitter::Node, bytes: &[u8], data: &mut
         match node.kind() {
             "package_header" => {
                 // (package_header "package" (identifier ...))
-                let mut c = node.walk();
-                for child in node.children(&mut c) {
-                    if child.kind() == "identifier" {
-                        if let Ok(txt) = child.utf8_text(bytes) {
-                            data.package = Some(txt.to_owned());
-                        }
-                        break;
-                    }
+                if let Some(child) = node.first_child_of_kind(KIND_IDENTIFIER) {
+                    data.package = child.utf8_text_owned(bytes);
                 }
             }
             "import_list" => {
-                let mut lc = node.walk();
-                for header in node.children(&mut lc) {
-                    if header.kind() == "import_header" {
-                        parse_import_header(&header, bytes, data);
-                    }
+                for header in node.children_of_kind("import_header") {
+                    parse_import_header(&header, bytes, data);
                 }
             }
             _ => {}
@@ -655,17 +638,12 @@ fn parse_import_header(header: &tree_sitter::Node, bytes: &[u8], data: &mut File
     for child in header.children(&mut cur) {
         match child.kind() {
             "identifier" => {
-                path_text = child.utf8_text(bytes).ok().map(str::to_owned);
+                path_text = child.utf8_text_owned(bytes);
             }
             "import_alias" => {
                 // (import_alias "as" (type_identifier))
-                let mut ac = child.walk();
-                for ac_child in child.children(&mut ac) {
-                    if ac_child.kind() == "type_identifier" {
-                        alias_text = ac_child.utf8_text(bytes).ok().map(str::to_owned);
-                        break;
-                    }
-                }
+                alias_text = child.first_child_of_kind(KIND_TYPE_IDENT)
+                    .and_then(|c| c.utf8_text_owned(bytes));
             }
             "wildcard_import" => {
                 is_star = true;
@@ -678,7 +656,7 @@ fn parse_import_header(header: &tree_sitter::Node, bytes: &[u8], data: &mut File
         let local_name = if is_star {
             "*".to_owned()
         } else {
-            alias_text.unwrap_or_else(|| last_segment(&full_path).to_owned())
+            alias_text.unwrap_or_else(|| full_path.last_segment().to_owned())
         };
         data.imports.push(ImportEntry { full_path, local_name, is_star });
     }
@@ -691,8 +669,8 @@ pub fn parse_imports_from_lines(lines: &[String]) -> Vec<crate::types::ImportEnt
     let mut imports = Vec::new();
     for line in lines {
         let trimmed = line.trim_start();
-        if !trimmed.starts_with("import ") { continue; }
-        let rest_raw = trimmed["import ".len()..].trim();
+        if !trimmed.starts_with(IMPORT_KW) { continue; }
+        let rest_raw = trimmed[IMPORT_KW.len()..].trim();
         if rest_raw.is_empty() { continue; }
         // Strip inline comments (e.g. `import foo.Bar // generated`)
         let rest = if let Some(ci) = rest_raw.find("//") {
@@ -703,10 +681,10 @@ pub fn parse_imports_from_lines(lines: &[String]) -> Vec<crate::types::ImportEnt
         if rest.is_empty() { continue; }
         // Trim optional trailing `;` (Java-style imports) and skip Java's `static` modifier.
         let rest = rest.trim_end_matches(';').trim_end();
-        let rest = rest.strip_prefix("static ").map(str::trim_start).unwrap_or(rest);
+        let rest = rest.strip_prefix(STATIC_KW).map(str::trim_start).unwrap_or(rest);
         let is_star = rest.ends_with(".*");
-        let (path_part, alias) = if let Some(idx) = rest.find(" as ") {
-            (&rest[..idx], Some(rest[idx + " as ".len()..].trim().to_owned()))
+        let (path_part, alias) = if let Some(idx) = rest.find(IMPORT_ALIAS_KW) {
+            (&rest[..idx], Some(rest[idx + IMPORT_ALIAS_KW.len()..].trim().to_owned()))
         } else {
             (rest, None)
         };
@@ -731,13 +709,8 @@ pub fn parse_imports_from_lines(lines: &[String]) -> Vec<crate::types::ImportEnt
 
 /// Extract the import path text from an `import_declaration` node, if present.
 fn swift_import_path<'a>(node: tree_sitter::Node<'a>, bytes: &'a [u8]) -> Option<&'a str> {
-    let mut cur = node.walk();
-    for child in node.children(&mut cur) {
-        if child.kind() == "identifier" {
-            return child.utf8_text(bytes).ok();
-        }
-    }
-    None
+    node.first_child_of_kind(KIND_IDENTIFIER)
+        .and_then(|c| c.utf8_text(bytes).ok())
 }
 
 fn extract_swift_imports(root: tree_sitter::Node, bytes: &[u8], data: &mut FileData) {
@@ -745,7 +718,7 @@ fn extract_swift_imports(root: tree_sitter::Node, bytes: &[u8], data: &mut FileD
     for node in root.children(&mut cur) {
         if node.kind() == "import_declaration" {
             if let Some(txt) = swift_import_path(node, bytes) {
-                let local = last_segment(txt);
+                let local = txt.last_segment();
                 data.imports.push(ImportEntry {
                     full_path:  txt.to_owned(),
                     local_name: local.to_owned(),
@@ -854,7 +827,7 @@ pub(crate) fn extract_declared_names(lines: &[String]) -> Vec<String> {
                 .rev()
                 .collect();
             if word.len() > 1
-                && word.chars().next().map(|c| c.is_lowercase()).unwrap_or(false)
+                && word.starts_with_lowercase()
                 && seen.insert(word.clone())
             {
                 names.push(word);
@@ -876,12 +849,9 @@ fn extract_supers_kotlin(root: Node, bytes: &[u8], data: &mut FileData) {
         match node.kind() {
             "class_declaration" | "object_declaration" => {
                 let name_line = node.name_line();
-                let mut cur = node.walk();
-                for child in node.children(&mut cur) {
-                    if child.kind() == "delegation_specifier" {
-                        if let Some(name) = super_name_from_delegation(&child, bytes) {
-                            data.supers.push((name_line, name));
-                        }
+                for child in node.children_of_kind("delegation_specifier") {
+                    if let Some(name) = super_name_from_delegation(&child, bytes) {
+                        data.supers.push((name_line, name));
                     }
                 }
             }
@@ -917,12 +887,9 @@ fn extract_supers_java(node: &Node, bytes: &[u8], data: &mut FileData) {
         }
         "interface_declaration" => {
             let name_line = node.name_line();
-            let mut cur = node.walk();
-            for child in node.children(&mut cur) {
-                if child.kind() == "extends_interfaces" {
-                    // (extends_interfaces "extends" (type_list ...))
-                    java_collect_type_list(&child, bytes, name_line, data);
-                }
+            if let Some(ext) = node.first_child_of_kind("extends_interfaces") {
+                // (extends_interfaces "extends" (type_list ...))
+                java_collect_type_list(&ext, bytes, name_line, data);
             }
         }
         _ => {}
@@ -931,13 +898,7 @@ fn extract_supers_java(node: &Node, bytes: &[u8], data: &mut FileData) {
 
 /// Returns the name of the first `user_type` child of `node`, if any.
 fn first_user_type_child_name(node: &Node, bytes: &[u8]) -> Option<String> {
-    let mut cur = node.walk();
-    for child in node.children(&mut cur) {
-        if child.kind() == "user_type" {
-            return user_type_name(&child, bytes);
-        }
-    }
-    None
+    node.first_child_of_kind(KIND_USER_TYPE).and_then(|c| user_type_name(&c, bytes))
 }
 
 /// Extract the supertype name from a `delegation_specifier` node.
@@ -996,7 +957,7 @@ fn java_first_type_name(node: &Node, bytes: &[u8]) -> Option<String> {
     while let Some(n) = stack.pop() {
         match n.kind() {
             "type_identifier" => {
-                return n.utf8_text(bytes).ok().map(str::to_owned);
+                return n.utf8_text_owned(bytes);
             }
             "scoped_type_identifier" => {
                 // Return the full dotted name (e.g. `pkg.Base`), stripping any trailing
@@ -1020,21 +981,17 @@ fn java_first_type_name(node: &Node, bytes: &[u8]) -> Option<String> {
 /// Walk a `super_interfaces` or `extends_interfaces` node, collecting all type names
 /// from its `type_list` child into `data.supers`.
 fn java_collect_type_list(node: &Node, bytes: &[u8], name_line: u32, data: &mut FileData) {
-    let mut cur = node.walk();
-    for child in node.children(&mut cur) {
-        if child.kind() == "type_list" {
-            let mut cc = child.walk();
-            for type_node in child.children(&mut cc) {
-                // type_list children may be leaf type_identifier nodes directly,
-                // or wrapper nodes (generic_type, scoped_type_identifier) containing one.
-                let name = if type_node.kind() == "type_identifier" {
-                    type_node.utf8_text(bytes).ok().map(str::to_owned)
-                } else {
-                    java_first_type_name(&type_node, bytes)
-                };
-                if let Some(n) = name { data.supers.push((name_line, n)); }
-            }
-        }
+    let Some(type_list) = node.first_child_of_kind("type_list") else { return };
+    let mut cc = type_list.walk();
+    for type_node in type_list.children(&mut cc) {
+        // type_list children may be leaf type_identifier nodes directly,
+        // or wrapper nodes (generic_type, scoped_type_identifier) containing one.
+        let name = if type_node.kind() == KIND_TYPE_IDENT {
+            type_node.utf8_text_owned(bytes)
+        } else {
+            java_first_type_name(&type_node, bytes)
+        };
+        if let Some(n) = name { data.supers.push((name_line, n)); }
     }
 }
 
@@ -1067,6 +1024,7 @@ impl crate::types::FileData {
 mod tests {
     use super::*;
     use tower_lsp::lsp_types::{Position, SymbolKind};
+    use crate::resolver::complete_symbol;
 
     fn uri(path: &str) -> tower_lsp::lsp_types::Url {
         tower_lsp::lsp_types::Url::parse(&format!("file:///test{path}")).unwrap()
@@ -1378,7 +1336,7 @@ mod tests {
 
         let (items, _) = idx.completions(&vm_uri, tower_lsp::lsp_types::Position::new(2, 24), true); // after "private val repo: Repo"
         // Trigger a dot completion manually through resolver
-        let (items, _) = crate::resolver::complete_symbol(
+        let (items, _) = complete_symbol(
             &idx, "", Some("repo"), &vm_uri, true
         );
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();

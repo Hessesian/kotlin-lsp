@@ -6,6 +6,7 @@ use std::sync::{Arc, RwLock};
 use dashmap::{DashMap, DashSet};
 use tower_lsp::lsp_types::*;
 
+use crate::StrExt;
 use crate::types::{FileData, CursorPos};
 
 // Re-export rg-module items that existing callers reach via `crate::indexer::`.
@@ -82,6 +83,7 @@ use self::cache::{FileCacheEntry, cache_entry_to_file_result};
 use crate::types::{IndexStats, FileIndexResult};
 #[cfg(test)]
 use crate::rg::regex_escape;
+use crate::resolver::{complete_symbol, complete_symbol_with_context, is_annotation_context, infer_variable_type_raw};
 #[cfg(test)]
 use std::path::Path;
 
@@ -201,7 +203,7 @@ impl crate::indexer::infer::InferDeps for Indexer {
         find_fun_signature_full(fn_name, self, uri)
     }
     fn find_var_type(&self, var_name: &str, uri: &Url) -> Option<String> {
-        crate::resolver::infer_variable_type_raw(self, var_name, uri)
+        infer_variable_type_raw(self, var_name, uri)
     }
 }
 
@@ -426,7 +428,7 @@ impl Indexer {
                 let cursor_col  = before.chars().count();
                 let elem_type = self.resolve_lambda_recv_type(recv, before, cursor_line, cursor_col, uri);
                 if let Some(elem_type) = elem_type {
-                    let (items, _) = crate::resolver::complete_symbol(self, prefix, Some(&elem_type), uri, snippets);
+                    let (items, _) = complete_symbol(self, prefix, Some(&elem_type), uri, snippets);
                     if items.is_empty() {
                         // Type name known (e.g. generic param `T`, `StateType`) but not
                         // indexed — show a single hint item so the user sees the inferred type.
@@ -446,8 +448,8 @@ impl Indexer {
         }
 
         let annotation_only = dot_recv.is_none()
-            && crate::resolver::is_annotation_context(before, prefix);
-        let (mut items, hit_cap) = crate::resolver::complete_symbol_with_context(
+            && is_annotation_context(before, prefix);
+        let (mut items, hit_cap) = complete_symbol_with_context(
             self, prefix, dot_recv.as_deref(), uri, snippets, annotation_only,
         );
 
@@ -497,11 +499,11 @@ fn dot_receiver(before_prefix: &str) -> Option<String> {
     if inner.is_empty() { return None; }
     let remaining = &before_dot[..before_dot.len() - inner.len()];
     if remaining.ends_with('.')
-        && inner.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+        && inner.starts_with_uppercase()
     {
         let outer = last_ident_in(&remaining[..remaining.len() - 1]);
         if !outer.is_empty()
-            && outer.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+            && outer.starts_with_uppercase()
         {
             return Some(format!("{outer}.{inner}"));
         }
@@ -2078,11 +2080,11 @@ class Foo @Inject constructor(
 
     #[test]
     fn last_ident_in_simple() {
-        assert_eq!(crate::indexer::last_ident_in("foo.barBaz"), "barBaz");
+        assert_eq!("foo.barBaz".last_ident_in(), "barBaz");
     }
     #[test]
     fn last_ident_in_whole_string() {
-        assert_eq!(crate::indexer::last_ident_in("identifier"), "identifier");
+        assert_eq!("identifier".last_ident_in(), "identifier");
     }
     #[test]
     fn last_ident_in_empty() {
@@ -2090,11 +2092,11 @@ class Foo @Inject constructor(
     }
     #[test]
     fn last_ident_in_no_ident() {
-        assert_eq!(crate::indexer::last_ident_in("foo.bar("), "");
+        assert_eq!("foo.bar(".last_ident_in(), "");
     }
     #[test]
     fn last_ident_in_with_spaces() {
-        assert_eq!(crate::indexer::last_ident_in("  someIdent"), "someIdent");
+        assert_eq!("  someIdent".last_ident_in(), "someIdent");
     }
 
     // ── completion helpers ───────────────────────────────────────────────────

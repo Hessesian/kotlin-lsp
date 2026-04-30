@@ -3,6 +3,7 @@ use tower_lsp::lsp_types::{Location, Url};
 
 use crate::indexer::Indexer;
 use crate::LinesExt;
+use crate::parser::parse_by_extension;
 
 /// Search for `name` in a specific file identified by its URI string.
 ///
@@ -26,7 +27,7 @@ pub(crate) fn find_name_in_uri(idx: &Indexer, name: &str, file_uri: &str) -> Vec
     // c) File not yet indexed — parse on demand using the correct parser
     if let Ok(path) = uri.to_file_path() {
         if let Ok(content) = std::fs::read_to_string(&path) {
-            let file_data = crate::parser::parse_by_extension(file_uri, &content);
+            let file_data = parse_by_extension(file_uri, &content);
             if let Some(sym) = file_data.symbols.iter().find(|s| s.name == name) {
                 return vec![Location { uri, range: sym.selection_range }];
             }

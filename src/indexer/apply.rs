@@ -25,6 +25,9 @@ use tower_lsp::lsp_types::*;
 
 use crate::indexer::discover::find_source_files_unconstrained;
 use crate::types::{FileData, FileIndexResult, WorkspaceIndexResult};
+use crate::StrExt;
+use crate::parser::parse_by_extension;
+use crate::resolver::symbols_from_uri_as_completions_pub;
 use super::{FileContributions, StaleKeys, Indexer};
 
 // ─── hash helper ─────────────────────────────────────────────────────────────
@@ -127,7 +130,7 @@ impl Indexer {
     /// Parse a single file via tree-sitter and extract symbols, supertypes, and a
     /// content hash.  Pure — no writes to any `Indexer` field.
     pub fn parse_file(uri: &Url, content: &str) -> FileIndexResult {
-        let data = crate::parser::parse_by_extension(uri.path(), content);
+        let data = parse_by_extension(uri.path(), content);
         let hash = hash_str(content);
 
         // Extract supertype relationships for goToImplementation.
@@ -436,11 +439,9 @@ impl Indexer {
                 let mut rest = t;
                 while let Some(ci) = rest.find(':') {
                     let after = rest[ci + 1..].trim_start();
-                    let type_name: String = after.chars()
-                        .take_while(|&c| c.is_alphanumeric() || c == '_')
-                        .collect();
+                    let type_name = after.ident_prefix();
                     if !type_name.is_empty()
-                        && type_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+                        && type_name.starts_with_uppercase()
                         && seen.insert(type_name.clone())
                     {
                         type_names.push(type_name);
@@ -464,7 +465,7 @@ impl Indexer {
                     if let Some(loc) = locs.first() {
                         let file_uri = loc.uri.to_string();
                         if idx.completion_cache.contains_key(&file_uri) { return; }
-                        crate::resolver::symbols_from_uri_as_completions_pub(&idx, &file_uri);
+                        symbols_from_uri_as_completions_pub(&idx, &file_uri);
                     }
                 }).await.ok();
             });

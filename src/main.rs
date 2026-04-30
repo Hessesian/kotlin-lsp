@@ -8,10 +8,12 @@ mod resolver;
 mod rg;
 mod stdlib;
 mod stdlib_tail;
+mod str_ext;
 mod task_runner;
 mod types;
 
 pub(crate) use lines_ext::LinesExt;
+pub(crate) use str_ext::StrExt;
 
 use tower_lsp::{LspService, Server};
 

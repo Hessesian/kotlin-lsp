@@ -3,6 +3,7 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use super::Backend;
 use super::rename::whole_word_replace_file;
+use crate::StrExt;
 
 /// Returns true if `name` is a keyword that precedes a block but is NOT
 /// a function call — i.e. we should NOT show signature help for it.
@@ -64,7 +65,7 @@ fn derive_var_name(expr: &str) -> String {
     let result = if seg.starts_with("get") && seg.len() > "get".len() {
         let rest = &seg["get".len()..];
         // Only strip if next char is uppercase (proper camelCase).
-        if rest.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+        if rest.starts_with_uppercase() {
             let r = if let Some(first) = rest.chars().next() {
                 let mut s = first.to_lowercase().collect::<String>();
                 s.push_str(&rest[first.len_utf8()..]);
@@ -257,7 +258,7 @@ impl Backend {
         //       User then does  %s_Word<ret>cNewName<esc>  in Helix.
         // Only for Kotlin/KTS files — Java/Swift use different rename flows.
         if is_kotlin && !is_import_line && !cursor_word.is_empty()
-            && cursor_word.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+            && cursor_word.starts_with_uppercase()
         {
             // Combined: add `as _Word` to matching import + rename Word→_Word in body (single action).
             if !all_lines.is_empty() {

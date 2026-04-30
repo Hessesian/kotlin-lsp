@@ -22,6 +22,7 @@ use crate::indexer::{
     discover::{find_source_files, warm_discover_files},
 };
 use crate::rg::{IgnoreMatcher, SOURCE_EXTENSIONS, regex_escape};
+use crate::task_runner::run_concurrent;
 use crate::types::{FileIndexResult, WorkspaceIndexResult, IndexStats};
 
 // ─── LSP progress notification ────────────────────────────────────────────────
@@ -620,7 +621,7 @@ impl Indexer {
         let url_failed2 = Arc::clone(&url_failed);
         let panic_failed2 = Arc::clone(&panic_failed);
 
-        let results = crate::task_runner::run_concurrent(
+        let results = run_concurrent(
             work_items,
             sem,
             move |item, sem| {

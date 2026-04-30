@@ -7,7 +7,7 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{async_trait, Client, LanguageServer};
 
-use crate::indexer::{Indexer, IgnoreMatcher};
+use crate::indexer::{Indexer, IgnoreMatcher, workspace_cache_path};
 use self::helpers::syntax_diagnostics;
 
 pub mod nav;
@@ -301,7 +301,7 @@ impl LanguageServer for Backend {
                     }
                 }
             };
-            let cache_path = crate::indexer::workspace_cache_path(&target_root);
+            let cache_path = workspace_cache_path(&target_root);
             if let Some(cache_dir) = cache_path.parent() {
                 match std::fs::remove_dir_all(cache_dir) {
                     Ok(_) => {

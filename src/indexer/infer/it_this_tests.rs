@@ -8,6 +8,7 @@
 use super::*;
 use tower_lsp::lsp_types::Url;
 use super::super::super::Indexer;
+use crate::queries::KIND_LAMBDA_LIT;
 
 fn uri(path: &str) -> Url {
     Url::parse(&format!("file:///test{path}")).unwrap()
@@ -420,7 +421,7 @@ fn has_lambda_named_params_false_for_no_params() {
     let src = "val x = items.map { it.name }";
     let bytes = src.as_bytes();
     let tree = parse_kotlin(src);
-    let lambda = find_node_kind(tree.root_node(), "lambda_literal").unwrap();
+    let lambda = find_node_kind(tree.root_node(), KIND_LAMBDA_LIT).unwrap();
     assert!(!super::has_lambda_named_params(lambda, bytes),
         "no lambda_parameters child should yield false");
 }
@@ -431,7 +432,7 @@ fn has_lambda_named_params_false_for_it() {
     let src = "val x = items.map { it -> it.name }";
     let bytes = src.as_bytes();
     let tree = parse_kotlin(src);
-    let lambda = find_node_kind(tree.root_node(), "lambda_literal").unwrap();
+    let lambda = find_node_kind(tree.root_node(), KIND_LAMBDA_LIT).unwrap();
     assert!(!super::has_lambda_named_params(lambda, bytes),
         "param named `it` should yield false");
 }
@@ -442,7 +443,7 @@ fn has_lambda_named_params_true_for_named() {
     let src = "val x = items.map { item -> item.name }";
     let bytes = src.as_bytes();
     let tree = parse_kotlin(src);
-    let lambda = find_node_kind(tree.root_node(), "lambda_literal").unwrap();
+    let lambda = find_node_kind(tree.root_node(), KIND_LAMBDA_LIT).unwrap();
     assert!(super::has_lambda_named_params(lambda, bytes),
         "param named `item` should yield true");
 }
@@ -453,7 +454,7 @@ fn has_lambda_named_params_false_for_underscore() {
     let src = "val x = items.map { _ -> 42 }";
     let bytes = src.as_bytes();
     let tree = parse_kotlin(src);
-    let lambda = find_node_kind(tree.root_node(), "lambda_literal").unwrap();
+    let lambda = find_node_kind(tree.root_node(), KIND_LAMBDA_LIT).unwrap();
     assert!(!super::has_lambda_named_params(lambda, bytes),
         "param named `_` should yield false");
 }

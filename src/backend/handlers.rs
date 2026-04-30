@@ -1,8 +1,10 @@
-use std::sync::Arc;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use crate::indexer::find_fun_signature_with_receiver;
 use crate::indexer::NodeExt;
+use crate::StrExt;
+use crate::queries::KIND_VALUE_ARG;
+use crate::inlay_hints::compute_inlay_hints;
 use super::Backend;
 use super::cursor::CursorContext;
 use super::helpers::resolve_references_scope;
@@ -245,7 +247,7 @@ impl Backend {
     ) -> Result<Option<Vec<InlayHint>>> {
         let uri   = &params.text_document.uri;
         let range = params.range;
-        let hints = crate::inlay_hints::compute_inlay_hints(&self.indexer, uri, range);
+        let hints = compute_inlay_hints(&self.indexer, uri, range);
         Ok(if hints.is_empty() { None } else { Some(hints) })
     }
 
@@ -547,7 +549,7 @@ fn cst_call_info(
         let mut count = 0u32;
         let mut walker = value_arguments.walk();
         for child in value_arguments.children(&mut walker) {
-            if child.kind() == "value_argument" {
+            if child.kind() == KIND_VALUE_ARG {
                 if child.end_byte() <= cursor_byte { count += 1; } else { break; }
             }
         }
@@ -565,7 +567,7 @@ fn find_call_open_on_line(line: &str) -> Option<(String, Option<String>)> {
         .collect::<Vec<_>>().into_iter().rev()
     {
         let before_paren = &line[..p];
-        let name = crate::indexer::last_ident_in(before_paren);
+        let name = before_paren.last_ident_in();
         if !name.is_empty() && !is_non_call_keyword(name) {
             let net: i32 = line[p..].chars()
                 .map(|c| match c { '(' => 1, ')' => -1, _ => 0 }).sum();
@@ -573,7 +575,7 @@ fn find_call_open_on_line(line: &str) -> Option<(String, Option<String>)> {
                 // Qualifier before the dot on the same line.
                 let before_name = &before_paren[..before_paren.len() - name.len()];
                 let qualifier = if before_name.ends_with('.') {
-                    let q = crate::indexer::last_ident_in(before_name.strip_suffix('.').unwrap_or(before_name));
+                    let q = before_name.strip_suffix('.').unwrap_or(before_name).last_ident_in();
                     if q.is_empty() { None } else { Some(q.to_owned()) }
                 } else { None };
                 return Some((name.to_owned(), qualifier));
@@ -583,17 +585,16 @@ fn find_call_open_on_line(line: &str) -> Option<(String, Option<String>)> {
     None
 }
 
-/// Scans up to 10 lines before `line_idx` for an unclosed `fn(` call site.
-/// Returns `(call_name, qualifier, extra_commas)` where `extra_commas` is
-/// the count of commas on the intermediate lines plus the commas in `before`
-/// (to add to `active_param`).
+/// Scans up to `MAX_SCAN_BACK_LINES` lines before `line_idx` for an unclosed `fn(` call site.
+/// Returns `(call_name, qualifier, extra_commas)` where `extra_commas` counts commas on the
+/// intermediate lines only (between the opening line and `line_idx`, exclusive). Commas on
+/// `line_idx` itself (in `before`) are already counted by the caller.
 /// Maximum number of lines to scan backward when looking for a multi-line call opener.
 const MAX_SCAN_BACK_LINES: usize = 10;
 
 fn scan_multiline_call_open(
     lines: &[String],
     line_idx: usize,
-    before: &str,
 ) -> Option<(String, Option<String>, u32)> {
     let scan_start = line_idx.saturating_sub(MAX_SCAN_BACK_LINES);
     for scan_line in (scan_start..line_idx).rev() {
@@ -606,7 +607,6 @@ fn scan_multiline_call_open(
                     extra += mid.chars().filter(|&c| c == ',').count() as u32;
                 }
             }
-            extra += before.chars().filter(|&c| c == ',').count() as u32;
             return Some((name, qualifier, extra));
         }
     }
@@ -671,7 +671,7 @@ fn text_call_info(
     let in_block_body = before.contains('{') || before.contains('}')
         || lines[line_idx].trim_start().starts_with('}');
     if call_name.is_none() && line_idx > 0 && !in_block_body {
-        if let Some((name, qual, extra)) = scan_multiline_call_open(lines, line_idx, before) {
+        if let Some((name, qual, extra)) = scan_multiline_call_open(lines, line_idx) {
             call_name = Some(name);
             call_qualifier = qual;
             active_param += extra;

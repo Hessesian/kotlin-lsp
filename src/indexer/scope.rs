@@ -15,7 +15,9 @@ use super::{
     lambda_brace_pos_for_param,
 };
 use crate::indexer::NodeExt;
+use crate::queries::KIND_LAMBDA_LIT;
 use crate::types::CursorPos;
+use crate::StrExt;
 
 /// Lines to scan backward when resolving variable types and lambda receivers from scope.
 const SCOPE_SCAN_BACK_LINES: usize = 50;
@@ -23,8 +25,8 @@ const SCOPE_SCAN_BACK_LINES: usize = 50;
 /// Lines to scan upward when looking for a local variable declaration.
 const DECL_SCAN_UP_LINES: usize = 15;
 
-/// Lines to scan backward when looking for a visibility modifier.
-const VISIBILITY_SCAN_BACK: usize = 20;
+/// Lines to scan backward when looking for an enclosing call during named-argument scanning.
+const ENCLOSING_CALL_SCAN_BACK: usize = 20;
 
 impl Indexer {
     /// LSP positions are UTF-16; for ASCII-heavy Kotlin/Java identifiers the
@@ -255,7 +257,7 @@ impl Indexer {
                 let mut params: Vec<String> = Vec::new();
                 let mut cur = node;
                 loop {
-                    if cur.kind() == "lambda_literal" {
+                    if cur.kind() == KIND_LAMBDA_LIT {
                         let new_names = cur.collect_lambda_param_names(&doc.bytes, &params);
                         params.extend(new_names);
                     }
@@ -300,11 +302,9 @@ impl Indexer {
                             if let Some(arrow_pos) = after.find("->") {
                                 let names_str = &after[..arrow_pos];
                                 for tok in names_str.split(',') {
-                                    let name: String = tok.trim()
-                                        .chars().take_while(|&c| c.is_alphanumeric() || c == '_')
-                                        .collect();
+                                    let name = tok.trim().ident_prefix();
                                     if !name.is_empty() && name != "it" && name != "_"
-                                        && name.chars().next().map(|c| c.is_lowercase()).unwrap_or(false)
+                                        && name.starts_with_lowercase()
                                         && !params.contains(&name) { params.push(name.clone()); }
                                 }
                             }
@@ -456,7 +456,7 @@ pub(super) fn extract_class_decl_name(line: &str) -> Option<String> {
         .or_else(|| rest.strip_prefix("extension "))?;
     // Extract the identifier
     let name: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
-    if name.is_empty() || !name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+    if name.is_empty() || !name.starts_with_uppercase() {
         return None;
     }
     Some(name)
@@ -492,7 +492,7 @@ pub(crate) fn last_ident_in(s: &str) -> &str {
 /// `()` still balance) so we don't need special-case brace handling.
 pub(crate) fn find_enclosing_call_name(lines: &[String], line_no: usize, col: usize) -> Option<String> {
     let mut depth: i32 = 0;
-    let scan_range_start = line_no.saturating_sub(VISIBILITY_SCAN_BACK);
+    let scan_range_start = line_no.saturating_sub(ENCLOSING_CALL_SCAN_BACK);
 
     for ln in (scan_range_start..=line_no).rev() {
         let line_chars: Vec<char> = lines[ln].chars().collect();
@@ -540,7 +540,7 @@ fn callee_to_qualifier(full_callee: &str) -> Option<String> {
     let last = *segments.last()?;
 
     // Constructor call: last segment is a type name (uppercase first char).
-    if last.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+    if last.starts_with_uppercase() {
         return Some(last.to_string());
     }
 
@@ -549,7 +549,7 @@ fn callee_to_qualifier(full_callee: &str) -> Option<String> {
     // `viewModel.state.copy`   → no uppercase in receiver → None
     let receiver = &segments[..segments.len() - 1];
     receiver.iter().rev()
-        .find(|s| s.chars().next().map(|c| c.is_uppercase()).unwrap_or(false))
+        .find(|s| s.starts_with_uppercase())
         .map(|s| s.to_string())
 }
 
