@@ -884,12 +884,9 @@ fn extract_supers_java(node: &Node, bytes: &[u8], data: &mut FileData) {
         }
         "interface_declaration" => {
             let name_line = node.name_line();
-            let mut cur = node.walk();
-            for child in node.children(&mut cur) {
-                if child.kind() == "extends_interfaces" {
-                    // (extends_interfaces "extends" (type_list ...))
-                    java_collect_type_list(&child, bytes, name_line, data);
-                }
+            if let Some(ext) = node.first_child_of_kind("extends_interfaces") {
+                // (extends_interfaces "extends" (type_list ...))
+                java_collect_type_list(&ext, bytes, name_line, data);
             }
         }
         _ => {}
