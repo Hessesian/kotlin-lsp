@@ -13,6 +13,12 @@ use crate::resolver::{ReceiverKind, infer_receiver_type};
 
 // ─── Multiline signature collector ───────────────────────────────────────────
 
+/// Maximum number of lines to scan when collecting a multi-line function signature.
+const SIGNATURE_SCAN_LINES: usize = 15;
+
+/// Maximum number of lines to scan when collecting a function parameter list.
+const FUN_PARAMS_SCAN_LINES: usize = 20;
+
 /// Collect a human-readable function/class signature starting at `start_line`.
 ///
 /// Rules:
@@ -26,7 +32,7 @@ pub(crate) fn collect_signature(lines: &[String], start_line: usize) -> String {
     let mut parts: Vec<String> = Vec::new();
     let mut depth: i32 = 0;
 
-    for raw_line in lines[start_line..(start_line + 15).min(lines.len())].iter() {
+    for raw_line in lines[start_line..(start_line + SIGNATURE_SCAN_LINES).min(lines.len())].iter() {
         let raw = raw_line.trim();
 
         // Count parens in this line.
@@ -144,7 +150,7 @@ pub(crate) fn collect_params_from_line(lines: &[String], start_line: usize) -> O
     let mut found_open = false;
     let mut params = String::new();
 
-    'outer: for ln in start_line..start_line + 20 {
+    'outer: for ln in start_line..start_line + FUN_PARAMS_SCAN_LINES {
         let line = match lines.get(ln) { Some(l) => l, None => break };
         let chars = line.char_indices().peekable();
         for (_, ch) in chars {

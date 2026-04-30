@@ -83,6 +83,12 @@ fn camel_acronym_match(name: &str, prefix: &str) -> bool {
 /// When capped, `is_incomplete` should be set so the client re-queries.
 pub(crate) const COMPLETION_CAP: usize = 150;
 
+/// Prefix length at which local-symbol relevance score is reduced (longer prefix → more confident match).
+const MIN_PREFIX_SCORE_REDUCTION: usize = 4;
+
+/// Minimum prefix length to enable case-insensitive completion matching.
+const MIN_CASE_INSENSITIVE_PREFIX: usize = 2;
+
 /// Provide completion candidates for `prefix` at the current position.
 ///
 /// Returns `(items, hit_cap)` — when `hit_cap` is true the caller should set
@@ -346,7 +352,7 @@ pub(crate) fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippet
     // hits from filling the cap and crowding out precise tier-2 cross-package matches
     // (e.g. typing "ChildDash" must surface ChildDashboardViewModel even if the same
     // package has many classes that contain "child" as a substring).
-    let local_max_score: u8 = if prefix.len() >= 4 { 1 } else { 2 };
+    let local_max_score: u8 = if prefix.len() >= MIN_PREFIX_SCORE_REDUCTION { 1 } else { 2 };
     let mut seen = std::collections::HashSet::new();
     let mut items: Vec<CompletionItem> = Vec::new();
 
@@ -424,7 +430,7 @@ pub(crate) fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippet
     // 3. Cross-package symbols — src_tier 2, uppercase mode only, prefix ≥ 2 chars,
     //    prefix/acronym matches only (max_score=1) — no substring flood.
     // Emits one CompletionItem per distinct FQN, with additionalTextEdits for auto-import.
-    if !lowercase_mode && prefix.len() >= 2 {
+    if !lowercase_mode && prefix.len() >= MIN_CASE_INSENSITIVE_PREFIX {
         let is_java = from_uri.as_str().ends_with(".java");
         // Prefer live_lines (updated on every keystroke) over the indexed snapshot so that
         // import deduplication and insertion position are based on the current buffer state.

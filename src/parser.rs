@@ -498,10 +498,10 @@ fn report_error_node(node: &Node, bytes: &[u8], seen: &mut std::collections::Has
     let key = (range.start.line, range.start.character);
     if seen.insert(key) {
         let text: String = node.utf8_text(bytes).unwrap_or("").chars().take(30).collect();
-        let text = text.lines().next().unwrap_or(&text);
+        let first_line = text.lines().next().unwrap_or(&text);
         errors.push(SyntaxError {
             range,
-            message: if text.is_empty() { "syntax error".into() } else { format!("unexpected `{text}`") },
+            message: if first_line.is_empty() { "syntax error".into() } else { format!("unexpected `{first_line}`") },
         });
     }
 }
@@ -565,6 +565,9 @@ fn collect_syntax_errors(root: Node, bytes: &[u8]) -> Vec<SyntaxError> {
 ///   `fun addBiometryToPowerAuth(isAllowedForActiveOp: Boolean): Boolean`
 ///   `class CreatePinViewModel @Inject constructor(`
 ///   `val isChecked: Boolean`
+/// Maximum number of characters in an extracted detail string before truncation.
+const MAX_DETAIL_CHARS: usize = 120;
+
 pub(crate) fn extract_detail(lines: &[String], start_line: u32, end_line: u32) -> String {
     let start = start_line as usize;
     let end   = (end_line as usize + 1).min(lines.len());
@@ -589,8 +592,8 @@ pub(crate) fn extract_detail(lines: &[String], start_line: u32, end_line: u32) -
     };
     // Strip trailing `)` then `: ReturnType` to keep it compact, or keep if short.
     // Cap at 120 chars.
-    if trimmed.chars().count() > 120 {
-        let s: String = trimmed.chars().take(119).collect();
+    if trimmed.chars().count() > MAX_DETAIL_CHARS {
+        let s: String = trimmed.chars().take(MAX_DETAIL_CHARS - 1).collect();
         format!("{}…", s)
     } else {
         trimmed
@@ -703,12 +706,12 @@ pub fn parse_imports_from_lines(lines: &[String]) -> Vec<crate::types::ImportEnt
         let rest = rest.strip_prefix("static ").map(str::trim_start).unwrap_or(rest);
         let is_star = rest.ends_with(".*");
         let (path_part, alias) = if let Some(idx) = rest.find(" as ") {
-            (&rest[..idx], Some(rest[idx + 4..].trim().to_owned()))
+            (&rest[..idx], Some(rest[idx + " as ".len()..].trim().to_owned()))
         } else {
             (rest, None)
         };
         let full_path = if is_star {
-            path_part[..path_part.len() - 2].to_owned() // strip ".*"
+            path_part.strip_suffix(".*").unwrap_or(path_part).to_owned()
         } else {
             path_part.to_owned()
         };
@@ -926,32 +929,27 @@ fn extract_supers_java(node: &Node, bytes: &[u8], data: &mut FileData) {
     }
 }
 
+/// Returns the name of the first `user_type` child of `node`, if any.
+fn first_user_type_child_name(node: &Node, bytes: &[u8]) -> Option<String> {
+    let mut cur = node.walk();
+    for child in node.children(&mut cur) {
+        if child.kind() == "user_type" {
+            return user_type_name(&child, bytes);
+        }
+    }
+    None
+}
+
 /// Extract the supertype name from a `delegation_specifier` node.
 fn super_name_from_delegation(node: &Node, bytes: &[u8]) -> Option<String> {
     let mut cur = node.walk();
     for child in node.children(&mut cur) {
         match child.kind() {
-            "constructor_invocation" => {
-                // constructor_invocation → user_type value_arguments
-                let mut cc = child.walk();
-                for gc in child.children(&mut cc) {
-                    if gc.kind() == "user_type" {
-                        return user_type_name(&gc, bytes);
-                    }
-                }
+            "constructor_invocation" | "explicit_delegation" => {
+                return first_user_type_child_name(&child, bytes);
             }
-            "user_type" | "explicit_delegation" => {
-                // explicit_delegation → user_type "by" expression
-                if child.kind() == "explicit_delegation" {
-                    let mut cc = child.walk();
-                    for gc in child.children(&mut cc) {
-                        if gc.kind() == "user_type" {
-                            return user_type_name(&gc, bytes);
-                        }
-                    }
-                } else {
-                    return user_type_name(&child, bytes);
-                }
+            "user_type" => {
+                return user_type_name(&child, bytes);
             }
             _ => {}
         }

@@ -17,6 +17,15 @@ use super::{
 use crate::indexer::NodeExt;
 use crate::types::CursorPos;
 
+/// Lines to scan backward when resolving variable types and lambda receivers from scope.
+const SCOPE_SCAN_BACK_LINES: usize = 50;
+
+/// Lines to scan upward when looking for a local variable declaration.
+const DECL_SCAN_UP_LINES: usize = 15;
+
+/// Lines to scan backward when looking for a visibility modifier.
+const VISIBILITY_SCAN_BACK: usize = 20;
+
 impl Indexer {
     /// LSP positions are UTF-16; for ASCII-heavy Kotlin/Java identifiers the
     /// character offset is identical to the UTF-16 unit offset.
@@ -265,7 +274,7 @@ impl Indexer {
 
         let mut params: Vec<String> = Vec::new();
         let mut depth: i32 = 0;
-        let scan_start = cursor_line.saturating_sub(50);
+        let scan_start = cursor_line.saturating_sub(SCOPE_SCAN_BACK_LINES);
 
         for ln in (scan_start..=cursor_line).rev() {
             let line = match lines.get(ln) { Some(l) => l, None => continue };
@@ -317,7 +326,7 @@ impl Indexer {
             .map(|ll| ll.clone())
             .or_else(|| self.files.get(uri.as_str()).map(|f| f.lines.clone()))?;
 
-        let scan_start = cursor_line.saturating_sub(50);
+        let scan_start = cursor_line.saturating_sub(SCOPE_SCAN_BACK_LINES);
         for ln in (scan_start..=cursor_line).rev() {
             let line = match lines.get(ln) { Some(l) => l, None => continue };
             if !line_has_lambda_param(line, param_name) { continue; }
@@ -389,7 +398,7 @@ impl Indexer {
             if depth < 0 && i < row {
                 let t = line.trim();
                 if let Some(name) = extract_class_decl_name(t) { return Some(name); }
-                let scan_up = i.saturating_sub(15);
+                let scan_up = i.saturating_sub(DECL_SCAN_UP_LINES);
                 for j in (scan_up..i).rev() {
                     if let Some(prev) = file.lines.get(j) {
                         if let Some(name) = extract_class_decl_name(prev.trim()) { return Some(name); }
@@ -483,7 +492,7 @@ pub(crate) fn last_ident_in(s: &str) -> &str {
 /// `()` still balance) so we don't need special-case brace handling.
 pub(crate) fn find_enclosing_call_name(lines: &[String], line_no: usize, col: usize) -> Option<String> {
     let mut depth: i32 = 0;
-    let scan_range_start = line_no.saturating_sub(20);
+    let scan_range_start = line_no.saturating_sub(VISIBILITY_SCAN_BACK);
 
     for ln in (scan_range_start..=line_no).rev() {
         let line_chars: Vec<char> = lines[ln].chars().collect();

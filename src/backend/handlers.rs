@@ -8,6 +8,9 @@ use super::cursor::CursorContext;
 use super::helpers::resolve_references_scope;
 use super::actions::is_non_call_keyword;
 
+/// Maximum number of workspace symbol results to return.
+const WORKSPACE_SYMBOL_CAP: usize = 512;
+
 impl Backend {
     pub(super) async fn hover_impl(&self, params: HoverParams) -> Result<Option<Hover>> {
         let pp       = params.text_document_position_params;
@@ -298,11 +301,11 @@ impl Backend {
                     },
                     container_name: if sym.detail.is_empty() { None } else { Some(sym.detail.clone()) },
                 });
-                if results.len() >= 512 {
+                if results.len() >= WORKSPACE_SYMBOL_CAP {
                     break;
                 }
             }
-            if results.len() >= 512 {
+            if results.len() >= WORKSPACE_SYMBOL_CAP {
                 break;
             }
         }
@@ -584,12 +587,15 @@ fn find_call_open_on_line(line: &str) -> Option<(String, Option<String>)> {
 /// Returns `(call_name, qualifier, extra_commas)` where `extra_commas` is
 /// the count of commas on the intermediate lines plus the commas in `before`
 /// (to add to `active_param`).
+/// Maximum number of lines to scan backward when looking for a multi-line call opener.
+const MAX_SCAN_BACK_LINES: usize = 10;
+
 fn scan_multiline_call_open(
     lines: &[String],
     line_idx: usize,
     before: &str,
 ) -> Option<(String, Option<String>, u32)> {
-    let scan_start = line_idx.saturating_sub(10);
+    let scan_start = line_idx.saturating_sub(MAX_SCAN_BACK_LINES);
     for scan_line in (scan_start..line_idx).rev() {
         let l = &lines[scan_line];
         if l.contains('{') || l.contains('}') { break; }
