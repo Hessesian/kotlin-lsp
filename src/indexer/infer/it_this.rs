@@ -43,7 +43,6 @@ use crate::StrExt;
 // ── from indexer.rs (parent of infer; descendants can access private items) ──
 use super::super::{
     Indexer,
-    is_id_char,
     last_ident_in,
     find_enclosing_call_name,
 };

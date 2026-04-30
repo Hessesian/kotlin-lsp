@@ -53,7 +53,6 @@ pub(crate) use it_this::{
     lambda_receiver_type_from_context,
     line_has_lambda_param,
     lambda_brace_pos_for_param,
-    find_lambda_brace_for_param,
     lambda_param_position_on_line,
     find_last_dot_at_depth_zero,
 };

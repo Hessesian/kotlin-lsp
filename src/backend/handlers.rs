@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use crate::indexer::find_fun_signature_with_receiver;

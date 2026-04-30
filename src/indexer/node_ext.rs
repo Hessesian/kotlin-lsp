@@ -6,7 +6,7 @@ use tree_sitter::Node;
 use crate::StrExt;
 use crate::queries::{
     KIND_SIMPLE_IDENT, KIND_TYPE_IDENT, KIND_VALUE_ARG, KIND_VALUE_ARGS,
-    KIND_LAMBDA_PARAMS, KIND_CALL_EXPR, KIND_NAV_EXPR,
+    KIND_LAMBDA_PARAMS,
 };
 
 pub(crate) trait NodeExt<'a>: Sized + Copy {

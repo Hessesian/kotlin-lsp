@@ -10,7 +10,7 @@ use crate::StrExt;
 
 use super::{fqns_for_name, already_imported,
             resolve_symbol_inner, resolve_symbol_no_rg};
-use super::infer::{infer_variable_type, ReceiverKind, ReceiverType, infer_receiver_type};
+use super::infer::{ReceiverKind, ReceiverType, infer_receiver_type};
 
 // ─── match scoring ────────────────────────────────────────────────────────────
 
