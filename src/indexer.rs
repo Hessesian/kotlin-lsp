@@ -2080,11 +2080,11 @@ class Foo @Inject constructor(
 
     #[test]
     fn last_ident_in_simple() {
-        assert_eq!(crate::indexer::last_ident_in("foo.barBaz"), "barBaz");
+        assert_eq!("foo.barBaz".last_ident_in(), "barBaz");
     }
     #[test]
     fn last_ident_in_whole_string() {
-        assert_eq!(crate::indexer::last_ident_in("identifier"), "identifier");
+        assert_eq!("identifier".last_ident_in(), "identifier");
     }
     #[test]
     fn last_ident_in_empty() {
@@ -2092,11 +2092,11 @@ class Foo @Inject constructor(
     }
     #[test]
     fn last_ident_in_no_ident() {
-        assert_eq!(crate::indexer::last_ident_in("foo.bar("), "");
+        assert_eq!("foo.bar(".last_ident_in(), "");
     }
     #[test]
     fn last_ident_in_with_spaces() {
-        assert_eq!(crate::indexer::last_ident_in("  someIdent"), "someIdent");
+        assert_eq!("  someIdent".last_ident_in(), "someIdent");
     }
 
     // ── completion helpers ───────────────────────────────────────────────────

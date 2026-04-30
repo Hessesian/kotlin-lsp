@@ -4,6 +4,7 @@ use crate::indexer::find_fun_signature_with_receiver;
 use crate::indexer::NodeExt;
 use crate::StrExt;
 use crate::queries::KIND_VALUE_ARG;
+use crate::inlay_hints::compute_inlay_hints;
 use super::Backend;
 use super::cursor::CursorContext;
 use super::helpers::resolve_references_scope;
@@ -246,7 +247,7 @@ impl Backend {
     ) -> Result<Option<Vec<InlayHint>>> {
         let uri   = &params.text_document.uri;
         let range = params.range;
-        let hints = crate::inlay_hints::compute_inlay_hints(&self.indexer, uri, range);
+        let hints = compute_inlay_hints(&self.indexer, uri, range);
         Ok(if hints.is_empty() { None } else { Some(hints) })
     }
 

@@ -8,6 +8,8 @@ use crate::types::Visibility;
 use crate::LinesExt;
 use crate::StrExt;
 use crate::parser::parse_by_extension;
+use crate::stdlib::bare_completions;
+use crate::stdlib_tail::dot_completions_for_lang;
 
 use super::{fqns_for_name, already_imported,
             resolve_symbol_inner, resolve_symbol_no_rg};
@@ -230,7 +232,7 @@ pub(crate) fn complete_dot(idx: &Indexer, receiver: &str, from_uri: &Url, snippe
     // Append stdlib extensions filtered to the receiver type. Only add Kotlin stdlib
     // when the current file is a Kotlin file; add Swift-specific snippets for Swift.
     let from_path = from_uri.path();
-    items.extend(crate::stdlib_tail::dot_completions_for_lang(from_path, &rt.qualified, snippets));
+    items.extend(dot_completions_for_lang(from_path, &rt.qualified, snippets));
     items
 }
 
@@ -517,7 +519,7 @@ pub(crate) fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippet
     }
 
     // 4. Stdlib top-level / scope functions — src_tier 3.
-    for mut item in crate::stdlib::bare_completions(snippets) {
+    for mut item in bare_completions(snippets) {
         let label = item.label.clone();
         if lowercase_mode && label.starts_with_uppercase() {
             continue;
