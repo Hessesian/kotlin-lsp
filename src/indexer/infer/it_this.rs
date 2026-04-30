@@ -335,7 +335,7 @@ fn cst_it_or_this_type(
                 if result.is_some() { return result; }
             }
         }
-        let Some(p) = cur.parent() else { return None; };
+        let p = cur.parent()?;
         cur = p;
     }
 }

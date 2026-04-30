@@ -51,7 +51,7 @@ impl CursorContext {
         let col  = position.character as usize;
 
         // `it`/`this` are always contextual (lambda receiver inference).
-        let is_it_or_this = qualifier.as_deref().map_or(false, |q| q == "it" || q == "this")
+        let is_it_or_this = qualifier.as_deref().is_some_and(|q| q == "it" || q == "this")
             || (qualifier.is_none() && (word == "it" || word == "this"));
 
         // For other lowercase bare identifiers, confirm they are in scope as lambda
@@ -60,7 +60,7 @@ impl CursorContext {
         // class on hover, which is incorrect.
         let in_scope_lambda_params: Vec<String> = if !is_it_or_this
             && qualifier.is_none()
-            && word.chars().next().map_or(false, |c| c.is_lowercase())
+            && word.chars().next().is_some_and(|c| c.is_lowercase())
         {
             idx.lambda_params_at_col(uri, line, col)
         } else {

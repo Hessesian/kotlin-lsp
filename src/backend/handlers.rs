@@ -662,7 +662,7 @@ fn text_call_info(
                         // Qualifier before the dot on the same line.
                         let before_name = &before_paren[..before_paren.len() - name.len()];
                         let qualifier = if before_name.ends_with('.') {
-                            let q = crate::indexer::last_ident_in(&before_name[..before_name.len() - 1]);
+                            let q = crate::indexer::last_ident_in(before_name.strip_suffix('.').unwrap_or(before_name));
                             if q.is_empty() { None } else { Some(q.to_owned()) }
                         } else { None };
                         call_name = Some(name.to_owned());

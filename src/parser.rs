@@ -165,7 +165,7 @@ fn map_def_captures<'c, 't>(
     let mut def_range:  Option<Range> = None;
     let mut name_text:  Option<String> = None;
     let mut name_range: Option<Range> = None;
-    for cap in m.captures {
+    for cap in m.captures.iter() {
         if cap.index == def_idx {
             def_range = Some(ts_to_lsp(cap.node.range()));
         } else if cap.index == name_idx {
@@ -282,9 +282,9 @@ fn push_field_declaration(node: &Node, bytes: &[u8], data: &mut FileData) {
             if let Some((name, sel)) = first_identifier(&child, bytes) {
                 data.symbols.push(SymbolEntry {
                     name,
-                    kind: kind.clone(),
-                    visibility: vis.clone(),
-                    range: nr.clone(),
+                    kind,
+                    visibility: vis,
+                    range: nr,
                     selection_range: sel,
                     detail: detail.clone(),
                 });

@@ -366,15 +366,15 @@ impl Indexer {
     ) {
         let prefix_lower = prefix.to_lowercase();
         for param in self.lambda_params_at(uri, line_idx) {
-            if param.to_lowercase().starts_with(&prefix_lower) {
-                if !items.iter().any(|i| i.label == param) {
-                    items.push(CompletionItem {
-                        label:     param.clone(),
-                        kind:      Some(CompletionItemKind::VARIABLE),
-                        sort_text: Some(format!("005:{param}")),
-                        ..Default::default()
-                    });
-                }
+            if param.to_lowercase().starts_with(prefix_lower.as_str())
+                && !items.iter().any(|i| i.label == param)
+            {
+                items.push(CompletionItem {
+                    label:     param.clone(),
+                    kind:      Some(CompletionItemKind::VARIABLE),
+                    sort_text: Some(format!("005:{param}")),
+                    ..Default::default()
+                });
             }
         }
     }
@@ -389,7 +389,7 @@ impl Indexer {
             return (vec![], false);
         };
         let before = before_cursor(&line, position.character);
-        let (prefix, before_prefix) = split_prefix(&before);
+        let (prefix, before_prefix) = split_prefix(before);
 
         // ── completion result cache ──────────────────────────────────────────
         // Dot-completion: all members of a type are returned regardless of what
@@ -412,7 +412,7 @@ impl Indexer {
             }
         }
 
-        let dot_recv = dot_receiver(&before_prefix);
+        let dot_recv = dot_receiver(before_prefix);
 
         // `this.` / `it.` / named-param dot-completion.
         // `this` can mean: (a) scope-function receiver, (b) enclosing class.
@@ -420,13 +420,13 @@ impl Indexer {
         // Named lambda params are detected via `is_lambda_param`.
         if let Some(ref recv) = dot_recv {
             if recv == "it" || recv == "this"
-                || is_lambda_param(recv, &before, self, uri, position.line as usize)
+                || is_lambda_param(recv, before, self, uri, position.line as usize)
             {
                 let cursor_line = position.line as usize;
                 let cursor_col  = before.chars().count();
-                let elem_type = self.resolve_lambda_recv_type(recv, &before, cursor_line, cursor_col, uri);
+                let elem_type = self.resolve_lambda_recv_type(recv, before, cursor_line, cursor_col, uri);
                 if let Some(elem_type) = elem_type {
-                    let (items, _) = crate::resolver::complete_symbol(self, &prefix, Some(&elem_type), uri, snippets);
+                    let (items, _) = crate::resolver::complete_symbol(self, prefix, Some(&elem_type), uri, snippets);
                     if items.is_empty() {
                         // Type name known (e.g. generic param `T`, `StateType`) but not
                         // indexed — show a single hint item so the user sees the inferred type.
@@ -446,14 +446,14 @@ impl Indexer {
         }
 
         let annotation_only = dot_recv.is_none()
-            && crate::resolver::is_annotation_context(&before, &prefix);
+            && crate::resolver::is_annotation_context(before, prefix);
         let (mut items, hit_cap) = crate::resolver::complete_symbol_with_context(
-            self, &prefix, dot_recv.as_deref(), uri, snippets, annotation_only,
+            self, prefix, dot_recv.as_deref(), uri, snippets, annotation_only,
         );
 
         // Add scope-aware lambda parameter names (bare-word completion only).
         if dot_recv.is_none() {
-            self.add_lambda_param_completions(&mut items, uri, position.line as usize, &prefix);
+            self.add_lambda_param_completions(&mut items, uri, position.line as usize, prefix);
         }
 
         // Store in last_completion cache.
@@ -467,7 +467,7 @@ impl Indexer {
 
 // ─── completion helpers (free functions) ─────────────────────────────────────
 
-/// Returns a copy of `line` up to the UTF-16 column `utf16_col`.
+/// Returns a slice of `line` up to the UTF-16 column `utf16_col`.
 fn before_cursor(line: &str, utf16_col: u32) -> &str {
     let target = utf16_col as usize;
     let mut utf16 = 0usize;

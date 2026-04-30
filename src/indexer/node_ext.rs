@@ -1,7 +1,7 @@
 //! Extension trait adding Kotlin/Java CST helper methods to `tree_sitter::Node`.
 //!
-//! All methods are zero-cost thin wrappers around tree-sitter node traversal;
-//! their bodies were extracted from the free functions they replace.
+//! These methods are lightweight convenience wrappers around tree-sitter node
+//! traversal; their bodies were extracted from the free functions they replace.
 use tree_sitter::Node;
 
 pub(crate) trait NodeExt<'a>: Sized + Copy {
