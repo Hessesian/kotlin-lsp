@@ -59,6 +59,12 @@ pub(crate) trait NodeExt<'a>: Sized + Copy {
     /// - Returns `None` if the callee kind is not recognized.
     fn call_fn_and_qualifier(self, bytes: &[u8]) -> Option<(String, Option<String>)>;
 
+    /// Extract the user-type name from a `user_type` node (Kotlin/Java).
+    fn user_type_name(self, bytes: &[u8]) -> Option<String>;
+
+    /// Extract the first type name from a Java type node.
+    fn java_first_type_name(self, bytes: &[u8]) -> Option<String>;
+
     /// Returns the line number (0-based) of the first named identifier child,
     /// or the node's own start line if no named child is found.
     fn name_line(self) -> u32;
@@ -240,6 +246,35 @@ impl<'a> NodeExt<'a> for Node<'a> {
         }
     }
 
+    fn user_type_name(self, bytes: &[u8]) -> Option<String> {
+        let mut segments = Vec::new();
+        collect_user_type_segments(self, bytes, &mut segments);
+        if segments.is_empty() { None } else { Some(segments.join(".")) }
+    }
+
+    fn java_first_type_name(self, bytes: &[u8]) -> Option<String> {
+        let mut stack = vec![self];
+        while let Some(n) = stack.pop() {
+            match n.kind() {
+                "type_identifier" => {
+                    return n.utf8_text_owned(bytes);
+                }
+                "scoped_type_identifier" => {
+                    let text = n.utf8_text(bytes).ok()?;
+                    let name = text.split('<').next().unwrap_or(text).trim();
+                    return if name.is_empty() { None } else { Some(name.to_owned()) };
+                }
+                "type_arguments" => continue,
+                _ => {}
+            }
+            let mut cur = n.walk();
+            for child in n.children(&mut cur) {
+                if child.is_named() { stack.push(child); }
+            }
+        }
+        None
+    }
+
     fn name_line(self) -> u32 {
         // Java uses field "name"; Kotlin has type_identifier as a direct child.
         if let Some(n) = self.child_by_field_name("name") {
@@ -252,6 +287,25 @@ impl<'a> NodeExt<'a> for Node<'a> {
             }
         }
         self.start_position().row as u32
+    }
+}
+
+// ─── Private helpers ──────────────────────────────────────────────────────────
+
+fn collect_user_type_segments(node: Node<'_>, bytes: &[u8], segments: &mut Vec<String>) {
+    let mut cur = node.walk();
+    for child in node.children(&mut cur) {
+        match child.kind() {
+            "type_arguments" => {}  // skip generic parameters entirely
+            "simple_identifier" | "type_identifier" | "identifier" => {
+                if let Ok(text) = child.utf8_text(bytes) {
+                    let text = text.trim();
+                    if !text.is_empty() { segments.push(text.to_owned()); }
+                }
+            }
+            _ if child.is_named() => collect_user_type_segments(child, bytes, segments),
+            _ => {}
+        }
     }
 }
 
