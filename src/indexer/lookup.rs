@@ -95,6 +95,42 @@ impl Indexer {
         }
     }
 
+    /// Build Markdown documentation for a completion item identified by its
+    /// source file URI and declaration line number.
+    ///
+    /// Called by `completionItem/resolve` to lazily populate `documentation`
+    /// without bloating the initial completion response.
+    ///
+    /// Returns `(doc_markdown, detail)` where `detail` is the short signature
+    /// string suitable for `CompletionItem.detail`.
+    pub fn completion_docs_for(&self, uri_str: &str, line: u32) -> Option<(String, String)> {
+        let data = self.files.get(uri_str)?;
+        let start_line = line as usize;
+
+        let sym = data.symbols.iter()
+            .find(|s| s.selection_range.start.line == line)?;
+
+        let lang = if uri_str.ends_with(".kt")    { "kotlin" }
+                   else if uri_str.ends_with(".swift") { "swift" }
+                   else                                 { "java" };
+
+        let sig = data.lines.collect_signature(start_line);
+        let code_block = if sig.is_empty() {
+            format!("```{}\n{} {}\n```", lang, symbol_kw_for_lang(sym.kind, lang), sym.name)
+        } else {
+            format!("```{}\n{}\n```", lang, sig)
+        };
+
+        let doc_md = if let Some(kdoc) = extract_doc_comment(&data.lines, start_line) {
+            format!("{kdoc}\n\n---\n\n{code_block}")
+        } else {
+            code_block
+        };
+
+        let detail = sym.detail.clone();
+        Some((doc_md, detail))
+    }
+
     /// All symbols declared in the given file (for `documentSymbol`).
     pub fn file_symbols(&self, uri: &Url) -> Vec<SymbolEntry> {
         self.files

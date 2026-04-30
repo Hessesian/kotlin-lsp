@@ -193,7 +193,7 @@ impl LanguageServer for Backend {
                 )),
                 completion_provider: Some(CompletionOptions {
                     trigger_characters: Some(vec![".".into(), ":".into()]),
-                    resolve_provider:   Some(false),
+                    resolve_provider:   Some(true),
                     ..Default::default()
                 }),
                 hover_provider:          Some(HoverProviderCapability::Simple(true)),
@@ -610,6 +610,30 @@ impl LanguageServer for Backend {
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
         self.completion_impl(params).await
+    }
+
+    // ── completionItem/resolve ────────────────────────────────────────────────
+
+    async fn completion_resolve(&self, mut item: CompletionItem) -> Result<CompletionItem> {
+        if let Some(ref data) = item.data {
+            if let (Some(uri), Some(line)) = (
+                data.get("u").and_then(|v| v.as_str()),
+                data.get("l").and_then(|v| v.as_u64()),
+            ) {
+                if let Some((doc_md, detail)) =
+                    self.indexer.completion_docs_for(uri, line as u32)
+                {
+                    item.documentation = Some(Documentation::MarkupContent(MarkupContent {
+                        kind:  MarkupKind::Markdown,
+                        value: doc_md,
+                    }));
+                    if item.detail.is_none() && !detail.is_empty() {
+                        item.detail = Some(detail);
+                    }
+                }
+            }
+        }
+        Ok(item)
     }
 
     // ── textDocument/hover ───────────────────────────────────────────────────
