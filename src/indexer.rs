@@ -21,6 +21,7 @@ mod infer;
 pub(crate) use self::infer::{
     // sig.rs
     collect_signature,
+    collect_params_from_line,
     find_fun_signature_full,
     find_fun_signature_with_receiver,
     collect_all_fun_params_texts,

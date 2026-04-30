@@ -580,7 +580,7 @@ fn lambda_receiver_type_named_arg_ml(
         let outer = &callee_full[..dot];
         // Find outer class file; try indexed files first (no rg), then rg fallback.
         let outer_file: Option<String> = {
-            let locs = crate::resolver::resolve_symbol_no_rg(idx, outer, uri);
+            let locs = idx.resolve_symbol_no_rg(outer, uri);
             locs.first().map(|l| l.uri.to_string())
                 .or_else(|| {
                     // On-demand: use rg to find and index the outer class.

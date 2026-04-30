@@ -5,6 +5,7 @@ use tower_lsp::lsp_types::{
 
 use crate::indexer::Indexer;
 use crate::types::Visibility;
+use crate::LinesExt;
 
 use super::{fqns_for_name, already_imported, make_import_edit,
             resolve_symbol_inner, resolve_symbol_no_rg};
@@ -437,7 +438,7 @@ pub(crate) fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippet
                 let lines = live.clone().unwrap_or_else(|| f.lines.clone());
                 // Re-scan live lines for imports so we don't use a stale snapshot.
                 let imports = if live.is_some() {
-                    crate::parser::parse_imports_from_lines(&lines)
+                    lines.parse_imports()
                 } else {
                     f.imports.clone()
                 };
@@ -445,7 +446,7 @@ pub(crate) fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippet
             })
             .unwrap_or_else(|| {
                 let lines = live.clone().unwrap_or_default();
-                let imports = crate::parser::parse_imports_from_lines(&lines);
+                let imports = lines.parse_imports();
                 (imports, String::new(), lines)
             });
 
@@ -631,4 +632,27 @@ fn make_completion_item(name: &str, ck: CompletionItemKind, sort_text: String, s
 /// pre-warmer in `indexer.rs`.  Builds + caches completion items for a file.
 pub fn symbols_from_uri_as_completions_pub(idx: &Indexer, file_uri: &str) -> Vec<CompletionItem> {
     symbols_from_uri_as_completions(idx, file_uri)
+}
+
+// ─── impl Indexer wrappers ────────────────────────────────────────────────────
+
+impl crate::indexer::Indexer {
+    pub(crate) fn complete_dot(&self, receiver: &str, from_uri: &Url, snippets: bool) -> Vec<CompletionItem> {
+        complete_dot(self, receiver, from_uri, snippets)
+    }
+    pub(crate) fn complete_bare(&self, prefix: &str, from_uri: &Url, snippets: bool, annotation_only: bool) -> (Vec<CompletionItem>, bool) {
+        complete_bare(self, prefix, from_uri, snippets, annotation_only)
+    }
+    pub(super) fn complete_super_w(&self, from_uri: &Url, snippets: bool) -> Vec<CompletionItem> {
+        complete_super(self, from_uri, snippets)
+    }
+    pub(super) fn symbols_from_uri_as_completions_w(&self, file_uri: &str) -> Vec<CompletionItem> {
+        symbols_from_uri_as_completions(self, file_uri)
+    }
+    pub(super) fn build_completion_items_w(&self, file_uri: &str) -> Vec<CompletionItem> {
+        build_completion_items(self, file_uri)
+    }
+    pub fn symbols_from_uri_as_completions_pub(&self, file_uri: &str) -> Vec<CompletionItem> {
+        symbols_from_uri_as_completions_pub(self, file_uri)
+    }
 }

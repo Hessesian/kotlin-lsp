@@ -16,6 +16,7 @@
 use tower_lsp::lsp_types::*;
 
 use crate::types::SymbolEntry;
+use crate::LinesExt;
 use super::Indexer;
 use super::doc::extract_doc_comment;
 
@@ -30,7 +31,7 @@ impl Indexer {
     /// Resolve definition locations for `name` (with optional dot-qualifier).
     #[allow(dead_code)]
     pub fn find_definition(&self, name: &str, from_uri: &Url) -> Vec<Location> {
-        crate::resolver::resolve_symbol(self, name, None, from_uri)
+        self.resolve_symbol(name, None, from_uri)
     }
 
     pub fn find_definition_qualified(
@@ -39,7 +40,7 @@ impl Indexer {
         qualifier: Option<&str>,
         from_uri: &Url,
     ) -> Vec<Location> {
-        crate::resolver::resolve_symbol(self, name, qualifier, from_uri)
+        self.resolve_symbol(name, qualifier, from_uri)
     }
 
     /// Build a Markdown hover snippet for a symbol name.
@@ -74,7 +75,7 @@ impl Indexer {
             .or_else(|| data.symbols.iter().find(|s| s.name == name))?;
 
         let start_line = sym.selection_range.start.line as usize;
-        let sig = super::infer::collect_signature(&data.lines, start_line);
+        let sig = data.lines.collect_signature(start_line);
 
         let lang = if loc.uri.path().ends_with(".kt") { "kotlin" }
                    else if loc.uri.path().ends_with(".swift") { "swift" }

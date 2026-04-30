@@ -60,7 +60,7 @@ pub(crate) fn collect_signature(lines: &[String], start_line: usize) -> String {
 /// Used by signature help (fires on every keystroke).
 fn find_fun_signature(fn_name: &str, idx: &Indexer, uri: &Url) -> Option<String> {
     // 1. Import-aware resolution using only already-indexed files (no rg/disk).
-    let locs = crate::resolver::resolve_symbol_no_rg(idx, fn_name, uri);
+    let locs = idx.resolve_symbol_no_rg(fn_name, uri);
     for loc in &locs {
         let file_uri_str = loc.uri.as_str();
         if let Some(data) = idx.files.get(file_uri_str) {
@@ -274,7 +274,7 @@ pub(crate) fn find_fun_signature_with_receiver(
             // name-only scan that may return a completely unrelated function.
             return String::new();
         };
-        let locs = crate::resolver::resolve_symbol(idx, &rt.outer, None, uri);
+        let locs = idx.resolve_symbol(&rt.outer, None, uri);
         for loc in &locs {
             if let Some(data) = idx.files.get(loc.uri.as_str()) {
                 if let Some(sig) = collect_fun_params_text(name, loc.uri.as_str(), idx) {
