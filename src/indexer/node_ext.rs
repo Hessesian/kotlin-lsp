@@ -5,6 +5,13 @@
 use tree_sitter::Node;
 
 pub(crate) trait NodeExt<'a>: Sized + Copy {
+    /// Extract the node's text as an owned `String`.  Returns `None` if the bytes
+    /// are not valid UTF-8 (should never happen in practice for Kotlin/Java source).
+    fn utf8_text_owned(self, bytes: &[u8]) -> Option<String>;
+
+    /// Find the first direct child whose `kind()` equals `kind`.
+    fn first_child_of_kind(self, kind: &str) -> Option<Node<'a>>;
+
     /// Extract the function name from a `call_expression` node.
     /// Handles simple calls `foo(...)` and navigation chains `foo.bar(...)`.
     fn call_fn_name(self, bytes: &[u8]) -> Option<String>;
@@ -44,6 +51,16 @@ pub(crate) trait NodeExt<'a>: Sized + Copy {
 }
 
 impl<'a> NodeExt<'a> for Node<'a> {
+    fn utf8_text_owned(self, bytes: &[u8]) -> Option<String> {
+        self.utf8_text(bytes).ok().map(|s| s.to_owned())
+    }
+
+    fn first_child_of_kind(self, kind: &str) -> Option<Node<'a>> {
+        (0..self.child_count())
+            .filter_map(|i| self.child(i))
+            .find(|c| c.kind() == kind)
+    }
+
     fn call_fn_name(self, bytes: &[u8]) -> Option<String> {
         self.call_fn_and_qualifier(bytes).map(|(name, _)| name)
     }
@@ -53,9 +70,7 @@ impl<'a> NodeExt<'a> for Node<'a> {
         for i in 0..count.saturating_sub(1) {
             let (c, next) = (self.child(i)?, self.child(i + 1)?);
             if c.kind() == "simple_identifier" && next.kind() == "=" {
-                return std::str::from_utf8(&bytes[c.byte_range()])
-                    .ok()
-                    .map(|s| s.to_string());
+                return c.utf8_text_owned(bytes);
             }
         }
         None
@@ -99,9 +114,7 @@ impl<'a> NodeExt<'a> for Node<'a> {
     }
 
     fn has_lambda_named_params(self, bytes: &[u8]) -> bool {
-        let Some(lp) = (0..self.child_count())
-            .filter_map(|i| self.child(i))
-            .find(|c| c.kind() == "lambda_parameters")
+        let Some(lp) = self.first_child_of_kind("lambda_parameters")
         else {
             return false;
         };
@@ -121,9 +134,7 @@ impl<'a> NodeExt<'a> for Node<'a> {
     }
 
     fn collect_lambda_param_names(self, bytes: &[u8], existing: &[String]) -> Vec<String> {
-        let Some(lp) = (0..self.child_count())
-            .filter_map(|i| self.child(i))
-            .find(|c| c.kind() == "lambda_parameters")
+        let Some(lp) = self.first_child_of_kind("lambda_parameters")
         else {
             return Vec::new();
         };
@@ -133,14 +144,12 @@ impl<'a> NodeExt<'a> for Node<'a> {
             .filter(|c| c.kind() == "variable_declaration")
             .filter_map(|vd| {
                 let si = vd.child(0).filter(|n| n.kind() == "simple_identifier")?;
-                std::str::from_utf8(&bytes[si.byte_range()])
-                    .ok()
-                    .map(|s| s.to_string())
+                si.utf8_text_owned(bytes)
             })
             .filter(|name| {
                 name != "it"
                     && name != "_"
-                    && name.chars().next().map(|c| c.is_lowercase()).unwrap_or(false)
+                    && crate::indexer::starts_with_lowercase(name)
                     && !existing.contains(name)
             })
             .collect()
@@ -148,9 +157,8 @@ impl<'a> NodeExt<'a> for Node<'a> {
 
     fn extract_type_name(self, bytes: &[u8]) -> Option<String> {
         if let Some(n) = self.child_by_field_name("name") {
-            if let Ok(s) = std::str::from_utf8(&bytes[n.byte_range()]) {
-                let s = s.to_string();
-                if s.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+            if let Some(s) = n.utf8_text_owned(bytes) {
+                if crate::indexer::starts_with_uppercase(&s) {
                     return Some(s);
                 }
             }
@@ -161,9 +169,9 @@ impl<'a> NodeExt<'a> for Node<'a> {
                     child.kind(),
                     "type_identifier" | "simple_identifier" | "identifier"
                 ) {
-                    if let Ok(s) = std::str::from_utf8(&bytes[child.byte_range()]) {
-                        if s.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
-                            return Some(s.to_string());
+                    if let Some(s) = child.utf8_text_owned(bytes) {
+                        if crate::indexer::starts_with_uppercase(&s) {
+                            return Some(s);
                         }
                     }
                 }
@@ -176,7 +184,7 @@ impl<'a> NodeExt<'a> for Node<'a> {
         let callee = self.child(0)?;
         match callee.kind() {
             "simple_identifier" | "type_identifier" => {
-                let name = std::str::from_utf8(&bytes[callee.byte_range()]).ok()?.to_string();
+                let name = callee.utf8_text_owned(bytes)?;
                 Some((name, None))
             }
             "navigation_expression" => {
@@ -186,14 +194,13 @@ impl<'a> NodeExt<'a> for Node<'a> {
                 for child in callee.children(&mut walker) {
                     match child.kind() {
                         "simple_identifier" | "type_identifier" => {
-                            qualifier_opt = std::str::from_utf8(&bytes[child.byte_range()])
-                                .ok().map(|s| s.to_string());
+                            qualifier_opt = child.utf8_text_owned(bytes);
                         }
                         "navigation_suffix" => {
                             fn_name_opt = (0..child.child_count())
                                 .filter_map(|i| child.child(i))
                                 .find(|c| c.kind() == "simple_identifier" || c.kind() == "type_identifier")
-                                .and_then(|c| std::str::from_utf8(&bytes[c.byte_range()]).ok().map(|s| s.to_string()));
+                                .and_then(|c| c.utf8_text_owned(bytes));
                         }
                         _ => {}
                     }

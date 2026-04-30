@@ -170,7 +170,7 @@ fn map_def_captures<'c, 't>(
         if cap.index == def_idx {
             def_range = Some(ts_to_lsp(cap.node.range()));
         } else if cap.index == name_idx {
-            name_text  = cap.node.utf8_text(bytes).ok().map(str::to_owned);
+            name_text  = cap.node.utf8_text_owned(bytes);
             name_range = Some(ts_to_lsp(cap.node.range()));
         }
     }
@@ -655,14 +655,14 @@ fn parse_import_header(header: &tree_sitter::Node, bytes: &[u8], data: &mut File
     for child in header.children(&mut cur) {
         match child.kind() {
             "identifier" => {
-                path_text = child.utf8_text(bytes).ok().map(str::to_owned);
+                path_text = child.utf8_text_owned(bytes);
             }
             "import_alias" => {
                 // (import_alias "as" (type_identifier))
                 let mut ac = child.walk();
                 for ac_child in child.children(&mut ac) {
                     if ac_child.kind() == "type_identifier" {
-                        alias_text = ac_child.utf8_text(bytes).ok().map(str::to_owned);
+                        alias_text = ac_child.utf8_text_owned(bytes);
                         break;
                     }
                 }
@@ -996,7 +996,7 @@ fn java_first_type_name(node: &Node, bytes: &[u8]) -> Option<String> {
     while let Some(n) = stack.pop() {
         match n.kind() {
             "type_identifier" => {
-                return n.utf8_text(bytes).ok().map(str::to_owned);
+                return n.utf8_text_owned(bytes);
             }
             "scoped_type_identifier" => {
                 // Return the full dotted name (e.g. `pkg.Base`), stripping any trailing
@@ -1028,7 +1028,7 @@ fn java_collect_type_list(node: &Node, bytes: &[u8], name_line: u32, data: &mut 
                 // type_list children may be leaf type_identifier nodes directly,
                 // or wrapper nodes (generic_type, scoped_type_identifier) containing one.
                 let name = if type_node.kind() == "type_identifier" {
-                    type_node.utf8_text(bytes).ok().map(str::to_owned)
+                    type_node.utf8_text_owned(bytes)
                 } else {
                     java_first_type_name(&type_node, bytes)
                 };
