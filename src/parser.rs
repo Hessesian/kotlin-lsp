@@ -873,7 +873,7 @@ fn extract_supers_java(node: &Node, bytes: &[u8], data: &mut FileData) {
                 match child.kind() {
                     "superclass" => {
                         // (superclass "extends" _type)
-                        if let Some(name) = java_first_type_name(&child, bytes) {
+                        if let Some(name) = child.java_first_type_name(bytes) {
                             data.supers.push((name_line, name));
                         }
                     }
@@ -896,83 +896,18 @@ fn extract_supers_java(node: &Node, bytes: &[u8], data: &mut FileData) {
     }
 }
 
-/// Returns the name of the first `user_type` child of `node`, if any.
-fn first_user_type_child_name(node: &Node, bytes: &[u8]) -> Option<String> {
-    node.first_child_of_kind(KIND_USER_TYPE).and_then(|c| user_type_name(&c, bytes))
-}
-
 /// Extract the supertype name from a `delegation_specifier` node.
 fn super_name_from_delegation(node: &Node, bytes: &[u8]) -> Option<String> {
     let mut cur = node.walk();
     for child in node.children(&mut cur) {
         match child.kind() {
             "constructor_invocation" | "explicit_delegation" => {
-                return first_user_type_child_name(&child, bytes);
+                return child.first_child_of_kind(KIND_USER_TYPE).and_then(|c| c.user_type_name(bytes));
             }
             "user_type" => {
-                return user_type_name(&child, bytes);
+                return child.user_type_name(bytes);
             }
             _ => {}
-        }
-    }
-    None
-}
-
-/// Collect the identifier segments of a `user_type` node, ignoring
-/// `type_arguments` subtrees, so generics don't interfere with dotted paths.
-/// `Bar<Event, State>` → `["Bar"]`;  `Outer<T>.Inner` → `["Outer", "Inner"]`.
-fn collect_user_type_segments(node: &Node, bytes: &[u8], segments: &mut Vec<String>) {
-    let mut cur = node.walk();
-    for child in node.children(&mut cur) {
-        match child.kind() {
-            "type_arguments" => {}  // skip generic parameters entirely
-            "simple_identifier" | "type_identifier" | "identifier" => {
-                if let Ok(text) = child.utf8_text(bytes) {
-                    let text = text.trim();
-                    if !text.is_empty() { segments.push(text.to_owned()); }
-                }
-            }
-            _ if child.is_named() => collect_user_type_segments(&child, bytes, segments),
-            _ => {}
-        }
-    }
-}
-
-/// Get the canonical type name from a `user_type` node, stripping generic args.
-/// `Bar<Event, State>` → `"Bar"`;  `Outer<T>.Inner` → `"Outer.Inner"`.
-fn user_type_name(node: &Node, bytes: &[u8]) -> Option<String> {
-    let mut segments = Vec::new();
-    collect_user_type_segments(node, bytes, &mut segments);
-    if segments.is_empty() { None } else { Some(segments.join(".")) }
-}
-
-/// Extract the outermost type name from a Java type node.
-///
-/// Handles leaf `type_identifier`, `scoped_type_identifier`, and wrapper nodes
-/// like `generic_type` (`Base<String>` → `"Base"`) by descending until
-/// a `type_identifier` is found. `type_arguments` nodes are skipped so generic
-/// parameters don't shadow the base type name.
-fn java_first_type_name(node: &Node, bytes: &[u8]) -> Option<String> {
-    let mut stack = vec![*node];
-    while let Some(n) = stack.pop() {
-        match n.kind() {
-            "type_identifier" => {
-                return n.utf8_text_owned(bytes);
-            }
-            "scoped_type_identifier" => {
-                // Return the full dotted name (e.g. `pkg.Base`), stripping any trailing
-                // generic args that may appear inside the scope chain.
-                let text = n.utf8_text(bytes).ok()?;
-                let name = text.split('<').next().unwrap_or(text).trim();
-                return if name.is_empty() { None } else { Some(name.to_owned()) };
-            }
-            // Skip type_arguments entirely — they contain the generic params, not the base name.
-            "type_arguments" => continue,
-            _ => {}
-        }
-        let mut cur = n.walk();
-        for child in n.children(&mut cur) {
-            if child.is_named() { stack.push(child); }
         }
     }
     None
@@ -989,7 +924,7 @@ fn java_collect_type_list(node: &Node, bytes: &[u8], name_line: u32, data: &mut 
         let name = if type_node.kind() == KIND_TYPE_IDENT {
             type_node.utf8_text_owned(bytes)
         } else {
-            java_first_type_name(&type_node, bytes)
+            type_node.java_first_type_name(bytes)
         };
         if let Some(n) = name { data.supers.push((name_line, n)); }
     }
