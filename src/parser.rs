@@ -612,14 +612,8 @@ fn extract_package_and_imports(root: tree_sitter::Node, bytes: &[u8], data: &mut
         match node.kind() {
             "package_header" => {
                 // (package_header "package" (identifier ...))
-                let mut c = node.walk();
-                for child in node.children(&mut c) {
-                    if child.kind() == "identifier" {
-                        if let Ok(txt) = child.utf8_text(bytes) {
-                            data.package = Some(txt.to_owned());
-                        }
-                        break;
-                    }
+                if let Some(child) = node.first_child_of_kind("identifier") {
+                    data.package = child.utf8_text_owned(bytes);
                 }
             }
             "import_list" => {
@@ -645,13 +639,8 @@ fn parse_import_header(header: &tree_sitter::Node, bytes: &[u8], data: &mut File
             }
             "import_alias" => {
                 // (import_alias "as" (type_identifier))
-                let mut ac = child.walk();
-                for ac_child in child.children(&mut ac) {
-                    if ac_child.kind() == "type_identifier" {
-                        alias_text = ac_child.utf8_text_owned(bytes);
-                        break;
-                    }
-                }
+                alias_text = child.first_child_of_kind("type_identifier")
+                    .and_then(|c| c.utf8_text_owned(bytes));
             }
             "wildcard_import" => {
                 is_star = true;
@@ -717,13 +706,8 @@ pub fn parse_imports_from_lines(lines: &[String]) -> Vec<crate::types::ImportEnt
 
 /// Extract the import path text from an `import_declaration` node, if present.
 fn swift_import_path<'a>(node: tree_sitter::Node<'a>, bytes: &'a [u8]) -> Option<&'a str> {
-    let mut cur = node.walk();
-    for child in node.children(&mut cur) {
-        if child.kind() == "identifier" {
-            return child.utf8_text(bytes).ok();
-        }
-    }
-    None
+    node.first_child_of_kind("identifier")
+        .and_then(|c| c.utf8_text(bytes).ok())
 }
 
 fn extract_swift_imports(root: tree_sitter::Node, bytes: &[u8], data: &mut FileData) {
