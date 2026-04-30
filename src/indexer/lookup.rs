@@ -46,7 +46,7 @@ impl Indexer {
     }
 
     /// Build a Markdown hover snippet for a symbol name.
-    pub fn hover_info(&self, name: &str) -> Option<String> {
+    pub fn hover_info(&self, name: &str, calling_uri: Option<&str>) -> Option<String> {
         // Check stdlib first so well-known symbols (run, apply, map, …) get
         // proper signatures even when no project source contains them.
         if let Some(md) = hover(name) { return Some(md); }
@@ -56,7 +56,7 @@ impl Indexer {
             let r = self.definitions.get(name)?;
             r.first()?.clone()
         };
-        self.hover_info_at_location(&loc, name, None)
+        self.hover_info_at_location(&loc, name, calling_uri)
     }
 
     /// Build hover markdown for `name` at a specific resolved `Location`.
@@ -371,46 +371,62 @@ fn build_type_param_subst(
 ) -> std::collections::HashMap<String, String> {
     if sym_uri == calling_uri { return Default::default(); }
 
-    let sym_data = match idx.files.get(sym_uri) { Some(d) => d, None => return Default::default() };
+    let sym_data = match idx.files.get(sym_uri) {
+        Some(d) => d,
+        None => {
+            eprintln!("[kotlin-lsp] type_subst: sym_uri not indexed: {sym_uri}");
+            return Default::default();
+        }
+    };
 
-    // Identify the generic class that declares this symbol.
     let container_name = match find_containing_class_name(&sym_data, sym_line) {
         Some(n) => n,
-        None => return Default::default(),
+        None => {
+            eprintln!("[kotlin-lsp] type_subst: no container class for line {sym_line} in {sym_uri}");
+            return Default::default();
+        }
     };
+    eprintln!("[kotlin-lsp] type_subst: container={container_name}");
 
-    // Get the type parameters from the container's declaration.
     let container_sym = match sym_data.symbols.iter().find(|s| s.name == container_name) {
         Some(s) => s,
-        None => return Default::default(),
+        None => {
+            eprintln!("[kotlin-lsp] type_subst: container symbol not found: {container_name}");
+            return Default::default();
+        }
     };
-    // Use detail (pre-computed signature) as the source for type params; fall back to
-    // the declaration line if detail is empty.
     let decl_text = if !container_sym.detail.is_empty() {
         container_sym.detail.clone()
     } else {
         let line_idx = container_sym.selection_range.start.line as usize;
         sym_data.lines.get(line_idx).cloned().unwrap_or_default()
     };
+    eprintln!("[kotlin-lsp] type_subst: decl_text={decl_text:?}");
     let type_params = parse_type_params(&decl_text);
+    eprintln!("[kotlin-lsp] type_subst: type_params={type_params:?}");
     if type_params.is_empty() { return Default::default(); }
 
-    // Find the concrete type arguments in the calling file.
-    // TODO: when calling_file has multiple classes implementing the same interface,
-    // this uses the first match. A future improvement could filter by which class
-    // the cursor is inside.
-    let calling_data = match idx.files.get(calling_uri) { Some(d) => d, None => return Default::default() };
+    let calling_data = match idx.files.get(calling_uri) {
+        Some(d) => d,
+        None => {
+            eprintln!("[kotlin-lsp] type_subst: calling_uri not indexed: {calling_uri}");
+            return Default::default();
+        }
+    };
+    eprintln!("[kotlin-lsp] type_subst: calling_file supers={:?}", calling_data.supers);
     let type_args = calling_data.supers.iter()
         .find(|(_, base, _)| base == &container_name)
         .map(|(_, _, args)| args.clone())
         .unwrap_or_default();
+    eprintln!("[kotlin-lsp] type_subst: type_args={type_args:?}");
 
     if type_args.is_empty() { return Default::default(); }
 
-    // Zip params → args (stop at the shorter list).
-    type_params.iter().zip(type_args.iter())
+    let result: std::collections::HashMap<String, String> = type_params.iter().zip(type_args.iter())
         .map(|(k, v)| (k.clone(), v.clone()))
-        .collect()
+        .collect();
+    eprintln!("[kotlin-lsp] type_subst: map={result:?}");
+    result
 }
 
 /// Apply a type-parameter substitution map to a signature string.

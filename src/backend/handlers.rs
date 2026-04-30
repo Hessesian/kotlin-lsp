@@ -34,7 +34,7 @@ impl Backend {
                 let sig_md = format!("```{lang}\n{kw} {}: {type_name}\n```", ctx.word);
                 // For symbol lookup use the last segment of a qualified name.
                 let lookup_name = type_name.rsplit('.').next().unwrap_or(type_name.as_str());
-                let type_hover = self.indexer.hover_info(lookup_name);
+                let type_hover = self.indexer.hover_info(lookup_name, Some(uri.as_str()));
                 let full = if let Some(th) = type_hover {
                     format!("{sig_md}\n\n---\n\n{th}")
                 } else {
@@ -82,7 +82,7 @@ impl Backend {
             self.indexer.hover_info_at_location(loc, &ctx.word, Some(uri.as_str()))
         } else {
             // Index lookup — works for already-indexed symbols + stdlib.
-            let from_index = self.indexer.hover_info(&ctx.word);
+            let from_index = self.indexer.hover_info(&ctx.word, Some(uri.as_str()));
             if from_index.is_some() {
                 from_index
             } else {
