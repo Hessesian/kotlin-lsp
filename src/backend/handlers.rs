@@ -8,6 +8,9 @@ use super::cursor::CursorContext;
 use super::helpers::resolve_references_scope;
 use super::actions::is_non_call_keyword;
 
+/// Maximum number of workspace symbol results to return.
+const WORKSPACE_SYMBOL_CAP: usize = 512;
+
 impl Backend {
     pub(super) async fn hover_impl(&self, params: HoverParams) -> Result<Option<Hover>> {
         let pp       = params.text_document_position_params;
@@ -298,11 +301,11 @@ impl Backend {
                     },
                     container_name: if sym.detail.is_empty() { None } else { Some(sym.detail.clone()) },
                 });
-                if results.len() >= 512 {
+                if results.len() >= WORKSPACE_SYMBOL_CAP {
                     break;
                 }
             }
-            if results.len() >= 512 {
+            if results.len() >= WORKSPACE_SYMBOL_CAP {
                 break;
             }
         }
