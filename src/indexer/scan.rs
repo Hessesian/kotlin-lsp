@@ -10,6 +10,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tower_lsp::lsp_types::*;
 
@@ -35,6 +36,92 @@ mod progress {
         type Params = ProgressParams;
         const METHOD: &'static str = "$/progress";
     }
+}
+
+// ─── LSP progress helpers ─────────────────────────────────────────────────────
+
+const PROGRESS_TOKEN: &str = "kotlin-lsp/indexing";
+const PROGRESS_CREATE_TIMEOUT_MS: u64 = 500;
+const PROGRESS_POLL_INTERVAL_MS: u64 = 500;
+
+async fn lsp_progress_create(client: &tower_lsp::Client, token: &NumberOrString) {
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_millis(PROGRESS_CREATE_TIMEOUT_MS),
+        client.send_request::<tower_lsp::lsp_types::request::WorkDoneProgressCreate>(
+            WorkDoneProgressCreateParams { token: token.clone() },
+        ),
+    )
+    .await;
+}
+
+async fn lsp_progress_begin(
+    client: &tower_lsp::Client,
+    token: &NumberOrString,
+    message: String,
+) {
+    client
+        .send_notification::<progress::KotlinProgress>(ProgressParams {
+            token: token.clone(),
+            value: ProgressParamsValue::WorkDone(WorkDoneProgress::Begin(WorkDoneProgressBegin {
+                title: "kotlin-lsp".into(),
+                cancellable: Some(false),
+                message: Some(message),
+                percentage: Some(0),
+            })),
+        })
+        .await;
+}
+
+async fn lsp_progress_end(client: &tower_lsp::Client, token: &NumberOrString, message: String) {
+    client
+        .send_notification::<progress::KotlinProgress>(ProgressParams {
+            token: token.clone(),
+            value: ProgressParamsValue::WorkDone(WorkDoneProgress::End(WorkDoneProgressEnd {
+                message: Some(message),
+            })),
+        })
+        .await;
+}
+
+/// Spawns a background task that sends `$/progress` report notifications every
+/// `PROGRESS_POLL_INTERVAL_MS` ms until `total` tasks complete.
+///
+/// Returns a handle that the caller must `.abort()` when parsing finishes.
+fn spawn_progress_poller(
+    idx: Arc<crate::indexer::Indexer>,
+    client: Option<tower_lsp::Client>,
+    token: NumberOrString,
+    total: usize,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        if client.is_none() || total == 0 {
+            return;
+        }
+        let mut interval =
+            tokio::time::interval(std::time::Duration::from_millis(PROGRESS_POLL_INTERVAL_MS));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            let done = idx.parse_tasks_completed.load(Ordering::Relaxed);
+            let pct = ((done * 100) / total) as u32;
+            if let Some(ref c) = client {
+                c.send_notification::<progress::KotlinProgress>(ProgressParams {
+                    token: token.clone(),
+                    value: ProgressParamsValue::WorkDone(WorkDoneProgress::Report(
+                        WorkDoneProgressReport {
+                            cancellable: Some(false),
+                            message: Some(format!("{done}/{total} files…")),
+                            percentage: Some(pct),
+                        },
+                    )),
+                })
+                .await;
+            }
+            if done >= total {
+                break;
+            }
+        }
+    })
 }
 
 // ─── RAII guard ───────────────────────────────────────────────────────────────
@@ -115,6 +202,239 @@ pub(crate) fn find_files_for_types(
         None    => paths,
         Some(m) => m.filter_paths(paths),
     }
+}
+
+// ─── ParseWorkItem ────────────────────────────────────────────────────────────
+
+#[derive(Clone)]
+struct ParseWorkItem {
+    path: PathBuf,
+    key: String,
+    start_gen: u64,
+}
+
+// ─── ParseCounters ────────────────────────────────────────────────────────────
+
+/// Accumulates per-kind failure counts across concurrent parse tasks.
+struct ParseCounters {
+    gen_skipped:  Arc<AtomicUsize>,
+    read_failed:  Arc<AtomicUsize>,
+    url_failed:   Arc<AtomicUsize>,
+    panic_failed: Arc<AtomicUsize>,
+}
+
+impl ParseCounters {
+    fn new() -> Self {
+        Self {
+            gen_skipped:  Arc::new(AtomicUsize::new(0)),
+            read_failed:  Arc::new(AtomicUsize::new(0)),
+            url_failed:   Arc::new(AtomicUsize::new(0)),
+            panic_failed: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn clone_for_task(&self) -> Self {
+        Self {
+            gen_skipped:  Arc::clone(&self.gen_skipped),
+            read_failed:  Arc::clone(&self.read_failed),
+            url_failed:   Arc::clone(&self.url_failed),
+            panic_failed: Arc::clone(&self.panic_failed),
+        }
+    }
+
+    fn log_summary(&self, total: usize) {
+        let g = self.gen_skipped.load(Ordering::Relaxed);
+        let r = self.read_failed.load(Ordering::Relaxed);
+        let u = self.url_failed.load(Ordering::Relaxed);
+        let p = self.panic_failed.load(Ordering::Relaxed);
+        log::info!(
+            "All {total} parse tasks done: gen_skipped={g}, read_failed={r}, url_failed={u}, panics={p}"
+        );
+    }
+}
+
+// ─── partition_by_cache ───────────────────────────────────────────────────────
+
+/// Partition `paths` into cache hits and parse misses.
+///
+/// Returns `(cached_results, need_parse, cache_hits, aborted_early)`.
+fn partition_by_cache(
+    paths: &[PathBuf],
+    cache: Option<&super::cache::IndexCache>,
+    start_gen: u64,
+    root_generation: &std::sync::atomic::AtomicU64,
+) -> (Vec<FileIndexResult>, Vec<PathBuf>, usize, bool) {
+    let mut cached_results: Vec<FileIndexResult> = Vec::new();
+    let mut need_parse: Vec<PathBuf> = Vec::new();
+    let mut cache_hits: usize = 0;
+    let mut aborted_early = false;
+
+    for path in paths {
+        if root_generation.load(std::sync::atomic::Ordering::SeqCst) != start_gen {
+            log::info!("index_workspace_impl: generation changed, aborting partition");
+            aborted_early = true;
+            break;
+        }
+
+        let path_str = path.to_string_lossy().to_string();
+        let meta = std::fs::metadata(path);
+        let mtime = meta
+            .as_ref()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let on_disk_size = meta.map(|m| m.len()).unwrap_or(u64::MAX);
+
+        if let Some(c) = cache {
+            if let Some(entry) = c.entries.get(&path_str) {
+                // Cache hit: mtime AND file size must both match to guard against
+                // same-second edits (1s mtime resolution on some filesystems).
+                if entry.mtime_secs == mtime && entry.file_size == on_disk_size {
+                    if let Ok(uri) = Url::from_file_path(path) {
+                        cached_results.push(cache_entry_to_file_result(&uri, entry));
+                    }
+                    cache_hits += 1;
+                    continue;
+                }
+            }
+        }
+        need_parse.push(path.clone());
+    }
+
+    (cached_results, need_parse, cache_hits, aborted_early)
+}
+
+// ─── schedule_work_items ──────────────────────────────────────────────────────
+
+fn schedule_work_items(
+    need_parse: Vec<PathBuf>,
+    start_gen: u64,
+    root_generation: &std::sync::atomic::AtomicU64,
+    scheduled_paths: &dashmap::DashMap<String, u64>,
+) -> (Vec<ParseWorkItem>, bool) {
+    let mut work_items = Vec::new();
+    let mut aborted_early = false;
+
+    for path in need_parse {
+        if root_generation.load(std::sync::atomic::Ordering::SeqCst) != start_gen {
+            log::info!(
+                "index_workspace_impl: generation changed during scheduling, aborting remaining parses"
+            );
+            aborted_early = true;
+            break;
+        }
+
+        let key = std::fs::canonicalize(&path)
+            .unwrap_or_else(|_| path.clone())
+            .to_string_lossy()
+            .to_string();
+
+        match scheduled_paths.entry(key.clone()) {
+            dashmap::mapref::entry::Entry::Occupied(mut o) => {
+                let existing_gen = *o.get();
+                if existing_gen == start_gen {
+                    log::debug!(
+                        "Skipped scheduling parse for {} (already scheduled gen {})",
+                        key,
+                        existing_gen
+                    );
+                    continue;
+                } else {
+                    o.insert(start_gen);
+                }
+            }
+            dashmap::mapref::entry::Entry::Vacant(v) => {
+                v.insert(start_gen);
+            }
+        }
+
+        work_items.push(ParseWorkItem { path, key, start_gen });
+    }
+
+    (work_items, aborted_early)
+}
+
+// ─── execute_parse_item ───────────────────────────────────────────────────────
+
+async fn execute_parse_item(
+    item: ParseWorkItem,
+    sem: Arc<tokio::sync::Semaphore>,
+    idx: Arc<Indexer>,
+    counters: ParseCounters,
+) -> Option<FileIndexResult> {
+    log::debug!("Parsing: {}", item.path.display());
+
+    if idx
+        .root_generation
+        .load(std::sync::atomic::Ordering::SeqCst)
+        != item.start_gen
+    {
+        counters.gen_skipped.fetch_add(1, Ordering::Relaxed);
+        return None;
+    }
+
+    let content = match tokio::fs::read_to_string(&item.path).await {
+        Ok(c) => c,
+        Err(e) => {
+            let n = counters.read_failed.fetch_add(1, Ordering::Relaxed);
+            if n < MAX_READ_FAILURES_LOGGED {
+                log::warn!("Could not read {}: {}", item.path.display(), e);
+            }
+            return None;
+        }
+    };
+
+    let uri = match Url::from_file_path(&item.path) {
+        Ok(u) => u,
+        Err(_) => {
+            counters.url_failed.fetch_add(1, Ordering::Relaxed);
+            log::warn!("Invalid file path: {}", item.path.display());
+            return None;
+        }
+    };
+
+    let _permit = sem.acquire().await.unwrap();
+    let t0 = std::time::Instant::now();
+    let uri_clone = uri.clone();
+    let parse_result = match tokio::task::spawn_blocking(move || {
+        Indexer::parse_file(&uri_clone, &content)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(e) => {
+            counters.panic_failed.fetch_add(1, Ordering::Relaxed);
+            log::warn!("Parse task panicked for {}: {}", item.path.display(), e);
+            return None;
+        }
+    };
+    let took = t0.elapsed().as_millis();
+
+    log::debug!("Parsed {} in {} ms", item.path.display(), took);
+
+    let should_remove = idx
+        .scheduled_paths
+        .get(&item.key)
+        .map(|gen| *gen == item.start_gen)
+        .unwrap_or(false);
+    if should_remove {
+        idx.scheduled_paths.remove(&item.key);
+    }
+
+    let threshold: u128 = std::env::var("KOTLIN_LSP_PARSE_LOG_MS")
+        .ok()
+        .and_then(|v| v.parse::<u128>().ok())
+        .unwrap_or(1000);
+    if took > threshold {
+        log::warn!("Slow parse: {} took {} ms", item.path.display(), took);
+    }
+
+    idx.parse_tasks_completed
+        .fetch_add(1, Ordering::Relaxed);
+
+    Some(parse_result)
 }
 
 // ─── impl Indexer ─────────────────────────────────────────────────────────────
@@ -415,48 +735,8 @@ impl Indexer {
         }
 
         // ── Partition: cache hits → FileIndexResult, misses → need_parse ────────
-        let mut need_parse: Vec<PathBuf> = Vec::new();
-        let mut cached_results: Vec<FileIndexResult> = Vec::new();
-        let mut cache_hits: usize = 0;
-        let mut aborted_early = false;
-
-        for path in &paths {
-            if self
-                .root_generation
-                .load(std::sync::atomic::Ordering::SeqCst)
-                != start_gen
-            {
-                log::info!("index_workspace_impl: generation changed, aborting partition");
-                aborted_early = true;
-                break;
-            }
-
-            let path_str = path.to_string_lossy().to_string();
-            let meta = std::fs::metadata(path);
-            let mtime = meta
-                .as_ref()
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            let on_disk_size = meta.map(|m| m.len()).unwrap_or(u64::MAX);
-
-            if let Some(ref c) = cache {
-                if let Some(entry) = c.entries.get(&path_str) {
-                    // Cache hit: mtime AND file size must both match to guard against
-                    // same-second edits (1s mtime resolution on some filesystems).
-                    if entry.mtime_secs == mtime && entry.file_size == on_disk_size {
-                        if let Ok(uri) = Url::from_file_path(path) {
-                            cached_results.push(cache_entry_to_file_result(&uri, entry));
-                        }
-                        cache_hits += 1;
-                        continue;
-                    }
-                }
-            }
-            need_parse.push(path.clone());
-        }
+        let (cached_results, need_parse, cache_hits, mut aborted_early) =
+            partition_by_cache(&paths, cache.as_ref(), start_gen, &self.root_generation);
 
         let parse_count = need_parse.len();
         log::info!("Cache: {cache_hits} hits, {parse_count} files need (re-)parsing");
@@ -479,17 +759,9 @@ impl Indexer {
         ));
 
         // ── LSP progress: begin ──────────────────────────────────────────────
-        let token = NumberOrString::String("kotlin-lsp/indexing".into());
+        let token = NumberOrString::String(PROGRESS_TOKEN.into());
         if let Some(ref client) = client {
-            let _ = tokio::time::timeout(
-                std::time::Duration::from_millis(500),
-                client.send_request::<tower_lsp::lsp_types::request::WorkDoneProgressCreate>(
-                    WorkDoneProgressCreateParams {
-                        token: token.clone(),
-                    },
-                ),
-            )
-            .await;
+            lsp_progress_create(client, &token).await;
         }
 
         let begin_msg = if cache_hits > 0 {
@@ -500,74 +772,18 @@ impl Indexer {
             format!("Indexing {total} Kotlin files…")
         };
         if let Some(ref client) = client {
-            client
-                .send_notification::<progress::KotlinProgress>(ProgressParams {
-                    token: token.clone(),
-                    value: ProgressParamsValue::WorkDone(WorkDoneProgress::Begin(
-                        WorkDoneProgressBegin {
-                            title: "kotlin-lsp".into(),
-                            cancellable: Some(false),
-                            message: Some(begin_msg),
-                            percentage: Some(0),
-                        },
-                    )),
-                })
-                .await;
+            lsp_progress_begin(client, &token, begin_msg).await;
         }
 
         self.scheduled_paths.clear();
 
-        #[derive(Clone)]
-        struct ParseWorkItem {
-            path: PathBuf,
-            key: String,
-            start_gen: u64,
-        }
-
-        let mut work_items = Vec::new();
-        for path in need_parse {
-            if self
-                .root_generation
-                .load(std::sync::atomic::Ordering::SeqCst)
-                != start_gen
-            {
-                log::info!(
-                    "index_workspace_impl: generation changed during scheduling, aborting remaining parses"
-                );
-                aborted_early = true;
-                break;
-            }
-
-            let key = std::fs::canonicalize(&path)
-                .unwrap_or_else(|_| path.clone())
-                .to_string_lossy()
-                .to_string();
-
-            match self.scheduled_paths.entry(key.clone()) {
-                dashmap::mapref::entry::Entry::Occupied(mut o) => {
-                    let existing_gen = *o.get();
-                    if existing_gen == start_gen {
-                        log::debug!(
-                            "Skipped scheduling parse for {} (already scheduled gen {})",
-                            key,
-                            existing_gen
-                        );
-                        continue;
-                    } else {
-                        o.insert(start_gen);
-                    }
-                }
-                dashmap::mapref::entry::Entry::Vacant(v) => {
-                    v.insert(start_gen);
-                }
-            }
-
-            work_items.push(ParseWorkItem {
-                path,
-                key,
-                start_gen,
-            });
-        }
+        let (work_items, scheduling_aborted) = schedule_work_items(
+            need_parse,
+            start_gen,
+            &self.root_generation,
+            &self.scheduled_paths,
+        );
+        aborted_early = aborted_early || scheduling_aborted;
 
         // ── Concurrent parse via task_runner ─────────────────────────────────
         log::info!("Parsing {} files concurrently", work_items.len());
@@ -575,168 +791,26 @@ impl Indexer {
         let idx_ref = Arc::clone(&self);
         let sem = Arc::clone(&self.parse_sem);
 
-        let progress_idx = Arc::clone(&self);
-        let progress_client = client.clone();
-        let progress_token = token.clone();
-        let progress_total = parse_count;
-        let progress_handle = tokio::spawn(async move {
-            if progress_client.is_none() || progress_total == 0 {
-                return;
-            }
-            let mut interval =
-                tokio::time::interval(std::time::Duration::from_millis(500));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                interval.tick().await;
-                let done = progress_idx
-                    .parse_tasks_completed
-                    .load(std::sync::atomic::Ordering::Relaxed);
-                let pct = ((done * 100) / progress_total) as u32;
-                if let Some(ref c) = progress_client {
-                    c.send_notification::<progress::KotlinProgress>(ProgressParams {
-                        token: progress_token.clone(),
-                        value: ProgressParamsValue::WorkDone(WorkDoneProgress::Report(
-                            WorkDoneProgressReport {
-                                cancellable: Some(false),
-                                message: Some(format!("{done}/{progress_total} files…")),
-                                percentage: Some(pct),
-                            },
-                        )),
-                    })
-                    .await;
-                }
-                if done >= progress_total {
-                    break;
-                }
-            }
-        });
+        let progress_handle = spawn_progress_poller(
+            Arc::clone(&self),
+            client.clone(),
+            token.clone(),
+            parse_count,
+        );
 
-        let gen_skipped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let read_failed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let url_failed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let panic_failed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let gen_skipped2 = Arc::clone(&gen_skipped);
-        let read_failed2 = Arc::clone(&read_failed);
-        let url_failed2 = Arc::clone(&url_failed);
-        let panic_failed2 = Arc::clone(&panic_failed);
+        let counters = ParseCounters::new();
+        let counters_tasks = counters.clone_for_task();
 
         let results = crate::task_runner::run_concurrent(
             work_items,
             sem,
-            move |item, sem| {
-                let idx = Arc::clone(&idx_ref);
-                let gen_skipped = Arc::clone(&gen_skipped2);
-                let read_failed = Arc::clone(&read_failed2);
-                let url_failed = Arc::clone(&url_failed2);
-                let panic_failed = Arc::clone(&panic_failed2);
-                async move {
-                    log::debug!("Parsing: {}", item.path.display());
-
-                    if idx
-                        .root_generation
-                        .load(std::sync::atomic::Ordering::SeqCst)
-                        != item.start_gen
-                    {
-                        gen_skipped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        return None;
-                    }
-
-                    let content = match tokio::fs::read_to_string(&item.path).await {
-                        Ok(c) => c,
-                        Err(e) => {
-                            let n =
-                                read_failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            if n < MAX_READ_FAILURES_LOGGED {
-                                log::warn!(
-                                    "Could not read {}: {}",
-                                    item.path.display(),
-                                    e
-                                );
-                            }
-                            return None;
-                        }
-                    };
-
-                    let uri = match Url::from_file_path(&item.path) {
-                        Ok(u) => u,
-                        Err(_) => {
-                            url_failed
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            log::warn!("Invalid file path: {}", item.path.display());
-                            return None;
-                        }
-                    };
-
-                    let _permit = sem.acquire().await.unwrap();
-                    let t0 = std::time::Instant::now();
-                    let uri_clone = uri.clone();
-                    let parse_result =
-                        match tokio::task::spawn_blocking(move || {
-                            Indexer::parse_file(&uri_clone, &content)
-                        })
-                        .await
-                        {
-                            Ok(result) => result,
-                            Err(e) => {
-                                panic_failed
-                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                log::warn!(
-                                    "Parse task panicked for {}: {}",
-                                    item.path.display(),
-                                    e
-                                );
-                                return None;
-                            }
-                        };
-                    let took = t0.elapsed().as_millis();
-
-                    log::debug!("Parsed {} in {} ms", item.path.display(), took);
-
-                    let should_remove = idx
-                        .scheduled_paths
-                        .get(&item.key)
-                        .map(|gen| *gen == item.start_gen)
-                        .unwrap_or(false);
-                    if should_remove {
-                        idx.scheduled_paths.remove(&item.key);
-                    }
-
-                    let threshold: u128 =
-                        std::env::var("KOTLIN_LSP_PARSE_LOG_MS")
-                            .ok()
-                            .and_then(|v| v.parse::<u128>().ok())
-                            .unwrap_or(1000);
-                    if took > threshold {
-                        log::warn!(
-                            "Slow parse: {} took {} ms",
-                            item.path.display(),
-                            took
-                        );
-                    }
-
-                    idx.parse_tasks_completed
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-                    Some(parse_result)
-                }
-            },
+            move |item, sem| execute_parse_item(item, sem, Arc::clone(&idx_ref), counters_tasks.clone_for_task()),
         )
         .await;
 
         progress_handle.abort();
 
-        let gen_skip_n = gen_skipped.load(std::sync::atomic::Ordering::Relaxed);
-        let read_fail_n = read_failed.load(std::sync::atomic::Ordering::Relaxed);
-        let url_fail_n = url_failed.load(std::sync::atomic::Ordering::Relaxed);
-        let panic_n = panic_failed.load(std::sync::atomic::Ordering::Relaxed);
-        log::info!(
-            "All {} parse tasks done: gen_skipped={}, read_failed={}, url_failed={}, panics={}",
-            results.len(),
-            gen_skip_n,
-            read_fail_n,
-            url_fail_n,
-            panic_n
-        );
+        counters.log_summary(results.len());
 
         if self
             .root_generation
@@ -792,21 +866,10 @@ impl Indexer {
 
         // ── LSP progress: end ────────────────────────────────────────────────
         if let Some(ref client) = client {
-            client
-                .send_notification::<progress::KotlinProgress>(ProgressParams {
-                    token: token.clone(),
-                    value: ProgressParamsValue::WorkDone(WorkDoneProgress::End(
-                        WorkDoneProgressEnd {
-                            message: Some(format!(
-                                "Indexed {} files ({} cached, {} parsed)",
-                                all_results.len(),
-                                cache_hits,
-                                files_parsed
-                            )),
-                        },
-                    )),
-                })
-                .await;
+            lsp_progress_end(client, &token, format!(
+                "Indexed {} files ({} cached, {} parsed)",
+                all_results.len(), cache_hits, files_parsed
+            )).await;
         }
 
         // ── Status file: done ────────────────────────────────────────────────
