@@ -914,13 +914,7 @@ fn extract_supers_java(node: &Node, bytes: &[u8], data: &mut FileData) {
 
 /// Returns the name of the first `user_type` child of `node`, if any.
 fn first_user_type_child_name(node: &Node, bytes: &[u8]) -> Option<String> {
-    let mut cur = node.walk();
-    for child in node.children(&mut cur) {
-        if child.kind() == "user_type" {
-            return user_type_name(&child, bytes);
-        }
-    }
-    None
+    node.first_child_of_kind("user_type").and_then(|c| user_type_name(&c, bytes))
 }
 
 /// Extract the supertype name from a `delegation_specifier` node.
@@ -1003,21 +997,17 @@ fn java_first_type_name(node: &Node, bytes: &[u8]) -> Option<String> {
 /// Walk a `super_interfaces` or `extends_interfaces` node, collecting all type names
 /// from its `type_list` child into `data.supers`.
 fn java_collect_type_list(node: &Node, bytes: &[u8], name_line: u32, data: &mut FileData) {
-    let mut cur = node.walk();
-    for child in node.children(&mut cur) {
-        if child.kind() == "type_list" {
-            let mut cc = child.walk();
-            for type_node in child.children(&mut cc) {
-                // type_list children may be leaf type_identifier nodes directly,
-                // or wrapper nodes (generic_type, scoped_type_identifier) containing one.
-                let name = if type_node.kind() == "type_identifier" {
-                    type_node.utf8_text_owned(bytes)
-                } else {
-                    java_first_type_name(&type_node, bytes)
-                };
-                if let Some(n) = name { data.supers.push((name_line, n)); }
-            }
-        }
+    let Some(type_list) = node.first_child_of_kind("type_list") else { return };
+    let mut cc = type_list.walk();
+    for type_node in type_list.children(&mut cc) {
+        // type_list children may be leaf type_identifier nodes directly,
+        // or wrapper nodes (generic_type, scoped_type_identifier) containing one.
+        let name = if type_node.kind() == "type_identifier" {
+            type_node.utf8_text_owned(bytes)
+        } else {
+            java_first_type_name(&type_node, bytes)
+        };
+        if let Some(n) = name { data.supers.push((name_line, n)); }
     }
 }
 
