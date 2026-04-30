@@ -34,7 +34,6 @@ pub(crate) use self::infer::{
     find_named_param_type_in_sig,
     lambda_param_position_on_line,
     has_named_params_not_it,
-    cst_call_fn_name,
     // it_this.rs
     find_it_element_type,
     find_it_element_type_in_lines,
@@ -61,6 +60,9 @@ mod apply;
 pub(crate) use self::apply::{file_contributions, stale_keys_for, build_bare_names};
 
 mod lookup;
+
+mod node_ext;
+pub(crate) use node_ext::NodeExt;
 
 mod scope;
 pub(crate) use scope::is_id_char;
@@ -293,12 +295,11 @@ impl Indexer {
         self.files.get(uri).map(|f| f.lines.clone())
     }
 
-    ///
-    /// Uses `live_lines` (updated synchronously on every keystroke) for the
-    /// current file's line text, falling back to indexed lines or disk.
-    pub fn completions(&self, uri: &Url, position: Position, snippets: bool) -> (Vec<CompletionItem>, bool) {
-        // Ensure the file is indexed — on first open, did_open's spawn_blocking
-        // may not have finished by the time the first completion request arrives.
+    // ─── completion helpers (methods on Indexer) ─────────────────────────────
+
+    /// Ensures the file at `uri` is indexed, loading from disk if needed.
+    /// Called on the completion hot-path before the debounced re-index finishes.
+    fn ensure_indexed(&self, uri: &Url) {
         if !self.files.contains_key(uri.as_str()) {
             if let Ok(path) = uri.to_file_path() {
                 if let Ok(content) = std::fs::read_to_string(&path) {
@@ -306,43 +307,88 @@ impl Indexer {
                 }
             }
         }
+    }
 
-        // Use live_lines (no debounce delay) for the current line so dot-detection
-        // is always accurate even when the user types faster than the 120ms debounce.
-        let line_owned: String;
-        let line: &str = if let Some(ll) = self.live_lines.get(uri.as_str()) {
-            if let Some(l) = ll.get(position.line as usize) {
-                line_owned = l.clone();
-                &line_owned
-            } else { return (vec![], false); }
-        } else if let Some(data) = self.files.get(uri.as_str()) {
-            if let Some(l) = data.lines.get(position.line as usize) {
-                line_owned = l.clone();
-                &line_owned
-            } else { return (vec![], false); }
-        } else { return (vec![], false); };
-
-        // Slice line up to cursor (UTF-16 aware).
-        let target = position.character as usize;
-        let mut utf16 = 0usize;
-        let mut byte_end = line.len();
-        for (bi, ch) in line.char_indices() {
-            if utf16 >= target { byte_end = bi; break; }
-            utf16 += ch.len_utf16();
+    /// Returns the text of line `line_idx` for `uri`, preferring live lines.
+    fn line_for_position(&self, uri: &Url, line_idx: u32) -> Option<String> {
+        let idx = line_idx as usize;
+        if let Some(ll) = self.live_lines.get(uri.as_str()) {
+            return ll.get(idx).cloned();
         }
-        let before = &line[..byte_end];
+        self.files.get(uri.as_str())?.lines.get(idx).cloned()
+    }
 
-        // Extract the identifier fragment the user is currently typing.
-        let prefix: String = before.chars()
-            .rev()
-            .take_while(|&c| c.is_alphanumeric() || c == '_')
-            .collect::<String>()
-            .chars()
-            .rev()
-            .collect();
+    /// Resolves the element type for an `it`/`this`/named-param dot-receiver.
+    fn resolve_lambda_recv_type(
+        &self,
+        recv: &str,
+        before: &str,
+        cursor_line: usize,
+        cursor_col: usize,
+        uri: &Url,
+    ) -> Option<String> {
+        if recv == "it" || recv == "this" {
+            // Try single-line first (fast path: `obj.run { this. }` on same line).
+            let t = find_it_element_type(before, self, uri);
+            if t.is_some() && recv == "it" {
+                return t;
+            }
+            // Multi-line fallback: lambda opened on a previous line.
+            let lines = self.mem_lines_for(uri.as_str());
+            let pos = CursorPos { line: cursor_line, utf16_col: cursor_col };
+            let ml = lines.and_then(|ls| {
+                if recv == "this" {
+                    find_this_element_type_in_lines(&ls, pos, self, uri)
+                } else {
+                    find_it_element_type_in_lines(&ls, pos, self, uri)
+                }
+            });
+            if ml.is_some() {
+                return ml;
+            }
+            if recv == "this" {
+                return self.enclosing_class_at(uri, cursor_line as u32);
+            }
+            None
+        } else {
+            find_named_lambda_param_type(before, recv, self, uri, cursor_line)
+        }
+    }
 
-        // Check if the char before the prefix is a dot.
-        let before_prefix = &before[..before.len() - prefix.len()];
+    /// Appends lambda-parameter completions for bare-word (non-dot) completion.
+    fn add_lambda_param_completions(
+        &self,
+        items: &mut Vec<CompletionItem>,
+        uri: &Url,
+        line_idx: usize,
+        prefix: &str,
+    ) {
+        let prefix_lower = prefix.to_lowercase();
+        for param in self.lambda_params_at(uri, line_idx) {
+            if param.to_lowercase().starts_with(&prefix_lower) {
+                if !items.iter().any(|i| i.label == param) {
+                    items.push(CompletionItem {
+                        label:     param.clone(),
+                        kind:      Some(CompletionItemKind::VARIABLE),
+                        sort_text: Some(format!("005:{param}")),
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+    }
+
+    ///
+    /// Uses `live_lines` (updated synchronously on every keystroke) for the
+    /// current file's line text, falling back to indexed lines or disk.
+    pub fn completions(&self, uri: &Url, position: Position, snippets: bool) -> (Vec<CompletionItem>, bool) {
+        self.ensure_indexed(uri);
+
+        let Some(line) = self.line_for_position(uri, position.line) else {
+            return (vec![], false);
+        };
+        let before = before_cursor(&line, position.character);
+        let (prefix, before_prefix) = split_prefix(&before);
 
         // ── completion result cache ──────────────────────────────────────────
         // Dot-completion: all members of a type are returned regardless of what
@@ -364,95 +410,25 @@ impl Indexer {
                 }
             }
         }
-        // (compute below, then store in cache at the end)
-        let dot_receiver = if let Some(before_dot) = before_prefix.strip_suffix('.') {
-            // Grab the expression immediately preceding the dot.
-            // For simple identifiers: `foo.` → "foo"
-            // For qualified nested types: `DPSCoordinator.Kind.` → "DPSCoordinator.Kind"
-            // We walk backwards collecting identifier chars; if we then see a dot followed
-            // by another identifier, include that outer segment too (one level only).
-            let inner: String = before_dot
-                .chars()
-                .rev()
-                .take_while(|&c| c.is_alphanumeric() || c == '_')
-                .collect::<String>()
-                .chars()
-                .rev()
-                .collect();
-            if inner.is_empty() {
-                None
-            } else {
-                // Check whether there is an `Outer.` prefix immediately before `inner`.
-                let remaining = &before_dot[..before_dot.len() - inner.len()];
-                if remaining.ends_with('.')
-                    && inner.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
-                {
-                    let outer: String = remaining[..remaining.len() - 1]
-                        .chars()
-                        .rev()
-                        .take_while(|&c| c.is_alphanumeric() || c == '_')
-                        .collect::<String>()
-                        .chars()
-                        .rev()
-                        .collect();
-                    if !outer.is_empty()
-                        && outer.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
-                    {
-                        Some(format!("{}.{}", outer, inner))
-                    } else {
-                        Some(inner)
-                    }
-                } else {
-                    Some(inner)
-                }
-            }
-        } else {
-            None
-        };
+
+        let dot_recv = dot_receiver(&before_prefix);
 
         // `this.` / `it.` / named-param dot-completion.
         // `this` can mean: (a) scope-function receiver, (b) enclosing class.
         // `it` means: implicit lambda param.
         // Named lambda params are detected via `is_lambda_param`.
-        if let Some(ref recv) = dot_receiver {
+        if let Some(ref recv) = dot_recv {
             if recv == "it" || recv == "this"
-                || is_lambda_param(recv, before, self, uri, position.line as usize)
+                || is_lambda_param(recv, &before, self, uri, position.line as usize)
             {
                 let cursor_line = position.line as usize;
                 let cursor_col  = before.chars().count();
-                let elem_type = if recv == "it" || recv == "this" {
-                    // Try single-line first (fast path: `obj.run { this. }` on same line).
-                    let t = find_it_element_type(before, self, uri);
-                    if t.is_some() && recv == "it" {
-                        t
-                    } else {
-                        // Multi-line fallback: lambda opened on a previous line.
-                        let lines = self.mem_lines_for(uri.as_str());
-                        let pos = CursorPos { line: cursor_line, utf16_col: cursor_col };
-                        let ml = lines.and_then(|ls| {
-                            if recv == "this" {
-                                find_this_element_type_in_lines(&ls, pos, self, uri)
-                            } else {
-                                find_it_element_type_in_lines(&ls, pos, self, uri)
-                            }
-                        });
-                        if ml.is_some() {
-                            ml
-                        } else if recv == "this" {
-                            self.enclosing_class_at(uri, position.line)
-                        } else {
-                            None
-                        }
-                    }
-                } else {
-                    find_named_lambda_param_type(before, recv, self, uri, position.line as usize)
-                };
+                let elem_type = self.resolve_lambda_recv_type(recv, &before, cursor_line, cursor_col, uri);
                 if let Some(elem_type) = elem_type {
                     let (items, _) = crate::resolver::complete_symbol(self, &prefix, Some(&elem_type), uri, snippets);
                     if items.is_empty() {
                         // Type name known (e.g. generic param `T`, `StateType`) but not
                         // indexed — show a single hint item so the user sees the inferred type.
-                        use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind};
                         return (vec![CompletionItem {
                             label: format!("{recv}: {elem_type}"),
                             kind: Some(CompletionItemKind::TYPE_PARAMETER),
@@ -468,31 +444,15 @@ impl Indexer {
             }
         }
 
-        let (mut items, hit_cap) = {
-            // Detect @AnnotationName context — suppress functions/variables.
-            let annotation_only = dot_receiver.is_none()
-                && crate::resolver::is_annotation_context(before, &prefix);
-            crate::resolver::complete_symbol_with_context(
-                self, &prefix, dot_receiver.as_deref(), uri, snippets, annotation_only,
-            )
-        };
+        let annotation_only = dot_recv.is_none()
+            && crate::resolver::is_annotation_context(&before, &prefix);
+        let (mut items, hit_cap) = crate::resolver::complete_symbol_with_context(
+            self, &prefix, dot_recv.as_deref(), uri, snippets, annotation_only,
+        );
 
         // Add scope-aware lambda parameter names (bare-word completion only).
-        if dot_receiver.is_none() {
-            let prefix_lower = prefix.to_lowercase();
-            for param in self.lambda_params_at(uri, position.line as usize) {
-                if param.to_lowercase().starts_with(&prefix_lower) {
-                    use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind};
-                    if !items.iter().any(|i| i.label == param) {
-                        items.push(CompletionItem {
-                            label:     param.clone(),
-                            kind:      Some(CompletionItemKind::VARIABLE),
-                            sort_text: Some(format!("005:{param}")),
-                            ..Default::default()
-                        });
-                    }
-                }
-            }
+        if dot_recv.is_none() {
+            self.add_lambda_param_completions(&mut items, uri, position.line as usize, &prefix);
         }
 
         // Store in last_completion cache.
@@ -502,6 +462,50 @@ impl Indexer {
 
         (items, hit_cap)
     }
+}
+
+// ─── completion helpers (free functions) ─────────────────────────────────────
+
+/// Returns a copy of `line` up to the UTF-16 column `utf16_col`.
+fn before_cursor(line: &str, utf16_col: u32) -> String {
+    let target = utf16_col as usize;
+    let mut utf16 = 0usize;
+    let mut byte_end = line.len();
+    for (bi, ch) in line.char_indices() {
+        if utf16 >= target { byte_end = bi; break; }
+        utf16 += ch.len_utf16();
+    }
+    line[..byte_end].to_owned()
+}
+
+/// Splits `before` into the trailing identifier fragment (`prefix`) and
+/// everything that precedes it (`before_prefix`).
+fn split_prefix(before: &str) -> (String, String) {
+    let prefix = last_ident_in(before).to_owned();
+    let before_prefix = before[..before.len() - prefix.len()].to_owned();
+    (prefix, before_prefix)
+}
+
+/// Returns the expression immediately before a trailing dot in `before_prefix`,
+/// or `None` if `before_prefix` does not end with a dot.
+///
+/// Handles one level of qualification: `Outer.Inner.` → `"Outer.Inner"`.
+fn dot_receiver(before_prefix: &str) -> Option<String> {
+    let before_dot = before_prefix.strip_suffix('.')?;
+    let inner = last_ident_in(before_dot);
+    if inner.is_empty() { return None; }
+    let remaining = &before_dot[..before_dot.len() - inner.len()];
+    if remaining.ends_with('.')
+        && inner.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+    {
+        let outer = last_ident_in(&remaining[..remaining.len() - 1]);
+        if !outer.is_empty()
+            && outer.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+        {
+            return Some(format!("{outer}.{inner}"));
+        }
+    }
+    Some(inner.to_owned())
 }
 
 // ─── rg cross-file fallback ──────────────────────────────────────────────────
@@ -2090,6 +2094,33 @@ class Foo @Inject constructor(
     #[test]
     fn last_ident_in_with_spaces() {
         assert_eq!(crate::indexer::last_ident_in("  someIdent"), "someIdent");
+    }
+
+    // ── completion helpers ───────────────────────────────────────────────────
+
+    #[test]
+    fn split_prefix_after_dot() {
+        let (prefix, before_prefix) = split_prefix("foo.bar");
+        assert_eq!(prefix, "bar");
+        assert_eq!(before_prefix, "foo.");
+    }
+    #[test]
+    fn split_prefix_bare() {
+        let (prefix, before_prefix) = split_prefix("someIdent");
+        assert_eq!(prefix, "someIdent");
+        assert_eq!(before_prefix, "");
+    }
+    #[test]
+    fn dot_receiver_simple() {
+        assert_eq!(dot_receiver("foo."), Some("foo".to_string()));
+    }
+    #[test]
+    fn dot_receiver_qualified() {
+        assert_eq!(dot_receiver("Outer.Inner."), Some("Outer.Inner".to_string()));
+    }
+    #[test]
+    fn dot_receiver_none() {
+        assert_eq!(dot_receiver("foo"), None);
     }
 }
 

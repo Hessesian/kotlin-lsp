@@ -31,56 +31,13 @@ pub fn parse_kotlin(content: &str) -> FileData {
     let mut cur = QueryCursor::new();
     let matches: Vec<MatchEntry> = cur
         .matches(&def_q, root, bytes)
-        .map(|m| {
-            let pidx = m.pattern_index;
-            let mut def_range:  Option<Range> = None;
-            let mut name_text:  Option<String> = None;
-            let mut name_range: Option<Range> = None;
-            for cap in m.captures {
-                if cap.index == def_idx {
-                    def_range = Some(ts_to_lsp(cap.node.range()));
-                } else if cap.index == name_idx {
-                    name_text  = cap.node.utf8_text(bytes).ok().map(str::to_owned);
-                    name_range = Some(ts_to_lsp(cap.node.range()));
-                }
-            }
-            let slot = if let (Some(dr), Some(nt), Some(nr)) = (def_range, name_text, name_range) {
-                [Some((nt, dr, nr)), None]
-            } else {
-                [None, None]
-            };
-            (pidx, slot)
-        })
+        .map(|m| map_def_captures(&m, def_idx, name_idx, bytes))
         .collect();
 
     // Deduplicate: multiple patterns can fire on the same node
     // (e.g. enum class matches both pattern 0 "enum" AND pattern 2 "class").
-    //
-    // Use a BTreeMap keyed by the @name node's start position.
-    // The value records the LOWEST pattern index seen so far — lower index = more
-    // specific pattern = wins.  This is correct regardless of the order in which
-    // tree-sitter returns overlapping matches (not guaranteed by the API).
-    let mut best: std::collections::BTreeMap<(u32, u32), (usize, String, Range, Range)> =
-        std::collections::BTreeMap::new();
-
-    for (pidx, slot) in matches {
-        if let Some((name, range, sel)) = slot[0].clone() {
-            let key = (sel.start.line, sel.start.character);
-            let is_better = best.get(&key).map(|(ep, _, _, _)| pidx < *ep).unwrap_or(true);
-            if is_better {
-                best.insert(key, (pidx, name, range, sel));
-            }
-        }
-    }
-
-    for (_, (pidx, name, range, sel)) in best {
-        let (kind, _detail) = queries::def_pattern_meta(pidx);
-        if kind != SymbolKind::NULL {
-            let visibility = visibility_at_line(&data.lines, sel.start.line as usize);
-            let detail = extract_detail(&data.lines, range.start.line, range.end.line);
-            data.symbols.push(SymbolEntry { name, kind, visibility, range, selection_range: sel, detail });
-        }
-    }
+    let best = dedup_matches(&matches);
+    push_def_symbols(best, queries::def_pattern_meta, visibility_at_line, &data.lines, &mut data.symbols);
 
     // ── package + imports (manual tree walk — avoids query overlap issues) ────
     extract_package_and_imports(root, bytes, &mut data);
@@ -146,60 +103,27 @@ pub fn parse_swift(content: &str) -> FileData {
     let matches: Vec<MatchEntry> = cur
         .matches(&def_q, root, bytes)
         .map(|m| {
-            let pidx = m.pattern_index;
-            let mut def_range:  Option<Range> = None;
-            let mut name_text:  Option<String> = None;
-            let mut name_range: Option<Range> = None;
-            for cap in m.captures {
-                if cap.index == def_idx {
-                    def_range = Some(ts_to_lsp(cap.node.range()));
-                } else if cap.index == name_idx {
-                    name_text  = cap.node.utf8_text(bytes).ok().map(str::to_owned);
-                    name_range = Some(ts_to_lsp(cap.node.range()));
-                }
-            }
-            let slot = if let (Some(dr), Some(nt), Some(nr)) = (def_range, name_text, name_range) {
-                [Some((nt, dr, nr)), None]
-            } else if pidx == 8 {
+            let (pidx, slot) = map_def_captures(&m, def_idx, name_idx, bytes);
+            if pidx == 8 && slot[0].is_none() {
                 // init_declaration — no @name, synthesize "init"
+                let def_range = m.captures.iter()
+                    .find(|cap| cap.index == def_idx)
+                    .map(|cap| ts_to_lsp(cap.node.range()));
                 if let Some(dr) = def_range {
                     let sel = Range::new(
                         Position::new(dr.start.line, dr.start.character),
                         Position::new(dr.start.line, dr.start.character + 4),
                     );
-                    [Some(("init".to_owned(), dr, sel)), None]
-                } else {
-                    [None, None]
+                    return (pidx, [Some(("init".to_owned(), dr, sel)), None]);
                 }
-            } else {
-                [None, None]
-            };
+            }
             (pidx, slot)
         })
         .collect();
 
     // Deduplicate: use same BTreeMap strategy as Kotlin parser.
-    let mut best: std::collections::BTreeMap<(u32, u32), (usize, String, Range, Range)> =
-        std::collections::BTreeMap::new();
-
-    for (pidx, slot) in matches {
-        if let Some((name, range, sel)) = slot[0].clone() {
-            let key = (sel.start.line, sel.start.character);
-            let is_better = best.get(&key).map(|(ep, _, _, _)| pidx < *ep).unwrap_or(true);
-            if is_better {
-                best.insert(key, (pidx, name, range, sel));
-            }
-        }
-    }
-
-    for (_, (pidx, name, range, sel)) in best {
-        let (kind, _detail) = queries::swift_def_pattern_meta(pidx);
-        if kind != SymbolKind::NULL {
-            let visibility = swift_visibility_at_line(&data.lines, sel.start.line as usize);
-            let detail = extract_detail(&data.lines, range.start.line, range.end.line);
-            data.symbols.push(SymbolEntry { name, kind, visibility, range, selection_range: sel, detail });
-        }
-    }
+    let best = dedup_matches(&matches);
+    push_def_symbols(best, queries::swift_def_pattern_meta, swift_visibility_at_line, &data.lines, &mut data.symbols);
 
     // ── imports (manual tree walk — Swift imports are simpler) ────────────────
     extract_swift_imports(root, bytes, &mut data);
@@ -221,6 +145,80 @@ pub fn parse_by_extension(path: &str, content: &str) -> FileData {
         parse_java(content)
     } else {
         parse_kotlin(content)
+    }
+}
+
+// ─── shared query pipeline helpers ───────────────────────────────────────────
+
+/// Extract def/name captures from a single `QueryMatch` into a `MatchEntry`.
+///
+/// Handles the common case shared by both Kotlin and Swift definition queries:
+/// each match has a `@def` capture (full node range) and a `@name` capture
+/// (identifier text + range).  Returns `[None, None]` when either is absent.
+fn map_def_captures<'c, 't>(
+    m: &tree_sitter::QueryMatch<'c, 't>,
+    def_idx: u32,
+    name_idx: u32,
+    bytes: &[u8],
+) -> MatchEntry {
+    let pidx = m.pattern_index;
+    let mut def_range:  Option<Range> = None;
+    let mut name_text:  Option<String> = None;
+    let mut name_range: Option<Range> = None;
+    for cap in m.captures {
+        if cap.index == def_idx {
+            def_range = Some(ts_to_lsp(cap.node.range()));
+        } else if cap.index == name_idx {
+            name_text  = cap.node.utf8_text(bytes).ok().map(str::to_owned);
+            name_range = Some(ts_to_lsp(cap.node.range()));
+        }
+    }
+    let slot = if let (Some(dr), Some(nt), Some(nr)) = (def_range, name_text, name_range) {
+        [Some((nt, dr, nr)), None]
+    } else {
+        [None, None]
+    };
+    (pidx, slot)
+}
+
+/// Deduplicate a list of `MatchEntry` values by `@name` start position.
+///
+/// Multiple patterns can fire on the same node (e.g. an enum class matches both
+/// the "enum class" pattern and the plain "class" pattern).  Keeps the entry
+/// with the **lowest** pattern index — lower index = more specific pattern.
+fn dedup_matches(
+    matches: &[MatchEntry],
+) -> std::collections::BTreeMap<(u32, u32), (usize, String, Range, Range)> {
+    let mut best = std::collections::BTreeMap::new();
+    for (pidx, slot) in matches {
+        if let Some((name, range, sel)) = slot[0].clone() {
+            let key = (sel.start.line, sel.start.character);
+            let is_better = best.get(&key).map(|(ep, _, _, _)| pidx < ep).unwrap_or(true);
+            if is_better {
+                best.insert(key, (*pidx, name, range, sel));
+            }
+        }
+    }
+    best
+}
+
+/// Convert a deduplicated match map into `SymbolEntry` values and append them
+/// to `symbols`.  `pattern_meta` maps a pattern index to `(SymbolKind, label)`;
+/// `vis_fn` detects the visibility modifier from source lines.
+fn push_def_symbols(
+    best: std::collections::BTreeMap<(u32, u32), (usize, String, Range, Range)>,
+    pattern_meta: fn(usize) -> (SymbolKind, Option<&'static str>),
+    vis_fn: fn(&[String], usize) -> Visibility,
+    lines: &[String],
+    symbols: &mut Vec<SymbolEntry>,
+) {
+    for (_, (pidx, name, range, sel)) in best {
+        let (kind, _) = pattern_meta(pidx);
+        if kind != SymbolKind::NULL {
+            let visibility = vis_fn(lines, sel.start.line as usize);
+            let detail = extract_detail(lines, range.start.line, range.end.line);
+            symbols.push(SymbolEntry { name, kind, visibility, range, selection_range: sel, detail });
+        }
     }
 }
 
@@ -247,60 +245,9 @@ fn extract_java(node: &Node, bytes: &[u8], data: &mut FileData) {
         "enum_declaration"      => push_named(node, bytes, SymbolKind::ENUM,      data),
         "method_declaration"    => push_named(node, bytes, SymbolKind::METHOD,    data),
         "constructor_declaration" => push_named(node, bytes, SymbolKind::CONSTRUCTOR, data),
-        "enum_constant" => {
-            // Direct child of enum_body — the first identifier child is the constant name.
-            let nr = ts_to_lsp(node.range());
-            let line_no = node.range().start_point.row;
-            let vis = visibility_at_line(&data.lines, line_no);
-            let mut cur = node.walk();
-            for child in node.children(&mut cur) {
-                if child.kind() == "identifier" {
-                    if let Ok(txt) = child.utf8_text(bytes) {
-                        data.symbols.push(SymbolEntry {
-                            name: txt.to_owned(),
-                            kind: SymbolKind::ENUM_MEMBER,
-                            visibility: vis,
-                            range: nr,
-                            selection_range: ts_to_lsp(child.range()),
-                            detail: extract_detail(&data.lines, nr.start.line, nr.end.line),
-                        });
-                    }
-                    break;
-                }
-            }
-        }
-        "field_declaration"     => {
-            let nr = ts_to_lsp(node.range());
-            let line_no = node.range().start_point.row;
-            let vis = visibility_at_line(&data.lines, line_no);
-            // Detect `static final` → CONSTANT, anything else → FIELD.
-            let kind = if java_node_has_modifiers(node, &["static", "final"]) {
-                SymbolKind::CONSTANT
-            } else {
-                SymbolKind::FIELD
-            };
-            let mut cur = node.walk();
-            for child in node.children(&mut cur) {
-                if child.kind() == "variable_declarator" {
-                    if let Some((name, sel)) = first_identifier(&child, bytes) {
-                        data.symbols.push(SymbolEntry { name, kind, visibility: vis, range: nr, selection_range: sel, detail: extract_detail(&data.lines, nr.start.line, nr.end.line) });
-                    }
-                }
-            }
-        }
-        "import_declaration" => {
-            let mut cur = node.walk();
-            for child in node.children(&mut cur) {
-                if matches!(child.kind(), "scoped_identifier" | "identifier") {
-                    if let Ok(txt) = child.utf8_text(bytes) {
-                        let full_path  = txt.to_owned();
-                        let local_name = last_segment(&full_path).to_owned();
-                        data.imports.push(ImportEntry { full_path, local_name, is_star: false });
-                        return;
-                    }
-                }
-            }
-        }
+        "enum_constant" => push_named(node, bytes, SymbolKind::ENUM_MEMBER, data),
+        "field_declaration"     => push_field_declaration(node, bytes, data),
+        "import_declaration" => push_java_import(node, bytes, data),
         _ => {}
     }
 }
@@ -317,6 +264,41 @@ fn java_node_has_modifiers(node: &Node, required: &[&str]) -> bool {
         }
     }
     false
+}
+
+fn push_field_declaration(node: &Node, bytes: &[u8], data: &mut FileData) {
+    // Detect `static final` → CONSTANT, anything else → FIELD.
+    let kind = if java_node_has_modifiers(node, &["static", "final"]) {
+        SymbolKind::CONSTANT
+    } else {
+        SymbolKind::FIELD
+    };
+    let nr = ts_to_lsp(node.range());
+    let vis = visibility_at_line(&data.lines, node.range().start_point.row);
+    let detail = extract_detail(&data.lines, nr.start.line, nr.end.line);
+    let mut cur = node.walk();
+    for child in node.children(&mut cur) {
+        if child.kind() == "variable_declarator" {
+            if let Some((name, sel)) = first_identifier(&child, bytes) {
+                data.symbols.push(SymbolEntry { name, kind, visibility: vis, range: nr, selection_range: sel, detail });
+            }
+            return;
+        }
+    }
+}
+
+fn push_java_import(node: &Node, bytes: &[u8], data: &mut FileData) {
+    let mut cur = node.walk();
+    for child in node.children(&mut cur) {
+        if matches!(child.kind(), "scoped_identifier" | "identifier") {
+            if let Ok(txt) = child.utf8_text(bytes) {
+                let full_path  = txt.to_owned();
+                let local_name = last_segment(&full_path).to_owned();
+                data.imports.push(ImportEntry { full_path, local_name, is_star: false });
+            }
+            return;
+        }
+    }
 }
 
 fn push_named(node: &Node, bytes: &[u8], kind: SymbolKind, data: &mut FileData) {
@@ -1673,5 +1655,19 @@ class LoanReducer {
         assert!(sym(&data, "Kind").is_some(), "nested Kind enum should be indexed; got: {names:?}");
         assert_eq!(sym(&data, "Kind").unwrap().kind, SymbolKind::ENUM, "Kind should be ENUM");
         assert!(sym(&data, "victory").is_some(), "enum cases should be indexed; got: {names:?}");
+    }
+
+    #[test]
+    fn dedup_matches_lower_pidx_wins() {
+        use tower_lsp::lsp_types::{Position, Range};
+        let sel   = Range::new(Position::new(1, 0), Position::new(1, 3));
+        let range = sel;
+        let matches: Vec<MatchEntry> = vec![
+            (2, [Some(("Foo".into(), range, sel)), None]),
+            (0, [Some(("Foo".into(), range, sel)), None]),
+        ];
+        let best = dedup_matches(&matches);
+        assert_eq!(best.len(), 1);
+        assert_eq!(best.values().next().unwrap().0, 0, "pidx 0 should win over pidx 2");
     }
 }

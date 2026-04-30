@@ -14,6 +14,7 @@ use std::sync::Arc;
 use tower_lsp::lsp_types::{InlayHint, InlayHintKind, InlayHintLabel, Position, Range, Url};
 
 use crate::indexer::Indexer;
+use crate::indexer::NodeExt;
 use crate::indexer::live_tree::{lang_for_path, parse_live};
 use crate::resolver::{ReceiverKind, infer_receiver_type};
 
@@ -243,7 +244,7 @@ fn hint_property(
 fn infer_type_from_init(init: tree_sitter::Node<'_>, bytes: &[u8]) -> Option<String> {
     // call_expression: callee(...) or callee<T>(...)
     if init.kind() == "call_expression" {
-        let name = crate::indexer::cst_call_fn_name(init, bytes)?;
+        let name = init.call_fn_name(bytes)?;
         if name.starts_with(|c: char| c.is_uppercase()) {
             return Some(name);
         }
