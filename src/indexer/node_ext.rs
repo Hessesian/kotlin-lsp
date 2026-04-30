@@ -37,6 +37,10 @@ pub(crate) trait NodeExt<'a>: Sized + Copy {
     /// - Navigation call `obj.bar(...)` → `("bar", Some("obj"))`
     /// - Returns `None` if the callee kind is not recognized.
     fn call_fn_and_qualifier(self, bytes: &[u8]) -> Option<(String, Option<String>)>;
+
+    /// Returns the line number (0-based) of the first named identifier child,
+    /// or the node's own start line if no named child is found.
+    fn name_line(self) -> u32;
 }
 
 impl<'a> NodeExt<'a> for Node<'a> {
@@ -234,6 +238,20 @@ impl<'a> NodeExt<'a> for Node<'a> {
             }
             _ => None,
         }
+    }
+
+    fn name_line(self) -> u32 {
+        // Java uses field "name"; Kotlin has type_identifier as a direct child.
+        if let Some(n) = self.child_by_field_name("name") {
+            return n.start_position().row as u32;
+        }
+        let mut cur = self.walk();
+        for child in self.children(&mut cur) {
+            if matches!(child.kind(), "type_identifier" | "simple_identifier" | "identifier") {
+                return child.start_position().row as u32;
+            }
+        }
+        self.start_position().row as u32
     }
 }
 

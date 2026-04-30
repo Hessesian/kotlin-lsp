@@ -7,7 +7,7 @@ use crate::indexer::Indexer;
 use crate::types::Visibility;
 use crate::LinesExt;
 
-use super::{fqns_for_name, already_imported, make_import_edit,
+use super::{fqns_for_name, already_imported,
             resolve_symbol_inner, resolve_symbol_no_rg};
 use super::infer::{infer_variable_type, ReceiverKind, ReceiverType, infer_receiver_type};
 
@@ -488,7 +488,7 @@ pub(crate) fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippet
                     if !seen.insert(item_key) { continue; }
 
                     let import_edit = if needs_import {
-                        Some(vec![make_import_edit(fqn, &cur_lines, is_java)])
+                        Some(vec![cur_lines.make_import_edit(fqn, is_java)])
                     } else {
                         None
                     };

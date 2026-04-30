@@ -1,6 +1,7 @@
 use tree_sitter::{Node, Parser, Query, QueryCursor};
 use tower_lsp::lsp_types::{Position, Range, SymbolKind};
 
+use crate::indexer::NodeExt;
 use crate::queries::{self, KOTLIN_DEFINITIONS, SWIFT_DEFINITIONS};
 use crate::types::{FileData, ImportEntry, SymbolEntry, SyntaxError, Visibility};
 
@@ -864,7 +865,7 @@ fn extract_supers_kotlin(root: Node, bytes: &[u8], data: &mut FileData) {
     while let Some(node) = stack.pop() {
         match node.kind() {
             "class_declaration" | "object_declaration" => {
-                let name_line = node_name_line(&node);
+                let name_line = node.name_line();
                 let mut cur = node.walk();
                 for child in node.children(&mut cur) {
                     if child.kind() == "delegation_specifier" {
@@ -886,7 +887,7 @@ fn extract_supers_kotlin(root: Node, bytes: &[u8], data: &mut FileData) {
 fn extract_supers_java(node: &Node, bytes: &[u8], data: &mut FileData) {
     match node.kind() {
         "class_declaration" | "record_declaration" | "enum_declaration" => {
-            let name_line = node_name_line(node);
+            let name_line = node.name_line();
             let mut cur = node.walk();
             for child in node.children(&mut cur) {
                 match child.kind() {
@@ -905,7 +906,7 @@ fn extract_supers_java(node: &Node, bytes: &[u8], data: &mut FileData) {
             }
         }
         "interface_declaration" => {
-            let name_line = node_name_line(node);
+            let name_line = node.name_line();
             let mut cur = node.walk();
             for child in node.children(&mut cur) {
                 if child.kind() == "extends_interfaces" {
@@ -916,21 +917,6 @@ fn extract_supers_java(node: &Node, bytes: &[u8], data: &mut FileData) {
         }
         _ => {}
     }
-}
-
-/// Get the start line of the class-name identifier — matches `SymbolEntry::selection_range.start.line`.
-fn node_name_line(node: &Node) -> u32 {
-    // Java uses field "name"; Kotlin has type_identifier as a direct child.
-    if let Some(n) = node.child_by_field_name("name") {
-        return n.start_position().row as u32;
-    }
-    let mut cur = node.walk();
-    for child in node.children(&mut cur) {
-        if matches!(child.kind(), "type_identifier" | "simple_identifier" | "identifier") {
-            return child.start_position().row as u32;
-        }
-    }
-    node.start_position().row as u32
 }
 
 /// Extract the supertype name from a `delegation_specifier` node.

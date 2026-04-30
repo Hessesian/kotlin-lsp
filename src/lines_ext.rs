@@ -3,7 +3,7 @@
 //! Each method is a thin façade over the original free function; no logic
 //! lives here.  The original free functions are kept intact so existing
 //! callers continue to compile during the incremental migration.
-use tower_lsp::lsp_types::Range;
+use tower_lsp::lsp_types::{Range, TextEdit};
 use crate::types::{ImportEntry, Visibility};
 
 pub(crate) trait LinesExt {
@@ -33,6 +33,9 @@ pub(crate) trait LinesExt {
 
     /// Line number at which a new `import` statement should be inserted.
     fn import_insertion_line(&self) -> u32;
+
+    /// Build a TextEdit that inserts an import for `fqn` at the appropriate line.
+    fn make_import_edit(&self, fqn: &str, needs_semicolon: bool) -> TextEdit;
 
     /// Infer the (stripped) type of `var_name` from a type annotation in these lines.
     fn infer_type(&self, var_name: &str) -> Option<String>;
@@ -82,6 +85,10 @@ impl LinesExt for [String] {
 
     fn import_insertion_line(&self) -> u32 {
         crate::resolver::import_insertion_line(self)
+    }
+
+    fn make_import_edit(&self, fqn: &str, needs_semicolon: bool) -> TextEdit {
+        crate::resolver::make_import_edit(fqn, self, needs_semicolon)
     }
 
     fn infer_type(&self, var_name: &str) -> Option<String> {
