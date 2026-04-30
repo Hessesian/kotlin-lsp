@@ -827,8 +827,8 @@ fn extract_supers_kotlin(root: Node, bytes: &[u8], data: &mut FileData) {
             "class_declaration" | "object_declaration" => {
                 let name_line = node.name_line();
                 for child in node.children_of_kind("delegation_specifier") {
-                    if let Some(name) = super_name_from_delegation(&child, bytes) {
-                        data.supers.push((name_line, name));
+                    if let Some((name, type_args)) = super_name_from_delegation(&child, bytes) {
+                        data.supers.push((name_line, name, type_args));
                     }
                 }
             }
@@ -851,7 +851,8 @@ fn extract_supers_java(node: &Node, bytes: &[u8], data: &mut FileData) {
                     "superclass" => {
                         // (superclass "extends" _type)
                         if let Some(name) = child.java_first_type_name(bytes) {
-                            data.supers.push((name_line, name));
+                            let type_args = child.type_arg_strings(bytes);
+                            data.supers.push((name_line, name, type_args));
                         }
                     }
                     "super_interfaces" => {
@@ -874,15 +875,17 @@ fn extract_supers_java(node: &Node, bytes: &[u8], data: &mut FileData) {
 }
 
 /// Extract the supertype name from a `delegation_specifier` node.
-fn super_name_from_delegation(node: &Node, bytes: &[u8]) -> Option<String> {
+fn super_name_from_delegation(node: &Node, bytes: &[u8]) -> Option<(String, Vec<String>)> {
     let mut cur = node.walk();
     for child in node.children(&mut cur) {
         match child.kind() {
             "constructor_invocation" | "explicit_delegation" => {
-                return child.first_child_of_kind(KIND_USER_TYPE).and_then(|c| c.user_type_name(bytes));
+                if let Some(ut) = child.first_child_of_kind(KIND_USER_TYPE) {
+                    return ut.user_type_name(bytes).map(|n| (n, ut.type_arg_strings(bytes)));
+                }
             }
             "user_type" => {
-                return child.user_type_name(bytes);
+                return child.user_type_name(bytes).map(|n| (n, child.type_arg_strings(bytes)));
             }
             _ => {}
         }
@@ -898,12 +901,12 @@ fn java_collect_type_list(node: &Node, bytes: &[u8], name_line: u32, data: &mut 
     for type_node in type_list.children(&mut cc) {
         // type_list children may be leaf type_identifier nodes directly,
         // or wrapper nodes (generic_type, scoped_type_identifier) containing one.
-        let name = if type_node.kind() == KIND_TYPE_IDENT {
-            type_node.utf8_text_owned(bytes)
+        let (name, type_args) = if type_node.kind() == KIND_TYPE_IDENT {
+            (type_node.utf8_text_owned(bytes), Vec::new())
         } else {
-            type_node.java_first_type_name(bytes)
+            (type_node.java_first_type_name(bytes), type_node.type_arg_strings(bytes))
         };
-        if let Some(n) = name { data.supers.push((name_line, n)); }
+        if let Some(n) = name { data.supers.push((name_line, n, type_args)); }
     }
 }
 

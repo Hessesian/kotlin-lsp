@@ -231,8 +231,8 @@ super.doIt()
     let file = idx.files.get(locs[0].uri.as_str()).unwrap();
     let start_line = locs[0].range.start.line;
     let supers: Vec<String> = file.supers.iter()
-        .filter(|(l, _)| *l == start_line)
-        .map(|(_, n)| n.clone())
+        .filter(|(l, _, _)| *l == start_line)
+        .map(|(_, n, _)| n.clone())
         .collect();
     assert!(supers.contains(&"Bar".to_string()), "supers={supers:?}");
 

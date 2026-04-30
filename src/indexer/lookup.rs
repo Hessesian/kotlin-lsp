@@ -56,12 +56,15 @@ impl Indexer {
             let r = self.definitions.get(name)?;
             r.first()?.clone()
         };
-        self.hover_info_at_location(&loc, name)
+        self.hover_info_at_location(&loc, name, None)
     }
 
     /// Build hover markdown for `name` at a specific resolved `Location`.
     /// Used by the hover handler so it shows the same symbol as go-to-definition.
-    pub fn hover_info_at_location(&self, loc: &Location, name: &str) -> Option<String> {
+    ///
+    /// `calling_uri` — the file where the cursor is (used to substitute generic type
+    /// parameters with concrete types when the symbol is from a base class).
+    pub fn hover_info_at_location(&self, loc: &Location, name: &str, calling_uri: Option<&str>) -> Option<String> {
         // On-demand index: the file may have been found by rg but not yet indexed.
         if !self.files.contains_key(loc.uri.as_str()) {
             if let Ok(path) = loc.uri.to_file_path() {
@@ -77,7 +80,16 @@ impl Indexer {
             .or_else(|| data.symbols.iter().find(|s| s.name == name))?;
 
         let start_line = sym.selection_range.start.line as usize;
-        let sig = data.lines.collect_signature(start_line);
+        let raw_sig = data.lines.collect_signature(start_line);
+
+        // Apply generic type parameter substitution when the cursor is in a different
+        // file (subtype) than where the symbol is defined.
+        let sig = if let Some(cu) = calling_uri {
+            let subst = build_type_param_subst(self, loc.uri.as_str(), sym.selection_range.start.line, cu);
+            if subst.is_empty() { raw_sig } else { apply_subst(&raw_sig, &subst) }
+        } else {
+            raw_sig
+        };
 
         let lang = lang_str(loc.uri.path());
 
@@ -98,18 +110,25 @@ impl Indexer {
     /// Returns the pre-computed `detail` string (declaration signature) for the
     /// symbol declared at the given line+character in `uri_str`. Used by
     /// `completionItem/resolve` to populate `CompletionItem.detail`.
-    pub fn symbol_detail_at(&self, uri_str: &str, line: u32, col: u32) -> Option<String> {
+    ///
+    /// `calling_uri` — the file where the cursor is; used for generic type substitution.
+    pub fn symbol_detail_at(&self, uri_str: &str, line: u32, col: u32, calling_uri: Option<&str>) -> Option<String> {
         let data = self.files.get(uri_str)?;
         let sym = data.symbols.iter()
             .find(|s| s.selection_range.start.line == line
                    && s.selection_range.start.character == col)
             .or_else(|| data.symbols.iter().find(|s| s.selection_range.start.line == line))?;
         let lang = lang_str(uri_str);
-        if sym.detail.is_empty() {
-            Some(format!("{} {}", symbol_kw_for_lang(sym.kind, lang), sym.name))
+        let raw = if sym.detail.is_empty() {
+            format!("{} {}", symbol_kw_for_lang(sym.kind, lang), sym.name)
         } else {
-            Some(sym.detail.clone())
+            sym.detail.clone()
+        };
+        if let Some(cu) = calling_uri {
+            let subst = build_type_param_subst(self, uri_str, sym.selection_range.start.line, cu);
+            if !subst.is_empty() { return Some(apply_subst(&raw, &subst)); }
         }
+        Some(raw)
     }
 
     /// Build Markdown documentation for a completion item identified by its
@@ -121,7 +140,9 @@ impl Indexer {
     /// Returns `(doc_markdown, detail)` where `doc_markdown` is the KDoc/Javadoc
     /// comment only (no code block — the signature is already shown in `detail`)
     /// and `detail` is the short signature string for `CompletionItem.detail`.
-    pub fn completion_docs_for(&self, uri_str: &str, line: u32, col: u32) -> Option<(String, String)> {
+    ///
+    /// `calling_uri` — the file where the cursor is; used for generic type substitution.
+    pub fn completion_docs_for(&self, uri_str: &str, line: u32, col: u32, calling_uri: Option<&str>) -> Option<(String, String)> {
         let data = self.files.get(uri_str)?;
         let start_line = line as usize;
 
@@ -134,10 +155,18 @@ impl Indexer {
 
         // detail: prefer the pre-computed SymbolEntry.detail; fall back to
         // a minimal keyword + name string so the field is never empty.
-        let detail = if sym.detail.is_empty() {
+        let raw_detail = if sym.detail.is_empty() {
             format!("{} {}", symbol_kw_for_lang(sym.kind, lang), sym.name)
         } else {
             sym.detail.clone()
+        };
+
+        // Apply generic type parameter substitution when requested.
+        let detail = if let Some(cu) = calling_uri {
+            let subst = build_type_param_subst(self, uri_str, sym.selection_range.start.line, cu);
+            if subst.is_empty() { raw_detail } else { apply_subst(&raw_detail, &subst) }
+        } else {
+            raw_detail
         };
 
         // documentation: KDoc/Javadoc only — the signature is already in detail.
@@ -228,6 +257,14 @@ impl Indexer {
         }
         (None, None)
     }
+
+    /// Apply generic type parameter substitution to `sig` for a symbol at `sym_uri:sym_line`
+    /// when viewed from `calling_uri`.  Returns the substituted string, or the original if
+    /// no substitution is applicable.
+    pub(crate) fn type_subst_sig(&self, sym_uri: &str, sym_line: u32, calling_uri: &str, sig: &str) -> String {
+        let subst = build_type_param_subst(self, sym_uri, sym_line, calling_uri);
+        if subst.is_empty() { sig.to_owned() } else { apply_subst(sig, &subst) }
+    }
 }
 
 fn symbol_kw(kind: SymbolKind) -> &'static str {
@@ -256,6 +293,155 @@ fn lang_str(path: &str) -> &'static str {
     if path.ends_with(".kt") || path.ends_with(".kts") { "kotlin" }
     else if path.ends_with(".swift")                   { "swift" }
     else                                               { "java" }
+}
+
+// ─── Generic type parameter substitution ─────────────────────────────────────
+
+/// Find the name of the innermost class/interface/object that contains `sym_line`
+/// in the given file's symbol list. Returns `None` if the symbol is top-level.
+fn find_containing_class_name(data: &crate::types::FileData, sym_line: u32) -> Option<String> {
+    use tower_lsp::lsp_types::SymbolKind;
+    const CLASS_KINDS: &[SymbolKind] = &[
+        SymbolKind::CLASS, SymbolKind::INTERFACE, SymbolKind::STRUCT,
+        SymbolKind::ENUM, SymbolKind::OBJECT,
+    ];
+    data.symbols.iter()
+        .filter(|s| CLASS_KINDS.contains(&s.kind))
+        .filter(|s| s.range.start.line <= sym_line && sym_line <= s.range.end.line)
+        // innermost = smallest range span
+        .min_by_key(|s| s.range.end.line.saturating_sub(s.range.start.line))
+        .map(|s| s.name.clone())
+}
+
+/// Parse type parameter names from a class/interface declaration line or detail string.
+///
+/// e.g. `"interface FlowReducer<EventType, out EffectType, StateType>"` → `["EventType", "EffectType", "StateType"]`
+///
+/// Handles variance annotations (`in`, `out`) and type constraints (`T : Bound`).
+fn parse_type_params(decl: &str) -> Vec<String> {
+    let start = match decl.find('<') { Some(i) => i + 1, None => return Vec::new() };
+    let end   = match decl.rfind('>') { Some(i) => i, None => return Vec::new() };
+    if end <= start { return Vec::new(); }
+    let inner = &decl[start..end];
+
+    // Re-implement depth-0 comma split here to avoid depending on node_ext internals.
+    let mut raw_params = Vec::new();
+    let mut depth = 0usize;
+    let mut seg_start = 0;
+    for (i, ch) in inner.char_indices() {
+        match ch {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                let seg = inner[seg_start..i].trim();
+                if !seg.is_empty() { raw_params.push(seg); }
+                seg_start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    let last = inner[seg_start..].trim();
+    if !last.is_empty() { raw_params.push(last); }
+
+    raw_params.into_iter().map(|s| {
+        // Strip variance keywords
+        let s = s.strip_prefix("in ").unwrap_or(s);
+        let s = s.strip_prefix("out ").unwrap_or(s);
+        let s = s.trim();
+        // Strip type constraint (everything from ":" onward) and whitespace
+        let end_pos = s.find(|c: char| c == ':' || c.is_whitespace()).unwrap_or(s.len());
+        s[..end_pos].trim().to_owned()
+    }).filter(|s| !s.is_empty()).collect()
+}
+
+/// Build a type-parameter → concrete-type substitution map for a symbol declared
+/// inside a generic class/interface when viewed from a specialised subtype.
+///
+/// For example: `FlowReducer<EventType, out EffectType, StateType>` specialised by
+/// `DashboardProductsReducer : FlowReducer<Event, Effect, State>` gives
+/// `{"EventType" → "Event", "EffectType" → "Effect", "StateType" → "State"}`.
+///
+/// Returns an empty map when substitution is not applicable (same file, no generics,
+/// or the calling file doesn't implement the container class).
+fn build_type_param_subst(
+    idx:         &Indexer,
+    sym_uri:     &str,
+    sym_line:    u32,
+    calling_uri: &str,
+) -> std::collections::HashMap<String, String> {
+    if sym_uri == calling_uri { return Default::default(); }
+
+    let sym_data = match idx.files.get(sym_uri) { Some(d) => d, None => return Default::default() };
+
+    // Identify the generic class that declares this symbol.
+    let container_name = match find_containing_class_name(&sym_data, sym_line) {
+        Some(n) => n,
+        None => return Default::default(),
+    };
+
+    // Get the type parameters from the container's declaration.
+    let container_sym = match sym_data.symbols.iter().find(|s| s.name == container_name) {
+        Some(s) => s,
+        None => return Default::default(),
+    };
+    // Use detail (pre-computed signature) as the source for type params; fall back to
+    // the declaration line if detail is empty.
+    let decl_text = if !container_sym.detail.is_empty() {
+        container_sym.detail.clone()
+    } else {
+        let line_idx = container_sym.selection_range.start.line as usize;
+        sym_data.lines.get(line_idx).cloned().unwrap_or_default()
+    };
+    let type_params = parse_type_params(&decl_text);
+    if type_params.is_empty() { return Default::default(); }
+
+    // Find the concrete type arguments in the calling file.
+    // TODO: when calling_file has multiple classes implementing the same interface,
+    // this uses the first match. A future improvement could filter by which class
+    // the cursor is inside.
+    let calling_data = match idx.files.get(calling_uri) { Some(d) => d, None => return Default::default() };
+    let type_args = calling_data.supers.iter()
+        .find(|(_, base, _)| base == &container_name)
+        .map(|(_, _, args)| args.clone())
+        .unwrap_or_default();
+
+    if type_args.is_empty() { return Default::default(); }
+
+    // Zip params → args (stop at the shorter list).
+    type_params.iter().zip(type_args.iter())
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
+}
+
+/// Apply a type-parameter substitution map to a signature string.
+///
+/// Only replaces whole-word occurrences (character boundaries), so `EventType` is
+/// not partially replaced when looking up `Event`.
+fn apply_subst(sig: &str, subst: &std::collections::HashMap<String, String>) -> String {
+    if subst.is_empty() { return sig.to_owned(); }
+    let mut result = String::with_capacity(sig.len() + 16);
+    let chars: Vec<char> = sig.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let ch = chars[i];
+        if ch.is_alphabetic() || ch == '_' {
+            // Collect the full identifier starting at i.
+            let start = i;
+            while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                i += 1;
+            }
+            let ident: String = chars[start..i].iter().collect();
+            if let Some(replacement) = subst.get(&ident) {
+                result.push_str(replacement);
+            } else {
+                result.push_str(&ident);
+            }
+        } else {
+            result.push(ch);
+            i += 1;
+        }
+    }
+    result
 }
 
 #[cfg(test)]

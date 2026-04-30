@@ -401,7 +401,7 @@
     // ── supers CST extraction (via parse_kotlin / parse_java) ────────────────
 
     fn kotlin_supers(src: &str) -> Vec<String> {
-        parse_kotlin(src).supers.into_iter().map(|(_, n)| n).collect()
+        parse_kotlin(src).supers.into_iter().map(|(_, n, _)| n).collect()
     }
 
     #[test]
@@ -436,14 +436,14 @@
     #[test]
     fn supers_java_extends() {
         let src = "public class FlexiEntryVM extends BaseFlexikreditVM {}";
-        let s: Vec<String> = parse_java(src).supers.into_iter().map(|(_, n)| n).collect();
+        let s: Vec<String> = parse_java(src).supers.into_iter().map(|(_, n, _)| n).collect();
         assert!(s.contains(&"BaseFlexikreditVM".to_string()), "got {s:?}");
     }
 
     #[test]
     fn supers_java_implements() {
         let src = "public class Foo extends Base implements Runnable, Serializable {}";
-        let s: Vec<String> = parse_java(src).supers.into_iter().map(|(_, n)| n).collect();
+        let s: Vec<String> = parse_java(src).supers.into_iter().map(|(_, n, _)| n).collect();
         assert!(s.contains(&"Base".to_string()),         "got {s:?}");
         assert!(s.contains(&"Runnable".to_string()),     "got {s:?}");
         assert!(s.contains(&"Serializable".to_string()), "got {s:?}");
@@ -452,7 +452,7 @@
     #[test]
     fn supers_java_generic_extends() {
         let java = |src: &str| -> Vec<String> {
-            parse_java(src).supers.into_iter().map(|(_, n)| n).collect()
+            parse_java(src).supers.into_iter().map(|(_, n, _)| n).collect()
         };
 
         let s = java("public class Foo extends Base<String> {}");

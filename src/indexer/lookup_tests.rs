@@ -30,6 +30,7 @@ fn swift_hover_uses_func_keyword() {
     let hover = idx.hover_info_at_location(
         &Location { uri: u.clone(), range: Default::default() },
         "greet",
+        None,
     ).unwrap_or_default();
     assert!(
         hover.contains("func"),
@@ -48,6 +49,7 @@ fn kotlin_hover_still_uses_fun_keyword() {
     let hover = idx.hover_info_at_location(
         &Location { uri: u.clone(), range: Default::default() },
         "greet",
+        None,
     ).unwrap_or_default();
     assert!(
         hover.contains("fun"),
@@ -94,7 +96,7 @@ class Foo(
     assert!(!locs.is_empty(), "repo should be found via find_definition_qualified");
 
     // 3. hover_info_at_location should return something
-    let hover = idx.hover_info_at_location(locs.first().unwrap(), "repo");
+    let hover = idx.hover_info_at_location(locs.first().unwrap(), "repo", None);
     assert!(hover.is_some(), "hover on val repo should produce result");
     let md = hover.unwrap();
     assert!(md.contains("repo"), "hover should mention 'repo', got: {md}");
@@ -118,7 +120,7 @@ internal class ContactAddressInteractor @Inject constructor(
     // hover on `repo` (line 2, col ~14)
     let locs = idx.find_definition_qualified("repo", None, &u);
     assert!(!locs.is_empty(), "repo should be found");
-    let hover = idx.hover_info_at_location(locs.first().unwrap(), "repo");
+    let hover = idx.hover_info_at_location(locs.first().unwrap(), "repo", None);
     assert!(hover.is_some(), "hover on val repo should work");
     let md = hover.unwrap();
     assert!(md.contains("repo"), "hover should mention repo: {md}");
@@ -148,7 +150,7 @@ fun add(a: Int, b: Int): Int = a + b
     let line = sym.selection_range.start.line;
     let col  = sym.selection_range.start.character;
 
-    let result = idx.completion_docs_for(u.as_str(), line, col);
+    let result = idx.completion_docs_for(u.as_str(), line, col, None);
     assert!(result.is_some(), "completion_docs_for should return Some for documented function");
     let (doc_md, detail) = result.unwrap();
     assert!(doc_md.contains("Adds two numbers"), "doc should contain KDoc text, got: {doc_md}");
@@ -168,7 +170,7 @@ fn completion_docs_for_returns_none_without_kdoc() {
     let line = sym.selection_range.start.line;
     let col  = sym.selection_range.start.character;
     // No KDoc → None (caller skips setting documentation)
-    assert!(idx.completion_docs_for(u.as_str(), line, col).is_none());
+    assert!(idx.completion_docs_for(u.as_str(), line, col, None).is_none());
 }
 
 #[test]
@@ -184,6 +186,6 @@ fun configure() {}\n");
     };
     let line = sym.selection_range.start.line;
     let col  = sym.selection_range.start.character;
-    let (doc_md, _detail) = idx.completion_docs_for(u.as_str(), line, col).unwrap();
+    let (doc_md, _detail) = idx.completion_docs_for(u.as_str(), line, col, None).unwrap();
     assert!(doc_md.contains("Configure something"));
 }

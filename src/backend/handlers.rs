@@ -64,7 +64,7 @@ impl Backend {
             if let Some(ref rt) = ctx.contextual {
                 let locs = self.resolve_with_receiver_fallback(&ctx.word, rt, uri);
                 if let Some(loc) = locs.first() {
-                    if let Some(md) = self.indexer.hover_info_at_location(loc, &ctx.word) {
+                    if let Some(md) = self.indexer.hover_info_at_location(loc, &ctx.word, Some(uri.as_str())) {
                         return Ok(Some(Hover {
                             contents: HoverContents::Markup(MarkupContent {
                                 kind:  MarkupKind::Markdown,
@@ -79,7 +79,7 @@ impl Backend {
 
         let locs = self.indexer.find_definition_qualified(&ctx.word, ctx.qualifier.as_deref(), uri);
         let hover_md = if let Some(loc) = locs.first() {
-            self.indexer.hover_info_at_location(loc, &ctx.word)
+            self.indexer.hover_info_at_location(loc, &ctx.word, Some(uri.as_str()))
         } else {
             // Index lookup — works for already-indexed symbols + stdlib.
             let from_index = self.indexer.hover_info(&ctx.word);
@@ -94,7 +94,7 @@ impl Backend {
                     (crate::rg::effective_rg_root(wr.as_deref(), file_path.as_deref()), m)
                 };
                 let rg_locs = crate::rg::rg_find_definition(&ctx.word, rg_root.as_deref(), matcher.as_deref());
-                rg_locs.first().and_then(|loc| self.indexer.hover_info_at_location(loc, &ctx.word))
+                rg_locs.first().and_then(|loc| self.indexer.hover_info_at_location(loc, &ctx.word, Some(uri.as_str())))
             }
         };
 

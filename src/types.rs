@@ -79,11 +79,12 @@ pub struct FileData {
     /// Populated once at parse time; used by completion without re-scanning.
     pub declared_names: Vec<String>,
     /// Supertype relationships extracted from the CST at parse time.
-    /// Each entry is `(class_name_line, supertype_name)` where `class_name_line`
-    /// matches `SymbolEntry::selection_range.start.line` for the declaring class.
-    /// Replaces the old string-based `extract_supers_from_lines` scanner.
+    /// Each entry is `(class_name_line, supertype_name, type_args)` where:
+    /// - `class_name_line` matches `SymbolEntry::selection_range.start.line` for the declaring class
+    /// - `supertype_name` is the base name without type arguments (e.g. `"FlowReducer"`)
+    /// - `type_args` are the concrete type arguments (e.g. `["Event", "Effect", "State"]`)
     #[serde(default)]
-    pub supers: Vec<(u32, String)>,
+    pub supers: Vec<(u32, String, Vec<String>)>,
     /// Structural syntax errors from tree-sitter (ERROR / MISSING nodes).
     /// Transient — not serialized to disk cache.
     #[serde(skip)]

@@ -144,7 +144,7 @@ impl Indexer {
             if !class_kinds.contains(&sym.kind) { continue; }
             let start_line = sym.selection_range.start.line;
             let class_loc = Location { uri: uri.clone(), range: sym.selection_range };
-            for (_, super_name) in data.supers.iter().filter(|(l, _)| *l == start_line) {
+            for (_, super_name, _) in data.supers.iter().filter(|(l, _, _)| *l == start_line) {
                 supertypes.push((super_name.clone(), class_loc.clone()));
             }
         }

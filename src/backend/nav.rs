@@ -192,8 +192,8 @@ impl Backend {
         for loc in &locs {
             if let Some(file) = self.indexer.files.get(loc.uri.as_str()) {
                 let names: Vec<String> = file.supers.iter()
-                    .filter(|(l, _)| *l == loc.range.start.line)
-                    .map(|(_, n)| n.clone())
+                    .filter(|(l, _, _)| *l == loc.range.start.line)
+                    .map(|(_, n, _)| n.clone())
                     .collect();
                 if !names.is_empty() { return names; }
             }
@@ -202,7 +202,7 @@ impl Backend {
         if let Some(lines) = self.indexer.live_lines.get(uri.as_str()) {
             let content = lines.join("\n");
             let names: Vec<String> = parse_by_extension(uri.path(), &content)
-                .supers.into_iter().map(|(_, n)| n).collect();
+                .supers.into_iter().map(|(_, n, _)| n).collect();
             if !names.is_empty() { return names; }
         }
         vec![]
