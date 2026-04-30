@@ -188,8 +188,15 @@ impl LanguageServer for Backend {
             }),
             capabilities: ServerCapabilities {
                 // FULL sync: each change event carries the whole document.
-                text_document_sync: Some(TextDocumentSyncCapability::Kind(
-                    TextDocumentSyncKind::FULL,
+                text_document_sync: Some(TextDocumentSyncCapability::Options(
+                    TextDocumentSyncOptions {
+                        open_close:   Some(true),
+                        change:       Some(TextDocumentSyncKind::FULL),
+                        save:         Some(TextDocumentSyncSaveOptions::SaveOptions(SaveOptions {
+                            include_text: Some(false),
+                        })),
+                        ..Default::default()
+                    }
                 )),
                 completion_provider: Some(CompletionOptions {
                     trigger_characters: Some(vec![".".into(), ":".into()]),

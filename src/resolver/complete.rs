@@ -247,6 +247,7 @@ fn completion_item_for_nested_symbol(s: &crate::types::SymbolEntry, uri_str: &st
         insert_text_format: if is_fn { Some(InsertTextFormat::SNIPPET) } else { None },
         sort_text:          Some(format!("{:02}:{}", kind_sort_rank(Some(kind)), s.name)),
         detail:             if s.detail.is_empty() { None } else { Some(s.detail.clone()) },
+        command:            if is_fn { Some(trigger_parameter_hints()) } else { None },
         data:               Some(serde_json::json!({"u": uri_str, "l": s.selection_range.start.line, "c": s.selection_range.start.character})),
         ..Default::default()
     }
@@ -396,6 +397,7 @@ pub(crate) fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippet
             insert_text:        if is_fn { Some(format!("{}($1)", name)) } else { None },
             insert_text_format: if is_fn { Some(InsertTextFormat::SNIPPET) } else { None },
             detail:             if detail.is_empty() { None } else { Some(detail.to_string()) },
+            command:            if is_fn { Some(trigger_parameter_hints()) } else { None },
             data:               item_data,
             ..Default::default()
         });
@@ -634,6 +636,7 @@ fn make_completion_item(name: &str, ck: CompletionItemKind, sort_text: String, s
         sort_text:          Some(sort_text),
         insert_text:        if is_fn { Some(format!("{}($1)", name)) } else { None },
         insert_text_format: if is_fn { Some(InsertTextFormat::SNIPPET) } else { None },
+        command:            if is_fn { Some(trigger_parameter_hints()) } else { None },
         ..Default::default()
     }
 }
@@ -642,6 +645,18 @@ fn make_completion_item(name: &str, ck: CompletionItemKind, sort_text: String, s
 /// pre-warmer in `indexer.rs`.  Builds + caches completion items for a file.
 pub fn symbols_from_uri_as_completions_pub(idx: &Indexer, file_uri: &str) -> Vec<CompletionItem> {
     symbols_from_uri_as_completions(idx, file_uri)
+}
+
+/// LSP `Command` that tells the editor to open the parameter-hints (signature
+/// help) popup immediately after a function completion is accepted.
+/// Mirrors VS Code's built-in `editor.action.triggerParameterHints` command,
+/// which is also what rust-analyzer emits.
+fn trigger_parameter_hints() -> tower_lsp::lsp_types::Command {
+    tower_lsp::lsp_types::Command {
+        title:     "triggerParameterHints".into(),
+        command:   "editor.action.triggerParameterHints".into(),
+        arguments: None,
+    }
 }
 
 // ─── impl Indexer wrappers ────────────────────────────────────────────────────
