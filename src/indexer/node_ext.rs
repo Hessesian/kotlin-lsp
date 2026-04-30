@@ -39,27 +39,33 @@ impl<'a> NodeExt<'a> for Node<'a> {
         let name_node = match callee.kind() {
             "simple_identifier" | "type_identifier" => callee,
             "navigation_expression" => {
-                // Prefer the identifier inside the last navigation_suffix (the member name,
-                // e.g. "bar" in `obj.bar(...)`). Fall back to the last direct identifier
-                // for bare qualified names with no suffix.
+                // Single-pass scan: track the last direct identifier and the last
+                // identifier inside a navigation_suffix. Prefer the suffix identifier
+                // (member name, e.g. "bar" in `obj.bar(…)`); fall back to the direct
+                // identifier for bare qualified names with no suffix.
                 let mut walker = callee.walk();
-                let children: Vec<Node<'a>> = callee.children(&mut walker).collect();
-                if let Some(suffix) =
-                    children.iter().rev().find(|c| c.kind() == "navigation_suffix")
-                {
-                    (0..suffix.child_count())
-                        .filter_map(|i| suffix.child(i))
-                        .find(|c| {
-                            c.kind() == "simple_identifier" || c.kind() == "type_identifier"
-                        })?
-                } else {
-                    children
-                        .into_iter()
-                        .filter(|c| {
-                            c.kind() == "simple_identifier" || c.kind() == "type_identifier"
-                        })
-                        .last()?
+                let mut last_identifier = None;
+                let mut last_suffix_identifier = None;
+                for child in callee.children(&mut walker) {
+                    match child.kind() {
+                        "simple_identifier" | "type_identifier" => {
+                            last_identifier = Some(child);
+                        }
+                        "navigation_suffix" => {
+                            let suffix_id = (0..child.child_count())
+                                .filter_map(|i| child.child(i))
+                                .find(|c| {
+                                    c.kind() == "simple_identifier"
+                                        || c.kind() == "type_identifier"
+                                });
+                            if let Some(id) = suffix_id {
+                                last_suffix_identifier = Some(id);
+                            }
+                        }
+                        _ => {}
+                    }
                 }
+                last_suffix_identifier.or(last_identifier)?
             }
             _ => return None,
         };

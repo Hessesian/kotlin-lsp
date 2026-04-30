@@ -458,7 +458,7 @@ impl Indexer {
 
         // Store in last_completion cache.
         if let Ok(mut guard) = self.last_completion.lock() {
-            *guard = Some((cache_key, prefix.clone(), items.clone()));
+            *guard = Some((cache_key, prefix.to_owned(), items.clone()));
         }
 
         (items, hit_cap)
@@ -468,7 +468,7 @@ impl Indexer {
 // ─── completion helpers (free functions) ─────────────────────────────────────
 
 /// Returns a copy of `line` up to the UTF-16 column `utf16_col`.
-fn before_cursor(line: &str, utf16_col: u32) -> String {
+fn before_cursor(line: &str, utf16_col: u32) -> &str {
     let target = utf16_col as usize;
     let mut utf16 = 0usize;
     let mut byte_end = line.len();
@@ -476,14 +476,14 @@ fn before_cursor(line: &str, utf16_col: u32) -> String {
         if utf16 >= target { byte_end = bi; break; }
         utf16 += ch.len_utf16();
     }
-    line[..byte_end].to_owned()
+    &line[..byte_end]
 }
 
 /// Splits `before` into the trailing identifier fragment (`prefix`) and
 /// everything that precedes it (`before_prefix`).
-fn split_prefix(before: &str) -> (String, String) {
-    let prefix = last_ident_in(before).to_owned();
-    let before_prefix = before[..before.len() - prefix.len()].to_owned();
+fn split_prefix(before: &str) -> (&str, &str) {
+    let prefix = last_ident_in(before);
+    let before_prefix = &before[..before.len() - prefix.len()];
     (prefix, before_prefix)
 }
 
