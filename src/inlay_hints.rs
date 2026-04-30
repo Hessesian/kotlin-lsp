@@ -247,7 +247,7 @@ fn infer_type_from_init(init: tree_sitter::Node<'_>, bytes: &[u8]) -> Option<Str
     // call_expression: callee(...) or callee<T>(...)
     if init.kind() == KIND_CALL_EXPR {
         let name = init.call_fn_name(bytes)?;
-        if name.starts_with(|c: char| c.is_uppercase()) {
+        if name.starts_with_uppercase() {
             return Some(name);
         }
     }
