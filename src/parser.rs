@@ -256,19 +256,15 @@ fn extract_java(node: &Node, bytes: &[u8], data: &mut FileData) {
     }
 }
 
-/// Returns true if the Java node's modifiers child contains ALL of `required` keywords.
-fn java_node_has_modifiers(node: &Node, required: &[&str]) -> bool {
-    let Some(mods) = node.first_child_of_kind("modifiers") else { return false; };
-    let found_kinds: Vec<&str> = (0..mods.child_count())
-        .filter_map(|i| mods.child(i))
-        .map(|c| c.kind())
-        .collect();
-    required.iter().all(|&req| found_kinds.contains(&req))
-}
-
 fn push_field_declaration(node: &Node, bytes: &[u8], data: &mut FileData) {
     // Detect `static final` → CONSTANT, anything else → FIELD.
-    let kind = if java_node_has_modifiers(node, &["static", "final"]) {
+    let kind = if node.first_child_of_kind("modifiers").map_or(false, |mods| {
+        let found_kinds: Vec<&str> = (0..mods.child_count())
+            .filter_map(|i| mods.child(i))
+            .map(|c| c.kind())
+            .collect();
+        ["static", "final"].iter().all(|&req| found_kinds.contains(&req))
+    }) {
         SymbolKind::CONSTANT
     } else {
         SymbolKind::FIELD
@@ -321,7 +317,10 @@ fn first_identifier(node: &Node, bytes: &[u8]) -> Option<(String, Range)> {
     for child in node.children(&mut cur) {
         if matches!(child.kind(), "type_identifier" | "simple_identifier" | "identifier") {
             if let Ok(t) = child.utf8_text(bytes) {
-                if is_ident(t) { return Some((t.to_owned(), ts_to_lsp(child.range()))); }
+                if !t.is_empty()
+                    && t.chars().next().map(|c| c.is_alphabetic() || c == '_').unwrap_or(false)
+                    && t.chars().all(|c| c.is_alphanumeric() || c == '_')
+                { return Some((t.to_owned(), ts_to_lsp(child.range()))); }
             }
         }
     }
@@ -476,28 +475,6 @@ fn has_fun_interface_descendant(node: &Node, bytes: &[u8]) -> bool {
     children.iter().any(|c| has_fun_interface_descendant(c, bytes))
 }
 
-fn report_missing_node(node: &Node, seen: &mut std::collections::HashSet<(u32, u32)>, errors: &mut Vec<SyntaxError>) {
-    let range = ts_to_lsp(node.range());
-    let key = (range.start.line, range.start.character);
-    if seen.insert(key) {
-        let kind = node.kind();
-        errors.push(SyntaxError { range, message: format!("missing `{kind}`") });
-    }
-}
-
-fn report_error_node(node: &Node, bytes: &[u8], seen: &mut std::collections::HashSet<(u32, u32)>, errors: &mut Vec<SyntaxError>) {
-    let range = ts_to_lsp(node.range());
-    let key = (range.start.line, range.start.character);
-    if seen.insert(key) {
-        let text: String = node.utf8_text(bytes).unwrap_or("").chars().take(30).collect();
-        let first_line = text.lines().next().unwrap_or(&text);
-        errors.push(SyntaxError {
-            range,
-            message: if first_line.is_empty() { "syntax error".into() } else { format!("unexpected `{first_line}`") },
-        });
-    }
-}
-
 fn collect_syntax_errors(root: Node, bytes: &[u8]) -> Vec<SyntaxError> {
     if !root.has_error() { return Vec::new(); }
 
@@ -509,13 +486,27 @@ fn collect_syntax_errors(root: Node, bytes: &[u8]) -> Vec<SyntaxError> {
         if errors.len() >= MAX_SYNTAX_ERRORS { break; }
 
         if node.is_missing() {
-            report_missing_node(&node, &mut seen, &mut errors);
+            let range = ts_to_lsp(node.range());
+            let key = (range.start.line, range.start.character);
+            if seen.insert(key) {
+                let kind = node.kind();
+                errors.push(SyntaxError { range, message: format!("missing `{kind}`") });
+            }
         } else if node.is_error() {
             // Skip errors that are actually valid `fun interface` declarations.
             if is_fun_interface_error(&node, bytes) {
                 continue;
             }
-            report_error_node(&node, bytes, &mut seen, &mut errors);
+            let range = ts_to_lsp(node.range());
+            let key = (range.start.line, range.start.character);
+            if seen.insert(key) {
+                let text: String = node.utf8_text(bytes).unwrap_or("").chars().take(30).collect();
+                let first_line = text.lines().next().unwrap_or(&text);
+                errors.push(SyntaxError {
+                    range,
+                    message: if first_line.is_empty() { "syntax error".into() } else { format!("unexpected `{first_line}`") },
+                });
+            }
             // Recurse into ERROR children to find nested MISSING nodes.
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
@@ -590,12 +581,6 @@ pub(crate) fn extract_detail(lines: &[String], start_line: u32, end_line: u32) -
     } else {
         trimmed
     }
-}
-
-fn is_ident(s: &str) -> bool {
-    !s.is_empty()
-        && s.chars().next().map(|c| c.is_alphabetic() || c == '_').unwrap_or(false)
-        && s.chars().all(|c| c.is_alphanumeric() || c == '_')
 }
 
 // ─── package + import extraction ─────────────────────────────────────────────
