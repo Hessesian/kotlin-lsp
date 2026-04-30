@@ -12,6 +12,9 @@ pub(crate) trait NodeExt<'a>: Sized + Copy {
     /// Find the first direct child whose `kind()` equals `kind`.
     fn first_child_of_kind(self, kind: &str) -> Option<Node<'a>>;
 
+    /// Collect all direct children whose `kind()` equals `kind`.
+    fn children_of_kind(self, kind: &str) -> Vec<Node<'a>>;
+
     /// Extract the function name from a `call_expression` node.
     /// Handles simple calls `foo(...)` and navigation chains `foo.bar(...)`.
     fn call_fn_name(self, bytes: &[u8]) -> Option<String>;
@@ -59,6 +62,13 @@ impl<'a> NodeExt<'a> for Node<'a> {
         (0..self.child_count())
             .filter_map(|i| self.child(i))
             .find(|c| c.kind() == kind)
+    }
+
+    fn children_of_kind(self, kind: &str) -> Vec<Node<'a>> {
+        (0..self.child_count())
+            .filter_map(|i| self.child(i))
+            .filter(|c| c.kind() == kind)
+            .collect()
     }
 
     fn call_fn_name(self, bytes: &[u8]) -> Option<String> {

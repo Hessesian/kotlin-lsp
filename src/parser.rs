@@ -255,16 +255,12 @@ fn extract_java(node: &Node, bytes: &[u8], data: &mut FileData) {
 
 /// Returns true if the Java node's modifiers child contains ALL of `required` keywords.
 fn java_node_has_modifiers(node: &Node, required: &[&str]) -> bool {
-    let mut cur = node.walk();
-    for child in node.children(&mut cur) {
-        if child.kind() == "modifiers" {
-            // Collect modifier keyword kinds into a Vec first to avoid walker lifetime issues.
-            let mut mc = child.walk();
-            let found_kinds: Vec<&str> = child.children(&mut mc).map(|k| k.kind()).collect();
-            return required.iter().all(|&req| found_kinds.contains(&req));
-        }
-    }
-    false
+    let Some(mods) = node.first_child_of_kind("modifiers") else { return false; };
+    let found_kinds: Vec<&str> = (0..mods.child_count())
+        .filter_map(|i| mods.child(i))
+        .map(|c| c.kind())
+        .collect();
+    required.iter().all(|&req| found_kinds.contains(&req))
 }
 
 fn push_field_declaration(node: &Node, bytes: &[u8], data: &mut FileData) {
@@ -277,19 +273,16 @@ fn push_field_declaration(node: &Node, bytes: &[u8], data: &mut FileData) {
     let nr = ts_to_lsp(node.range());
     let vis = visibility_at_line(&data.lines, node.range().start_point.row);
     let detail = extract_detail(&data.lines, nr.start.line, nr.end.line);
-    let mut cur = node.walk();
-    for child in node.children(&mut cur) {
-        if child.kind() == "variable_declarator" {
-            if let Some((name, sel)) = first_identifier(&child, bytes) {
-                data.symbols.push(SymbolEntry {
-                    name,
-                    kind,
-                    visibility: vis,
-                    range: nr,
-                    selection_range: sel,
-                    detail: detail.clone(),
-                });
-            }
+    for child in node.children_of_kind("variable_declarator") {
+        if let Some((name, sel)) = first_identifier(&child, bytes) {
+            data.symbols.push(SymbolEntry {
+                name,
+                kind,
+                visibility: vis,
+                range: nr,
+                selection_range: sel,
+                detail: detail.clone(),
+            });
         }
     }
 }
@@ -433,13 +426,9 @@ fn extract_fun_interfaces(root: Node, bytes: &[u8], data: &mut FileData) {
     while let Some(node) = stack.pop() {
         // Case 1: no-modifier `fun interface` → ERROR node
         if node.is_error() && is_fun_interface_error(&node, bytes) {
-            let mut cur = node.walk();
-            for child in node.children(&mut cur) {
-                if child.kind() == "simple_identifier" {
-                    if let Ok(name) = child.utf8_text(bytes) {
-                        push_interface_symbol(name, &node, child.range(), data);
-                    }
-                    break;
+            if let Some(child) = node.first_child_of_kind("simple_identifier") {
+                if let Ok(name) = child.utf8_text(bytes) {
+                    push_interface_symbol(name, &node, child.range(), data);
                 }
             }
             // Don't recurse further into ERROR children.
@@ -634,11 +623,8 @@ fn extract_package_and_imports(root: tree_sitter::Node, bytes: &[u8], data: &mut
                 }
             }
             "import_list" => {
-                let mut lc = node.walk();
-                for header in node.children(&mut lc) {
-                    if header.kind() == "import_header" {
-                        parse_import_header(&header, bytes, data);
-                    }
+                for header in node.children_of_kind("import_header") {
+                    parse_import_header(&header, bytes, data);
                 }
             }
             _ => {}
@@ -876,12 +862,9 @@ fn extract_supers_kotlin(root: Node, bytes: &[u8], data: &mut FileData) {
         match node.kind() {
             "class_declaration" | "object_declaration" => {
                 let name_line = node.name_line();
-                let mut cur = node.walk();
-                for child in node.children(&mut cur) {
-                    if child.kind() == "delegation_specifier" {
-                        if let Some(name) = super_name_from_delegation(&child, bytes) {
-                            data.supers.push((name_line, name));
-                        }
+                for child in node.children_of_kind("delegation_specifier") {
+                    if let Some(name) = super_name_from_delegation(&child, bytes) {
+                        data.supers.push((name_line, name));
                     }
                 }
             }
