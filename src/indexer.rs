@@ -523,6 +523,20 @@ pub(crate) fn starts_with_lowercase(s: &str) -> bool {
     s.chars().next().map(|c| c.is_lowercase()).unwrap_or(false)
 }
 
+/// Returns the leading identifier portion of `s` — all leading chars satisfying `is_id_char`.
+/// `"foo.bar()"` → `"foo"`;  `"Bar<T>"` → `"Bar"`.
+#[inline]
+pub(crate) fn ident_prefix(s: &str) -> String {
+    s.chars().take_while(|&c| is_id_char(c)).collect()
+}
+
+/// Returns the leading dotted-identifier portion of `s` — all leading chars satisfying `is_id_char` or `.`.
+/// `"foo.Bar.baz()"` → `"foo.Bar.baz"`.
+#[inline]
+pub(crate) fn dotted_ident_prefix(s: &str) -> String {
+    s.chars().take_while(|&c| is_id_char(c) || c == '.').collect()
+}
+
 // ─── rg cross-file fallback ──────────────────────────────────────────────────
 
 // ─── tests ───────────────────────────────────────────────────────────────────

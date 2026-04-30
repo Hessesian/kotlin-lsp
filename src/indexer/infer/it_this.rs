@@ -229,9 +229,7 @@ pub(crate) fn lambda_receiver_type_from_context(
         let receiver_expr = callee[..dot_pos].trim_end();
         let receiver_var = last_ident_in(receiver_expr);
         // Extract method name (everything after the dot up to the first non-id char).
-        let method: String = callee[dot_pos + 1..].trim_start()
-            .chars().take_while(|&c| is_id_char(c))
-            .collect();
+        let method = crate::indexer::ident_prefix(callee[dot_pos + 1..].trim_start());
 
         if !receiver_var.is_empty() {
             if let Some(raw) = deps.find_var_type(receiver_var, uri) {
@@ -247,7 +245,7 @@ pub(crate) fn lambda_receiver_type_from_context(
                         return Some(ty);
                     }
                 }
-                let base: String = raw.chars().take_while(|&c| is_id_char(c)).collect();
+                let base = crate::indexer::ident_prefix(&raw);
                 if !base.is_empty() && crate::indexer::starts_with_uppercase(&base) {
                     return Some(base);
                 }
@@ -269,11 +267,11 @@ pub(crate) fn lambda_receiver_type_from_context(
         if trailing_fn == "with" {
             if let Some(recv_name) = extract_first_arg(trimmed) {
                 if let Some(raw) = deps.find_var_type(recv_name, uri) {
-                    let base: String = raw.chars().take_while(|&c| is_id_char(c)).collect();
+                    let base = crate::indexer::ident_prefix(&raw);
                     if !base.is_empty() { return Some(base); }
                 }
                 // If recv_name starts uppercase it IS the type (companion / object ref).
-                let base: String = recv_name.chars().take_while(|&c| is_id_char(c)).collect();
+                let base = crate::indexer::ident_prefix(recv_name);
                 if crate::indexer::starts_with_uppercase(&base) {
                     return Some(base);
                 }
@@ -518,9 +516,7 @@ fn lambda_receiver_this_type_from_context(
     if let Some(dot_pos) = find_last_dot_at_depth_zero(callee) {
         let receiver_expr = callee[..dot_pos].trim_end();
         let receiver_var = last_ident_in(receiver_expr);
-        let method: String = callee[dot_pos + 1..].trim_start()
-            .chars().take_while(|&c| is_id_char(c))
-            .collect();
+        let method = crate::indexer::ident_prefix(callee[dot_pos + 1..].trim_start());
 
         if !receiver_var.is_empty() && !method.is_empty() {
             // Prefer the method's own receiver-lambda type (only for indexed fns).
@@ -531,7 +527,7 @@ fn lambda_receiver_this_type_from_context(
             // receiver-`this` lambdas; `also`/`let` are intentionally excluded.
             if RECEIVER_THIS_FNS.contains(&method.as_str()) {
                 if let Some(raw) = deps.find_var_type(receiver_var, uri) {
-                    let base: String = raw.chars().take_while(|&c| is_id_char(c)).collect();
+                    let base = crate::indexer::ident_prefix(&raw);
                     if !base.is_empty() { return Some(base); }
                 }
                 if crate::indexer::starts_with_uppercase(receiver_var) {
@@ -547,10 +543,10 @@ fn lambda_receiver_this_type_from_context(
     if trailing_fn == "with" {
         if let Some(recv_name) = extract_first_arg(trimmed) {
             if let Some(raw) = deps.find_var_type(recv_name, uri) {
-                let base: String = raw.chars().take_while(|&c| is_id_char(c)).collect();
+                let base = crate::indexer::ident_prefix(&raw);
                 if !base.is_empty() { return Some(base); }
             }
-            let base: String = recv_name.chars().take_while(|&c| is_id_char(c)).collect();
+            let base = crate::indexer::ident_prefix(recv_name);
             if crate::indexer::starts_with_uppercase(&base) {
                 return Some(base);
             }

@@ -67,8 +67,7 @@ pub(crate) fn find_as_call_arg_type(
                         if let Some(fn_name) = fn_full.split('.').next_back().filter(|n| !n.is_empty()) {
                             if let Some(sig) = find_fun_signature_full(fn_name, idx, uri) {
                                 if let Some(param_type) = find_named_param_type_in_sig(&sig, named_arg) {
-                                    let base: String = param_type.trim()
-                                        .chars().take_while(|&c| is_id_char(c)).collect();
+                                    let base = crate::indexer::ident_prefix(param_type.trim());
                                     if !base.is_empty() { return Some(base); }
                                 }
                             }
@@ -125,8 +124,7 @@ pub(crate) fn find_as_call_arg_type(
                             .split('.').next_back().filter(|n| !n.is_empty())?;
                         let sig = find_fun_signature_full(fn_name, idx, uri)?;
                         let param_type = nth_fun_param_type_str(&sig, arg_pos)?;
-                        let base: String = param_type.trim()
-                            .chars().take_while(|&c| is_id_char(c)).collect();
+                        let base = crate::indexer::ident_prefix(param_type.trim());
                         return if base.is_empty() { None } else { Some(base) };
                     }
                 }
@@ -323,7 +321,7 @@ fn cst_call_arg_type(pos: CursorPos, idx: &Indexer, uri: &Url) -> Option<String>
         nth_fun_param_type_str(&sig, value_arg.value_arg_position())
     }?;
 
-    let base: String = param_type.trim().chars().take_while(|&c| is_id_char(c)).collect();
+    let base = crate::indexer::ident_prefix(param_type.trim());
     if base.is_empty() { None } else { Some(base) }
 }
 
