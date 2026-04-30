@@ -2,6 +2,7 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use super::Backend;
 use super::cursor::CursorContext;
+use crate::parser::parse_by_extension;
 
 fn locs_to_response(locs: Vec<Location>) -> GotoDefinitionResponse {
     match locs.len() {
@@ -200,7 +201,7 @@ impl Backend {
         // Fallback: parse live_lines for the open file itself.
         if let Some(lines) = self.indexer.live_lines.get(uri.as_str()) {
             let content = lines.join("\n");
-            let names: Vec<String> = crate::parser::parse_by_extension(uri.path(), &content)
+            let names: Vec<String> = parse_by_extension(uri.path(), &content)
                 .supers.into_iter().map(|(_, n)| n).collect();
             if !names.is_empty() { return names; }
         }

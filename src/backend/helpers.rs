@@ -1,5 +1,6 @@
 use tower_lsp::lsp_types::*;
 use crate::types::SyntaxError;
+use crate::StrExt;
 
 /// Determine the `(parent_class, declared_pkg)` scope for a `findReferences` request.
 ///
@@ -18,7 +19,7 @@ pub(super) fn resolve_references_scope(
     line: u32,
     name: &str,
 ) -> (Option<String>, Option<String>) {
-    if !name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+    if !name.starts_with_uppercase() {
         return (None, None);
     }
     let on_decl = idx.is_declared_in(uri, name)

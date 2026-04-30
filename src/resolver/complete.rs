@@ -6,10 +6,14 @@ use tower_lsp::lsp_types::{
 use crate::indexer::Indexer;
 use crate::types::Visibility;
 use crate::LinesExt;
+use crate::StrExt;
+use crate::parser::parse_by_extension;
+use crate::stdlib::bare_completions;
+use crate::stdlib_tail::dot_completions_for_lang;
 
 use super::{fqns_for_name, already_imported,
             resolve_symbol_inner, resolve_symbol_no_rg};
-use super::infer::{infer_variable_type, ReceiverKind, ReceiverType, infer_receiver_type};
+use super::infer::{ReceiverKind, ReceiverType, infer_receiver_type};
 
 // ─── match scoring ────────────────────────────────────────────────────────────
 
@@ -193,7 +197,7 @@ pub(crate) fn complete_dot(idx: &Indexer, receiver: &str, from_uri: &Url, snippe
         Some(r) => r,
         None => {
             // Could be an uppercase class/object — look it up directly.
-            if receiver.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+            if receiver.starts_with_uppercase() {
                 ReceiverType::from_raw(receiver.to_string())
             } else {
                 return vec![];
@@ -228,7 +232,7 @@ pub(crate) fn complete_dot(idx: &Indexer, receiver: &str, from_uri: &Url, snippe
     // Append stdlib extensions filtered to the receiver type. Only add Kotlin stdlib
     // when the current file is a Kotlin file; add Swift-specific snippets for Swift.
     let from_path = from_uri.path();
-    items.extend(crate::stdlib_tail::dot_completions_for_lang(from_path, &rt.qualified, snippets));
+    items.extend(dot_completions_for_lang(from_path, &rt.qualified, snippets));
     items
 }
 
@@ -272,7 +276,7 @@ fn symbols_from_nested_type(
         let url = match Url::parse(file_uri) { Ok(u) => u, Err(_) => return vec![] };
         let path = match url.to_file_path() { Ok(p) => p, Err(_) => return vec![] };
         let content = match std::fs::read_to_string(&path) { Ok(c) => c, Err(_) => return vec![] };
-        owned = crate::parser::parse_by_extension(file_uri, &content);
+        owned = parse_by_extension(file_uri, &content);
         &owned.symbols
     };
 
@@ -373,10 +377,10 @@ pub(crate) fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippet
             return;
         }
         // Case gates: match user intent by the capitalisation of what they typed.
-        if lowercase_mode && name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+        if lowercase_mode && name.starts_with_uppercase() {
             return;
         }
-        if uppercase_mode && name.chars().next().map(|c| c.is_lowercase()).unwrap_or(false) {
+        if uppercase_mode && name.starts_with_lowercase() {
             return;
         }
         // CamelCase prefix → hide SCREAMING_SNAKE_CASE names (constants, enum variants).
@@ -465,7 +469,7 @@ pub(crate) fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippet
         if let Ok(cache) = idx.bare_name_cache.read() {
             for name in cache.iter() {
                 // Case gate + match quality gate (prefix or acronym only).
-                if name.chars().next().map(|c| c.is_lowercase()).unwrap_or(false) { continue; }
+                if name.starts_with_lowercase() { continue; }
                 if camel_mode && is_screaming_snake(name) { continue; }
                 let score = match match_score(name, prefix) {
                     Some(s) if s <= 1 => s,
@@ -525,9 +529,9 @@ pub(crate) fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippet
     }
 
     // 4. Stdlib top-level / scope functions — src_tier 3.
-    for mut item in crate::stdlib::bare_completions(snippets) {
+    for mut item in bare_completions(snippets) {
         let label = item.label.clone();
-        if lowercase_mode && label.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+        if lowercase_mode && label.starts_with_uppercase() {
             continue;
         }
         if camel_mode && is_screaming_snake(&label) { continue; }
@@ -591,7 +595,7 @@ fn build_completion_items(idx: &Indexer, file_uri: &str) -> Vec<CompletionItem> 
     if let Ok(url) = Url::parse(file_uri) {
         if let Ok(path) = url.to_file_path() {
             if let Ok(content) = std::fs::read_to_string(&path) {
-                let file_data = crate::parser::parse_by_extension(file_uri, &content);
+                let file_data = parse_by_extension(file_uri, &content);
                 for sym in &file_data.symbols {
                     let ck       = symbol_kind_to_completion(sym.kind);
                     let vt       = vis_tag(sym.visibility);

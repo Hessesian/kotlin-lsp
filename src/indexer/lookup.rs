@@ -17,6 +17,8 @@ use tower_lsp::lsp_types::*;
 
 use crate::types::SymbolEntry;
 use crate::LinesExt;
+use crate::StrExt;
+use crate::stdlib::hover;
 use super::Indexer;
 use super::doc::extract_doc_comment;
 
@@ -47,7 +49,7 @@ impl Indexer {
     pub fn hover_info(&self, name: &str) -> Option<String> {
         // Check stdlib first so well-known symbols (run, apply, map, …) get
         // proper signatures even when no project source contains them.
-        if let Some(md) = crate::stdlib::hover(name) { return Some(md); }
+        if let Some(md) = hover(name) { return Some(md); }
 
         // Drop the dashmap ref before taking the second one.
         let loc: Location = {
@@ -219,7 +221,7 @@ impl Indexer {
             if last == name && segments.len() >= 2 {
                 let pkg = segments[..segments.len() - 1].join(".");
                 let parent = segments.get(segments.len() - 2)
-                    .filter(|s| s.chars().next().map(|c| c.is_uppercase()).unwrap_or(false))
+                    .filter(|s| s.starts_with_uppercase())
                     .map(|s| s.to_string());
                 return (parent, Some(pkg));
             }

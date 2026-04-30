@@ -1,5 +1,7 @@
     use super::*;
     use crate::indexer::Indexer;
+    use crate::parser::{parse_java, parse_kotlin};
+    use crate::stdlib::dot_completions_for;
     use tower_lsp::lsp_types::Url;
 
     fn uri(path: &str) -> Url {
@@ -399,7 +401,7 @@
     // ── supers CST extraction (via parse_kotlin / parse_java) ────────────────
 
     fn kotlin_supers(src: &str) -> Vec<String> {
-        crate::parser::parse_kotlin(src).supers.into_iter().map(|(_, n)| n).collect()
+        parse_kotlin(src).supers.into_iter().map(|(_, n)| n).collect()
     }
 
     #[test]
@@ -434,14 +436,14 @@
     #[test]
     fn supers_java_extends() {
         let src = "public class FlexiEntryVM extends BaseFlexikreditVM {}";
-        let s: Vec<String> = crate::parser::parse_java(src).supers.into_iter().map(|(_, n)| n).collect();
+        let s: Vec<String> = parse_java(src).supers.into_iter().map(|(_, n)| n).collect();
         assert!(s.contains(&"BaseFlexikreditVM".to_string()), "got {s:?}");
     }
 
     #[test]
     fn supers_java_implements() {
         let src = "public class Foo extends Base implements Runnable, Serializable {}";
-        let s: Vec<String> = crate::parser::parse_java(src).supers.into_iter().map(|(_, n)| n).collect();
+        let s: Vec<String> = parse_java(src).supers.into_iter().map(|(_, n)| n).collect();
         assert!(s.contains(&"Base".to_string()),         "got {s:?}");
         assert!(s.contains(&"Runnable".to_string()),     "got {s:?}");
         assert!(s.contains(&"Serializable".to_string()), "got {s:?}");
@@ -450,7 +452,7 @@
     #[test]
     fn supers_java_generic_extends() {
         let java = |src: &str| -> Vec<String> {
-            crate::parser::parse_java(src).supers.into_iter().map(|(_, n)| n).collect()
+            parse_java(src).supers.into_iter().map(|(_, n)| n).collect()
         };
 
         let s = java("public class Foo extends Base<String> {}");
@@ -757,7 +759,7 @@ data class State(
 
     #[test]
     fn dot_completions_string_receiver_has_string_fns() {
-        let items = crate::stdlib::dot_completions_for("String", false);
+        let items = dot_completions_for("String", false);
         let names: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(names.contains(&"trim"),    "String should have trim()");
         assert!(names.contains(&"split"),   "String should have split()");
@@ -769,7 +771,7 @@ data class State(
 
     #[test]
     fn dot_completions_list_receiver_has_collection_fns() {
-        let items = crate::stdlib::dot_completions_for("List", false);
+        let items = dot_completions_for("List", false);
         let names: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(names.contains(&"map"),      "List should have map()");
         assert!(names.contains(&"filter"),   "List should have filter()");
@@ -782,7 +784,7 @@ data class State(
 
     #[test]
     fn dot_completions_custom_type_has_scope_fns_only() {
-        let items = crate::stdlib::dot_completions_for("MyDomainClass", false);
+        let items = dot_completions_for("MyDomainClass", false);
         let names: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(names.contains(&"let"),     "domain type should have let()");
         assert!(names.contains(&"apply"),   "domain type should have apply()");

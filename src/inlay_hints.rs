@@ -16,7 +16,9 @@ use tower_lsp::lsp_types::{InlayHint, InlayHintKind, InlayHintLabel, Position, R
 use crate::indexer::Indexer;
 use crate::indexer::NodeExt;
 use crate::indexer::live_tree::{lang_for_path, parse_live};
+use crate::queries::{KIND_LAMBDA_PARAMS, KIND_CALL_EXPR};
 use crate::resolver::{ReceiverKind, infer_receiver_type};
+use crate::StrExt;
 
 pub fn compute_inlay_hints(idx: &Arc<Indexer>, uri: &Url, range: Range) -> Vec<InlayHint> {
     // Fast path: editor has the file open → use pre-parsed live tree.
@@ -133,7 +135,7 @@ fn hint_lambda(
 ) {
     let mut nc = node.walk();
     for child in node.children(&mut nc) {
-        if child.kind() != "lambda_parameters" { continue; }
+        if child.kind() != KIND_LAMBDA_PARAMS { continue; }
 
         let mut pc = child.walk();
         for param in child.children(&mut pc) {
@@ -156,7 +158,7 @@ fn hint_lambda(
             let Ok(name)     = name_n.utf8_text(bytes)      else { continue };
             let name = name.trim();
             if name.is_empty() || name == "_" { continue; }
-            if !name.chars().next().map(|c| c.is_lowercase()).unwrap_or(false) { continue; }
+            if !name.starts_with_lowercase() { continue; }
 
             let start_pos = ts_pos_to_lsp(name_n.start_position(), starts, bytes);
             let end_pos   = ts_pos_to_lsp(name_n.end_position(),   starts, bytes);
@@ -243,9 +245,9 @@ fn hint_property(
 /// the same as the callee (`val user = User(…)` → `"User"`).
 fn infer_type_from_init(init: tree_sitter::Node<'_>, bytes: &[u8]) -> Option<String> {
     // call_expression: callee(...) or callee<T>(...)
-    if init.kind() == "call_expression" {
+    if init.kind() == KIND_CALL_EXPR {
         let name = init.call_fn_name(bytes)?;
-        if name.starts_with(|c: char| c.is_uppercase()) {
+        if name.starts_with_uppercase() {
             return Some(name);
         }
     }

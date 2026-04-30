@@ -2,6 +2,7 @@ use tower_lsp::lsp_types::{Position, Range, Url};
 
 use crate::indexer::Indexer;
 use crate::LinesExt;
+use crate::StrExt;
 
 // ─── Receiver type resolution ─────────────────────────────────────────────────
 
@@ -136,7 +137,7 @@ pub fn extract_collection_element_type(raw_type: &str) -> Option<String> {
         "Array",
     ];
 
-    let base: String = raw_type.chars().take_while(|&c| c.is_alphanumeric() || c == '_').collect();
+    let base = raw_type.ident_prefix();
     if !COLLECTION_TYPES.contains(&base.as_str()) { return None; }
 
     let open  = raw_type.find('<')?;
@@ -148,8 +149,8 @@ pub fn extract_collection_element_type(raw_type: &str) -> Option<String> {
     let first = first_type_arg(inner).trim().trim_matches('?');
 
     // Strip to the base class name only.
-    let elem: String = first.chars().take_while(|&c| c.is_alphanumeric() || c == '_').collect();
-    if elem.is_empty() || !elem.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+    let elem = first.ident_prefix();
+    if elem.is_empty() || !elem.starts_with_uppercase() {
         return None;
     }
     Some(elem)
@@ -235,7 +236,7 @@ pub(crate) fn infer_type_in_lines(lines: &[String], var_name: &str) -> Option<St
             // Trim any trailing dots.
             let type_name = type_name.trim_end_matches('.').to_owned();
             if !type_name.is_empty()
-                && type_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+                && type_name.starts_with_uppercase()
             {
                 return Some(type_name);
             }
@@ -265,7 +266,7 @@ pub(crate) fn infer_type_in_lines_raw(lines: &[String], var_name: &str) -> Optio
             let after = &line[pos + var_name.len()..];
             let after = after.trim_start_matches(':').trim_start();
             let raw = extract_type_with_generics(after);
-            if !raw.is_empty() && raw.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+            if !raw.is_empty() && raw.starts_with_uppercase() {
                 return Some(raw);
             }
         }

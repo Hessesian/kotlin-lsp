@@ -37,11 +37,13 @@ use super::{
 };
 
 use crate::indexer::NodeExt;
+use crate::queries::{KIND_LAMBDA_LIT, KIND_CALL_EXPR};
+use crate::StrExt;
+use crate::resolver::extract_collection_element_type;
 
 // ── from indexer.rs (parent of infer; descendants can access private items) ──
 use super::super::{
     Indexer,
-    is_id_char,
     last_ident_in,
     find_enclosing_call_name,
 };
@@ -186,7 +188,7 @@ pub(crate) fn is_lambda_param(
 ) -> bool {
     // Fast reject: if `recv` starts with uppercase or contains `.` it's a type/qualified
     // name, never a lambda parameter name.
-    if recv.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) { return false; }
+    if recv.starts_with_uppercase() { return false; }
     if recv.contains('.') { return false; }
 
     // Same-line fast check: the lambda declaration may be on the cursor line
@@ -229,13 +231,11 @@ pub(crate) fn lambda_receiver_type_from_context(
         let receiver_expr = callee[..dot_pos].trim_end();
         let receiver_var = last_ident_in(receiver_expr);
         // Extract method name (everything after the dot up to the first non-id char).
-        let method: String = callee[dot_pos + 1..].trim_start()
-            .chars().take_while(|&c| is_id_char(c))
-            .collect();
+        let method = callee[dot_pos + 1..].trim_start().ident_prefix();
 
         if !receiver_var.is_empty() {
             if let Some(raw) = deps.find_var_type(receiver_var, uri) {
-                if let Some(elem) = crate::resolver::extract_collection_element_type(&raw) {
+                if let Some(elem) = extract_collection_element_type(&raw) {
                     return Some(elem);
                 }
                 // Non-collection receiver: prefer the method's own lambda param type when
@@ -247,12 +247,12 @@ pub(crate) fn lambda_receiver_type_from_context(
                         return Some(ty);
                     }
                 }
-                let base: String = raw.chars().take_while(|&c| is_id_char(c)).collect();
-                if !base.is_empty() && base.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                let base = raw.ident_prefix();
+                if !base.is_empty() && base.starts_with_uppercase() {
                     return Some(base);
                 }
             }
-            if receiver_var.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+            if receiver_var.starts_with_uppercase() {
                 return Some(receiver_var.to_owned());
             }
         }
@@ -269,12 +269,12 @@ pub(crate) fn lambda_receiver_type_from_context(
         if trailing_fn == "with" {
             if let Some(recv_name) = extract_first_arg(trimmed) {
                 if let Some(raw) = deps.find_var_type(recv_name, uri) {
-                    let base: String = raw.chars().take_while(|&c| is_id_char(c)).collect();
+                    let base = raw.ident_prefix();
                     if !base.is_empty() { return Some(base); }
                 }
                 // If recv_name starts uppercase it IS the type (companion / object ref).
-                let base: String = recv_name.chars().take_while(|&c| is_id_char(c)).collect();
-                if base.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                let base = recv_name.ident_prefix();
+                if base.starts_with_uppercase() {
                     return Some(base);
                 }
             }
@@ -317,7 +317,7 @@ fn cst_it_or_this_type(
 ) -> Option<String> {
     let mut cur = start_node;
     loop {
-        if cur.kind() == "lambda_literal" && !cur.has_lambda_named_params(&doc.bytes) {
+        if cur.kind() == KIND_LAMBDA_LIT && !cur.has_lambda_named_params(&doc.bytes) {
             // Extract text of the lambda-opening line up to the `{`.
             let brace_byte = cur.start_byte();
             let line_start = doc.bytes[..brace_byte]
@@ -447,14 +447,14 @@ fn lambda_brace_arrows(line: &str) -> impl Iterator<Item = (usize, &str)> {
 
 fn names_has_param(names_str: &str, param_name: &str) -> bool {
     names_str.split(',').any(|tok| {
-        let n: String = tok.trim().chars().take_while(|&c| c.is_alphanumeric() || c == '_').collect();
+        let n = tok.trim().ident_prefix();
         n == param_name
     })
 }
 
 fn param_index_in(names_str: &str, param_name: &str) -> Option<usize> {
     names_str.split(',').enumerate().find_map(|(i, tok)| {
-        let n: String = tok.trim().chars().take_while(|&c| c.is_alphanumeric() || c == '_').collect();
+        let n = tok.trim().ident_prefix();
         if n == param_name { Some(i) } else { None }
     })
 }
@@ -518,9 +518,7 @@ fn lambda_receiver_this_type_from_context(
     if let Some(dot_pos) = find_last_dot_at_depth_zero(callee) {
         let receiver_expr = callee[..dot_pos].trim_end();
         let receiver_var = last_ident_in(receiver_expr);
-        let method: String = callee[dot_pos + 1..].trim_start()
-            .chars().take_while(|&c| is_id_char(c))
-            .collect();
+        let method = callee[dot_pos + 1..].trim_start().ident_prefix();
 
         if !receiver_var.is_empty() && !method.is_empty() {
             // Prefer the method's own receiver-lambda type (only for indexed fns).
@@ -531,10 +529,10 @@ fn lambda_receiver_this_type_from_context(
             // receiver-`this` lambdas; `also`/`let` are intentionally excluded.
             if RECEIVER_THIS_FNS.contains(&method.as_str()) {
                 if let Some(raw) = deps.find_var_type(receiver_var, uri) {
-                    let base: String = raw.chars().take_while(|&c| is_id_char(c)).collect();
+                    let base = raw.ident_prefix();
                     if !base.is_empty() { return Some(base); }
                 }
-                if receiver_var.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                if receiver_var.starts_with_uppercase() {
                     return Some(receiver_var.to_owned());
                 }
             }
@@ -547,11 +545,11 @@ fn lambda_receiver_this_type_from_context(
     if trailing_fn == "with" {
         if let Some(recv_name) = extract_first_arg(trimmed) {
             if let Some(raw) = deps.find_var_type(recv_name, uri) {
-                let base: String = raw.chars().take_while(|&c| is_id_char(c)).collect();
+                let base = raw.ident_prefix();
                 if !base.is_empty() { return Some(base); }
             }
-            let base: String = recv_name.chars().take_while(|&c| is_id_char(c)).collect();
-            if base.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+            let base = recv_name.ident_prefix();
+            if base.starts_with_uppercase() {
                 return Some(base);
             }
         }
@@ -659,7 +657,7 @@ fn cst_lambda_param_type_via_call(
                 let mut node = parent;
                 let call_expr = loop {
                     let p = node.parent()?;
-                    if p.kind() == "call_expression" { break p; }
+                    if p.kind() == KIND_CALL_EXPR { break p; }
                     node = p;
                 };
                 let fn_name = call_expr.call_fn_name(bytes)?;
@@ -674,7 +672,7 @@ fn cst_lambda_param_type_via_call(
             "call_suffix" => {
                 // Trailing lambda: `fn(...) { it }` or `fn { it }`.
                 let call_expr = parent.parent()?;
-                if call_expr.kind() != "call_expression" { cur = parent; continue; }
+                if call_expr.kind() != KIND_CALL_EXPR { cur = parent; continue; }
                 let fn_name = call_expr.call_fn_name(bytes)?;
                 let sig = deps.find_fun_params_text(&fn_name, uri)?;
                 let last_type = last_fun_param_type_str(&sig)?;
