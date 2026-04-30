@@ -95,14 +95,32 @@ impl Indexer {
         }
     }
 
+    /// Returns the pre-computed `detail` string (declaration signature) for the
+    /// symbol declared at the given line in `uri_str`. Used by `completionItem/resolve`
+    /// to populate `CompletionItem.detail` without triggering a full doc extraction.
+    pub fn symbol_detail_at(&self, uri_str: &str, line: u32) -> Option<String> {
+        let data = self.files.get(uri_str)?;
+        let sym = data.symbols.iter()
+            .find(|s| s.selection_range.start.line == line)?;
+        let lang = if uri_str.ends_with(".kt")    { "kotlin" }
+                   else if uri_str.ends_with(".swift") { "swift" }
+                   else                                 { "java" };
+        if sym.detail.is_empty() {
+            Some(format!("{} {}", symbol_kw_for_lang(sym.kind, lang), sym.name))
+        } else {
+            Some(sym.detail.clone())
+        }
+    }
+
     /// Build Markdown documentation for a completion item identified by its
     /// source file URI and declaration line number.
     ///
     /// Called by `completionItem/resolve` to lazily populate `documentation`
     /// without bloating the initial completion response.
     ///
-    /// Returns `(doc_markdown, detail)` where `detail` is the short signature
-    /// string suitable for `CompletionItem.detail`.
+    /// Returns `(doc_markdown, detail)` where `doc_markdown` is the KDoc/Javadoc
+    /// comment only (no code block — the signature is already shown in `detail`)
+    /// and `detail` is the short signature string for `CompletionItem.detail`.
     pub fn completion_docs_for(&self, uri_str: &str, line: u32) -> Option<(String, String)> {
         let data = self.files.get(uri_str)?;
         let start_line = line as usize;
@@ -114,20 +132,17 @@ impl Indexer {
                    else if uri_str.ends_with(".swift") { "swift" }
                    else                                 { "java" };
 
-        let sig = data.lines.collect_signature(start_line);
-        let code_block = if sig.is_empty() {
-            format!("```{}\n{} {}\n```", lang, symbol_kw_for_lang(sym.kind, lang), sym.name)
+        // detail: prefer the pre-computed SymbolEntry.detail; fall back to
+        // a minimal keyword + name string so the field is never empty.
+        let detail = if sym.detail.is_empty() {
+            format!("{} {}", symbol_kw_for_lang(sym.kind, lang), sym.name)
         } else {
-            format!("```{}\n{}\n```", lang, sig)
+            sym.detail.clone()
         };
 
-        let doc_md = if let Some(kdoc) = extract_doc_comment(&data.lines, start_line) {
-            format!("{kdoc}\n\n---\n\n{code_block}")
-        } else {
-            code_block
-        };
+        // documentation: KDoc/Javadoc only — the signature is already in detail.
+        let doc_md = extract_doc_comment(&data.lines, start_line)?;
 
-        let detail = sym.detail.clone();
         Some((doc_md, detail))
     }
 

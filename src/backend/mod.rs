@@ -645,16 +645,22 @@ impl LanguageServer for Backend {
                 data.get("u").and_then(|v| v.as_str()),
                 data.get("l").and_then(|v| v.as_u64()),
             ) {
-                if let Some((doc_md, detail)) =
+                // Always fill detail from the symbol if not already set.
+                if item.detail.is_none() {
+                    if let Some(d) = self.indexer.symbol_detail_at(uri, line as u32) {
+                        if !d.is_empty() {
+                            item.detail = Some(d);
+                        }
+                    }
+                }
+                // Populate documentation only when KDoc/Javadoc is present.
+                if let Some((doc_md, _)) =
                     self.indexer.completion_docs_for(uri, line as u32)
                 {
                     item.documentation = Some(Documentation::MarkupContent(MarkupContent {
                         kind:  MarkupKind::Markdown,
                         value: doc_md,
                     }));
-                    if item.detail.is_none() && !detail.is_empty() {
-                        item.detail = Some(detail);
-                    }
                 }
             }
         }
