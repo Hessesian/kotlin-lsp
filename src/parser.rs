@@ -731,14 +731,6 @@ fn extract_swift_imports(root: tree_sitter::Node, bytes: &[u8], data: &mut FileD
 
 // ─── visibility detection ────────────────────────────────────────────────────
 
-/// Returns the portion of `line` before any `{` or `=` — the modifiers region.
-fn decl_prefix(line: &str) -> &str {
-    line.split_once('{').map(|(l, _)| l)
-        .unwrap_or(line)
-        .split_once('=').map(|(l, _)| l)
-        .unwrap_or(line)
-}
-
 /// Detect the Kotlin/Java visibility modifier on `line_no` by scanning that
 /// source line for modifier keywords.
 ///
@@ -761,7 +753,7 @@ pub(crate) fn visibility_at_line(lines: &[String], line_no: usize) -> Visibility
     };
     // Work only on the part before any `=`, `{`, or `(` to avoid false positives
     // from string literals / bodies.
-    let decl = decl_prefix(line);
+    let decl = line.decl_prefix();
 
     // Check whole-word tokens.
     if contains_word(decl, "private")   { return Visibility::Private; }
@@ -779,7 +771,7 @@ pub(crate) fn swift_visibility_at_line(lines: &[String], line_no: usize) -> Visi
         Some(l) => l,
         None    => return Visibility::Internal,
     };
-    let decl = decl_prefix(line);
+    let decl = line.decl_prefix();
 
     if contains_word(decl, "private")     { return Visibility::Private; }
     if contains_word(decl, "fileprivate") { return Visibility::Private; }

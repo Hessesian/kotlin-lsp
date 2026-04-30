@@ -25,6 +25,9 @@ pub(crate) trait StrExt {
     /// Returns the trailing identifier at the end of `self` — all trailing chars satisfying `is_id_char`.
     /// `"foo.barBaz"` → `"barBaz"`;  `"foo.bar("` → `""`.
     fn last_ident_in(&self) -> &str;
+
+    /// Returns the declaration-keyword prefix of `self` — strips leading whitespace and annotations.
+    fn decl_prefix(&self) -> &str;
 }
 
 impl StrExt for str {
@@ -60,5 +63,13 @@ impl StrExt for str {
             .map(|c| c.len_utf8())
             .sum();
         &self[self.len() - ident_bytes..]
+    }
+
+    #[inline]
+    fn decl_prefix(&self) -> &str {
+        self.split_once('{').map(|(l, _)| l)
+            .unwrap_or(self)
+            .split_once('=').map(|(l, _)| l)
+            .unwrap_or(self)
     }
 }
