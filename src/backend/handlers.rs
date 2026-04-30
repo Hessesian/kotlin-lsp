@@ -3,6 +3,7 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use crate::indexer::find_fun_signature_with_receiver;
 use crate::indexer::NodeExt;
+use crate::queries::KIND_VALUE_ARG;
 use super::Backend;
 use super::cursor::CursorContext;
 use super::helpers::resolve_references_scope;
@@ -547,7 +548,7 @@ fn cst_call_info(
         let mut count = 0u32;
         let mut walker = value_arguments.walk();
         for child in value_arguments.children(&mut walker) {
-            if child.kind() == "value_argument" {
+            if child.kind() == KIND_VALUE_ARG {
                 if child.end_byte() <= cursor_byte { count += 1; } else { break; }
             }
         }

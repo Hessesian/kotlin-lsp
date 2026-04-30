@@ -339,3 +339,20 @@ pub const SWIFT_INIT_PATTERN_IDX: usize = 8;
 
 /// Synthesised name for Swift init declarations.
 pub const SWIFT_INIT_NAME: &str = "init";
+
+// ─── tree-sitter node kind constants ─────────────────────────────────────────
+// These match the `node.kind()` strings produced by tree-sitter-kotlin,
+// tree-sitter-java, and tree-sitter-swift grammars.
+
+pub(crate) const KIND_SIMPLE_IDENT:  &str = "simple_identifier";
+pub(crate) const KIND_TYPE_IDENT:    &str = "type_identifier";
+pub(crate) const KIND_IDENTIFIER:    &str = "identifier";
+pub(crate) const KIND_CALL_EXPR:     &str = "call_expression";
+pub(crate) const KIND_LAMBDA_LIT:    &str = "lambda_literal";
+pub(crate) const KIND_LAMBDA_PARAMS: &str = "lambda_parameters";
+pub(crate) const KIND_VALUE_ARG:     &str = "value_argument";
+pub(crate) const KIND_VALUE_ARGS:    &str = "value_arguments";
+pub(crate) const KIND_USER_TYPE:     &str = "user_type";
+pub(crate) const KIND_NAV_EXPR:      &str = "navigation_expression";
+pub(crate) const KIND_FUN_DECL:      &str = "function_declaration";
+pub(crate) const KIND_CLASS_DECL:    &str = "class_declaration";

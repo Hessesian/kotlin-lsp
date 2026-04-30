@@ -15,6 +15,7 @@ use super::{
     lambda_brace_pos_for_param,
 };
 use crate::indexer::NodeExt;
+use crate::queries::KIND_LAMBDA_LIT;
 use crate::types::CursorPos;
 
 /// Lines to scan backward when resolving variable types and lambda receivers from scope.
@@ -255,7 +256,7 @@ impl Indexer {
                 let mut params: Vec<String> = Vec::new();
                 let mut cur = node;
                 loop {
-                    if cur.kind() == "lambda_literal" {
+                    if cur.kind() == KIND_LAMBDA_LIT {
                         let new_names = cur.collect_lambda_param_names(&doc.bytes, &params);
                         params.extend(new_names);
                     }

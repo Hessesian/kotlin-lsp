@@ -37,6 +37,7 @@ use super::{
 };
 
 use crate::indexer::NodeExt;
+use crate::queries::{KIND_LAMBDA_LIT, KIND_CALL_EXPR};
 
 // ── from indexer.rs (parent of infer; descendants can access private items) ──
 use super::super::{
@@ -315,7 +316,7 @@ fn cst_it_or_this_type(
 ) -> Option<String> {
     let mut cur = start_node;
     loop {
-        if cur.kind() == "lambda_literal" && !cur.has_lambda_named_params(&doc.bytes) {
+        if cur.kind() == KIND_LAMBDA_LIT && !cur.has_lambda_named_params(&doc.bytes) {
             // Extract text of the lambda-opening line up to the `{`.
             let brace_byte = cur.start_byte();
             let line_start = doc.bytes[..brace_byte]
@@ -655,7 +656,7 @@ fn cst_lambda_param_type_via_call(
                 let mut node = parent;
                 let call_expr = loop {
                     let p = node.parent()?;
-                    if p.kind() == "call_expression" { break p; }
+                    if p.kind() == KIND_CALL_EXPR { break p; }
                     node = p;
                 };
                 let fn_name = call_expr.call_fn_name(bytes)?;
@@ -670,7 +671,7 @@ fn cst_lambda_param_type_via_call(
             "call_suffix" => {
                 // Trailing lambda: `fn(...) { it }` or `fn { it }`.
                 let call_expr = parent.parent()?;
-                if call_expr.kind() != "call_expression" { cur = parent; continue; }
+                if call_expr.kind() != KIND_CALL_EXPR { cur = parent; continue; }
                 let fn_name = call_expr.call_fn_name(bytes)?;
                 let sig = deps.find_fun_params_text(&fn_name, uri)?;
                 let last_type = last_fun_param_type_str(&sig)?;

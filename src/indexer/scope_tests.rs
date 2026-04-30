@@ -9,6 +9,7 @@ use crate::indexer::{
     line_has_lambda_param,
     lambda_brace_pos_for_param,
 };
+use crate::queries::KIND_LAMBDA_LIT;
 use super::extract_class_decl_name;
 
 fn uri(path: &str) -> Url {
@@ -555,7 +556,7 @@ fn collect_lambda_param_names_named() {
     let src = "val x = items.map { item -> item.foo }";
     let bytes = src.as_bytes();
     let tree = parse_kotlin_scope(src);
-    let lambda = find_node_scope(tree.root_node(), "lambda_literal").unwrap();
+    let lambda = find_node_scope(tree.root_node(), KIND_LAMBDA_LIT).unwrap();
     let names = super::collect_lambda_param_names(lambda, bytes, &[]);
     assert_eq!(names, vec!["item".to_string()],
         "should collect 'item', got: {names:?}");
@@ -566,7 +567,7 @@ fn collect_lambda_param_names_skips_it() {
     let src = "val x = items.map { it -> it.foo }";
     let bytes = src.as_bytes();
     let tree = parse_kotlin_scope(src);
-    let lambda = find_node_scope(tree.root_node(), "lambda_literal").unwrap();
+    let lambda = find_node_scope(tree.root_node(), KIND_LAMBDA_LIT).unwrap();
     let names = super::collect_lambda_param_names(lambda, bytes, &[]);
     assert!(names.is_empty(), "should skip 'it', got: {names:?}");
 }
@@ -576,7 +577,7 @@ fn collect_lambda_param_names_multi() {
     let src = "val x = items.zip(other) { a, b -> a.id }";
     let bytes = src.as_bytes();
     let tree = parse_kotlin_scope(src);
-    let lambda = find_node_scope(tree.root_node(), "lambda_literal").unwrap();
+    let lambda = find_node_scope(tree.root_node(), KIND_LAMBDA_LIT).unwrap();
     let names = super::collect_lambda_param_names(lambda, bytes, &[]);
     assert!(names.contains(&"a".to_string()), "should contain 'a', got: {names:?}");
     assert!(names.contains(&"b".to_string()), "should contain 'b', got: {names:?}");

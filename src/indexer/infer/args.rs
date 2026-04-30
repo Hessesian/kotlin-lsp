@@ -8,6 +8,7 @@ use tower_lsp::lsp_types::Url;
 use crate::indexer::{Indexer, is_id_char, find_enclosing_call_name};
 use crate::indexer::NodeExt;
 use crate::indexer::infer::sig::{find_fun_signature_full, nth_fun_param_type_str, split_params_at_depth_zero};
+use crate::queries::KIND_CALL_EXPR;
 use crate::types::CursorPos;
 
 // ─── Type-directed call-argument inference ────────────────────────────────────
@@ -305,7 +306,7 @@ fn cst_call_arg_type(pos: CursorPos, idx: &Indexer, uri: &Url) -> Option<String>
     let mut node = value_arg;
     let call_expr = loop {
         match node.parent() {
-            Some(p) if p.kind() == "call_expression" => break Some(p),
+            Some(p) if p.kind() == KIND_CALL_EXPR => break Some(p),
             Some(p) => node = p,
             None => break None,
         }

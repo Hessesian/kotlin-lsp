@@ -3,6 +3,10 @@
 //! These methods are lightweight convenience wrappers around tree-sitter node
 //! traversal; their bodies were extracted from the free functions they replace.
 use tree_sitter::Node;
+use crate::queries::{
+    KIND_SIMPLE_IDENT, KIND_TYPE_IDENT, KIND_VALUE_ARG, KIND_VALUE_ARGS,
+    KIND_LAMBDA_PARAMS, KIND_CALL_EXPR, KIND_NAV_EXPR,
+};
 
 pub(crate) trait NodeExt<'a>: Sized + Copy {
     /// Extract the node's text as an owned `String`.  Returns `None` if the bytes
@@ -79,7 +83,7 @@ impl<'a> NodeExt<'a> for Node<'a> {
         let count = self.child_count();
         for i in 0..count.saturating_sub(1) {
             let (c, next) = (self.child(i)?, self.child(i + 1)?);
-            if c.kind() == "simple_identifier" && next.kind() == "=" {
+            if c.kind() == KIND_SIMPLE_IDENT && next.kind() == "=" {
                 return c.utf8_text_owned(bytes);
             }
         }
@@ -95,7 +99,7 @@ impl<'a> NodeExt<'a> for Node<'a> {
         let mut pos = 0usize;
         let mut cursor = parent.walk();
         for child in parent.children(&mut cursor) {
-            if child.kind() == "value_argument" {
+            if child.kind() == KIND_VALUE_ARG {
                 if child.id() == target_id {
                     break;
                 }
@@ -108,13 +112,13 @@ impl<'a> NodeExt<'a> for Node<'a> {
     fn find_value_arguments(self) -> Option<Node<'a>> {
         let mut walker = self.walk();
         for child in self.children(&mut walker) {
-            if child.kind() == "value_arguments" {
+            if child.kind() == KIND_VALUE_ARGS {
                 return Some(child);
             }
             if child.kind() == "call_suffix" {
                 let mut w2 = child.walk();
                 for gc in child.children(&mut w2) {
-                    if gc.kind() == "value_arguments" {
+                    if gc.kind() == KIND_VALUE_ARGS {
                         return Some(gc);
                     }
                 }
@@ -124,7 +128,7 @@ impl<'a> NodeExt<'a> for Node<'a> {
     }
 
     fn has_lambda_named_params(self, bytes: &[u8]) -> bool {
-        let Some(lp) = self.first_child_of_kind("lambda_parameters")
+        let Some(lp) = self.first_child_of_kind(KIND_LAMBDA_PARAMS)
         else {
             return false;
         };
@@ -133,7 +137,7 @@ impl<'a> NodeExt<'a> for Node<'a> {
             .filter_map(|i| lp.child(i))
             .filter(|c| c.kind() == "variable_declaration")
             .any(|vd| {
-                let Some(si) = vd.child(0).filter(|n| n.kind() == "simple_identifier") else {
+                let Some(si) = vd.child(0).filter(|n| n.kind() == KIND_SIMPLE_IDENT) else {
                     return false;
                 };
                 let Ok(name) = std::str::from_utf8(&bytes[si.byte_range()]) else {
@@ -144,7 +148,7 @@ impl<'a> NodeExt<'a> for Node<'a> {
     }
 
     fn collect_lambda_param_names(self, bytes: &[u8], existing: &[String]) -> Vec<String> {
-        let Some(lp) = self.first_child_of_kind("lambda_parameters")
+        let Some(lp) = self.first_child_of_kind(KIND_LAMBDA_PARAMS)
         else {
             return Vec::new();
         };
@@ -153,7 +157,7 @@ impl<'a> NodeExt<'a> for Node<'a> {
             .filter_map(|i| lp.child(i))
             .filter(|c| c.kind() == "variable_declaration")
             .filter_map(|vd| {
-                let si = vd.child(0).filter(|n| n.kind() == "simple_identifier")?;
+                let si = vd.child(0).filter(|n| n.kind() == KIND_SIMPLE_IDENT)?;
                 si.utf8_text_owned(bytes)
             })
             .filter(|name| {
@@ -209,7 +213,7 @@ impl<'a> NodeExt<'a> for Node<'a> {
                         "navigation_suffix" => {
                             fn_name_opt = (0..child.child_count())
                                 .filter_map(|i| child.child(i))
-                                .find(|c| c.kind() == "simple_identifier" || c.kind() == "type_identifier")
+                                .find(|c| c.kind() == KIND_SIMPLE_IDENT || c.kind() == KIND_TYPE_IDENT)
                                 .and_then(|c| c.utf8_text_owned(bytes));
                         }
                         _ => {}
@@ -241,6 +245,7 @@ impl<'a> NodeExt<'a> for Node<'a> {
 #[cfg(test)]
 mod tests {
     use super::NodeExt;
+    use crate::queries::{KIND_CALL_EXPR, KIND_VALUE_ARGS, KIND_VALUE_ARG, KIND_LAMBDA_LIT};
 
     fn parse_kotlin(src: &str) -> (tree_sitter::Tree, Vec<u8>) {
         let mut parser = tree_sitter::Parser::new();
@@ -270,7 +275,7 @@ mod tests {
     #[test]
     fn call_fn_name_simple() {
         let (tree, bytes) = parse_kotlin("val x = foo(1)");
-        let call = find_node_kind(tree.root_node(), "call_expression").unwrap();
+        let call = find_node_kind(tree.root_node(), KIND_CALL_EXPR).unwrap();
         assert_eq!(call.call_fn_name(&bytes), Some("foo".to_string()));
     }
 
@@ -282,7 +287,7 @@ mod tests {
         //     navigation_suffix: .bar  ← `bar` is nested here
         // `call_fn_name` should return the member name "bar", not the receiver "obj".
         let (tree, bytes) = parse_kotlin("val x = obj.bar(1)");
-        let call = find_node_kind(tree.root_node(), "call_expression").unwrap();
+        let call = find_node_kind(tree.root_node(), KIND_CALL_EXPR).unwrap();
         assert_eq!(call.call_fn_name(&bytes), Some("bar".to_string()));
     }
 
@@ -290,12 +295,12 @@ mod tests {
     fn value_arg_position_first_and_second() {
         let (tree, bytes) = parse_kotlin("foo(a, b)");
         let _ = bytes; // not needed for position
-        let call = find_node_kind(tree.root_node(), "call_expression").unwrap();
-        let value_args_node = find_node_kind(call, "value_arguments").unwrap();
+        let call = find_node_kind(tree.root_node(), KIND_CALL_EXPR).unwrap();
+        let value_args_node = find_node_kind(call, KIND_VALUE_ARGS).unwrap();
         let mut args = vec![];
         for i in 0..value_args_node.child_count() {
             if let Some(c) = value_args_node.child(i) {
-                if c.kind() == "value_argument" {
+                if c.kind() == KIND_VALUE_ARG {
                     args.push(c);
                 }
             }
@@ -308,7 +313,7 @@ mod tests {
     #[test]
     fn has_lambda_named_params_true_for_named() {
         let (tree, bytes) = parse_kotlin("val x = foo { item -> item }");
-        let lambda = find_node_kind(tree.root_node(), "lambda_literal").unwrap();
+        let lambda = find_node_kind(tree.root_node(), KIND_LAMBDA_LIT).unwrap();
         assert!(
             lambda.has_lambda_named_params(&bytes),
             "param named `item` should yield true"
@@ -318,7 +323,7 @@ mod tests {
     #[test]
     fn has_lambda_named_params_false_for_no_params() {
         let (tree, bytes) = parse_kotlin("val x = items.map { it.name }");
-        let lambda = find_node_kind(tree.root_node(), "lambda_literal").unwrap();
+        let lambda = find_node_kind(tree.root_node(), KIND_LAMBDA_LIT).unwrap();
         assert!(
             !lambda.has_lambda_named_params(&bytes),
             "no lambda_parameters child should yield false"
@@ -328,7 +333,7 @@ mod tests {
     #[test]
     fn collect_lambda_param_names_collects_named() {
         let (tree, bytes) = parse_kotlin("val x = items.map { item -> item.foo }");
-        let lambda = find_node_kind(tree.root_node(), "lambda_literal").unwrap();
+        let lambda = find_node_kind(tree.root_node(), KIND_LAMBDA_LIT).unwrap();
         let names = lambda.collect_lambda_param_names(&bytes, &[]);
         assert_eq!(names, vec!["item".to_string()]);
     }
@@ -336,30 +341,30 @@ mod tests {
     #[test]
     fn named_arg_label_present() {
         let (tree, bytes) = parse_kotlin("foo(bar = 1)");
-        let call = find_node_kind(tree.root_node(), "call_expression").unwrap();
-        let va = find_node_kind(call, "value_argument").unwrap();
+        let call = find_node_kind(tree.root_node(), KIND_CALL_EXPR).unwrap();
+        let va = find_node_kind(call, KIND_VALUE_ARG).unwrap();
         assert_eq!(va.named_arg_label(&bytes), Some("bar".to_string()));
     }
 
     #[test]
     fn named_arg_label_absent() {
         let (tree, bytes) = parse_kotlin("foo(1)");
-        let call = find_node_kind(tree.root_node(), "call_expression").unwrap();
-        let va = find_node_kind(call, "value_argument").unwrap();
+        let call = find_node_kind(tree.root_node(), KIND_CALL_EXPR).unwrap();
+        let va = find_node_kind(call, KIND_VALUE_ARG).unwrap();
         assert_eq!(va.named_arg_label(&bytes), None);
     }
 
     #[test]
     fn call_fn_and_qualifier_simple_call() {
         let (tree, bytes) = parse_kotlin("val x = foo(1)");
-        let call = find_node_kind(tree.root_node(), "call_expression").unwrap();
+        let call = find_node_kind(tree.root_node(), KIND_CALL_EXPR).unwrap();
         assert_eq!(call.call_fn_and_qualifier(&bytes), Some(("foo".to_string(), None)));
     }
 
     #[test]
     fn call_fn_and_qualifier_navigation_call() {
         let (tree, bytes) = parse_kotlin("val x = obj.bar(1)");
-        let call = find_node_kind(tree.root_node(), "call_expression").unwrap();
+        let call = find_node_kind(tree.root_node(), KIND_CALL_EXPR).unwrap();
         assert_eq!(
             call.call_fn_and_qualifier(&bytes),
             Some(("bar".to_string(), Some("obj".to_string())))
@@ -371,7 +376,7 @@ mod tests {
         // call_fn_name is now implemented via call_fn_and_qualifier —
         // verify both return the same name for navigation and simple calls.
         let (tree, bytes) = parse_kotlin("val x = obj.bar(1)");
-        let call = find_node_kind(tree.root_node(), "call_expression").unwrap();
+        let call = find_node_kind(tree.root_node(), KIND_CALL_EXPR).unwrap();
         let via_and_qualifier = call.call_fn_and_qualifier(&bytes).map(|(n, _)| n);
         let via_name = call.call_fn_name(&bytes);
         assert_eq!(via_name, via_and_qualifier);

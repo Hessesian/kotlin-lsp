@@ -16,6 +16,7 @@ use tower_lsp::lsp_types::{InlayHint, InlayHintKind, InlayHintLabel, Position, R
 use crate::indexer::Indexer;
 use crate::indexer::NodeExt;
 use crate::indexer::live_tree::{lang_for_path, parse_live};
+use crate::queries::{KIND_LAMBDA_PARAMS, KIND_CALL_EXPR};
 use crate::resolver::{ReceiverKind, infer_receiver_type};
 
 pub fn compute_inlay_hints(idx: &Arc<Indexer>, uri: &Url, range: Range) -> Vec<InlayHint> {
@@ -133,7 +134,7 @@ fn hint_lambda(
 ) {
     let mut nc = node.walk();
     for child in node.children(&mut nc) {
-        if child.kind() != "lambda_parameters" { continue; }
+        if child.kind() != KIND_LAMBDA_PARAMS { continue; }
 
         let mut pc = child.walk();
         for param in child.children(&mut pc) {
@@ -243,7 +244,7 @@ fn hint_property(
 /// the same as the callee (`val user = User(…)` → `"User"`).
 fn infer_type_from_init(init: tree_sitter::Node<'_>, bytes: &[u8]) -> Option<String> {
     // call_expression: callee(...) or callee<T>(...)
-    if init.kind() == "call_expression" {
+    if init.kind() == KIND_CALL_EXPR {
         let name = init.call_fn_name(bytes)?;
         if name.starts_with(|c: char| c.is_uppercase()) {
             return Some(name);

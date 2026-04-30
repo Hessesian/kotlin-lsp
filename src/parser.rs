@@ -2,7 +2,9 @@ use tree_sitter::{Node, Parser, Query, QueryCursor};
 use tower_lsp::lsp_types::{Position, Range, SymbolKind};
 
 use crate::indexer::{last_segment, NodeExt};
-use crate::queries::{self, KOTLIN_DEFINITIONS, SWIFT_DEFINITIONS};
+use crate::queries::{self, KOTLIN_DEFINITIONS, SWIFT_DEFINITIONS,
+    KIND_SIMPLE_IDENT, KIND_TYPE_IDENT, KIND_IDENTIFIER,
+    KIND_USER_TYPE, KIND_FUN_DECL};
 use crate::types::{FileData, ImportEntry, SymbolEntry, SyntaxError, Visibility};
 
 type MatchEntry = (usize, [Option<(String, Range, Range)>; 2]);
@@ -376,14 +378,14 @@ fn is_fun_interface_error(node: &Node, bytes: &[u8]) -> bool {
 /// simple_identifier present after it (directly or as first child of ERROR).
 /// Returns (name_start_byte, name_end_byte, node_range) or None.
 fn fun_interface_name_from_fn_decl(node: &Node, bytes: &[u8]) -> Option<(usize, usize, tree_sitter::Range)> {
-    if node.kind() != "function_declaration" { return None; }
+    if node.kind() != KIND_FUN_DECL { return None; }
     if !node.has_error() { return None; }
     let mut after_interface = false;
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         if after_interface {
             // Direct simple_identifier child (@annotation case: "simple_identifier Factory")
-            if child.kind() == "simple_identifier" {
+            if child.kind() == KIND_SIMPLE_IDENT {
                 return Some((child.start_byte(), child.end_byte(), child.range()));
             }
             // ERROR child containing simple_identifier as first meaningful child
@@ -392,14 +394,14 @@ fn fun_interface_name_from_fn_decl(node: &Node, bytes: &[u8]) -> Option<(usize, 
                 let mut ec = child.walk();
                 let info = child.children(&mut ec)
                     .next()
-                    .filter(|c| c.kind() == "simple_identifier")
+                    .filter(|c| c.kind() == KIND_SIMPLE_IDENT)
                     .map(|c| (c.start_byte(), c.end_byte(), c.range()));
                 if let Some(loc) = info {
                     return Some(loc);
                 }
             }
         }
-        if child.kind() == "user_type" && child.utf8_text(bytes).unwrap_or("") == "interface" {
+        if child.kind() == KIND_USER_TYPE && child.utf8_text(bytes).unwrap_or("") == "interface" {
             after_interface = true;
         }
     }
@@ -426,7 +428,7 @@ fn extract_fun_interfaces(root: Node, bytes: &[u8], data: &mut FileData) {
     while let Some(node) = stack.pop() {
         // Case 1: no-modifier `fun interface` → ERROR node
         if node.is_error() && is_fun_interface_error(&node, bytes) {
-            if let Some(child) = node.first_child_of_kind("simple_identifier") {
+            if let Some(child) = node.first_child_of_kind(KIND_SIMPLE_IDENT) {
                 if let Ok(name) = child.utf8_text(bytes) {
                     push_interface_symbol(name, &node, child.range(), data);
                 }
@@ -612,7 +614,7 @@ fn extract_package_and_imports(root: tree_sitter::Node, bytes: &[u8], data: &mut
         match node.kind() {
             "package_header" => {
                 // (package_header "package" (identifier ...))
-                if let Some(child) = node.first_child_of_kind("identifier") {
+                if let Some(child) = node.first_child_of_kind(KIND_IDENTIFIER) {
                     data.package = child.utf8_text_owned(bytes);
                 }
             }
@@ -639,7 +641,7 @@ fn parse_import_header(header: &tree_sitter::Node, bytes: &[u8], data: &mut File
             }
             "import_alias" => {
                 // (import_alias "as" (type_identifier))
-                alias_text = child.first_child_of_kind("type_identifier")
+                alias_text = child.first_child_of_kind(KIND_TYPE_IDENT)
                     .and_then(|c| c.utf8_text_owned(bytes));
             }
             "wildcard_import" => {
@@ -706,7 +708,7 @@ pub fn parse_imports_from_lines(lines: &[String]) -> Vec<crate::types::ImportEnt
 
 /// Extract the import path text from an `import_declaration` node, if present.
 fn swift_import_path<'a>(node: tree_sitter::Node<'a>, bytes: &'a [u8]) -> Option<&'a str> {
-    node.first_child_of_kind("identifier")
+    node.first_child_of_kind(KIND_IDENTIFIER)
         .and_then(|c| c.utf8_text(bytes).ok())
 }
 
@@ -895,7 +897,7 @@ fn extract_supers_java(node: &Node, bytes: &[u8], data: &mut FileData) {
 
 /// Returns the name of the first `user_type` child of `node`, if any.
 fn first_user_type_child_name(node: &Node, bytes: &[u8]) -> Option<String> {
-    node.first_child_of_kind("user_type").and_then(|c| user_type_name(&c, bytes))
+    node.first_child_of_kind(KIND_USER_TYPE).and_then(|c| user_type_name(&c, bytes))
 }
 
 /// Extract the supertype name from a `delegation_specifier` node.
@@ -983,7 +985,7 @@ fn java_collect_type_list(node: &Node, bytes: &[u8], name_line: u32, data: &mut 
     for type_node in type_list.children(&mut cc) {
         // type_list children may be leaf type_identifier nodes directly,
         // or wrapper nodes (generic_type, scoped_type_identifier) containing one.
-        let name = if type_node.kind() == "type_identifier" {
+        let name = if type_node.kind() == KIND_TYPE_IDENT {
             type_node.utf8_text_owned(bytes)
         } else {
             java_first_type_name(&type_node, bytes)
