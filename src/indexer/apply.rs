@@ -440,7 +440,7 @@ impl Indexer {
                         .take_while(|&c| c.is_alphanumeric() || c == '_')
                         .collect();
                     if !type_name.is_empty()
-                        && type_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+                        && crate::indexer::starts_with_uppercase(&type_name)
                         && seen.insert(type_name.clone())
                     {
                         type_names.push(type_name);

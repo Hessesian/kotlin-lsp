@@ -170,7 +170,7 @@ impl Indexer {
             if last == name && segments.len() >= 2 {
                 let pkg = segments[..segments.len() - 1].join(".");
                 let parent = segments.get(segments.len() - 2)
-                    .filter(|s| s.chars().next().map(|c| c.is_uppercase()).unwrap_or(false))
+                    .filter(|s| crate::indexer::starts_with_uppercase(s))
                     .map(|s| s.to_string());
                 return (parent, Some(pkg));
             }

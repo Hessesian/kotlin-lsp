@@ -251,7 +251,7 @@ fn build_bare_completions(snippets: bool) -> Vec<tower_lsp::lsp_types::Completio
     let mut items = Vec::new();
     for e in SCOPE_FUNS.iter().chain(TOP_LEVEL_FUNS) {
         if !items.iter().any(|i: &tower_lsp::lsp_types::CompletionItem| i.label == e.name) {
-            let kind = if e.name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+            let kind = if crate::indexer::starts_with_uppercase(e.name) {
                 CompletionItemKind::CLASS
             } else {
                 CompletionItemKind::FUNCTION

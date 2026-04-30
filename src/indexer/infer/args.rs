@@ -162,7 +162,7 @@ pub(crate) fn extract_named_arg_name(before_brace: &str) -> Option<&str> {
     let ident = &s[ident_start..];
     if ident.is_empty() { return None; }
     // Named args start with a lowercase letter
-    if ident.chars().next().map(|c| c.is_uppercase()).unwrap_or(true) { return None; }
+    if !crate::indexer::starts_with_lowercase(ident) { return None; }
     // Require the prefix to be only whitespace (optionally preceded by a comma).
     // This prevents `(isRefresh = {` from matching — the `(` before `isRefresh`
     // makes the prefix non-empty after stripping commas and whitespace.

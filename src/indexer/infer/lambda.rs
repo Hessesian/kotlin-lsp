@@ -72,7 +72,7 @@ pub(crate) fn lambda_type_nth_input(ty: &str, n: usize) -> Option<String> {
     let base: String = arg.chars().take_while(|&c| is_id_char(c) || c == '.').collect();
     // Trim any trailing dots.
     let base = base.trim_end_matches('.');
-    if base.is_empty() || !base.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+    if base.is_empty() || !crate::indexer::starts_with_uppercase(base) {
         return None;
     }
     Some(base.to_owned())
@@ -112,7 +112,7 @@ pub(crate) fn lambda_type_first_input(ty: &str) -> Option<String> {
         let receiver = ty[..dot_paren].trim();
         let base: String = receiver.chars().take_while(|&c| is_id_char(c) || c == '.').collect();
         let base = base.trim_end_matches('.');
-        if !base.is_empty() && base.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+        if !base.is_empty() && crate::indexer::starts_with_uppercase(base) {
             return Some(base.to_owned());
         }
     }
@@ -166,7 +166,7 @@ pub(crate) fn lambda_type_first_input(ty: &str) -> Option<String> {
     // Return the base type name (allow qualified names like `Outer.Inner`, strip generics).
     let base: String = first.chars().take_while(|&c| is_id_char(c) || c == '.').collect();
     let base = base.trim_end_matches('.');
-    if base.is_empty() || !base.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+    if base.is_empty() || !crate::indexer::starts_with_uppercase(base) {
         return None;
     }
     Some(base.to_owned())

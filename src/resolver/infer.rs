@@ -149,7 +149,7 @@ pub fn extract_collection_element_type(raw_type: &str) -> Option<String> {
 
     // Strip to the base class name only.
     let elem: String = first.chars().take_while(|&c| c.is_alphanumeric() || c == '_').collect();
-    if elem.is_empty() || !elem.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+    if elem.is_empty() || !crate::indexer::starts_with_uppercase(&elem) {
         return None;
     }
     Some(elem)
@@ -235,7 +235,7 @@ pub(crate) fn infer_type_in_lines(lines: &[String], var_name: &str) -> Option<St
             // Trim any trailing dots.
             let type_name = type_name.trim_end_matches('.').to_owned();
             if !type_name.is_empty()
-                && type_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+                && crate::indexer::starts_with_uppercase(&type_name)
             {
                 return Some(type_name);
             }
@@ -265,7 +265,7 @@ pub(crate) fn infer_type_in_lines_raw(lines: &[String], var_name: &str) -> Optio
             let after = &line[pos + var_name.len()..];
             let after = after.trim_start_matches(':').trim_start();
             let raw = extract_type_with_generics(after);
-            if !raw.is_empty() && raw.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+            if !raw.is_empty() && crate::indexer::starts_with_uppercase(&raw) {
                 return Some(raw);
             }
         }

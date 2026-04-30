@@ -304,7 +304,7 @@ impl Indexer {
                                         .chars().take_while(|&c| c.is_alphanumeric() || c == '_')
                                         .collect();
                                     if !name.is_empty() && name != "it" && name != "_"
-                                        && name.chars().next().map(|c| c.is_lowercase()).unwrap_or(false)
+                                        && crate::indexer::starts_with_lowercase(&name)
                                         && !params.contains(&name) { params.push(name.clone()); }
                                 }
                             }
@@ -456,7 +456,7 @@ pub(super) fn extract_class_decl_name(line: &str) -> Option<String> {
         .or_else(|| rest.strip_prefix("extension "))?;
     // Extract the identifier
     let name: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
-    if name.is_empty() || !name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+    if name.is_empty() || !crate::indexer::starts_with_uppercase(&name) {
         return None;
     }
     Some(name)
@@ -540,7 +540,7 @@ fn callee_to_qualifier(full_callee: &str) -> Option<String> {
     let last = *segments.last()?;
 
     // Constructor call: last segment is a type name (uppercase first char).
-    if last.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+    if crate::indexer::starts_with_uppercase(last) {
         return Some(last.to_string());
     }
 
@@ -549,7 +549,7 @@ fn callee_to_qualifier(full_callee: &str) -> Option<String> {
     // `viewModel.state.copy`   → no uppercase in receiver → None
     let receiver = &segments[..segments.len() - 1];
     receiver.iter().rev()
-        .find(|s| s.chars().next().map(|c| c.is_uppercase()).unwrap_or(false))
+        .find(|s| crate::indexer::starts_with_uppercase(s))
         .map(|s| s.to_string())
 }
 

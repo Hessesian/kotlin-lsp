@@ -193,7 +193,7 @@ pub(crate) fn complete_dot(idx: &Indexer, receiver: &str, from_uri: &Url, snippe
         Some(r) => r,
         None => {
             // Could be an uppercase class/object — look it up directly.
-            if receiver.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+            if crate::indexer::starts_with_uppercase(receiver) {
                 ReceiverType::from_raw(receiver.to_string())
             } else {
                 return vec![];
@@ -370,10 +370,10 @@ pub(crate) fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippet
             return;
         }
         // Case gates: match user intent by the capitalisation of what they typed.
-        if lowercase_mode && name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+        if lowercase_mode && crate::indexer::starts_with_uppercase(name) {
             return;
         }
-        if uppercase_mode && name.chars().next().map(|c| c.is_lowercase()).unwrap_or(false) {
+        if uppercase_mode && crate::indexer::starts_with_lowercase(name) {
             return;
         }
         // CamelCase prefix → hide SCREAMING_SNAKE_CASE names (constants, enum variants).
@@ -455,7 +455,7 @@ pub(crate) fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippet
         if let Ok(cache) = idx.bare_name_cache.read() {
             for name in cache.iter() {
                 // Case gate + match quality gate (prefix or acronym only).
-                if name.chars().next().map(|c| c.is_lowercase()).unwrap_or(false) { continue; }
+                if crate::indexer::starts_with_lowercase(name) { continue; }
                 if camel_mode && is_screaming_snake(name) { continue; }
                 let score = match match_score(name, prefix) {
                     Some(s) if s <= 1 => s,
@@ -517,7 +517,7 @@ pub(crate) fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippet
     // 4. Stdlib top-level / scope functions — src_tier 3.
     for mut item in crate::stdlib::bare_completions(snippets) {
         let label = item.label.clone();
-        if lowercase_mode && label.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+        if lowercase_mode && crate::indexer::starts_with_uppercase(&label) {
             continue;
         }
         if camel_mode && is_screaming_snake(&label) { continue; }

@@ -181,7 +181,7 @@ pub(crate) fn resolve_symbol_inner(idx: &Indexer, name: &str, from_uri: &Url, wi
     // Catches function parameters without val/var that aren't in the symbol index.
     // Also catches named lambda parameters: `{ item -> ...}` found via the
     // `name ->` pattern in find_declaration_range_in_lines.
-    if name.chars().next().map(|c| c.is_lowercase()).unwrap_or(true) {
+    if !crate::indexer::starts_with_uppercase(name) {
         let decl = find_local_declaration(idx, name, from_uri);
         if !decl.is_empty() { return decl; }
     }
@@ -194,7 +194,7 @@ pub(crate) fn resolve_symbol_inner(idx: &Indexer, name: &str, from_uri: &Url, wi
     // Swift files have no package declarations, so same-package and star-import
     // steps return empty. Use the in-memory definitions index directly to avoid
     // expensive project-wide rg fallback at step 5.
-    if from_uri.path().ends_with(".swift") && name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+    if from_uri.path().ends_with(".swift") && crate::indexer::starts_with_uppercase(name) {
         if let Some(locs_ref) = idx.definitions.get(name) {
             let locs: Vec<Location> = locs_ref.clone();
             // Prefer definitions from .swift files when available.
@@ -314,7 +314,7 @@ fn resolve_qualified(idx: &Indexer, name: &str, qualifier: &str, from_uri: &Url)
         return resolve_from_class_hierarchy(idx, name, from_uri, 0, &mut visited);
     }
 
-    if root.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+    if crate::indexer::starts_with_uppercase(root) {
         // ── Uppercase chain: find the root's file and search it for `name` ──
         // Pass the qualifier's own line as a hint so that when the same field name
         // appears in multiple classes in the same file (e.g. State and Effect both
@@ -354,7 +354,7 @@ fn resolve_qualified(idx: &Indexer, name: &str, qualifier: &str, from_uri: &Url)
     // Traverse remaining qualifier segments (plus any from the nested type).
     for &seg in extra_segments.iter().chain(segments[1..].iter()) {
         let Some(ref uri) = current_file else { return vec![]; };
-        if seg.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+        if crate::indexer::starts_with_uppercase(seg) {
             // Nested class / companion object — likely in the same file.
             // Search current file first; fall back to a global resolve.
             let locs = find_name_in_uri(idx, seg, uri);
@@ -458,7 +458,7 @@ fn resolve_via_imports(idx: &Indexer, name: &str, uri: &Url) -> Vec<Location> {
 fn package_prefix(import_path: &str) -> String {
     import_path
         .split('.')
-        .take_while(|s| s.chars().next().map(|c| c.is_lowercase()).unwrap_or(false))
+        .take_while(|s| crate::indexer::starts_with_lowercase(s))
         .collect::<Vec<_>>()
         .join(".")
 }
@@ -470,7 +470,7 @@ fn package_prefix(import_path: &str) -> String {
 fn import_file_stems(import_path: &str) -> Vec<String> {
     let upper: Vec<&str> = import_path
         .split('.')
-        .filter(|s| s.chars().next().map(|c| c.is_uppercase()).unwrap_or(false))
+        .filter(|s| crate::indexer::starts_with_uppercase(s))
         .collect();
     match upper.as_slice() {
         []             => vec![],

@@ -156,7 +156,7 @@ fn hint_lambda(
             let Ok(name)     = name_n.utf8_text(bytes)      else { continue };
             let name = name.trim();
             if name.is_empty() || name == "_" { continue; }
-            if !name.chars().next().map(|c| c.is_lowercase()).unwrap_or(false) { continue; }
+            if !crate::indexer::starts_with_lowercase(name) { continue; }
 
             let start_pos = ts_pos_to_lsp(name_n.start_position(), starts, bytes);
             let end_pos   = ts_pos_to_lsp(name_n.end_position(),   starts, bytes);

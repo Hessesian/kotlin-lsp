@@ -854,7 +854,7 @@ pub(crate) fn extract_declared_names(lines: &[String]) -> Vec<String> {
                 .rev()
                 .collect();
             if word.len() > 1
-                && word.chars().next().map(|c| c.is_lowercase()).unwrap_or(false)
+                && crate::indexer::starts_with_lowercase(&word)
                 && seen.insert(word.clone())
             {
                 names.push(word);

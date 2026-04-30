@@ -497,16 +497,30 @@ fn dot_receiver(before_prefix: &str) -> Option<String> {
     if inner.is_empty() { return None; }
     let remaining = &before_dot[..before_dot.len() - inner.len()];
     if remaining.ends_with('.')
-        && inner.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+        && starts_with_uppercase(inner)
     {
         let outer = last_ident_in(&remaining[..remaining.len() - 1]);
         if !outer.is_empty()
-            && outer.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+            && starts_with_uppercase(outer)
         {
             return Some(format!("{outer}.{inner}"));
         }
     }
     Some(inner.to_owned())
+}
+
+/// Returns `true` if `s` starts with an uppercase ASCII letter.
+/// Returns `false` for empty strings.
+#[inline]
+pub(crate) fn starts_with_uppercase(s: &str) -> bool {
+    s.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+}
+
+/// Returns `true` if `s` starts with a lowercase ASCII letter.
+/// Returns `false` for empty strings.
+#[inline]
+pub(crate) fn starts_with_lowercase(s: &str) -> bool {
+    s.chars().next().map(|c| c.is_lowercase()).unwrap_or(false)
 }
 
 // ─── rg cross-file fallback ──────────────────────────────────────────────────

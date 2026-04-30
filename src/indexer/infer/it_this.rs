@@ -186,7 +186,7 @@ pub(crate) fn is_lambda_param(
 ) -> bool {
     // Fast reject: if `recv` starts with uppercase or contains `.` it's a type/qualified
     // name, never a lambda parameter name.
-    if recv.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) { return false; }
+    if crate::indexer::starts_with_uppercase(recv) { return false; }
     if recv.contains('.') { return false; }
 
     // Same-line fast check: the lambda declaration may be on the cursor line
@@ -248,11 +248,11 @@ pub(crate) fn lambda_receiver_type_from_context(
                     }
                 }
                 let base: String = raw.chars().take_while(|&c| is_id_char(c)).collect();
-                if !base.is_empty() && base.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                if !base.is_empty() && crate::indexer::starts_with_uppercase(&base) {
                     return Some(base);
                 }
             }
-            if receiver_var.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+            if crate::indexer::starts_with_uppercase(receiver_var) {
                 return Some(receiver_var.to_owned());
             }
         }
@@ -274,7 +274,7 @@ pub(crate) fn lambda_receiver_type_from_context(
                 }
                 // If recv_name starts uppercase it IS the type (companion / object ref).
                 let base: String = recv_name.chars().take_while(|&c| is_id_char(c)).collect();
-                if base.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                if crate::indexer::starts_with_uppercase(&base) {
                     return Some(base);
                 }
             }
@@ -534,7 +534,7 @@ fn lambda_receiver_this_type_from_context(
                     let base: String = raw.chars().take_while(|&c| is_id_char(c)).collect();
                     if !base.is_empty() { return Some(base); }
                 }
-                if receiver_var.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                if crate::indexer::starts_with_uppercase(receiver_var) {
                     return Some(receiver_var.to_owned());
                 }
             }
@@ -551,7 +551,7 @@ fn lambda_receiver_this_type_from_context(
                 if !base.is_empty() { return Some(base); }
             }
             let base: String = recv_name.chars().take_while(|&c| is_id_char(c)).collect();
-            if base.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+            if crate::indexer::starts_with_uppercase(&base) {
                 return Some(base);
             }
         }

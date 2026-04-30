@@ -181,7 +181,7 @@ impl Backend {
         };
 
         // ── Resolve scoping (same logic as `references`) ────────────────────
-        let (parent_class, declared_pkg) = if name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+        let (parent_class, declared_pkg) = if crate::indexer::starts_with_uppercase(&name) {
             let on_decl = self.indexer.is_declared_in(uri, &name)
                 && self.indexer.definitions.get(&name)
                     .map(|locs| locs.iter().any(|l| l.uri == *uri && l.range.start.line == pos.line))

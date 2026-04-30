@@ -18,7 +18,7 @@ pub(super) fn resolve_references_scope(
     line: u32,
     name: &str,
 ) -> (Option<String>, Option<String>) {
-    if !name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+    if !crate::indexer::starts_with_uppercase(name) {
         return (None, None);
     }
     let on_decl = idx.is_declared_in(uri, name)
