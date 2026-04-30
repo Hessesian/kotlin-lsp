@@ -8,6 +8,7 @@
 | `textDocument/hover` | Declaration kind, source line, lambda param types, Kotlin stdlib signatures |
 | `textDocument/documentSymbol` | All symbols in the current file (outline view) |
 | `textDocument/completion` | Dot-completion (`it.`, `this.`, named params), bare-word, stdlib entries |
+| `completionItem/resolve` | Lazy KDoc/Javadoc + signature on item selection; keeps initial list fast |
 | `textDocument/references` | Project-wide `rg --word-regexp` + in-memory scan of open buffers |
 | `textDocument/signatureHelp` | Active function signature + highlighted parameter as you type |
 | `textDocument/rename` | Renames symbol across all files via `WorkspaceEdit`; index updated via file watcher |
@@ -15,8 +16,31 @@
 | `textDocument/inlayHint` | Type hints for lambda `it`, named lambda params, `this`, untyped `val`/`var` |
 | `textDocument/publishDiagnostics` | Syntax errors from tree-sitter (ERROR/MISSING nodes) — not type checking |
 | `textDocument/implementation` | Transitive subtype lookup (interface → all implementing classes, BFS) |
+| `textDocument/documentHighlight` | Highlights all in-file occurrences; declaration sites marked WRITE, usages READ |
 | `workspace/symbol` | Fuzzy substring search; supports dot-qualified queries for extension functions |
 | `$/progress` | Spinner while workspace is indexed; non-blocking |
+| `textDocument/didSave` | Re-indexes the saved file so external formatters/codegen are picked up |
+
+## Not yet implemented
+
+The following LSP features are commonly supported by full language servers and
+are candidates for future work. Rough effort estimates assume tree-sitter
+parsing only (no type resolution):
+
+| LSP capability | Effort | Notes |
+|---|---|---|
+| `textDocument/semanticTokens/full` | High | Full syntax-highlight override via tree-sitter token types. Data is available; mapping to `SemanticTokenTypes` is tedious. |
+| `textDocument/prepareCallHierarchy` + `callHierarchy/incomingCalls` + `callHierarchy/outgoingCalls` | Medium | Call tree viewer. Would need `rg`-based caller search similar to `references`. |
+| `textDocument/selectionRange` | Medium | Smart expand-selection by CST node boundaries. tree-sitter has the structure. |
+| `completionItem` — `deprecated` tag (`CompletionItemTag::DEPRECATED`) | Medium | Strikethrough for `@Deprecated`/`@deprecated` symbols. Requires detecting the annotation at index time and storing a flag on `SymbolEntry`. |
+| `completionItem` — `label_details` | Medium | Inline param list + right-aligned return type in the completion list (RA-style). Would require splitting `SymbolEntry.detail` into params + return type at parse time. |
+| `textDocument/gotoDeclaration` | Trivial | Identical to `goto_definition` for our use-case (no separate declaration/definition concept in Kotlin/Java). |
+| `textDocument/typeDefinition` | Medium | Jump to the type of a variable. Requires type inference beyond what tree-sitter provides without the compiler. |
+| `textDocument/codeAction` — quick-fixes | Medium | Currently only "introduce local variable" and "add import alias" are implemented. Missing: add missing import, generate override stubs, suppress warning. |
+| `textDocument/onTypeFormatting` | Low | Auto-indent / brace matching as you type. |
+| `textDocument/formatting` | Low | Delegate to `ktfmt` / `google-java-format` subprocess if available on `$PATH`. |
+
+
 
 ## What gets indexed
 
