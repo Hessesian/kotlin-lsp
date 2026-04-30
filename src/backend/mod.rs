@@ -188,19 +188,28 @@ impl LanguageServer for Backend {
             }),
             capabilities: ServerCapabilities {
                 // FULL sync: each change event carries the whole document.
-                text_document_sync: Some(TextDocumentSyncCapability::Kind(
-                    TextDocumentSyncKind::FULL,
+                text_document_sync: Some(TextDocumentSyncCapability::Options(
+                    TextDocumentSyncOptions {
+                        open_close:   Some(true),
+                        change:       Some(TextDocumentSyncKind::FULL),
+                        save:         Some(TextDocumentSyncSaveOptions::SaveOptions(SaveOptions {
+                            include_text: Some(false),
+                        })),
+                        ..Default::default()
+                    }
                 )),
                 completion_provider: Some(CompletionOptions {
                     trigger_characters: Some(vec![".".into(), ":".into()]),
-                    resolve_provider:   Some(false),
+                    resolve_provider:   Some(true),
                     ..Default::default()
                 }),
                 hover_provider:          Some(HoverProviderCapability::Simple(true)),
                 definition_provider:     Some(OneOf::Left(true)),
+                declaration_provider:    Some(DeclarationCapability::Simple(true)),
                 implementation_provider: Some(ImplementationProviderCapability::Simple(true)),
-                references_provider:     Some(OneOf::Left(true)),
-                document_symbol_provider: Some(OneOf::Left(true)),
+                references_provider:          Some(OneOf::Left(true)),
+                document_highlight_provider:  Some(OneOf::Left(true)),
+                document_symbol_provider:     Some(OneOf::Left(true)),
                 inlay_hint_provider: Some(OneOf::Left(true)),
                 workspace: Some(WorkspaceServerCapabilities {
                     workspace_folders: None,
@@ -560,6 +569,30 @@ impl LanguageServer for Backend {
         self.client.publish_diagnostics(params.text_document.uri, Vec::new(), None).await;
     }
 
+    // ── textDocument/didSave ─────────────────────────────────────────────────
+
+    async fn did_save(&self, params: DidSaveTextDocumentParams) {
+        // Re-index the saved file so the symbol index stays consistent with
+        // what is on disk (e.g. after an external format or code-gen step).
+        let uri = params.text_document.uri;
+        let idx = Arc::clone(&self.indexer);
+        let sem = idx.parse_sem();
+        tokio::task::spawn(async move {
+            if let Ok(path) = uri.to_file_path() {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if let Ok(permit) = sem.acquire_owned().await {
+                        tokio::task::spawn_blocking(move || {
+                            let _permit = permit;
+                            idx.index_content(&uri, &content);
+                        })
+                        .await
+                        .ok();
+                    }
+                }
+            }
+        });
+    }
+
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
         // Re-index any *.kt / *.java file that changed on disk.
         // This fires after workspace/rename edits are applied to closed files,
@@ -597,6 +630,17 @@ impl LanguageServer for Backend {
         self.goto_definition_impl(params).await
     }
 
+    // ── textDocument/declaration ─────────────────────────────────────────────
+    // In Kotlin/Java there is no separate declaration/definition concept,
+    // so we delegate to the same implementation.
+
+    async fn goto_declaration(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> Result<Option<GotoDefinitionResponse>> {
+        self.goto_definition_impl(params).await
+    }
+
     // ── textDocument/implementation ──────────────────────────────────────────
 
     async fn goto_implementation(
@@ -612,6 +656,37 @@ impl LanguageServer for Backend {
         self.completion_impl(params).await
     }
 
+    // ── completionItem/resolve ────────────────────────────────────────────────
+
+    async fn completion_resolve(&self, mut item: CompletionItem) -> Result<CompletionItem> {
+        if let Some(ref data) = item.data {
+            if let (Some(uri), Some(line)) = (
+                data.get("u").and_then(|v| v.as_str()),
+                data.get("l").and_then(|v| v.as_u64()),
+            ) {
+                let col = data.get("c").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                // Always fill detail from the symbol if not already set.
+                if item.detail.is_none() {
+                    if let Some(d) = self.indexer.symbol_detail_at(uri, line as u32, col) {
+                        if !d.is_empty() {
+                            item.detail = Some(d);
+                        }
+                    }
+                }
+                // Populate documentation only when KDoc/Javadoc is present.
+                if let Some((doc_md, _)) =
+                    self.indexer.completion_docs_for(uri, line as u32, col)
+                {
+                    item.documentation = Some(Documentation::MarkupContent(MarkupContent {
+                        kind:  MarkupKind::Markdown,
+                        value: doc_md,
+                    }));
+                }
+            }
+        }
+        Ok(item)
+    }
+
     // ── textDocument/hover ───────────────────────────────────────────────────
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
@@ -622,6 +697,15 @@ impl LanguageServer for Backend {
 
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
         self.references_impl(params).await
+    }
+
+    // ── textDocument/documentHighlight ───────────────────────────────────────
+
+    async fn document_highlight(
+        &self,
+        params: DocumentHighlightParams,
+    ) -> Result<Option<Vec<DocumentHighlight>>> {
+        self.document_highlight_impl(params).await
     }
 
     // ── textDocument/documentSymbol ──────────────────────────────────────────

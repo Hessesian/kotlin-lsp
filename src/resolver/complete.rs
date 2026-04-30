@@ -237,7 +237,7 @@ pub(crate) fn complete_dot(idx: &Indexer, receiver: &str, from_uri: &Url, snippe
 /// Functions/methods get a snippet `name($1)`; all other kinds are plain-text.
 /// The `sort_text` prefix is the `kind_sort_rank` value so the list is ordered
 /// consistently with the rest of the completion results.
-fn completion_item_for_nested_symbol(s: &crate::types::SymbolEntry) -> CompletionItem {
+fn completion_item_for_nested_symbol(s: &crate::types::SymbolEntry, uri_str: &str) -> CompletionItem {
     let kind  = symbol_kind_to_completion(s.kind);
     let is_fn = matches!(kind, CompletionItemKind::FUNCTION | CompletionItemKind::METHOD);
     CompletionItem {
@@ -246,6 +246,9 @@ fn completion_item_for_nested_symbol(s: &crate::types::SymbolEntry) -> Completio
         insert_text:        if is_fn { Some(format!("{}($1)", s.name)) } else { None },
         insert_text_format: if is_fn { Some(InsertTextFormat::SNIPPET) } else { None },
         sort_text:          Some(format!("{:02}:{}", kind_sort_rank(Some(kind)), s.name)),
+        detail:             if s.detail.is_empty() { None } else { Some(s.detail.clone()) },
+        command:            if is_fn { Some(trigger_parameter_hints()) } else { None },
+        data:               Some(serde_json::json!({"u": uri_str, "l": s.selection_range.start.line, "c": s.selection_range.start.character})),
         ..Default::default()
     }
 }
@@ -280,7 +283,7 @@ fn symbols_from_nested_type(
             // Unknown type — return all non-private symbols as a fallback.
             return symbols_ref.iter()
                 .filter(|s| s.visibility != Visibility::Private)
-                .map(|s| completion_item_for_nested_symbol(s))
+                .map(|s| completion_item_for_nested_symbol(s, file_uri))
                 .collect();
         }
     };
@@ -301,7 +304,7 @@ fn symbols_from_nested_type(
             starts_after && starts_before
         })
         .filter(|s| s.visibility != Visibility::Private)
-        .map(|s| completion_item_for_nested_symbol(s))
+        .map(|s| completion_item_for_nested_symbol(s, file_uri))
         .collect()
 }
 
@@ -360,7 +363,7 @@ pub(crate) fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippet
     // Full sort_text: "{src_tier}{match_score}:{name_lower}" so that
     //   same-file exact match ("000:column") beats same-file acronym ("001:columnbutton")
     //   which beats same-pkg exact ("010:column"), etc.
-    let mut add = |name: &str, kind: CompletionItemKind, src_tier: u8, max_score: u8| {
+    let mut add = |name: &str, kind: CompletionItemKind, src_tier: u8, max_score: u8, detail: &str, item_data: Option<serde_json::Value>| {
         // In annotation context (@Foo), only emit class/interface/type items.
         if annotation_only && matches!(kind,
             CompletionItemKind::FUNCTION | CompletionItemKind::METHOD |
@@ -393,6 +396,9 @@ pub(crate) fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippet
             sort_text:          Some(format!("{}{}{}", src_tier, score, name.to_lowercase())),
             insert_text:        if is_fn { Some(format!("{}($1)", name)) } else { None },
             insert_text_format: if is_fn { Some(InsertTextFormat::SNIPPET) } else { None },
+            detail:             if detail.is_empty() { None } else { Some(detail.to_string()) },
+            command:            if is_fn { Some(trigger_parameter_hints()) } else { None },
+            data:               item_data,
             ..Default::default()
         });
     };
@@ -400,12 +406,14 @@ pub(crate) fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippet
     // 1. Local file symbols — src_tier 0, substring fallback only for short prefixes.
     if let Some(f) = idx.files.get(from_uri.as_str()) {
         for sym in &f.symbols {
-            add(&sym.name, symbol_kind_to_completion(sym.kind), 0, local_max_score);
+            add(&sym.name, symbol_kind_to_completion(sym.kind), 0, local_max_score,
+                &sym.detail,
+                Some(serde_json::json!({"u": from_uri.as_str(), "l": sym.selection_range.start.line, "c": sym.selection_range.start.character})));
         }
         // Constructor params / local vars from declared_names (lowercase only).
         if lowercase_mode {
             for name in &f.declared_names {
-                add(name, CompletionItemKind::VARIABLE, 0, local_max_score);
+                add(name, CompletionItemKind::VARIABLE, 0, local_max_score, "", None);
             }
         }
     }
@@ -420,7 +428,9 @@ pub(crate) fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippet
                 if uri_str == from_uri.as_str() { continue; }
                 if let Some(f) = idx.files.get(uri_str.as_str()) {
                     for sym in &f.symbols {
-                        add(&sym.name, symbol_kind_to_completion(sym.kind), 1, local_max_score);
+                        add(&sym.name, symbol_kind_to_completion(sym.kind), 1, local_max_score,
+                            &sym.detail,
+                            Some(serde_json::json!({"u": uri_str.as_str(), "l": sym.selection_range.start.line, "c": sym.selection_range.start.character})));
                     }
                 }
             }
@@ -626,6 +636,7 @@ fn make_completion_item(name: &str, ck: CompletionItemKind, sort_text: String, s
         sort_text:          Some(sort_text),
         insert_text:        if is_fn { Some(format!("{}($1)", name)) } else { None },
         insert_text_format: if is_fn { Some(InsertTextFormat::SNIPPET) } else { None },
+        command:            if is_fn { Some(trigger_parameter_hints()) } else { None },
         ..Default::default()
     }
 }
@@ -634,6 +645,18 @@ fn make_completion_item(name: &str, ck: CompletionItemKind, sort_text: String, s
 /// pre-warmer in `indexer.rs`.  Builds + caches completion items for a file.
 pub fn symbols_from_uri_as_completions_pub(idx: &Indexer, file_uri: &str) -> Vec<CompletionItem> {
     symbols_from_uri_as_completions(idx, file_uri)
+}
+
+/// LSP `Command` that tells the editor to open the parameter-hints (signature
+/// help) popup immediately after a function completion is accepted.
+/// Mirrors VS Code's built-in `editor.action.triggerParameterHints` command,
+/// which is also what rust-analyzer emits.
+fn trigger_parameter_hints() -> tower_lsp::lsp_types::Command {
+    tower_lsp::lsp_types::Command {
+        title:     "triggerParameterHints".into(),
+        command:   "editor.action.triggerParameterHints".into(),
+        arguments: None,
+    }
 }
 
 // ─── impl Indexer wrappers ────────────────────────────────────────────────────

@@ -93,10 +93,15 @@ impl Backend {
         let position = pp.position;
         let snippets = self.snippet_support.load(Ordering::Relaxed);
 
-        let (items, hit_cap) = self.indexer.completions(uri, position, snippets);
+        let (mut items, hit_cap) = self.indexer.completions(uri, position, snippets);
         let still_indexing = self.indexer.indexing_in_progress.load(Ordering::Acquire);
         if items.is_empty() && !still_indexing {
             return Ok(None);
+        }
+        // Pre-select the best match so the editor highlights it without requiring
+        // an extra keystroke (mirrors RA's preselect behaviour).
+        if let Some(first) = items.first_mut() {
+            first.preselect = Some(true);
         }
         // When hit_cap is true the list was truncated — tell the client to
         // re-request completions on every keystroke so the list stays tight

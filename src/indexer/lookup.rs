@@ -77,9 +77,7 @@ impl Indexer {
         let start_line = sym.selection_range.start.line as usize;
         let sig = data.lines.collect_signature(start_line);
 
-        let lang = if loc.uri.path().ends_with(".kt") { "kotlin" }
-                   else if loc.uri.path().ends_with(".swift") { "swift" }
-                   else { "java" };
+        let lang = lang_str(loc.uri.path());
 
         let code_block = if sig.is_empty() {
             format!("```{}\n{} {}\n```", lang, symbol_kw_for_lang(sym.kind, lang), name)
@@ -93,6 +91,57 @@ impl Indexer {
         } else {
             Some(code_block)
         }
+    }
+
+    /// Returns the pre-computed `detail` string (declaration signature) for the
+    /// symbol declared at the given line+character in `uri_str`. Used by
+    /// `completionItem/resolve` to populate `CompletionItem.detail`.
+    pub fn symbol_detail_at(&self, uri_str: &str, line: u32, col: u32) -> Option<String> {
+        let data = self.files.get(uri_str)?;
+        let sym = data.symbols.iter()
+            .find(|s| s.selection_range.start.line == line
+                   && s.selection_range.start.character == col)
+            .or_else(|| data.symbols.iter().find(|s| s.selection_range.start.line == line))?;
+        let lang = lang_str(uri_str);
+        if sym.detail.is_empty() {
+            Some(format!("{} {}", symbol_kw_for_lang(sym.kind, lang), sym.name))
+        } else {
+            Some(sym.detail.clone())
+        }
+    }
+
+    /// Build Markdown documentation for a completion item identified by its
+    /// source file URI and declaration line+character.
+    ///
+    /// Called by `completionItem/resolve` to lazily populate `documentation`
+    /// without bloating the initial completion response.
+    ///
+    /// Returns `(doc_markdown, detail)` where `doc_markdown` is the KDoc/Javadoc
+    /// comment only (no code block — the signature is already shown in `detail`)
+    /// and `detail` is the short signature string for `CompletionItem.detail`.
+    pub fn completion_docs_for(&self, uri_str: &str, line: u32, col: u32) -> Option<(String, String)> {
+        let data = self.files.get(uri_str)?;
+        let start_line = line as usize;
+
+        let sym = data.symbols.iter()
+            .find(|s| s.selection_range.start.line == line
+                   && s.selection_range.start.character == col)
+            .or_else(|| data.symbols.iter().find(|s| s.selection_range.start.line == line))?;
+
+        let lang = lang_str(uri_str);
+
+        // detail: prefer the pre-computed SymbolEntry.detail; fall back to
+        // a minimal keyword + name string so the field is never empty.
+        let detail = if sym.detail.is_empty() {
+            format!("{} {}", symbol_kw_for_lang(sym.kind, lang), sym.name)
+        } else {
+            sym.detail.clone()
+        };
+
+        // documentation: KDoc/Javadoc only — the signature is already in detail.
+        let doc_md = extract_doc_comment(&data.lines, start_line)?;
+
+        Some((doc_md, detail))
     }
 
     /// All symbols declared in the given file (for `documentSymbol`).
@@ -199,6 +248,12 @@ fn symbol_kw_for_lang(kind: SymbolKind, lang: &str) -> &'static str {
     let kw = symbol_kw(kind);
     // Swift uses `func`, not `fun`.
     if lang == "swift" && kw == "fun" { "func" } else { kw }
+}
+
+fn lang_str(path: &str) -> &'static str {
+    if path.ends_with(".kt") || path.ends_with(".kts") { "kotlin" }
+    else if path.ends_with(".swift")                   { "swift" }
+    else                                               { "java" }
 }
 
 #[cfg(test)]
