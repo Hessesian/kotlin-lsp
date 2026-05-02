@@ -1,3 +1,6 @@
+use std::cell::RefCell;
+use std::sync::OnceLock;
+
 use tree_sitter::{Node, Parser, Query, QueryCursor};
 use tower_lsp::lsp_types::{Position, Range, SymbolKind};
 
@@ -10,32 +13,90 @@ use crate::types::{FileData, ImportEntry, SymbolEntry, SyntaxError, Visibility};
 
 type MatchEntry = (usize, [Option<(String, Range, Range)>; 2]);
 
+// ─── cached query objects ────────────────────────────────────────────────────
+//
+// Query compilation (parsing the S-expression DSL + building the automaton) is
+// expensive — O(query²) — and identical across every file parse.  Cache the
+// compiled query *and* its capture indices in a process-wide OnceLock so we pay
+// that cost once.  Query is Send+Sync in tree-sitter ≥0.22.
+
+struct DefQueryCache {
+    query:    Query,
+    def_idx:  u32,
+    name_idx: u32,
+}
+
+static KOTLIN_DEF_QUERY_CACHE: OnceLock<Option<DefQueryCache>> = OnceLock::new();
+static SWIFT_DEF_QUERY_CACHE:  OnceLock<Option<DefQueryCache>> = OnceLock::new();
+
+fn kotlin_def_query() -> Option<&'static DefQueryCache> {
+    KOTLIN_DEF_QUERY_CACHE.get_or_init(|| {
+        match Query::new(&tree_sitter_kotlin::language(), KOTLIN_DEFINITIONS) {
+            Ok(query) => {
+                let def_idx  = query.capture_index_for_name("def").unwrap_or(0);
+                let name_idx = query.capture_index_for_name("name").unwrap_or(1);
+                Some(DefQueryCache { query, def_idx, name_idx })
+            }
+            Err(e) => { log::error!("Kotlin definitions query compile error: {e}"); None }
+        }
+    }).as_ref()
+}
+
+fn swift_def_query() -> Option<&'static DefQueryCache> {
+    SWIFT_DEF_QUERY_CACHE.get_or_init(|| {
+        match Query::new(&tree_sitter_swift_bundled::language(), SWIFT_DEFINITIONS) {
+            Ok(query) => {
+                let def_idx  = query.capture_index_for_name("def").unwrap_or(0);
+                let name_idx = query.capture_index_for_name("name").unwrap_or(1);
+                Some(DefQueryCache { query, def_idx, name_idx })
+            }
+            Err(e) => { log::error!("Swift definitions query compile error: {e}"); None }
+        }
+    }).as_ref()
+}
+
+// ─── per-thread parser instances ─────────────────────────────────────────────
+//
+// Parser::new() + set_language() allocates internal state each time.  Re-using
+// a Parser across parse() calls is safe — parse(content, None) with no prior
+// tree passes no incremental state.  Thread-local storage gives each worker
+// thread its own Parser without any locking overhead.
+
+thread_local! {
+    static KOTLIN_PARSER: RefCell<Parser> = RefCell::new({
+        let mut p = Parser::new();
+        let _ = p.set_language(&tree_sitter_kotlin::language());
+        p
+    });
+    static SWIFT_PARSER: RefCell<Parser> = RefCell::new({
+        let mut p = Parser::new();
+        let _ = p.set_language(&tree_sitter_swift_bundled::language());
+        p
+    });
+    static JAVA_PARSER: RefCell<Parser> = RefCell::new({
+        let mut p = Parser::new();
+        let _ = p.set_language(&tree_sitter_java::language());
+        p
+    });
+}
+
 // ─── public entry points ────────────────────────────────────────────────────
 
 pub fn parse_kotlin(content: &str) -> FileData {
-    let lang  = tree_sitter_kotlin::language();
     let lines = std::sync::Arc::new(content.lines().map(str::to_owned).collect());
     let mut data = FileData { lines, ..Default::default() };
 
-    let mut parser = Parser::new();
-    if parser.set_language(&lang).is_err() { return data; }
-    let Some(tree) = parser.parse(content, None) else { return data; };
+    let Some(tree) = KOTLIN_PARSER.with(|p| p.borrow_mut().parse(content, None)) else { return data; };
 
     let bytes = content.as_bytes();
     let root  = tree.root_node();
 
     // ── definitions ──────────────────────────────────────────────────────────
-    let def_q = match Query::new(&lang, KOTLIN_DEFINITIONS) {
-        Ok(q)  => q,
-        Err(e) => { log::error!("definitions query error: {e}"); return data; }
-    };
-    let def_idx  = def_q.capture_index_for_name("def").unwrap_or(0);
-    let name_idx = def_q.capture_index_for_name("name").unwrap_or(1);
-
+    let Some(qc) = kotlin_def_query() else { return data; };
     let mut cur = QueryCursor::new();
     let matches: Vec<MatchEntry> = cur
-        .matches(&def_q, root, bytes)
-        .map(|m| map_def_captures(&m, def_idx, name_idx, bytes))
+        .matches(&qc.query, root, bytes)
+        .map(|m| map_def_captures(&m, qc.def_idx, qc.name_idx, bytes))
         .collect();
 
     // Deduplicate: multiple patterns can fire on the same node
@@ -62,13 +123,10 @@ pub fn parse_kotlin(content: &str) -> FileData {
 }
 
 pub fn parse_java(content: &str) -> FileData {
-    let lang  = tree_sitter_java::language();
     let lines = std::sync::Arc::new(content.lines().map(str::to_owned).collect());
     let mut data = FileData { lines, ..Default::default() };
 
-    let mut parser = Parser::new();
-    if parser.set_language(&lang).is_err() { return data; }
-    let Some(tree) = parser.parse(content, None) else { return data; };
+    let Some(tree) = JAVA_PARSER.with(|p| p.borrow_mut().parse(content, None)) else { return data; };
 
     let bytes = content.as_bytes();
     let mut queue = vec![tree.root_node()];
@@ -84,28 +142,21 @@ pub fn parse_java(content: &str) -> FileData {
 }
 
 pub fn parse_swift(content: &str) -> FileData {
-    let lang  = tree_sitter_swift_bundled::language();
     let lines = std::sync::Arc::new(content.lines().map(str::to_owned).collect());
     let mut data = FileData { lines, ..Default::default() };
 
-    let mut parser = Parser::new();
-    if parser.set_language(&lang).is_err() { return data; }
-    let Some(tree) = parser.parse(content, None) else { return data; };
+    let Some(tree) = SWIFT_PARSER.with(|p| p.borrow_mut().parse(content, None)) else { return data; };
 
     let bytes = content.as_bytes();
     let root  = tree.root_node();
 
     // ── definitions ──────────────────────────────────────────────────────────
-    let def_q = match Query::new(&lang, SWIFT_DEFINITIONS) {
-        Ok(q)  => q,
-        Err(e) => { log::error!("Swift definitions query error: {e}"); return data; }
-    };
-    let def_idx  = def_q.capture_index_for_name("def").unwrap_or(0);
-    let name_idx = def_q.capture_index_for_name("name").unwrap_or(1);
-
+    let Some(qc) = swift_def_query() else { return data; };
+    let def_idx  = qc.def_idx;
+    let name_idx = qc.name_idx;
     let mut cur = QueryCursor::new();
     let matches: Vec<MatchEntry> = cur
-        .matches(&def_q, root, bytes)
+        .matches(&qc.query, root, bytes)
         .map(|m| {
             let (pidx, slot) = map_def_captures(&m, def_idx, name_idx, bytes);
             if pidx == queries::SWIFT_INIT_PATTERN_IDX && slot[0].is_none() {
