@@ -164,7 +164,7 @@ fn collect_hierarchy_completions(
     if depth >= MAX_DEPTH { return; }
 
     let supers: Vec<String> = match idx.files.get(from_uri.as_str()) {
-        Some(f) => f.supers.iter().map(|(_, n)| n.clone()).collect(),
+        Some(f) => f.supers.iter().map(|(_, n, _)| n.clone()).collect(),
         None => return,
     };
 
@@ -213,7 +213,7 @@ pub(crate) fn complete_dot(idx: &Indexer, receiver: &str, from_uri: &Url, snippe
 
     // For dotted types (e.g. `Outer.Inner`), show only the inner type's members.
     // `rt.leaf` is the last segment, so it works for both plain and dotted types.
-    let mut items = symbols_from_nested_type(idx, &file_uri, &rt.leaf);
+    let mut items = symbols_from_nested_type(idx, &file_uri, &rt.leaf, Some(from_uri.as_str()));
 
     // Filter out private members — they are inaccessible from outside the class.
     items.retain(|i| i.sort_text.as_deref().map(|s| !s.starts_with("prv:")).unwrap_or(true));
@@ -241,18 +241,34 @@ pub(crate) fn complete_dot(idx: &Indexer, receiver: &str, from_uri: &Url, snippe
 /// Functions/methods get a snippet `name($1)`; all other kinds are plain-text.
 /// The `sort_text` prefix is the `kind_sort_rank` value so the list is ordered
 /// consistently with the rest of the completion results.
-fn completion_item_for_nested_symbol(s: &crate::types::SymbolEntry, uri_str: &str) -> CompletionItem {
+fn completion_item_for_nested_symbol(
+    idx:         &Indexer,
+    s:           &crate::types::SymbolEntry,
+    uri_str:     &str,
+    calling_uri: Option<&str>,
+) -> CompletionItem {
     let kind  = symbol_kind_to_completion(s.kind);
     let is_fn = matches!(kind, CompletionItemKind::FUNCTION | CompletionItemKind::METHOD);
+    // Apply generic type param substitution when the symbol is from a different file.
+    let detail_raw = if s.detail.is_empty() { None } else { Some(s.detail.clone()) };
+    let detail = detail_raw.map(|d| {
+        if let Some(cu) = calling_uri {
+            idx.type_subst_sig(uri_str, s.selection_range.start.line, cu, &d)
+        } else {
+            d
+        }
+    });
+    let mut data = serde_json::json!({"u": uri_str, "l": s.selection_range.start.line, "c": s.selection_range.start.character});
+    if let Some(cu) = calling_uri { data["cu"] = serde_json::Value::String(cu.to_owned()); }
     CompletionItem {
         label:              s.name.clone(),
         kind:               Some(kind),
         insert_text:        if is_fn { Some(format!("{}($1)", s.name)) } else { None },
         insert_text_format: if is_fn { Some(InsertTextFormat::SNIPPET) } else { None },
         sort_text:          Some(format!("{:02}:{}", kind_sort_rank(Some(kind)), s.name)),
-        detail:             if s.detail.is_empty() { None } else { Some(s.detail.clone()) },
+        detail,
         command:            if is_fn { Some(trigger_parameter_hints()) } else { None },
-        data:               Some(serde_json::json!({"u": uri_str, "l": s.selection_range.start.line, "c": s.selection_range.start.character})),
+        data:               Some(data),
         ..Default::default()
     }
 }
@@ -261,9 +277,10 @@ fn completion_item_for_nested_symbol(s: &crate::types::SymbolEntry, uri_str: &st
 /// Uses the symbol's range end (the closing `}` of the class body) to determine
 /// membership — no indentation heuristics needed.
 fn symbols_from_nested_type(
-    idx:        &Indexer,
-    file_uri:   &str,
-    inner_name: &str,
+    idx:         &Indexer,
+    file_uri:    &str,
+    inner_name:  &str,
+    calling_uri: Option<&str>,
 ) -> Vec<CompletionItem> {
     // Try in-memory index first; fall back to on-demand disk parse.
     let owned: crate::types::FileData;
@@ -287,7 +304,7 @@ fn symbols_from_nested_type(
             // Unknown type — return all non-private symbols as a fallback.
             return symbols_ref.iter()
                 .filter(|s| s.visibility != Visibility::Private)
-                .map(|s| completion_item_for_nested_symbol(s, file_uri))
+                .map(|s| completion_item_for_nested_symbol(idx, s, file_uri, calling_uri))
                 .collect();
         }
     };
@@ -308,7 +325,7 @@ fn symbols_from_nested_type(
             starts_after && starts_before
         })
         .filter(|s| s.visibility != Visibility::Private)
-        .map(|s| completion_item_for_nested_symbol(s, file_uri))
+        .map(|s| completion_item_for_nested_symbol(idx, s, file_uri, calling_uri))
         .collect()
 }
 

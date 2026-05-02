@@ -197,7 +197,7 @@ impl Indexer {
                 let cont_c = content.clone();
                 let supers: Vec<String> = tokio::task::spawn_blocking(move || {
                     idx_c.index_content(&uri_c, &cont_c)
-                        .map(|d| d.supers.iter().map(|(_, n)| n.clone()).collect())
+                        .map(|d| d.supers.iter().map(|(_, n, _)| n.clone()).collect())
                         .unwrap_or_default()
                 }).await.unwrap_or_default();
                 // Expand priority set to include supertypes so cross-class navigation

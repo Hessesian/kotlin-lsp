@@ -61,6 +61,11 @@ pub(crate) trait NodeExt<'a>: Sized + Copy {
     /// Extract the first type name from a Java type node.
     fn java_first_type_name(self, bytes: &[u8]) -> Option<String>;
 
+    /// Extract the type argument strings from a `type_arguments` child of this node.
+    /// Splits `<Event, Effect, State>` at depth-0 commas.
+    /// Returns an empty vec when no `type_arguments` child exists.
+    fn type_arg_strings(self, bytes: &[u8]) -> Vec<String>;
+
     /// Returns the line number (0-based) of the first named identifier child,
     /// or the node's own start line if no named child is found.
     fn name_line(self) -> u32;
@@ -263,6 +268,19 @@ impl<'a> NodeExt<'a> for Node<'a> {
         None
     }
 
+    fn type_arg_strings(self, bytes: &[u8]) -> Vec<String> {
+        let Some(args_node) = self.first_child_of_kind("type_arguments") else {
+            return Vec::new();
+        };
+        let text = match args_node.utf8_text(bytes) {
+            Ok(t) => t.trim(),
+            Err(_) => return Vec::new(),
+        };
+        // text is like "<Event, Effect, State>" or "<Map<K,V>, String>"
+        let inner = text.trim_start_matches('<').trim_end_matches('>');
+        split_depth0_commas(inner)
+    }
+
     fn name_line(self) -> u32 {
         // Java uses field "name"; Kotlin has type_identifier as a direct child.
         if let Some(n) = self.child_by_field_name("name") {
@@ -279,6 +297,29 @@ impl<'a> NodeExt<'a> for Node<'a> {
 }
 
 // ─── Private helpers ──────────────────────────────────────────────────────────
+
+/// Split `s` at depth-0 commas (ignoring commas inside nested `<...>`).
+/// Returns trimmed, non-empty segments.
+pub(super) fn split_depth0_commas(s: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                let seg = s[start..i].trim();
+                if !seg.is_empty() { args.push(seg.to_owned()); }
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    let seg = s[start..].trim();
+    if !seg.is_empty() { args.push(seg.to_owned()); }
+    args
+}
 
 fn collect_user_type_segments(node: Node<'_>, bytes: &[u8], segments: &mut Vec<String>) {
     let mut cur = node.walk();

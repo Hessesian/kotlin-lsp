@@ -30,6 +30,7 @@ fn swift_hover_uses_func_keyword() {
     let hover = idx.hover_info_at_location(
         &Location { uri: u.clone(), range: Default::default() },
         "greet",
+        None,
     ).unwrap_or_default();
     assert!(
         hover.contains("func"),
@@ -48,6 +49,7 @@ fn kotlin_hover_still_uses_fun_keyword() {
     let hover = idx.hover_info_at_location(
         &Location { uri: u.clone(), range: Default::default() },
         "greet",
+        None,
     ).unwrap_or_default();
     assert!(
         hover.contains("fun"),
@@ -64,7 +66,7 @@ fn hover_includes_kdoc() {
  */
 class Account(val name: String)"#;
     let (u, idx) = indexed("/Account.kt", src);
-    let hover = idx.hover_info("Account").unwrap();
+    let hover = idx.hover_info("Account", None).unwrap();
     assert!(hover.contains("Represents a user account"), "got: {hover}");
     assert!(hover.contains("```kotlin"), "got: {hover}");
     assert!(hover.contains("---"), "separator missing: {hover}");
@@ -94,7 +96,7 @@ class Foo(
     assert!(!locs.is_empty(), "repo should be found via find_definition_qualified");
 
     // 3. hover_info_at_location should return something
-    let hover = idx.hover_info_at_location(locs.first().unwrap(), "repo");
+    let hover = idx.hover_info_at_location(locs.first().unwrap(), "repo", None);
     assert!(hover.is_some(), "hover on val repo should produce result");
     let md = hover.unwrap();
     assert!(md.contains("repo"), "hover should mention 'repo', got: {md}");
@@ -118,7 +120,7 @@ internal class ContactAddressInteractor @Inject constructor(
     // hover on `repo` (line 2, col ~14)
     let locs = idx.find_definition_qualified("repo", None, &u);
     assert!(!locs.is_empty(), "repo should be found");
-    let hover = idx.hover_info_at_location(locs.first().unwrap(), "repo");
+    let hover = idx.hover_info_at_location(locs.first().unwrap(), "repo", None);
     assert!(hover.is_some(), "hover on val repo should work");
     let md = hover.unwrap();
     assert!(md.contains("repo"), "hover should mention repo: {md}");
@@ -148,7 +150,7 @@ fun add(a: Int, b: Int): Int = a + b
     let line = sym.selection_range.start.line;
     let col  = sym.selection_range.start.character;
 
-    let result = idx.completion_docs_for(u.as_str(), line, col);
+    let result = idx.completion_docs_for(u.as_str(), line, col, None);
     assert!(result.is_some(), "completion_docs_for should return Some for documented function");
     let (doc_md, detail) = result.unwrap();
     assert!(doc_md.contains("Adds two numbers"), "doc should contain KDoc text, got: {doc_md}");
@@ -168,7 +170,7 @@ fn completion_docs_for_returns_none_without_kdoc() {
     let line = sym.selection_range.start.line;
     let col  = sym.selection_range.start.character;
     // No KDoc → None (caller skips setting documentation)
-    assert!(idx.completion_docs_for(u.as_str(), line, col).is_none());
+    assert!(idx.completion_docs_for(u.as_str(), line, col, None).is_none());
 }
 
 #[test]
@@ -184,6 +186,69 @@ fun configure() {}\n");
     };
     let line = sym.selection_range.start.line;
     let col  = sym.selection_range.start.character;
-    let (doc_md, _detail) = idx.completion_docs_for(u.as_str(), line, col).unwrap();
+    let (doc_md, _detail) = idx.completion_docs_for(u.as_str(), line, col, None).unwrap();
     assert!(doc_md.contains("Configure something"));
+}
+
+// ── generic type parameter substitution ─────────────────────────────────────
+
+#[test]
+fn hover_generic_type_params_substituted_in_subclass() {
+    // FlowReducer is a generic interface in one file.
+    // DashboardProductsReducer specialises it in another.
+    // Hovering `reduce` from the subclass file should show concrete types.
+    let idx = Indexer::new();
+
+    let base_u = uri("/FlowReducer.kt");
+    idx.index_content(&base_u, "\
+interface FlowReducer<EventType, out EffectType, StateType> {
+    fun reduce(state: StateType, event: EventType): StateType
+    fun effects(event: EventType): List<EffectType>
+}
+");
+
+    let sub_u = uri("/DashboardProductsReducer.kt");
+    idx.index_content(&sub_u, "\
+class DashboardProductsReducer : FlowReducer<Event, Effect, State> {
+    override fun reduce(state: State, event: Event): State = state
+    override fun effects(event: Event): List<Effect> = emptyList()
+}
+");
+
+    // `reduce` is declared in FlowReducer — hover from the subclass file
+    let base_data = idx.files.get(base_u.as_str()).unwrap();
+    let reduce_sym = base_data.symbols.iter().find(|s| s.name == "reduce").cloned()
+        .expect("reduce should be indexed in FlowReducer.kt");
+    let loc = tower_lsp::lsp_types::Location {
+        uri:   base_u.clone(),
+        range: reduce_sym.selection_range,
+    };
+
+    let hover = idx.hover_info_at_location(&loc, "reduce", Some(sub_u.as_str()))
+        .expect("hover should return Some");
+
+    // Type params should be substituted: StateType→State, EventType→Event
+    assert!(hover.contains("State"), "hover should show 'State', got: {hover}");
+    assert!(hover.contains("Event"), "hover should show 'Event', got: {hover}");
+    assert!(!hover.contains("StateType"), "hover must NOT show 'StateType', got: {hover}");
+    assert!(!hover.contains("EventType"), "hover must NOT show 'EventType', got: {hover}");
+}
+
+#[test]
+fn hover_generic_no_subst_when_same_file() {
+    // Hovering from the same file should NOT substitute (raw type params shown).
+    let idx = Indexer::new();
+    let u = uri("/FlowReducer.kt");
+    idx.index_content(&u, "\
+interface FlowReducer<EventType, out EffectType, StateType> {
+    fun reduce(state: StateType, event: EventType): StateType
+}
+");
+    let data = idx.files.get(u.as_str()).unwrap();
+    let reduce_sym = data.symbols.iter().find(|s| s.name == "reduce").cloned().unwrap();
+    let loc = tower_lsp::lsp_types::Location { uri: u.clone(), range: reduce_sym.selection_range };
+
+    // calling_uri == sym_uri → no substitution
+    let hover = idx.hover_info_at_location(&loc, "reduce", Some(u.as_str())).unwrap();
+    assert!(hover.contains("StateType"), "same-file hover should keep raw type params, got: {hover}");
 }

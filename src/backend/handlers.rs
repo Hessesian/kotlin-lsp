@@ -26,15 +26,26 @@ impl Backend {
         // For `it` or a named lambda param, generate hover showing the inferred type.
         if ctx.qualifier.is_none() {
             if let Some(ref rt) = ctx.contextual {
-                let type_name = &rt.raw;
+                // Apply type parameter substitution (same as inlay hints)
+                let subst = self.indexer.type_subst_for_enclosing_class(uri.as_str(), position.line);
+                let type_name = if subst.is_empty() {
+                    rt.raw.clone()
+                } else {
+                    crate::indexer::apply_type_subst(&rt.raw, &subst)
+                };
                 let lang = if uri.path().ends_with(".kt") { "kotlin" }
                            else if uri.path().ends_with(".swift") { "swift" }
                            else { "java" };
                 let kw = if uri.path().ends_with(".swift") { "let" } else { "val" };
                 let sig_md = format!("```{lang}\n{kw} {}: {type_name}\n```", ctx.word);
-                // For symbol lookup use the last segment of a qualified name.
-                let lookup_name = type_name.rsplit('.').next().unwrap_or(type_name.as_str());
-                let type_hover = self.indexer.hover_info(lookup_name);
+                // Resolve the type using the same path as go-to-definition (import-aware)
+                let leaf = type_name.rsplit('.').next().unwrap_or(type_name.as_str());
+                let locs = self.indexer.find_definition_qualified(leaf, None, uri);
+                let type_hover = if let Some(loc) = locs.first() {
+                    self.indexer.hover_info_at_location(loc, leaf, Some(uri.as_str()))
+                } else {
+                    self.indexer.hover_info(leaf, Some(uri.as_str()))
+                };
                 let full = if let Some(th) = type_hover {
                     format!("{sig_md}\n\n---\n\n{th}")
                 } else {
@@ -64,7 +75,7 @@ impl Backend {
             if let Some(ref rt) = ctx.contextual {
                 let locs = self.resolve_with_receiver_fallback(&ctx.word, rt, uri);
                 if let Some(loc) = locs.first() {
-                    if let Some(md) = self.indexer.hover_info_at_location(loc, &ctx.word) {
+                    if let Some(md) = self.indexer.hover_info_at_location(loc, &ctx.word, Some(uri.as_str())) {
                         return Ok(Some(Hover {
                             contents: HoverContents::Markup(MarkupContent {
                                 kind:  MarkupKind::Markdown,
@@ -79,10 +90,10 @@ impl Backend {
 
         let locs = self.indexer.find_definition_qualified(&ctx.word, ctx.qualifier.as_deref(), uri);
         let hover_md = if let Some(loc) = locs.first() {
-            self.indexer.hover_info_at_location(loc, &ctx.word)
+            self.indexer.hover_info_at_location(loc, &ctx.word, Some(uri.as_str()))
         } else {
             // Index lookup — works for already-indexed symbols + stdlib.
-            let from_index = self.indexer.hover_info(&ctx.word);
+            let from_index = self.indexer.hover_info(&ctx.word, Some(uri.as_str()));
             if from_index.is_some() {
                 from_index
             } else {
@@ -94,7 +105,7 @@ impl Backend {
                     (crate::rg::effective_rg_root(wr.as_deref(), file_path.as_deref()), m)
                 };
                 let rg_locs = crate::rg::rg_find_definition(&ctx.word, rg_root.as_deref(), matcher.as_deref());
-                rg_locs.first().and_then(|loc| self.indexer.hover_info_at_location(loc, &ctx.word))
+                rg_locs.first().and_then(|loc| self.indexer.hover_info_at_location(loc, &ctx.word, Some(uri.as_str())))
             }
         };
 

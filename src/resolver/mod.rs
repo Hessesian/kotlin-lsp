@@ -701,7 +701,7 @@ fn resolve_from_class_hierarchy(
     visited.push(key);
 
     let supers: Vec<String> = if let Some(f) = idx.files.get(from_uri.as_str()) {
-        f.supers.iter().map(|(_, n)| n.clone()).collect()
+        f.supers.iter().map(|(_, n, _)| n.clone()).collect()
     } else {
         // File not indexed yet — parse on demand so hierarchy walk works
         // even before background indexing reaches this file.
@@ -709,7 +709,7 @@ fn resolve_from_class_hierarchy(
         let content = path.and_then(|p| std::fs::read_to_string(p).ok());
         match content {
             Some(c) => parse_by_extension(from_uri.path(), &c)
-                .supers.iter().map(|(_, n)| n.clone()).collect(),
+                .supers.iter().map(|(_, n, _)| n.clone()).collect(),
             None => return vec![],
         }
     };
