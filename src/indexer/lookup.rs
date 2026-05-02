@@ -265,6 +265,16 @@ impl Indexer {
         let subst = build_type_param_subst(self, sym_uri, sym_line, calling_uri);
         if subst.is_empty() { sig.to_owned() } else { apply_subst(sig, &subst) }
     }
+
+    /// Build a combined type-parameter substitution map for the enclosing class at
+    /// `cursor_line` in `uri`.  Gathers type params from ALL supertypes of that class
+    /// and maps them to concrete type arguments.
+    ///
+    /// Used by inlay hints to convert inferred types like `EffectType` → `Effect`
+    /// when the cursor is inside a class that specialises a generic base.
+    pub(crate) fn type_subst_for_enclosing_class(&self, uri: &str, cursor_line: u32) -> std::collections::HashMap<String, String> {
+        build_enclosing_class_subst(self, uri, cursor_line)
+    }
 }
 
 fn symbol_kw(kind: SymbolKind) -> &'static str {
@@ -319,8 +329,14 @@ fn find_containing_class_name(data: &crate::types::FileData, sym_line: u32) -> O
 ///
 /// Handles variance annotations (`in`, `out`) and type constraints (`T : Bound`).
 fn parse_type_params(decl: &str) -> Vec<String> {
-    let start = match decl.find('<') { Some(i) => i + 1, None => return Vec::new() };
-    let end   = match decl.rfind('>') { Some(i) => i, None => return Vec::new() };
+    // Type params always appear before the first '(' (constructor/function params).
+    // Limit search to avoid picking up angle brackets from constructor parameter types.
+    let search_region = match decl.find('(') {
+        Some(paren) => &decl[..paren],
+        None => decl,
+    };
+    let start = match search_region.find('<') { Some(i) => i + 1, None => return Vec::new() };
+    let end   = match search_region.rfind('>') { Some(i) => i, None => return Vec::new() };
     if end <= start { return Vec::new(); }
     let inner = &decl[start..end];
 
@@ -369,12 +385,13 @@ fn build_type_param_subst(
     sym_line:    u32,
     calling_uri: &str,
 ) -> std::collections::HashMap<String, String> {
-    if sym_uri == calling_uri { return Default::default(); }
+    if sym_uri == calling_uri {
+        return Default::default();
+    }
 
     let sym_data = match idx.files.get(sym_uri) {
         Some(d) => d,
         None => {
-            eprintln!("[kotlin-lsp] type_subst: sym_uri not indexed: {sym_uri}");
             return Default::default();
         }
     };
@@ -382,16 +399,13 @@ fn build_type_param_subst(
     let container_name = match find_containing_class_name(&sym_data, sym_line) {
         Some(n) => n,
         None => {
-            eprintln!("[kotlin-lsp] type_subst: no container class for line {sym_line} in {sym_uri}");
             return Default::default();
         }
     };
-    eprintln!("[kotlin-lsp] type_subst: container={container_name}");
 
     let container_sym = match sym_data.symbols.iter().find(|s| s.name == container_name) {
         Some(s) => s,
         None => {
-            eprintln!("[kotlin-lsp] type_subst: container symbol not found: {container_name}");
             return Default::default();
         }
     };
@@ -401,32 +415,186 @@ fn build_type_param_subst(
         let line_idx = container_sym.selection_range.start.line as usize;
         sym_data.lines.get(line_idx).cloned().unwrap_or_default()
     };
-    eprintln!("[kotlin-lsp] type_subst: decl_text={decl_text:?}");
-    let type_params = parse_type_params(&decl_text);
-    eprintln!("[kotlin-lsp] type_subst: type_params={type_params:?}");
+    let mut type_params = parse_type_params(&decl_text);
+    // If detail is truncated (e.g. annotation only), scan source lines for type params
+    if type_params.is_empty() {
+        let start_line = container_sym.selection_range.start.line as usize;
+        for offset in 0..5 {
+            if let Some(line) = sym_data.lines.get(start_line + offset) {
+                let params = parse_type_params(line);
+                if !params.is_empty() {
+                    type_params = params;
+                    break;
+                }
+            }
+        }
+    }
     if type_params.is_empty() { return Default::default(); }
 
     let calling_data = match idx.files.get(calling_uri) {
         Some(d) => d,
         None => {
-            eprintln!("[kotlin-lsp] type_subst: calling_uri not indexed: {calling_uri}");
             return Default::default();
         }
     };
-    eprintln!("[kotlin-lsp] type_subst: calling_file supers={:?}", calling_data.supers);
     let type_args = calling_data.supers.iter()
         .find(|(_, base, _)| base == &container_name)
         .map(|(_, _, args)| args.clone())
         .unwrap_or_default();
-    eprintln!("[kotlin-lsp] type_subst: type_args={type_args:?}");
 
     if type_args.is_empty() { return Default::default(); }
 
     let result: std::collections::HashMap<String, String> = type_params.iter().zip(type_args.iter())
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    eprintln!("[kotlin-lsp] type_subst: map={result:?}");
     result
+}
+
+/// Build a substitution map from ALL supertypes of the enclosing class at `cursor_line`.
+///
+/// For each super with type args (e.g., `FlowReducer<Event, Effect, State>`), looks up
+/// the super's type params (`EventType`, `EffectType`, `StateType`) and builds the mapping.
+/// This allows inlay hints to show concrete types instead of generic param names.
+fn build_enclosing_class_subst(
+    idx:         &Indexer,
+    uri:         &str,
+    cursor_line: u32,
+) -> std::collections::HashMap<String, String> {
+    let data = match idx.files.get(uri) { Some(d) => d, None => {
+        return Default::default();
+    }};
+
+    // Find the enclosing class
+    let class_name = match find_containing_class_name(&data, cursor_line) {
+        Some(n) => n,
+        None => {
+            return Default::default();
+        }
+    };
+
+    // Get the class symbol's line to find its supers
+    let class_sym = match data.symbols.iter().find(|s| s.name == class_name) {
+        Some(s) => s,
+        None => return Default::default(),
+    };
+    let class_line = class_sym.selection_range.start.line;
+
+    // Gather all supers with type args for this class
+    let mut result = std::collections::HashMap::new();
+
+    for (line, base_name, type_args) in data.supers.iter() {
+        if *line != class_line || type_args.is_empty() { continue; }
+
+        // Look up the super class's type parameters from its symbol detail
+        let super_sym = idx.definitions.get(base_name.as_str())
+            .and_then(|locs| locs.first().cloned());
+        if super_sym.is_none() {
+            continue;
+        }
+        let Some(super_loc) = super_sym else { continue };
+        let Some(super_data) = idx.files.get(super_loc.uri.as_str()) else {
+            continue;
+        };
+        let Some(sym) = super_data.symbols.iter().find(|s| s.name == *base_name) else {
+            continue;
+        };
+
+        let decl_text = if !sym.detail.is_empty() {
+            &sym.detail
+        } else {
+            continue;
+        };
+
+        // Try detail first; if it doesn't have type params (e.g. truncated at annotation),
+        // scan subsequent source lines for the actual class/interface declaration.
+        let mut type_params = parse_type_params(decl_text);
+        if type_params.is_empty() {
+            let start_line = sym.selection_range.start.line as usize;
+            // Look at up to 5 lines starting from the symbol's line
+            for offset in 0..5 {
+                if let Some(line) = super_data.lines.get(start_line + offset) {
+                    let params = parse_type_params(line);
+                    if !params.is_empty() {
+                        type_params = params;
+                        break;
+                    }
+                }
+            }
+        }
+        // Zip params → args
+        for (param, arg) in type_params.iter().zip(type_args.iter()) {
+            result.insert(param.clone(), arg.clone());
+        }
+    }
+
+    // Also collect substitutions from member property types.
+    // If the enclosing class has a property like `val reducer: DashboardProductsReducer`
+    // and that type extends `FlowReducer<Event, Effect, State>`, include FlowReducer's
+    // type param → concrete arg mappings.
+    for sym in data.symbols.iter() {
+        if sym.selection_range.start.line <= class_line { continue; }
+        if !matches!(sym.kind, SymbolKind::FIELD | SymbolKind::PROPERTY) { continue; }
+        // Extract type name from detail (e.g., "private val foo: SomeType by lazy")
+        let type_name = extract_property_type_name(&sym.detail);
+        if type_name.is_empty() { continue; }
+        // Look up the property type's class definition
+        let Some(locs) = idx.definitions.get(type_name) else { continue };
+        let Some(loc) = locs.first() else { continue };
+        let Some(prop_type_data) = idx.files.get(loc.uri.as_str()) else { continue };
+        // Find this type's supers and resolve their type params
+        let prop_sym = match prop_type_data.symbols.iter().find(|s| s.name == type_name) {
+            Some(s) => s,
+            None => continue,
+        };
+        let prop_class_line = prop_sym.selection_range.start.line;
+        for (line, base_name, type_args) in prop_type_data.supers.iter() {
+            if *line != prop_class_line || type_args.is_empty() { continue; }
+            // Already have these params mapped? Skip.
+            let Some(super_locs) = idx.definitions.get(base_name.as_str()) else { continue };
+            let Some(super_loc) = super_locs.first() else { continue };
+            let Some(super_file) = idx.files.get(super_loc.uri.as_str()) else { continue };
+            let Some(super_sym) = super_file.symbols.iter().find(|s| s.name == *base_name) else { continue };
+            let mut type_params = parse_type_params(&super_sym.detail);
+            if type_params.is_empty() {
+                let start = super_sym.selection_range.start.line as usize;
+                for offset in 0..5 {
+                    if let Some(line) = super_file.lines.get(start + offset) {
+                        let params = parse_type_params(line);
+                        if !params.is_empty() { type_params = params; break; }
+                    }
+                }
+            }
+            for (param, arg) in type_params.iter().zip(type_args.iter()) {
+                result.entry(param.clone()).or_insert_with(|| arg.clone());
+            }
+        }
+    }
+
+    result
+}
+
+/// Extract the simple type name from a property detail string.
+/// E.g. "private val foo: DashboardProductsReducer by lazy" → "DashboardProductsReducer"
+/// E.g. "val x: List<String>" → "List"
+fn extract_property_type_name(detail: &str) -> &str {
+    // Find ": Type" pattern
+    let colon_pos = match detail.find(':') {
+        Some(p) => p,
+        None => return "",
+    };
+    let after_colon = detail[colon_pos + 1..].trim_start();
+    // Take the first identifier (uppercase start = type name)
+    let end = after_colon.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(after_colon.len());
+    let name = &after_colon[..end];
+    if name.is_empty() || !name.chars().next().unwrap_or(' ').is_uppercase() {
+        return "";
+    }
+    name
+}
+
+/// Apply a type-parameter substitution map to a type string (public for inlay_hints).
+pub(crate) fn apply_type_subst(sig: &str, subst: &std::collections::HashMap<String, String>) -> String {
+    apply_subst(sig, subst)
 }
 
 /// Apply a type-parameter substitution map to a signature string.

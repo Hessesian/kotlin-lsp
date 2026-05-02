@@ -62,6 +62,7 @@ mod apply;
 pub(crate) use self::apply::{file_contributions, stale_keys_for, build_bare_names};
 
 mod lookup;
+pub(crate) use lookup::apply_type_subst;
 
 mod node_ext;
 pub(crate) use node_ext::NodeExt;

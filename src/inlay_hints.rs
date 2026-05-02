@@ -15,6 +15,7 @@ use tower_lsp::lsp_types::{InlayHint, InlayHintKind, InlayHintLabel, Position, R
 
 use crate::indexer::Indexer;
 use crate::indexer::NodeExt;
+use crate::indexer::apply_type_subst;
 use crate::indexer::live_tree::{lang_for_path, parse_live};
 use crate::queries::{KIND_LAMBDA_PARAMS, KIND_CALL_EXPR};
 use crate::resolver::{ReceiverKind, infer_receiver_type};
@@ -63,6 +64,11 @@ fn cst_hints(
     let mut hints  = Vec::new();
     let mut cursor = tree.walk();
 
+    // Build a generic type-param substitution map for the enclosing class context.
+    // This lets inlay hints show concrete types (e.g. `Effect`) instead of raw
+    // type params (e.g. `EffectType`) when inside a class that specialises a generic base.
+    let subst = idx.type_subst_for_enclosing_class(uri.as_str(), range.start.line);
+
     'walk: loop {
         let node = cursor.node();
         let ns = node.start_position().row as u32;
@@ -81,7 +87,7 @@ fn cst_hints(
 
         match node.kind() {
             "lambda_literal" => {
-                hint_lambda(idx, uri, &node, bytes, &starts, range, &mut hints);
+                hint_lambda(idx, uri, &node, bytes, &starts, range, &subst, &mut hints);
             }
             "simple_identifier" => {
                 if node.utf8_text(bytes) == Ok("it") {
@@ -89,7 +95,8 @@ fn cst_hints(
                     if in_range(pos.line, range) {
                         let kind = ReceiverKind::Contextual { name: "it", position: pos };
                         if let Some(rt) = infer_receiver_type(idx, kind, uri) {
-                            hints.push(type_hint(ts_pos_to_lsp(node.end_position(), &starts, bytes), &rt.raw));
+                            let ty = subst_type(&rt.raw, &subst);
+                            hints.push(type_hint(ts_pos_to_lsp(node.end_position(), &starts, bytes), &ty));
                         }
                     }
                 }
@@ -99,12 +106,13 @@ fn cst_hints(
                 if in_range(pos.line, range) {
                     let kind = ReceiverKind::Contextual { name: "this", position: pos };
                     if let Some(rt) = infer_receiver_type(idx, kind, uri) {
-                        hints.push(type_hint(ts_pos_to_lsp(node.end_position(), &starts, bytes), &rt.raw));
+                        let ty = subst_type(&rt.raw, &subst);
+                        hints.push(type_hint(ts_pos_to_lsp(node.end_position(), &starts, bytes), &ty));
                     }
                 }
             }
             "property_declaration" => {
-                hint_property(idx, uri, &node, bytes, &starts, range, &mut hints);
+                hint_property(idx, uri, &node, bytes, &starts, range, &subst, &mut hints);
             }
             _ => {}
         }
@@ -131,6 +139,7 @@ fn hint_lambda(
     bytes:  &[u8],
     starts: &[usize],
     range:  Range,
+    subst:  &std::collections::HashMap<String, String>,
     hints:  &mut Vec<InlayHint>,
 ) {
     let mut nc = node.walk();
@@ -165,7 +174,8 @@ fn hint_lambda(
             if !in_range(start_pos.line, range) { continue; }
 
             if let Some(rt) = infer_receiver_type(idx, ReceiverKind::Contextual { name, position: start_pos }, uri) {
-                hints.push(type_hint(end_pos, &rt.raw));
+                let ty = subst_type(&rt.raw, subst);
+                hints.push(type_hint(end_pos, &ty));
             }
         }
         break; // only one lambda_parameters block per literal
@@ -180,6 +190,7 @@ fn hint_property(
     bytes:  &[u8],
     starts: &[usize],
     range:  Range,
+    subst:  &std::collections::HashMap<String, String>,
     hints:  &mut Vec<InlayHint>,
 ) {
     // Find the variable_declaration child.
@@ -223,6 +234,7 @@ fn hint_property(
 
     // Derive the type name from the initializer expression.
     if let Some(ty) = infer_type_from_init(init, bytes) {
+        let ty = subst_type(&ty, subst);
         hints.push(type_hint(end_pos, &ty));
         return;
     }
@@ -233,7 +245,8 @@ fn hint_property(
             .take_while(|&c| c.is_alphanumeric() || c == '_' || c == '<' || c == '>')
             .collect();
         if !base.is_empty() {
-            hints.push(type_hint(end_pos, &base));
+            let ty = subst_type(&base, subst);
+            hints.push(type_hint(end_pos, &ty));
         }
     }
 }
@@ -267,6 +280,13 @@ fn type_hint(position: Position, type_name: &str) -> InlayHint {
         padding_right: Some(true),
         data:         None,
     }
+}
+
+/// Apply type-param substitution to an inferred type string.
+/// Returns the original string unchanged if the map is empty or no match.
+fn subst_type(ty: &str, subst: &std::collections::HashMap<String, String>) -> String {
+    if subst.is_empty() { return ty.to_owned(); }
+    apply_type_subst(ty, subst)
 }
 
 #[inline]
