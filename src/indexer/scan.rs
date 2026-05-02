@@ -58,17 +58,18 @@ impl Drop for IndexingGuard {
 
 /// Hard cap on workspace files indexed eagerly in LSP mode.
 /// Override via `KOTLIN_LSP_MAX_FILES` environment variable.
-pub(super) const DEFAULT_MAX_INDEX_FILES: usize = 2000;
+/// Default is unlimited — the parse cost per file is low enough after
+/// query/parser caching that indexing all files is the right default.
+pub(super) const DEFAULT_MAX_INDEX_FILES: usize = MAX_FILES_UNLIMITED;
 
 /// Pure: resolve the maximum number of files to eagerly index.
 ///
 /// Reads `KOTLIN_LSP_MAX_FILES` from the environment on each call.
 /// Returns `default` when the variable is absent or not a valid integer.
 ///
-/// - LSP mode callers pass `DEFAULT_MAX_INDEX_FILES` (2000).
+/// - LSP mode callers pass `DEFAULT_MAX_INDEX_FILES` (unlimited).
 /// - CLI `--index-only` callers pass `MAX_FILES_UNLIMITED`.
-///   Note: even with `MAX_FILES_UNLIMITED`, setting `KOTLIN_LSP_MAX_FILES`
-///   in the environment will still cap the count.
+///   Note: setting `KOTLIN_LSP_MAX_FILES` in the environment will still cap the count.
 pub fn resolve_max_files(default: usize) -> usize {
     std::env::var("KOTLIN_LSP_MAX_FILES")
         .ok()

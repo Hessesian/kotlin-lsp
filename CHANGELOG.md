@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.9.3
+
+- **Performance: no more file cap** — the default file limit is now unlimited. Previously the LSP mode only eagerly indexed 2000 files; larger projects (especially iOS) fell back to on-demand `rg` for deeper files. After the query/parser caching fix in 0.9.2, the per-file parse cost is low enough that indexing everything upfront is the right default. Use `KOTLIN_LSP_MAX_FILES` env var to set a custom limit if needed.
+- **Performance: cached tree-sitter queries and parsers** — `Query` objects (the compiled S-expression query automaton) are now compiled once per process via `OnceLock` and reused across all file parses. `Parser` objects are reused per worker thread via thread-local storage. Eliminates the dominant CPU cost for large iOS codebases during indexing.
+
 ## 0.9.2
 
 - **Generic type parameter substitution** — hover, inlay hints, and completion now resolve generic type parameters to their concrete types when inside a subclass. For example, if `DashboardProductsReducer : FlowReducer<Event, Effect, State>`, then `EffectType` is shown as `Effect` in inlay hints, hover tooltips, and completion detail. Works for:
