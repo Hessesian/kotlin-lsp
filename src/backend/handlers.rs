@@ -26,7 +26,13 @@ impl Backend {
         // For `it` or a named lambda param, generate hover showing the inferred type.
         if ctx.qualifier.is_none() {
             if let Some(ref rt) = ctx.contextual {
-                let type_name = &rt.raw;
+                // Apply type parameter substitution (same as inlay hints)
+                let subst = self.indexer.type_subst_for_enclosing_class(uri.as_str(), position.line);
+                let type_name = if subst.is_empty() {
+                    rt.raw.clone()
+                } else {
+                    crate::indexer::apply_type_subst(&rt.raw, &subst)
+                };
                 let lang = if uri.path().ends_with(".kt") { "kotlin" }
                            else if uri.path().ends_with(".swift") { "swift" }
                            else { "java" };
