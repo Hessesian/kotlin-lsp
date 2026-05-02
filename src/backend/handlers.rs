@@ -38,9 +38,14 @@ impl Backend {
                            else { "java" };
                 let kw = if uri.path().ends_with(".swift") { "let" } else { "val" };
                 let sig_md = format!("```{lang}\n{kw} {}: {type_name}\n```", ctx.word);
-                // For symbol lookup use the last segment of a qualified name.
-                let lookup_name = type_name.rsplit('.').next().unwrap_or(type_name.as_str());
-                let type_hover = self.indexer.hover_info(lookup_name, Some(uri.as_str()));
+                // Resolve the type using the same path as go-to-definition (import-aware)
+                let leaf = type_name.rsplit('.').next().unwrap_or(type_name.as_str());
+                let locs = self.indexer.find_definition_qualified(leaf, None, uri);
+                let type_hover = if let Some(loc) = locs.first() {
+                    self.indexer.hover_info_at_location(loc, leaf, Some(uri.as_str()))
+                } else {
+                    self.indexer.hover_info(leaf, Some(uri.as_str()))
+                };
                 let full = if let Some(th) = type_hover {
                     format!("{sig_md}\n\n---\n\n{th}")
                 } else {
