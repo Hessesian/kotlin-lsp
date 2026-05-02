@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.9.2
+
+- **Generic type parameter substitution** — hover, inlay hints, and completion now resolve generic type parameters to their concrete types when inside a subclass. For example, if `DashboardProductsReducer : FlowReducer<Event, Effect, State>`, then `EffectType` is shown as `Effect` in inlay hints, hover tooltips, and completion detail. Works for:
+  - Enclosing class supertypes (e.g. `FlowReducer<Event, Effect, State>`)
+  - Member property type hierarchies (e.g. a `val reducer: DashboardProductsReducer` in a ViewModel gives access to `FlowReducer`'s param substitution)
+  - Annotated classes where the declaration line is an annotation (scans up to 5 source lines to find the actual `<TypeParams>`)
+- **Hover/inlay hint consistency** — `it`/lambda param hover now uses the same import-aware resolution as go-to-definition (`resolve_symbol` → local → imports → same-package → hierarchy), fixing cases where hover showed the wrong type (e.g. a deprecated enum instead of the local data class)
+- **Hover applies enclosing-class substitution** — `it`/`this` hover applies the same substitution map as inlay hints (was previously using raw inferred type)
+- **`parse_type_params` fix** — now only looks for `<>` before the first `(`, avoiding false matches on constructor parameter generic types
+
 ## 0.9.1
 
 - **CST inlay hints** — inlay hint computation replaced with a tree-sitter preorder walk; no longer scans line-by-line. `line_starts` precomputed for O(1) offset lookups; `hint_property` now uses CST initializer inference for untyped `val`/`var`.
