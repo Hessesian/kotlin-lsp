@@ -47,13 +47,25 @@ pub trait IndexRead {
 /// Resolve a named symbol from a cursor position. Returns None when not found.
 pub fn resolve_symbol_info<I: IndexRead>(
     _index: &I,
-    _name: &str,
+    name: &str,
     _qualifier: Option<&str>,
     _from_uri: &Url,
     _subst_ctx: SubstitutionContext<'_>,
     _options: &ResolveOptions,
 ) -> Option<ResolvedSymbol> {
     // Stub: implementation will be added in next phases.
+    // Phase 2 will implement the full pipeline:
+    // 1. locate via resolve_symbol or definitions.get
+    // 2. load FileData for resolved location
+    // 3. find SymbolEntry at location
+    // 4. extract canonical signature (detail || collect_signature)
+    // 5. build substitution map (based on SubstitutionContext)
+    // 6. apply substitution to get display signature
+    // 7. extract doc (if options.include_doc)
+    // 8. return ResolvedSymbol
+    
+    // TODO: For now, just show that we're not returning error
+    eprintln!("resolve_symbol_info stub for: {}", name);
     None
 }
 
