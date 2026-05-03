@@ -16,6 +16,7 @@ pub use crate::rg::SOURCE_EXTENSIONS;
 mod doc;
 
 mod infer;
+mod resolution;
 // Re-export pure helpers from submodules so existing callers within this file
 // and the inline test module (`use super::*`) continue to resolve them by name.
 #[allow(unused_imports)]
