@@ -2,9 +2,10 @@
 // Phase 1: types, traits and stubs. Will be filled in incrementally.
 
 use std::collections::HashMap;
-use url::Url;
+use tower_lsp::lsp_types::{Url, SymbolKind};
 
-use crate::types::{Location, SymbolKind, ReceiverType};
+use crate::indexer::Location;
+use crate::resolver::ReceiverType;
 
 /// Domain-level resolution result. Small, owned data suitable for LSP adapters.
 pub struct ResolvedSymbol {
@@ -72,10 +73,26 @@ pub fn build_subst_map<I: IndexRead>(_index: &I, _uri: &str, _cursor_line: u32) 
     HashMap::new()
 }
 
+// ─── Indexer impl (production) ───────────────────────────────────────────────
+
+// Implement IndexRead for Indexer: production code doesn't use the trait,
+// but this enables unit tests to use a TestIndex stub.
+impl IndexRead for super::Indexer {
+    fn get_file_lines(&self, uri: &str) -> Option<Vec<String>> {
+        self.files
+            .get(uri)
+            .map(|rf| rf.lines.as_ref().as_slice().to_vec())
+    }
+
+    fn get_definitions(&self, name: &str) -> Option<Vec<Location>> {
+        self.definitions.get(name).map(|rf| rf.clone())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use url::Url;
+    use tower_lsp::lsp_types::Url;
 
     struct TestIndex;
     impl IndexRead for TestIndex {
