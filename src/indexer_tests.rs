@@ -1304,6 +1304,7 @@ fn stale_keys_includes_both_qualified_aliases() {
         range: Default::default(),
         selection_range: Default::default(),
         detail: String::new(),
+        type_params: Vec::new(),
     };
     data.symbols.push(sym);
     let stale = super::stale_keys_for(&uri, &data);
@@ -1324,6 +1325,7 @@ fn stale_keys_stem_equals_sym_no_alias() {
         range: Default::default(),
         selection_range: Default::default(),
         detail: String::new(),
+        type_params: Vec::new(),
     };
     data.symbols.push(sym);
     let stale = super::stale_keys_for(&uri, &data);

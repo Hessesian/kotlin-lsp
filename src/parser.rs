@@ -11,7 +11,7 @@ use crate::queries::{self, KOTLIN_DEFINITIONS, SWIFT_DEFINITIONS,
     KIND_USER_TYPE, KIND_FUN_DECL};
 use crate::types::{FileData, ImportEntry, SymbolEntry, SyntaxError, Visibility};
 
-type MatchEntry = (usize, [Option<(String, Range, Range)>; 2]);
+type MatchEntry = (usize, [Option<(String, Range, Range, Vec<String>)>; 2]);
 
 // ─── cached query objects ────────────────────────────────────────────────────
 //
@@ -160,16 +160,16 @@ pub fn parse_swift(content: &str) -> FileData {
         .map(|m| {
             let (pidx, slot) = map_def_captures(&m, def_idx, name_idx, bytes);
             if pidx == queries::SWIFT_INIT_PATTERN_IDX && slot[0].is_none() {
-                // init_declaration — no @name, synthesize "init"
-                let def_range = m.captures.iter()
-                    .find(|cap| cap.index == def_idx)
-                    .map(|cap| ts_to_lsp(cap.node.range()));
-                if let Some(dr) = def_range {
+                // init_declaration — no @name, synthesize "init"; type_params from @def node.
+                let def_cap = m.captures.iter().find(|cap| cap.index == def_idx);
+                if let Some(cap) = def_cap {
+                    let dr = ts_to_lsp(cap.node.range());
                     let sel = Range::new(
                         Position::new(dr.start.line, dr.start.character),
                         Position::new(dr.start.line, dr.start.character + queries::SWIFT_INIT_NAME.len() as u32),
                     );
-                    return (pidx, [Some((queries::SWIFT_INIT_NAME.to_owned(), dr, sel)), None]);
+                    let type_params = cap.node.extract_type_params(bytes);
+                    return (pidx, [Some((queries::SWIFT_INIT_NAME.to_owned(), dr, sel, type_params)), None]);
                 }
             }
             (pidx, slot)
@@ -220,19 +220,22 @@ fn map_def_captures<'c, 't>(
     bytes: &[u8],
 ) -> MatchEntry {
     let pidx = m.pattern_index;
+    let mut def_node:   Option<tree_sitter::Node> = None;
     let mut def_range:  Option<Range> = None;
     let mut name_text:  Option<String> = None;
     let mut name_range: Option<Range> = None;
     for cap in m.captures.iter() {
         if cap.index == def_idx {
+            def_node  = Some(cap.node);
             def_range = Some(ts_to_lsp(cap.node.range()));
         } else if cap.index == name_idx {
             name_text  = cap.node.utf8_text_owned(bytes);
             name_range = Some(ts_to_lsp(cap.node.range()));
         }
     }
-    let slot = if let (Some(dr), Some(nt), Some(nr)) = (def_range, name_text, name_range) {
-        [Some((nt, dr, nr)), None]
+    let slot = if let (Some(dn), Some(dr), Some(nt), Some(nr)) = (def_node, def_range, name_text, name_range) {
+        let type_params = dn.extract_type_params(bytes);
+        [Some((nt, dr, nr, type_params)), None]
     } else {
         [None, None]
     };
@@ -246,14 +249,14 @@ fn map_def_captures<'c, 't>(
 /// with the **lowest** pattern index — lower index = more specific pattern.
 fn dedup_matches(
     matches: &[MatchEntry],
-) -> std::collections::BTreeMap<(u32, u32), (usize, String, Range, Range)> {
+) -> std::collections::BTreeMap<(u32, u32), (usize, String, Range, Range, Vec<String>)> {
     let mut best = std::collections::BTreeMap::new();
     for (pidx, slot) in matches {
-        if let Some((name, range, sel)) = slot[0].clone() {
+        if let Some((name, range, sel, type_params)) = slot[0].clone() {
             let key = (sel.start.line, sel.start.character);
-            let is_better = best.get(&key).map(|(ep, _, _, _)| pidx < ep).unwrap_or(true);
+            let is_better = best.get(&key).map(|(ep, _, _, _, _)| pidx < ep).unwrap_or(true);
             if is_better {
-                best.insert(key, (*pidx, name, range, sel));
+                best.insert(key, (*pidx, name, range, sel, type_params));
             }
         }
     }
@@ -264,18 +267,18 @@ fn dedup_matches(
 /// to `symbols`.  `pattern_meta` maps a pattern index to `(SymbolKind, label)`;
 /// `vis_fn` detects the visibility modifier from source lines.
 fn push_def_symbols(
-    best: std::collections::BTreeMap<(u32, u32), (usize, String, Range, Range)>,
+    best: std::collections::BTreeMap<(u32, u32), (usize, String, Range, Range, Vec<String>)>,
     pattern_meta: fn(usize) -> (SymbolKind, Option<&'static str>),
     vis_fn: fn(&[String], usize) -> Visibility,
     lines: &[String],
     symbols: &mut Vec<SymbolEntry>,
 ) {
-    for (_, (pidx, name, range, sel)) in best {
+    for (_, (pidx, name, range, sel, type_params)) in best {
         let (kind, _) = pattern_meta(pidx);
         if kind != SymbolKind::NULL {
             let visibility = vis_fn(lines, sel.start.line as usize);
             let detail = extract_detail(lines, range.start.line, range.end.line);
-            symbols.push(SymbolEntry { name, kind, visibility, range, selection_range: sel, detail });
+            symbols.push(SymbolEntry { name, kind, visibility, range, selection_range: sel, detail, type_params });
         }
     }
 }
@@ -335,6 +338,7 @@ fn push_field_declaration(node: &Node, bytes: &[u8], data: &mut FileData) {
                 range: nr,
                 selection_range: sel,
                 detail: detail.clone(),
+                type_params: Vec::new(), // fields are never generic
             });
         }
     }
@@ -356,10 +360,11 @@ fn push_java_import(node: &Node, bytes: &[u8], data: &mut FileData) {
 
 fn push_named(node: &Node, bytes: &[u8], kind: SymbolKind, data: &mut FileData) {
     if let Some((name, sel)) = first_identifier(node, bytes) {
-        let visibility = visibility_at_line(&data.lines, node.range().start_point.row);
-        let range = ts_to_lsp(node.range());
-        let detail = extract_detail(&data.lines, range.start.line, range.end.line);
-        data.symbols.push(SymbolEntry { name, kind, visibility, range, selection_range: sel, detail });
+        let visibility  = visibility_at_line(&data.lines, node.range().start_point.row);
+        let range       = ts_to_lsp(node.range());
+        let detail      = extract_detail(&data.lines, range.start.line, range.end.line);
+        let type_params = node.extract_type_params(bytes);
+        data.symbols.push(SymbolEntry { name, kind, visibility, range, selection_range: sel, detail, type_params });
     }
 }
 
@@ -462,12 +467,22 @@ fn fun_interface_name_from_fn_decl(node: &Node, bytes: &[u8]) -> Option<(usize, 
     None
 }
 
-fn push_interface_symbol(name: &str, node: &Node, sel_node_range: tree_sitter::Range, data: &mut FileData) {
-    let visibility = visibility_at_line(&data.lines, node.range().start_point.row);
-    let range      = ts_to_lsp(node.range());
-    let sel        = ts_to_lsp(sel_node_range);
-    let detail     = extract_detail(&data.lines, range.start.line, range.end.line);
-    data.symbols.push(SymbolEntry { name: name.to_owned(), kind: SymbolKind::INTERFACE, visibility, range, selection_range: sel, detail });
+fn push_interface_symbol(name: &str, node: &Node, sel_node_range: tree_sitter::Range, bytes: &[u8], data: &mut FileData) {
+    let visibility  = visibility_at_line(&data.lines, node.range().start_point.row);
+    let range       = ts_to_lsp(node.range());
+    let sel         = ts_to_lsp(sel_node_range);
+    let detail      = extract_detail(&data.lines, range.start.line, range.end.line);
+    // fun interface nodes are mis-parsed (ERROR or function_declaration), so the
+    // type_parameters CST child may not be present; fall back to string parsing.
+    let type_params = {
+        let cst_params = node.extract_type_params(bytes);
+        if cst_params.is_empty() {
+            crate::indexer::parse_type_params_from_decl(&detail)
+        } else {
+            cst_params
+        }
+    };
+    data.symbols.push(SymbolEntry { name: name.to_owned(), kind: SymbolKind::INTERFACE, visibility, range, selection_range: sel, detail, type_params });
 }
 
 /// Walk the parse tree and emit INTERFACE symbols for every `fun interface Foo` declaration.
@@ -484,7 +499,7 @@ fn extract_fun_interfaces(root: Node, bytes: &[u8], data: &mut FileData) {
         if node.is_error() && is_fun_interface_error(&node, bytes) {
             if let Some(child) = node.first_child_of_kind(KIND_SIMPLE_IDENT) {
                 if let Ok(name) = child.utf8_text(bytes) {
-                    push_interface_symbol(name, &node, child.range(), data);
+                    push_interface_symbol(name, &node, child.range(), bytes, data);
                 }
             }
             // Don't recurse further into ERROR children.
@@ -499,7 +514,7 @@ fn extract_fun_interfaces(root: Node, bytes: &[u8], data: &mut FileData) {
                     !(s.name == name && s.selection_range.start.line == sel.start.line
                       && matches!(s.kind, SymbolKind::FUNCTION | SymbolKind::METHOD))
                 });
-                push_interface_symbol(name, &node, name_ts_range, data);
+                push_interface_symbol(name, &node, name_ts_range, bytes, data);
             }
             // Still recurse into children to find nested fun interfaces.
         }

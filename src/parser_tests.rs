@@ -602,8 +602,8 @@ class LoanReducer {
         let sel   = Range::new(Position::new(1, 0), Position::new(1, 3));
         let range = sel;
         let matches: Vec<MatchEntry> = vec![
-            (2, [Some(("Foo".into(), range, sel)), None]),
-            (0, [Some(("Foo".into(), range, sel)), None]),
+            (2, [Some(("Foo".into(), range, sel, vec![])), None]),
+            (0, [Some(("Foo".into(), range, sel, vec![])), None]),
         ];
         let best = dedup_matches(&matches);
         assert_eq!(best.len(), 1);
@@ -679,4 +679,38 @@ class LoanReducer {
     fn visibility_swift_open_is_public() {
         let lines: Vec<String> = vec!["open class Foo {}".into()];
         assert_eq!(swift_visibility_at_line(&lines, 0), crate::types::Visibility::Public);
+    }
+
+    // ── type_params extraction ──────────────────────────────────────────────
+
+    #[test]
+    fn kotlin_generic_class_has_type_params() {
+        let src = "class Box<T, U>(val value: T) {}";
+        let data = parse_kotlin(src);
+        let s = sym(&data, "Box").expect("Box not found");
+        assert_eq!(s.type_params, vec!["T", "U"]);
+    }
+
+    #[test]
+    fn kotlin_generic_interface_has_type_params() {
+        let src = "interface FlowReducer<in Event, out Effect, State> {}";
+        let data = parse_kotlin(src);
+        let s = sym(&data, "FlowReducer").expect("FlowReducer not found");
+        assert_eq!(s.type_params, vec!["Event", "Effect", "State"]);
+    }
+
+    #[test]
+    fn kotlin_non_generic_class_has_empty_type_params() {
+        let src = "class Plain {}";
+        let data = parse_kotlin(src);
+        let s = sym(&data, "Plain").expect("Plain not found");
+        assert!(s.type_params.is_empty(), "expected empty type_params, got {:?}", s.type_params);
+    }
+
+    #[test]
+    fn java_generic_class_has_type_params() {
+        let src = "public class Pair<A, B> { public A first; public B second; }";
+        let data = parse_java(src);
+        let s = sym(&data, "Pair").expect("Pair not found");
+        assert_eq!(s.type_params, vec!["A", "B"]);
     }

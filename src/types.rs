@@ -39,6 +39,11 @@ pub struct SymbolEntry {
     /// Empty string when not computed.
     #[serde(default)]
     pub detail:           String,
+    /// Generic type parameter names extracted from the CST at parse time.
+    /// e.g. `class Foo<T, U>` → `["T", "U"]`.
+    /// Empty for non-generic symbols.
+    #[serde(default)]
+    pub type_params:      Vec<String>,
 }
 
 /// One import statement parsed from a Kotlin file.

@@ -119,11 +119,6 @@ fn extract_canonical_signature(sym: &SymbolEntry, data: &FileData) -> String {
     }
 }
 
-/// Parse type parameters from a declaration string (e.g., "class Foo<T, U>").
-fn parse_type_params(decl: &str) -> Vec<String> {
-    super::parse_type_params_from_decl(decl)
-}
-
 /// Apply type-parameter substitution to a signature string.
 fn apply_subst(sig: &str, subst: &HashMap<String, String>) -> String {
     super::apply_type_subst(sig, subst)
@@ -228,15 +223,28 @@ fn build_type_param_subst_impl<I: IndexRead>(
         None => return HashMap::new(),
     };
 
-    let _container_sym = match sym_data.symbols.iter().find(|s| s.name == container_name) {
+    let container_sym = match sym_data.symbols.iter().find(|s| s.name == container_name) {
         Some(s) => s,
         None => return HashMap::new(),
     };
 
-    // TODO: Implement full cross-file substitution logic (phases 2a)
-    // For now, stub to ensure compilation
-    let _ = index.get_file_data(calling_uri);
-    HashMap::new()
+    let type_params = &container_sym.type_params;
+    if type_params.is_empty() { return HashMap::new(); }
+
+    let calling_data = match index.get_file_data(calling_uri) {
+        Some(d) => d,
+        None => return HashMap::new(),
+    };
+    let type_args = calling_data.supers.iter()
+        .find(|(_, base, _)| base == &container_name)
+        .map(|(_, _, args)| args.clone())
+        .unwrap_or_default();
+
+    if type_args.is_empty() { return HashMap::new(); }
+
+    type_params.iter().zip(type_args.iter())
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
 }
 
 /// Build substitution for enclosing class's type parameters.
@@ -260,19 +268,21 @@ fn build_enclosing_class_subst_impl<I: IndexRead>(
         None => return HashMap::new(),
     };
 
-    let class_line = class_sym.selection_range.start.line;
-    let mut result = HashMap::new();
+    let type_params = &class_sym.type_params;
+    if type_params.is_empty() { return HashMap::new(); }
 
+    let class_line = class_sym.selection_range.start.line;
+
+    // Collect all supers of this class, zipping their type args against the class's type params.
+    let mut result = HashMap::new();
     for (line, _base_name, type_args) in data.supers.iter() {
         if *line != class_line || type_args.is_empty() {
             continue;
         }
-
-        // TODO: Implement full enclosing class substitution (phases 2b)
-        // For now, stub to ensure compilation
-        let _ = (type_args, index);
+        for (param, arg) in type_params.iter().zip(type_args.iter()) {
+            result.entry(param.clone()).or_insert_with(|| arg.clone());
+        }
     }
-
     result
 }
 
@@ -344,14 +354,14 @@ mod tests {
     #[test]
     fn parse_type_params_handles_simple_case() {
         let decl = "class Foo<T, U>";
-        let params = parse_type_params(decl);
+        let params = super::super::parse_type_params_from_decl(decl);
         assert_eq!(params, vec!["T", "U"]);
     }
 
     #[test]
     fn parse_type_params_handles_constraints() {
         let decl = "class Foo<T: Any, U>";
-        let params = parse_type_params(decl);
+        let params = super::super::parse_type_params_from_decl(decl);
         assert_eq!(params, vec!["T", "U"]);
     }
 
@@ -382,6 +392,7 @@ mod tests {
             range:           make_range(start_line, end_line),
             selection_range: make_range(start_line, start_line),
             detail:          String::new(),
+            type_params:     Vec::new(),
         }
     }
 

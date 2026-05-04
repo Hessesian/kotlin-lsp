@@ -323,15 +323,6 @@ fn find_containing_class_name(data: &crate::types::FileData, sym_line: u32) -> O
         .map(|s| s.name.clone())
 }
 
-/// Parse type parameter names from a class/interface declaration line or detail string.
-///
-/// e.g. `"interface FlowReducer<EventType, out EffectType, StateType>"` → `["EventType", "EffectType", "StateType"]`
-///
-/// Handles variance annotations (`in`, `out`) and type constraints (`T : Bound`).
-fn parse_type_params(decl: &str) -> Vec<String> {
-    super::parse_type_params_from_decl(decl)
-}
-
 /// Build a type-parameter → concrete-type substitution map for a symbol declared
 /// inside a generic class/interface when viewed from a specialised subtype.
 ///
@@ -353,51 +344,25 @@ fn build_type_param_subst(
 
     let sym_data = match idx.files.get(sym_uri) {
         Some(d) => d,
-        None => {
-            return Default::default();
-        }
+        None => return Default::default(),
     };
 
     let container_name = match find_containing_class_name(&sym_data, sym_line) {
         Some(n) => n,
-        None => {
-            return Default::default();
-        }
+        None    => return Default::default(),
     };
 
     let container_sym = match sym_data.symbols.iter().find(|s| s.name == container_name) {
         Some(s) => s,
-        None => {
-            return Default::default();
-        }
+        None    => return Default::default(),
     };
-    let decl_text = if !container_sym.detail.is_empty() {
-        container_sym.detail.clone()
-    } else {
-        let line_idx = container_sym.selection_range.start.line as usize;
-        sym_data.lines.get(line_idx).cloned().unwrap_or_default()
-    };
-    let mut type_params = parse_type_params(&decl_text);
-    // If detail is truncated (e.g. annotation only), scan source lines for type params
-    if type_params.is_empty() {
-        let start_line = container_sym.selection_range.start.line as usize;
-        for offset in 0..5 {
-            if let Some(line) = sym_data.lines.get(start_line + offset) {
-                let params = parse_type_params(line);
-                if !params.is_empty() {
-                    type_params = params;
-                    break;
-                }
-            }
-        }
-    }
+
+    let type_params = &container_sym.type_params;
     if type_params.is_empty() { return Default::default(); }
 
     let calling_data = match idx.files.get(calling_uri) {
         Some(d) => d,
-        None => {
-            return Default::default();
-        }
+        None    => return Default::default(),
     };
     let type_args = calling_data.supers.iter()
         .find(|(_, base, _)| base == &container_name)
@@ -406,10 +371,9 @@ fn build_type_param_subst(
 
     if type_args.is_empty() { return Default::default(); }
 
-    let result: std::collections::HashMap<String, String> = type_params.iter().zip(type_args.iter())
+    type_params.iter().zip(type_args.iter())
         .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
-    result
+        .collect()
 }
 
 /// Build a substitution map from ALL supertypes of the enclosing class at `cursor_line`.
@@ -461,28 +425,7 @@ fn build_enclosing_class_subst(
             continue;
         };
 
-        let decl_text = if !sym.detail.is_empty() {
-            &sym.detail
-        } else {
-            continue;
-        };
-
-        // Try detail first; if it doesn't have type params (e.g. truncated at annotation),
-        // scan subsequent source lines for the actual class/interface declaration.
-        let mut type_params = parse_type_params(decl_text);
-        if type_params.is_empty() {
-            let start_line = sym.selection_range.start.line as usize;
-            // Look at up to 5 lines starting from the symbol's line
-            for offset in 0..5 {
-                if let Some(line) = super_data.lines.get(start_line + offset) {
-                    let params = parse_type_params(line);
-                    if !params.is_empty() {
-                        type_params = params;
-                        break;
-                    }
-                }
-            }
-        }
+        let type_params = &sym.type_params;
         // Zip params → args
         for (param, arg) in type_params.iter().zip(type_args.iter()) {
             result.insert(param.clone(), arg.clone());
@@ -516,16 +459,7 @@ fn build_enclosing_class_subst(
             let Some(super_loc) = super_locs.first() else { continue };
             let Some(super_file) = idx.files.get(super_loc.uri.as_str()) else { continue };
             let Some(super_sym) = super_file.symbols.iter().find(|s| s.name == *base_name) else { continue };
-            let mut type_params = parse_type_params(&super_sym.detail);
-            if type_params.is_empty() {
-                let start = super_sym.selection_range.start.line as usize;
-                for offset in 0..5 {
-                    if let Some(line) = super_file.lines.get(start + offset) {
-                        let params = parse_type_params(line);
-                        if !params.is_empty() { type_params = params; break; }
-                    }
-                }
-            }
+            let type_params = &super_sym.type_params;
             for (param, arg) in type_params.iter().zip(type_args.iter()) {
                 result.entry(param.clone()).or_insert_with(|| arg.clone());
             }

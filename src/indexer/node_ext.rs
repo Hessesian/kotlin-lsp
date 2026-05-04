@@ -66,6 +66,17 @@ pub(crate) trait NodeExt<'a>: Sized + Copy {
     /// Returns an empty vec when no `type_arguments` child exists.
     fn type_arg_strings(self, bytes: &[u8]) -> Vec<String>;
 
+    /// Extract type parameter *names* from the `type_parameters` child of a class,
+    /// interface, function, or protocol declaration node.
+    ///
+    /// Works identically for Kotlin, Java, and Swift:
+    ///   `type_parameters → type_parameter → type_identifier`
+    ///
+    /// Variance annotations (`in`/`out` in Kotlin) and bounds (`: Bound`) are
+    /// sibling nodes, not part of the `type_identifier`, so they are naturally
+    /// skipped.  Returns an empty vec for non-generic nodes.
+    fn extract_type_params(self, bytes: &[u8]) -> Vec<String>;
+
     /// Returns the line number (0-based) of the first named identifier child,
     /// or the node's own start line if no named child is found.
     fn name_line(self) -> u32;
@@ -279,6 +290,19 @@ impl<'a> NodeExt<'a> for Node<'a> {
         // text is like "<Event, Effect, State>" or "<Map<K,V>, String>"
         let inner = text.trim_start_matches('<').trim_end_matches('>');
         split_depth0_commas(inner)
+    }
+
+    fn extract_type_params(self, bytes: &[u8]) -> Vec<String> {
+        let Some(tp) = self.first_child_of_kind("type_parameters") else { return Vec::new() };
+        let mut result = Vec::new();
+        for param in tp.children_of_kind("type_parameter") {
+            if let Some(id) = param.first_child_of_kind("type_identifier") {
+                if let Some(name) = id.utf8_text_owned(bytes) {
+                    result.push(name);
+                }
+            }
+        }
+        result
     }
 
     fn name_line(self) -> u32 {
