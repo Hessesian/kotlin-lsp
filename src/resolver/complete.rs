@@ -301,6 +301,15 @@ pub(crate) fn complete_dot(idx: &Indexer, receiver: &str, from_uri: &Url, snippe
     // Filter out private members — they are inaccessible from outside the class.
     items.retain(|i| i.sort_text.as_deref().map(|s| !s.starts_with("prv:")).unwrap_or(true));
 
+    // Walk the inheritance hierarchy to include members from parent classes/interfaces.
+    // Tracks "file_uri#TypeName" to prevent cycles; seed with the direct type.
+    let mut visited = vec![format!("{}#{}", file_uri, rt.leaf)];
+    collect_inherited_members(idx, &file_uri, &rt.leaf, from_uri, &mut visited, 0, &mut items, snippets);
+
+    // Deduplicate by label: direct members win over inherited ones (they come first).
+    let mut seen_labels = std::collections::HashSet::new();
+    items.retain(|i| seen_labels.insert(i.label.clone()));
+
     // Strip snippet fields if client doesn't support them.
     if !snippets {
         for item in &mut items {
@@ -324,6 +333,66 @@ pub(crate) fn complete_dot(idx: &Indexer, receiver: &str, from_uri: &Url, snippe
     }
 
     items
+}
+
+/// Recursively collect members from parent classes/interfaces of `type_name`
+/// (defined in `file_uri`) and append them to `out`.
+///
+/// `visited` tracks `"file_uri#TypeName"` pairs to prevent infinite cycles.
+/// Only non-private members are added (matching `complete_dot` behaviour).
+fn collect_inherited_members(
+    idx:         &Indexer,
+    file_uri:    &str,
+    type_name:   &str,
+    calling_uri: &Url,
+    visited:     &mut Vec<String>,
+    depth:       u8,
+    out:         &mut Vec<CompletionItem>,
+    snippets:    bool,
+) {
+    const MAX_DEPTH: u8 = 4;
+    if depth >= MAX_DEPTH { return; }
+
+    // Find the class's declaration line, then fetch its supertype names.
+    let supers: Vec<String> = {
+        let data = match idx.files.get(file_uri) {
+            Some(d) => d,
+            None    => return,
+        };
+        let class_line = data.symbols.iter()
+            .find(|s| s.name == type_name)
+            .map(|s| s.selection_range.start.line);
+        match class_line {
+            Some(line) => data.supers.iter()
+                .filter(|(l, _, _)| *l == line)
+                .map(|(_, n, _)| n.clone())
+                .collect(),
+            // Fallback if type not found: walk all supers in file.
+            None => data.supers.iter().map(|(_, n, _)| n.clone()).collect(),
+        }
+    };
+
+    let type_url = match Url::parse(file_uri) { Ok(u) => u, Err(_) => return };
+
+    for super_name in supers {
+        let super_locs = resolve_symbol_inner(idx, &super_name, &type_url, false);
+        for loc in &super_locs {
+            let key = format!("{}#{}", loc.uri.as_str(), super_name);
+            if visited.contains(&key) { continue; }
+            visited.push(key);
+
+            let mut inherited = symbols_from_nested_type(
+                idx, loc.uri.as_str(), &super_name, Some(calling_uri.as_str()),
+            );
+            inherited.retain(|i| i.sort_text.as_deref().map(|s| !s.starts_with("prv:")).unwrap_or(true));
+            if !snippets {
+                for item in &mut inherited { item.insert_text = None; item.insert_text_format = None; }
+            }
+            out.extend(inherited);
+
+            collect_inherited_members(idx, loc.uri.as_str(), &super_name, calling_uri, visited, depth + 1, out, snippets);
+        }
+    }
 }
 
 /// Build a `CompletionItem` for a symbol found inside a nested type body.

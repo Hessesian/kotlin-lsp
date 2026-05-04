@@ -871,6 +871,33 @@ data class State(
         assert!(!labels.contains(&"topLevelHelper"), "top-level fn must NOT leak into dot completions");
     }
 
+    #[test]
+    fn dot_complete_includes_inherited_members() {
+        // `AccountDetailResponseBody` extends `Account` (Java-style parent).
+        // Dot-completion on an instance of `AccountDetailResponseBody` must include
+        // fields declared in the parent `Account` class.
+        let account_uri  = uri("/Account.kt");
+        let response_uri = uri("/AccountDetailResponseBody.kt");
+        let caller_uri   = uri("/Caller.kt");
+        let idx = Indexer::new();
+
+        idx.index_content(&account_uri,
+            "package com.example\nopen class Account {\n    val accountName: String = \"\"\n    val accountId: String = \"\"\n}");
+        idx.index_content(&response_uri,
+            "package com.example\ndata class AccountDetailResponseBody(\n    val feePlanName: String?\n) : Account()");
+        idx.index_content(&caller_uri,
+            "package com.example\nval resp: AccountDetailResponseBody = TODO()");
+
+        let items = complete_dot(&idx, "AccountDetailResponseBody", &caller_uri, false);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+
+        // Direct members
+        assert!(labels.contains(&"feePlanName"), "direct field should appear");
+        // Inherited members from Account
+        assert!(labels.contains(&"accountName"), "inherited field from parent must appear");
+        assert!(labels.contains(&"accountId"),   "inherited field from parent must appear");
+    }
+
     // ── complete_bare distance sorting ───────────────────────────────────────
 
     #[test]
