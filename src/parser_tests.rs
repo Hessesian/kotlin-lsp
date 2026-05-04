@@ -609,3 +609,74 @@ class LoanReducer {
         assert_eq!(best.len(), 1);
         assert_eq!(best.values().next().unwrap().0, 0, "pidx 0 should win over pidx 2");
     }
+
+    // ── Swift supers extraction ──────────────────────────────────────────────
+
+    fn supers_names(data: &FileData) -> Vec<String> {
+        data.supers.iter().map(|(_, name, _)| name.clone()).collect()
+    }
+
+    #[test]
+    fn swift_supers_class() {
+        let data = parse_swift("class Foo: UIViewController, Sendable {}");
+        let names = supers_names(&data);
+        assert!(names.contains(&"UIViewController".to_owned()), "missing UIViewController; got: {names:?}");
+        assert!(names.contains(&"Sendable".to_owned()), "missing Sendable; got: {names:?}");
+    }
+
+    #[test]
+    fn swift_supers_protocol() {
+        let data = parse_swift("protocol P: Q, R {}");
+        let names = supers_names(&data);
+        assert!(names.contains(&"Q".to_owned()), "missing Q; got: {names:?}");
+        assert!(names.contains(&"R".to_owned()), "missing R; got: {names:?}");
+    }
+
+    #[test]
+    fn swift_supers_struct() {
+        let data = parse_swift("struct Point: Drawable {}");
+        let names = supers_names(&data);
+        assert!(names.contains(&"Drawable".to_owned()), "missing Drawable; got: {names:?}");
+    }
+
+    #[test]
+    fn swift_supers_extension() {
+        let data = parse_swift("extension Point: Hashable, Equatable {}");
+        let names = supers_names(&data);
+        assert!(names.contains(&"Hashable".to_owned()), "missing Hashable; got: {names:?}");
+        assert!(names.contains(&"Equatable".to_owned()), "missing Equatable; got: {names:?}");
+    }
+
+    #[test]
+    fn swift_supers_with_generic_base() {
+        let data = parse_swift("class Foo: Bar<Baz> {}");
+        let names = supers_names(&data);
+        // Base name "Bar" is captured; generic param stripped by user_type_name
+        assert!(names.contains(&"Bar".to_owned()), "missing Bar; got: {names:?}");
+    }
+
+    // ── visibility ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn visibility_kotlin_defaults_public() {
+        let lines: Vec<String> = vec!["fun foo() {}".into()];
+        assert_eq!(visibility_at_line(&lines, 0), crate::types::Visibility::Public);
+    }
+
+    #[test]
+    fn visibility_kotlin_private() {
+        let lines: Vec<String> = vec!["private fun foo() {}".into()];
+        assert_eq!(visibility_at_line(&lines, 0), crate::types::Visibility::Private);
+    }
+
+    #[test]
+    fn visibility_swift_defaults_internal() {
+        let lines: Vec<String> = vec!["func foo() {}".into()];
+        assert_eq!(swift_visibility_at_line(&lines, 0), crate::types::Visibility::Internal);
+    }
+
+    #[test]
+    fn visibility_swift_open_is_public() {
+        let lines: Vec<String> = vec!["open class Foo {}".into()];
+        assert_eq!(swift_visibility_at_line(&lines, 0), crate::types::Visibility::Public);
+    }

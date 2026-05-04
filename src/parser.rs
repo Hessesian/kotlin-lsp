@@ -183,6 +183,9 @@ pub fn parse_swift(content: &str) -> FileData {
     // ── imports (manual tree walk — Swift imports are simpler) ────────────────
     data.extract_swift_imports(root, bytes);
 
+    // ── supertype relationships (inheritance specifiers) ──────────────────────
+    data.extract_supers_swift(root, bytes);
+
     // ── declared_names ───────────────────────────────────────────────────────
     data.declared_names = extract_declared_names(&data.lines);
 
@@ -783,19 +786,12 @@ fn extract_swift_imports(root: tree_sitter::Node, bytes: &[u8], data: &mut FileD
 ///
 /// Multi-line modifier blocks (rare) are NOT handled; they default to Public.
 pub(crate) fn visibility_at_line(lines: &[String], line_no: usize) -> Visibility {
-    let line = match lines.get(line_no) {
-        Some(l) => l,
-        None    => return Visibility::Public,
-    };
-    // Work only on the part before any `=`, `{`, or `(` to avoid false positives
-    // from string literals / bodies.
-    let decl = line.decl_prefix();
-
-    // Check whole-word tokens.
-    if contains_word(decl, "private")   { return Visibility::Private; }
-    if contains_word(decl, "protected") { return Visibility::Protected; }
-    if contains_word(decl, "internal")  { return Visibility::Internal; }
-    Visibility::Public
+    const KOTLIN_JAVA_MODS: &[(&str, Visibility)] = &[
+        ("private",   Visibility::Private),
+        ("protected", Visibility::Protected),
+        ("internal",  Visibility::Internal),
+    ];
+    visibility_at_line_impl(lines, line_no, Visibility::Public, KOTLIN_JAVA_MODS)
 }
 
 /// Swift visibility detection.
@@ -803,17 +799,29 @@ pub(crate) fn visibility_at_line(lines: &[String], line_no: usize) -> Visibility
 /// Swift modifiers: `private`, `fileprivate`, `internal`, `public`, `open`.
 /// Default is `internal` (unlike Kotlin which defaults to `public`).
 pub(crate) fn swift_visibility_at_line(lines: &[String], line_no: usize) -> Visibility {
-    let line = match lines.get(line_no) {
-        Some(l) => l,
-        None    => return Visibility::Internal,
-    };
-    let decl = line.decl_prefix();
+    const SWIFT_MODS: &[(&str, Visibility)] = &[
+        ("private",     Visibility::Private),
+        ("fileprivate", Visibility::Private),
+        ("public",      Visibility::Public),
+        ("open",        Visibility::Public),
+    ];
+    visibility_at_line_impl(lines, line_no, Visibility::Internal, SWIFT_MODS)
+}
 
-    if contains_word(decl, "private")     { return Visibility::Private; }
-    if contains_word(decl, "fileprivate") { return Visibility::Private; }
-    if contains_word(decl, "public")      { return Visibility::Public; }
-    if contains_word(decl, "open")        { return Visibility::Public; }
-    Visibility::Internal // Swift default
+fn visibility_at_line_impl(
+    lines:     &[String],
+    line_no:   usize,
+    default:   Visibility,
+    modifiers: &[(&str, Visibility)],
+) -> Visibility {
+    let Some(line) = lines.get(line_no) else { return default };
+    // Work only on the part before any `=`, `{`, or `(` to avoid false positives
+    // from string literals / bodies.
+    let decl = line.decl_prefix();
+    for &(kw, vis) in modifiers {
+        if contains_word(decl, kw) { return vis; }
+    }
+    default
 }
 
 fn contains_word(text: &str, word: &str) -> bool {
@@ -961,6 +969,32 @@ fn java_collect_type_list(node: &Node, bytes: &[u8], name_line: u32, data: &mut 
     }
 }
 
+/// Walk the Swift CST and populate `data.supers` with `(class_name_line, supertype_name, type_args)`
+/// for every `class_declaration` (class/struct/enum/extension) and `protocol_declaration`
+/// that has inheritance specifiers.
+fn extract_supers_swift(root: Node, bytes: &[u8], data: &mut FileData) {
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        match node.kind() {
+            "class_declaration" | "protocol_declaration" => {
+                let name_line = node.name_line();
+                for spec in node.children_of_kind("inheritance_specifier") {
+                    if let Some(ut) = spec.first_child_of_kind("user_type") {
+                        if let Some(name) = ut.user_type_name(bytes) {
+                            // Swift generics are structurally nested inside user_type,
+                            // not via type_arguments, so type_args are empty here.
+                            data.supers.push((name_line, name, Vec::new()));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        let mut cur = node.walk();
+        for child in node.children(&mut cur) { stack.push(child); }
+    }
+}
+
 // ─── FileData methods (thin wrappers around the free functions above) ────────
 
 impl crate::types::FileData {
@@ -981,6 +1015,9 @@ impl crate::types::FileData {
     }
     fn extract_swift_imports(&mut self, root: tree_sitter::Node, bytes: &[u8]) {
         extract_swift_imports(root, bytes, self)
+    }
+    fn extract_supers_swift(&mut self, root: tree_sitter::Node, bytes: &[u8]) {
+        extract_supers_swift(root, bytes, self)
     }
 }
 

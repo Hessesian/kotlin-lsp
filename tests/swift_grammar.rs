@@ -205,3 +205,4 @@ import class CoreData.NSManagedObject
         }
     }
 }
+
