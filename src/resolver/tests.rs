@@ -795,6 +795,41 @@ data class State(
         assert_eq!(locs[0].uri, api_uri);
     }
 
+    // ── method return type inference (infer_variable_type) ───────────────────
+
+    #[test]
+    fn infer_variable_type_method_return_type() {
+        // `val response = accountApiService.getAccountDetail(body)` where
+        // accountApiService: AccountApiService is annotated in the same file
+        let service_uri = uri("/AccountApiService.kt");
+        let caller_uri  = uri("/Caller.kt");
+        let idx = Indexer::new();
+        idx.index_content(&service_uri,
+            "package com.example\ninterface AccountApiService {\n    fun getAccountDetail(body: AccountDetailRequestBody): Response<AccountDetail>\n}");
+        idx.index_content(&caller_uri,
+            "package com.example\nclass Repo(val accountApiService: AccountApiService) {\n    fun load() {\n        val response = accountApiService.getAccountDetail(AccountDetailRequestBody(123))\n    }\n}");
+
+        let result = infer_variable_type(&idx, "response", &caller_uri);
+        assert_eq!(result, Some("Response<AccountDetail>".into()),
+            "should infer return type via method lookup");
+    }
+
+    #[test]
+    fn infer_variable_type_unannotated_snapshot_no_declared_names_rejection() {
+        // Verify that the declared_names fast-reject no longer blocks unannotated vars
+        // when only a snapshot (no live_lines) is available.
+        let caller_uri = uri("/Caller.kt");
+        let idx = Indexer::new();
+        idx.index_content(&caller_uri,
+            "package com.example\nval vm = DashboardViewModel()");
+
+        // `vm` has no `:` annotation, so declared_names would not contain it.
+        // It must still be resolved via the assignment scan.
+        let result = infer_variable_type(&idx, "vm", &caller_uri);
+        assert_eq!(result, Some("DashboardViewModel".into()),
+            "unannotated var must still be resolved from snapshot");
+    }
+
     #[test]
     fn goto_def_on_named_lambda_param_resolves_to_declaration_line() {
         // items.forEach { product ->

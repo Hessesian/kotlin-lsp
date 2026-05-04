@@ -1,4 +1,4 @@
-use tower_lsp::lsp_types::{Position, Range, Url};
+use tower_lsp::lsp_types::{Position, Range, SymbolKind, Url};
 
 use crate::indexer::Indexer;
 use crate::LinesExt;
@@ -70,29 +70,32 @@ pub fn infer_receiver_type(
 }
 
 /// Scan the current file's lines for a type annotation on `var_name` and return
-/// the declared type name if found.  Delegates to [`infer_type_in_lines`].
+/// the declared type name if found.  Delegates to [`infer_type_in_lines`] and
+/// falls back to method return-type inference for `val x = receiver.method(...)`.
 pub(crate) fn infer_variable_type(idx: &Indexer, var_name: &str, uri: &Url) -> Option<String> {
-    // Prefer live_lines: updated synchronously on every keystroke, so they
-    // reflect unsaved edits that the indexed snapshot may not yet contain.
-    if let Some(ll) = idx.live_lines.get(uri.as_str()) {
-        if let result @ Some(_) = ll.infer_type(var_name) {
-            return result;
+    // Scope block: all DashMap guards are dropped before method-return inference,
+    // which may call this function recursively and must not deadlock.
+    let lines = {
+        if let Some(ll) = idx.live_lines.get(uri.as_str()) {
+            if let result @ Some(_) = ll.infer_type(var_name) {
+                return result;
+            }
+            (*ll).clone()
+        } else if let Some(data) = idx.files.get(uri.as_str()) {
+            if let result @ Some(_) = data.lines.infer_type(var_name) {
+                return result;
+            }
+            data.lines.clone()
+        } else {
+            // File not indexed yet — read from disk; skip method inference.
+            let path = uri.to_file_path().ok()?;
+            let content = std::fs::read_to_string(&path).ok()?;
+            let lines: Vec<String> = content.lines().map(String::from).collect();
+            return lines.infer_type(var_name);
         }
-    }
-    // Fall back to indexed snapshot.  Use declared_names as a fast reject
-    // only when live_lines are unavailable or returned nothing, since the
-    // index may lag behind in-flight edits.
-    if let Some(data) = idx.files.get(uri.as_str()) {
-        if !data.declared_names.iter().any(|n| n == var_name) {
-            return None;
-        }
-        return data.lines.infer_type(var_name);
-    }
-    // File not indexed yet — read from disk.
-    let path = uri.to_file_path().ok()?;
-    let content = std::fs::read_to_string(&path).ok()?;
-    let lines: Vec<String> = content.lines().map(String::from).collect();
-    lines.infer_type(var_name)
+    };
+    // All DashMap guards are dropped here.  Safe to recurse.
+    infer_method_return_type(idx, var_name, &lines, uri)
 }
 
 /// Like [`infer_variable_type`] but preserves generic parameters in the returned
@@ -399,7 +402,106 @@ fn infer_from_rhs_assignment(line: &str, var_name: &str) -> Option<String> {
     None
 }
 
-/// Capture a type expression including balanced generic parameters.
+// ─── Method return-type inference ─────────────────────────────────────────────
+
+/// Scan `lines` for `var_name = receiver.method(...)` and return the inferred
+/// return type of `method`.
+///
+/// Only handles one level of chaining: `simpleIdent.method(args)`.
+/// Skips `this`, `super`, and dotted/chained receivers.
+fn infer_method_return_type(idx: &Indexer, var_name: &str, lines: &[String], uri: &Url) -> Option<String> {
+    let assign = format!("{var_name} =");
+    for line in lines {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//") || trimmed.starts_with('*') || trimmed.starts_with("/*") {
+            continue;
+        }
+        let eq_start = match line.find(&assign) {
+            Some(p) => p,
+            None => continue,
+        };
+        if eq_start > 0 {
+            let before = line[..eq_start].chars().last().unwrap_or(' ');
+            if before.is_alphanumeric() || before == '_' { continue; }
+        }
+        // Reject type-annotation position: `val x: VarName = ...`
+        let before_name = line[..eq_start].trim_end();
+        let last_tok = before_name.chars().last().unwrap_or(' ');
+        if last_tok == ':' || last_tok == ',' || last_tok == '<' { continue; }
+
+        let eq_char_idx = eq_start + var_name.len() + 1;
+        let rest = match line.get(eq_char_idx..) {
+            Some(s) => s,
+            None => continue,
+        };
+        let next = rest.as_bytes().get(1).copied().unwrap_or(b' ');
+        if next == b'=' || next == b'>' { continue; }
+        let rhs = rest[1..].trim_start();
+
+        // Match `receiver.method(` where receiver is a simple identifier.
+        let paren_pos = match rhs.find('(') {
+            Some(p) => p,
+            None => continue,
+        };
+        let before_paren = &rhs[..paren_pos];
+        let dot_pos = match before_paren.rfind('.') {
+            Some(d) => d,
+            None => continue,
+        };
+        let receiver = before_paren[..dot_pos].trim();
+        let method   = before_paren[dot_pos + 1..].trim();
+
+        if receiver.is_empty() || method.is_empty() { continue; }
+        // Skip `this`/`super` and multi-segment receivers.
+        if receiver == "this" || receiver == "super" || receiver.contains('.') { continue; }
+        if !method.starts_with_lowercase() { continue; }
+
+        // Recursively infer the receiver type (DashMap guards already dropped).
+        if let Some(receiver_type) = infer_variable_type(idx, receiver, uri) {
+            if let Some(ret) = find_method_return_type(idx, &receiver_type, method) {
+                return Some(ret);
+            }
+        }
+    }
+    None
+}
+
+/// Look up `method_name` in the symbol index for `type_name` and return its
+/// return type, extracted from `SymbolEntry.detail`.
+fn find_method_return_type(idx: &Indexer, type_name: &str, method_name: &str) -> Option<String> {
+    let locations = idx.definitions.get(type_name)?;
+    for loc in locations.iter() {
+        if let Some(file_data) = idx.files.get(loc.uri.as_str()) {
+            for sym in &file_data.symbols {
+                if sym.name == method_name
+                    && matches!(sym.kind, SymbolKind::FUNCTION | SymbolKind::METHOD | SymbolKind::OPERATOR)
+                {
+                    if let Some(ret) = extract_return_type_from_detail(&sym.detail) {
+                        return Some(ret);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Extract the return type from a function `detail` string.
+///
+/// `"fun getDetail(req: Req): Response<Data>"` → `"Response<Data>"`
+/// `"fun doSomething()"` → `None`
+fn extract_return_type_from_detail(detail: &str) -> Option<String> {
+    let close_paren = detail.rfind(')')?;
+    let after = detail[close_paren + 1..].trim_start();
+    if !after.starts_with(':') { return None; }
+    let type_part = after[1..].trim_start();
+    let type_name = extract_type_with_generics(type_part);
+    if !type_name.is_empty() && type_name.starts_with_uppercase() {
+        Some(type_name)
+    } else {
+        None
+    }
+}
 ///
 /// `"List<Product> = emptyList()"` → `"List<Product>"`
 /// `"StateFlow<UiState>"` → `"StateFlow<UiState>"`
@@ -490,4 +592,43 @@ pub(crate) fn find_declaration_range_in_lines(lines: &[String], name: &str) -> O
         }
     }
     None
+}
+
+#[cfg(test)]
+mod infer_tests {
+    use super::extract_return_type_from_detail;
+
+    #[test]
+    fn return_type_simple() {
+        assert_eq!(
+            extract_return_type_from_detail("fun getDetail(req: Req): AccountDetail"),
+            Some("AccountDetail".into()),
+        );
+    }
+
+    #[test]
+    fn return_type_generic() {
+        assert_eq!(
+            extract_return_type_from_detail("fun getAccountDetail(body: Body): Response<AccountDetail>"),
+            Some("Response<AccountDetail>".into()),
+        );
+    }
+
+    #[test]
+    fn return_type_unit_returns_none() {
+        assert_eq!(extract_return_type_from_detail("fun doSomething(x: Int)"), None);
+    }
+
+    #[test]
+    fn return_type_primitive_returns_none() {
+        assert_eq!(extract_return_type_from_detail("fun count(): int"), None);
+    }
+
+    #[test]
+    fn return_type_nullable_stripped() {
+        assert_eq!(
+            extract_return_type_from_detail("fun find(): User?"),
+            Some("User".into()),
+        );
+    }
 }
