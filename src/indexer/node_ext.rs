@@ -5,8 +5,8 @@
 use tree_sitter::Node;
 use crate::StrExt;
 use crate::queries::{
-    KIND_SIMPLE_IDENT, KIND_TYPE_IDENT, KIND_VALUE_ARG, KIND_VALUE_ARGS,
-    KIND_LAMBDA_PARAMS,
+    KIND_SIMPLE_IDENT, KIND_TYPE_IDENT, KIND_IDENTIFIER, KIND_VALUE_ARG, KIND_VALUE_ARGS,
+    KIND_LAMBDA_PARAMS, KIND_TYPE_PARAMS, KIND_TYPE_PARAM, KIND_TYPE_ARGS,
 };
 
 pub(crate) trait NodeExt<'a>: Sized + Copy {
@@ -268,7 +268,7 @@ impl<'a> NodeExt<'a> for Node<'a> {
         let mut stack = vec![self];
         while let Some(n) = stack.pop() {
             match n.kind() {
-                "type_identifier" => {
+                KIND_TYPE_IDENT => {
                     return n.utf8_text_owned(bytes);
                 }
                 "scoped_type_identifier" => {
@@ -279,7 +279,7 @@ impl<'a> NodeExt<'a> for Node<'a> {
                     let name = segments.join(".");
                     return if name.is_empty() { None } else { Some(name) };
                 }
-                "type_arguments" => continue,
+                KIND_TYPE_ARGS => continue,
                 _ => {}
             }
             let mut cur = n.walk();
@@ -291,7 +291,7 @@ impl<'a> NodeExt<'a> for Node<'a> {
     }
 
     fn type_arg_strings(self, bytes: &[u8]) -> Vec<String> {
-        let Some(args_node) = self.first_child_of_kind("type_arguments") else {
+        let Some(args_node) = self.first_child_of_kind(KIND_TYPE_ARGS) else {
             return Vec::new();
         };
         let mut cur = args_node.walk();
@@ -304,10 +304,10 @@ impl<'a> NodeExt<'a> for Node<'a> {
     }
 
     fn extract_type_params(self, bytes: &[u8]) -> Vec<String> {
-        let Some(tp) = self.first_child_of_kind("type_parameters") else { return Vec::new() };
+        let Some(tp) = self.first_child_of_kind(KIND_TYPE_PARAMS) else { return Vec::new() };
         let mut result = Vec::new();
-        for param in tp.children_of_kind("type_parameter") {
-            if let Some(id) = param.first_child_of_kind("type_identifier") {
+        for param in tp.children_of_kind(KIND_TYPE_PARAM) {
+            if let Some(id) = param.first_child_of_kind(KIND_TYPE_IDENT) {
                 if let Some(name) = id.utf8_text_owned(bytes) {
                     result.push(name);
                 }
@@ -339,7 +339,10 @@ impl<'a> NodeExt<'a> for Node<'a> {
         }
         let mut cur = self.walk();
         for child in self.children(&mut cur) {
-            if matches!(child.kind(), "type_identifier" | "simple_identifier" | "identifier") {
+            if child.kind() == KIND_TYPE_IDENT
+                || child.kind() == KIND_SIMPLE_IDENT
+                || child.kind() == KIND_IDENTIFIER
+            {
                 return child.start_position().row as u32;
             }
         }
@@ -351,16 +354,16 @@ impl<'a> NodeExt<'a> for Node<'a> {
 fn collect_user_type_segments(node: Node<'_>, bytes: &[u8], segments: &mut Vec<String>) {
     let mut cur = node.walk();
     for child in node.children(&mut cur) {
-        match child.kind() {
-            "type_arguments" => {}  // skip generic parameters entirely
-            "simple_identifier" | "type_identifier" | "identifier" => {
-                if let Ok(text) = child.utf8_text(bytes) {
-                    let text = text.trim();
-                    if !text.is_empty() { segments.push(text.to_owned()); }
-                }
+        let kind = child.kind();
+        if kind == KIND_TYPE_ARGS {
+            // skip generic parameters entirely
+        } else if kind == KIND_SIMPLE_IDENT || kind == KIND_TYPE_IDENT || kind == KIND_IDENTIFIER {
+            if let Ok(text) = child.utf8_text(bytes) {
+                let text = text.trim();
+                if !text.is_empty() { segments.push(text.to_owned()); }
             }
-            _ if child.is_named() => collect_user_type_segments(child, bytes, segments),
-            _ => {}
+        } else if child.is_named() {
+            collect_user_type_segments(child, bytes, segments);
         }
     }
 }
