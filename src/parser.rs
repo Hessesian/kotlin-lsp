@@ -343,7 +343,27 @@ fn is_fun_interface_error(node: &Node, bytes: &[u8]) -> bool {
                 }
             }
             "simple_identifier" => has_name = true,
-            _ => {}
+            _ => {
+                // Variance case: `fun interface Foo<in A, out B>` produces a nested
+                // ERROR child that swallows `fun`, `interface`, and the name together:
+                //   ERROR { ERROR(user_type("interface"), simple_identifier("Foo")),
+                //           type_parameters(...) }
+                if child.is_error() {
+                    let mut ec = child.walk();
+                    for gc in child.children(&mut ec) {
+                        match gc.kind() {
+                            "fun" => has_fun = true,
+                            "user_type" => {
+                                if gc.utf8_text(bytes).unwrap_or("") == "interface" {
+                                    has_interface = true;
+                                }
+                            }
+                            "simple_identifier" => has_name = true,
+                            _ => {}
+                        }
+                    }
+                }
+            }
         }
     }
     has_fun && has_interface && has_name
@@ -411,7 +431,16 @@ fn extract_fun_interfaces(root: Node, bytes: &[u8], data: &mut FileData) {
     while let Some(node) = stack.pop() {
         // Case 1: no-modifier `fun interface` → ERROR node
         if node.is_error() && is_fun_interface_error(&node, bytes) {
-            if let Some(child) = node.first_child_of_kind(KIND_SIMPLE_IDENT) {
+            // Simple case: simple_identifier is a direct child.
+            let name_node = node.first_child_of_kind(KIND_SIMPLE_IDENT)
+                // Variance case: name is inside a nested ERROR child.
+                .or_else(|| {
+                    let mut cur = node.walk();
+                    let inner_error = node.children(&mut cur).find(|c| c.is_error());
+                    drop(cur);
+                    inner_error.and_then(|inner| inner.first_child_of_kind(KIND_SIMPLE_IDENT))
+                });
+            if let Some(child) = name_node {
                 if let Ok(name) = child.utf8_text(bytes) {
                     push_interface_symbol(name, &node, child.range(), bytes, data);
                 }

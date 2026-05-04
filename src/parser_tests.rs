@@ -761,18 +761,14 @@ class LoanReducer {
             "method param leaked into interface type_params: {:?}", s.type_params);
     }
 
-    /// Multi-type-param `fun interface` declarations (e.g. `<A, B>`) are currently
-    /// not indexed — tree-sitter-kotlin 0.3 parses `<A, B>` as a comparison chain
-    /// and produces an ERROR structure that doesn't match the single-param path.
-    /// This test documents the known limitation so a future fix is visible.
+    /// Multi-type-param `fun interface` declarations (e.g. `<A, B>`) are now indexed
+    /// via the nested-ERROR detection path added for variance support.
     #[test]
-    fn fun_interface_multi_type_params_known_limitation() {
+    fn fun_interface_multi_type_params_indexed() {
         let src = "fun interface Pair<A, B> { fun get(): A }";
         let data = parse_kotlin(src);
-        // Known limitation: multi-param fun interfaces are not indexed under their name.
-        // When this is fixed, this test should be updated to assert sym(&data, "Pair") is Some.
-        assert!(sym(&data, "Pair").is_none(),
-            "if Pair is now indexed, update this test to assert type_params = [A, B]");
+        let s = sym(&data, "Pair").expect("Pair should now be indexed");
+        assert_eq!(s.type_params, vec!["A", "B"]);
     }
 
     /// type_params_from_angle_brackets must not produce entries containing `:` or spaces.
@@ -831,12 +827,9 @@ class LoanReducer {
         let path = "/home/ocel/Work/Moneta/android/core/commonui/src/main/java/cz/moneta/smartbanka/mobile/commonui/component/input/validator/IInputValidator.kt";
         let Ok(src) = std::fs::read_to_string(path) else { return; };
         let data = parse_kotlin(&src);
-        if let Some(sym) = data.symbols.iter().find(|s| s.name == "IInputValidator" && s.kind == SymbolKind::INTERFACE) {
-            // When indexed, variance must be stripped: `in In` → "In", `out Out` → "Out"
-            assert_eq!(sym.type_params, vec!["In", "Out"], "IInputValidator<in In, out Out> type_params wrong");
-        }
-        // If not indexed: known limitation — tree-sitter-kotlin 0.3 wraps the name
-        // differently when variance annotations appear before type params, hiding
-        // the simple_identifier the detection logic relies on.
+        let sym = data.symbols.iter().find(|s| s.name == "IInputValidator" && s.kind == SymbolKind::INTERFACE)
+            .expect("IInputValidator should be indexed");
+        assert_eq!(sym.type_params, vec!["In", "Out"],
+            "variance 'in'/'out' must be stripped from type_params");
     }
 
