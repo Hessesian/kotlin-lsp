@@ -56,7 +56,7 @@ impl Indexer {
             let r = self.definitions.get(name)?;
             r.first()?.clone()
         };
-        self.hover_info_at_location(&loc, name, calling_uri)
+        self.hover_info_at_location(&loc, name, calling_uri, None)
     }
 
     /// Build hover markdown for `name` at a specific resolved `Location`.
@@ -64,7 +64,9 @@ impl Indexer {
     ///
     /// `calling_uri` — the file where the cursor is (used to substitute generic type
     /// parameters with concrete types when the symbol is from a base class).
-    pub fn hover_info_at_location(&self, loc: &Location, name: &str, calling_uri: Option<&str>) -> Option<String> {
+    /// `cursor_line` — the line of the cursor in `calling_uri`; used to disambiguate
+    /// when multiple classes in the same file extend the same generic base.
+    pub fn hover_info_at_location(&self, loc: &Location, name: &str, calling_uri: Option<&str>, cursor_line: Option<u32>) -> Option<String> {
         // On-demand index: the file may have been found by rg but not yet indexed.
         if !self.files.contains_key(loc.uri.as_str()) {
             if let Ok(path) = loc.uri.to_file_path() {
@@ -85,7 +87,7 @@ impl Indexer {
         // Apply generic type parameter substitution when the cursor is in a different
         // file (subtype) than where the symbol is defined.
         let sig = if let Some(cu) = calling_uri {
-            let subst = build_type_param_subst(self, loc.uri.as_str(), sym.selection_range.start.line, cu);
+            let subst = build_type_param_subst(self, loc.uri.as_str(), sym.selection_range.start.line, cu, cursor_line);
             if subst.is_empty() { raw_sig } else { apply_subst(&raw_sig, &subst) }
         } else {
             raw_sig
@@ -125,7 +127,7 @@ impl Indexer {
             sym.detail.clone()
         };
         if let Some(cu) = calling_uri {
-            let subst = build_type_param_subst(self, uri_str, sym.selection_range.start.line, cu);
+            let subst = build_type_param_subst(self, uri_str, sym.selection_range.start.line, cu, None);
             if !subst.is_empty() { return Some(apply_subst(&raw, &subst)); }
         }
         Some(raw)
@@ -163,7 +165,7 @@ impl Indexer {
 
         // Apply generic type parameter substitution when requested.
         let detail = if let Some(cu) = calling_uri {
-            let subst = build_type_param_subst(self, uri_str, sym.selection_range.start.line, cu);
+            let subst = build_type_param_subst(self, uri_str, sym.selection_range.start.line, cu, None);
             if subst.is_empty() { raw_detail } else { apply_subst(&raw_detail, &subst) }
         } else {
             raw_detail
@@ -262,7 +264,7 @@ impl Indexer {
     /// when viewed from `calling_uri`.  Returns the substituted string, or the original if
     /// no substitution is applicable.
     pub(crate) fn type_subst_sig(&self, sym_uri: &str, sym_line: u32, calling_uri: &str, sig: &str) -> String {
-        let subst = build_type_param_subst(self, sym_uri, sym_line, calling_uri);
+        let subst = build_type_param_subst(self, sym_uri, sym_line, calling_uri, None);
         if subst.is_empty() { sig.to_owned() } else { apply_subst(sig, &subst) }
     }
 
@@ -337,6 +339,7 @@ fn build_type_param_subst(
     sym_uri:     &str,
     sym_line:    u32,
     calling_uri: &str,
+    cursor_line: Option<u32>,
 ) -> std::collections::HashMap<String, String> {
     if sym_uri == calling_uri {
         return Default::default();
@@ -364,8 +367,19 @@ fn build_type_param_subst(
         Some(d) => d,
         None    => return Default::default(),
     };
+
+    // When multiple classes in the same file extend the same base, use cursor_line
+    // to identify the specific calling class and scope the supers lookup.
+    let calling_class_line = cursor_line
+        .and_then(|line| find_containing_class_name(&calling_data, line))
+        .and_then(|name| calling_data.symbols.iter().find(|s| s.name == name))
+        .map(|s| s.selection_range.start.line);
+
     let type_args = calling_data.supers.iter()
-        .find(|(_, base, _)| base == &container_name)
+        .find(|(line, base, _)| {
+            base == &container_name
+                && calling_class_line.map_or(true, |class_line| *line == class_line)
+        })
         .map(|(_, _, args)| args.clone())
         .unwrap_or_default();
 

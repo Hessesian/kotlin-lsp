@@ -31,6 +31,7 @@ fn swift_hover_uses_func_keyword() {
         &Location { uri: u.clone(), range: Default::default() },
         "greet",
         None,
+        None,
     ).unwrap_or_default();
     assert!(
         hover.contains("func"),
@@ -49,6 +50,7 @@ fn kotlin_hover_still_uses_fun_keyword() {
     let hover = idx.hover_info_at_location(
         &Location { uri: u.clone(), range: Default::default() },
         "greet",
+        None,
         None,
     ).unwrap_or_default();
     assert!(
@@ -96,7 +98,7 @@ class Foo(
     assert!(!locs.is_empty(), "repo should be found via find_definition_qualified");
 
     // 3. hover_info_at_location should return something
-    let hover = idx.hover_info_at_location(locs.first().unwrap(), "repo", None);
+    let hover = idx.hover_info_at_location(locs.first().unwrap(), "repo", None, None);
     assert!(hover.is_some(), "hover on val repo should produce result");
     let md = hover.unwrap();
     assert!(md.contains("repo"), "hover should mention 'repo', got: {md}");
@@ -120,7 +122,7 @@ internal class ContactAddressInteractor @Inject constructor(
     // hover on `repo` (line 2, col ~14)
     let locs = idx.find_definition_qualified("repo", None, &u);
     assert!(!locs.is_empty(), "repo should be found");
-    let hover = idx.hover_info_at_location(locs.first().unwrap(), "repo", None);
+    let hover = idx.hover_info_at_location(locs.first().unwrap(), "repo", None, None);
     assert!(hover.is_some(), "hover on val repo should work");
     let md = hover.unwrap();
     assert!(md.contains("repo"), "hover should mention repo: {md}");
@@ -224,7 +226,7 @@ class DashboardProductsReducer : FlowReducer<Event, Effect, State> {
         range: reduce_sym.selection_range,
     };
 
-    let hover = idx.hover_info_at_location(&loc, "reduce", Some(sub_u.as_str()))
+    let hover = idx.hover_info_at_location(&loc, "reduce", Some(sub_u.as_str()), None)
         .expect("hover should return Some");
 
     // Type params should be substituted: StateType→State, EventType→Event
@@ -249,6 +251,104 @@ interface FlowReducer<EventType, out EffectType, StateType> {
     let loc = tower_lsp::lsp_types::Location { uri: u.clone(), range: reduce_sym.selection_range };
 
     // calling_uri == sym_uri → no substitution
-    let hover = idx.hover_info_at_location(&loc, "reduce", Some(u.as_str())).unwrap();
+    let hover = idx.hover_info_at_location(&loc, "reduce", Some(u.as_str()), None).unwrap();
     assert!(hover.contains("StateType"), "same-file hover should keep raw type params, got: {hover}");
+}
+
+// ── Port-regression: property-type harvesting ─────────────────────────────────
+
+/// When the enclosing class's supers contain generic type args, the inlay-hint
+/// substitution path (`type_subst_for_enclosing_class`) must return the correct
+/// mapping. This tests the "UncC" scenario: build_enclosing_class_subst must
+/// perform phase 2 (member property harvesting) so that a property whose type
+/// extends a generic base contributes its type-param mappings to the enclosing class.
+#[test]
+fn inlay_hints_generic_subst_via_property_type_harvesting() {
+    let idx = Indexer::new();
+
+    let base_u = uri("/FlowReducer.kt");
+    idx.index_content(&base_u, "\
+interface FlowReducer<E, S> {
+    fun reduce(event: E, state: S): S
+}
+");
+
+    let reducer_u = uri("/DashReducer.kt");
+    idx.index_content(&reducer_u, "\
+class DashReducer : FlowReducer<DashEvent, DashState> {
+    override fun reduce(event: DashEvent, state: DashState): DashState = state
+}
+");
+
+    let owner_u = uri("/DashViewModel.kt");
+    idx.index_content(&owner_u, "\
+class DashViewModel {
+    val reducer: DashReducer = DashReducer()
+    fun process(event: DashEvent) {}
+}
+");
+
+    // Inlay hint substitution from inside DashViewModel (line 2 = inside the class):
+    // Phase 2 of build_enclosing_class_subst should trace:
+    //   property `reducer: DashReducer` → DashReducer supers → FlowReducer<E=DashEvent, S=DashState>
+    let subst = idx.type_subst_for_enclosing_class(owner_u.as_str(), 2);
+    assert!(subst.contains_key("E") || subst.contains_key("S"),
+        "property harvesting should produce substitution for FlowReducer params, got: {subst:?}");
+    if let Some(e_val) = subst.get("E") {
+        assert_eq!(e_val, "DashEvent", "E should map to DashEvent, got: {e_val}");
+    }
+    if let Some(s_val) = subst.get("S") {
+        assert_eq!(s_val, "DashState", "S should map to DashState, got: {s_val}");
+    }
+}
+
+// ── Port-regression: two callers in same file ─────────────────────────────────
+
+/// When two classes in the same file extend the same generic base with different
+/// type args, hovering inside each class must use the correct substitution.
+/// This is the "Unb5/TRjS" regression — fixed by adding cursor_line to
+/// build_type_param_subst / hover_info_at_location.
+#[test]
+fn hover_generic_subst_disambiguates_two_callers_in_same_file() {
+    let idx = Indexer::new();
+
+    let base_u = uri("/Processor.kt");
+    idx.index_content(&base_u, "\
+interface Processor<IN, OUT> {
+    fun process(input: IN): OUT
+}
+");
+
+    let caller_u = uri("/Callers.kt");
+    idx.index_content(&caller_u, "\
+class StringProcessor : Processor<String, Int> {
+    override fun process(input: String): Int = input.length
+}
+
+class BoolProcessor : Processor<Boolean, String> {
+    override fun process(input: Boolean): String = input.toString()
+}
+");
+
+    let base_data = idx.files.get(base_u.as_str()).unwrap();
+    let process_sym = base_data.symbols.iter().find(|s| s.name == "process").cloned()
+        .expect("process not found");
+    let loc = tower_lsp::lsp_types::Location {
+        uri: base_u.clone(),
+        range: process_sym.selection_range,
+    };
+
+    // Cursor on line 1 (inside StringProcessor): should use String/Int
+    let hover_string = idx.hover_info_at_location(&loc, "process", Some(caller_u.as_str()), Some(1))
+        .expect("hover should resolve for StringProcessor");
+    assert!(!hover_string.contains("Boolean"),
+        "StringProcessor hover (line 1) must not show Boolean, got: {hover_string}");
+
+    // Cursor on line 6 (inside BoolProcessor): should use Boolean/String
+    let hover_bool = idx.hover_info_at_location(&loc, "process", Some(caller_u.as_str()), Some(6))
+        .expect("hover should resolve for BoolProcessor");
+    assert!(hover_bool.contains("Boolean"),
+        "BoolProcessor hover (line 6) should show Boolean, got: {hover_bool}");
+    assert!(!hover_bool.contains("Int"),
+        "BoolProcessor hover (line 6) must not show Int, got: {hover_bool}");
 }
