@@ -344,13 +344,38 @@ pub const SWIFT_INIT_NAME: &str = "init";
 // These match the `node.kind()` strings produced by tree-sitter-kotlin,
 // tree-sitter-java, and tree-sitter-swift grammars.
 
-pub(crate) const KIND_SIMPLE_IDENT:  &str = "simple_identifier";
-pub(crate) const KIND_TYPE_IDENT:    &str = "type_identifier";
-pub(crate) const KIND_IDENTIFIER:    &str = "identifier";
-pub(crate) const KIND_CALL_EXPR:     &str = "call_expression";
-pub(crate) const KIND_LAMBDA_LIT:    &str = "lambda_literal";
-pub(crate) const KIND_LAMBDA_PARAMS: &str = "lambda_parameters";
-pub(crate) const KIND_VALUE_ARG:     &str = "value_argument";
-pub(crate) const KIND_VALUE_ARGS:    &str = "value_arguments";
-pub(crate) const KIND_USER_TYPE:     &str = "user_type";
-pub(crate) const KIND_FUN_DECL:      &str = "function_declaration";
+pub(crate) const KIND_SIMPLE_IDENT:      &str = "simple_identifier";
+pub(crate) const KIND_TYPE_IDENT:        &str = "type_identifier";
+pub(crate) const KIND_IDENTIFIER:        &str = "identifier";
+pub(crate) const KIND_CALL_EXPR:         &str = "call_expression";
+pub(crate) const KIND_LAMBDA_LIT:        &str = "lambda_literal";
+pub(crate) const KIND_LAMBDA_PARAMS:     &str = "lambda_parameters";
+pub(crate) const KIND_VALUE_ARG:         &str = "value_argument";
+pub(crate) const KIND_VALUE_ARGS:        &str = "value_arguments";
+pub(crate) const KIND_USER_TYPE:         &str = "user_type";
+pub(crate) const KIND_FUN_DECL:          &str = "function_declaration";
+
+// ─── Declaration node kinds (shared or language-specific) ──────────────────
+pub(crate) const KIND_CLASS_DECL:        &str = "class_declaration";
+pub(crate) const KIND_ENUM_DECL:         &str = "enum_declaration";
+pub(crate) const KIND_INTERFACE_DECL:    &str = "interface_declaration";
+
+// Kotlin-specific
+pub(crate) const KIND_OBJECT_DECL:       &str = "object_declaration";
+pub(crate) const KIND_DELEGATION_SPEC:   &str = "delegation_specifier";
+
+// Java-specific
+pub(crate) const KIND_RECORD_DECL:       &str = "record_declaration";
+pub(crate) const KIND_METHOD_DECL:       &str = "method_declaration";
+pub(crate) const KIND_CTOR_DECL:         &str = "constructor_declaration";
+pub(crate) const KIND_FIELD_DECL:        &str = "field_declaration";
+pub(crate) const KIND_IMPORT_DECL:       &str = "import_declaration";
+pub(crate) const KIND_PACKAGE_DECL:      &str = "package_declaration";
+pub(crate) const KIND_SUPERCLASS:        &str = "superclass";
+pub(crate) const KIND_SUPER_INTERFACES:  &str = "super_interfaces";
+pub(crate) const KIND_EXTENDS_INTERFACES:&str = "extends_interfaces";
+pub(crate) const KIND_TYPE_LIST:         &str = "type_list";
+
+// Swift-specific
+pub(crate) const KIND_PROTOCOL_DECL:     &str = "protocol_declaration";
+pub(crate) const KIND_INHERITANCE_SPEC:  &str = "inheritance_specifier";
