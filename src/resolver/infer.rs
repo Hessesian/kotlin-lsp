@@ -103,18 +103,27 @@ pub(crate) fn infer_variable_type(idx: &Indexer, var_name: &str, uri: &Url) -> O
 ///
 /// Used by the `it`-completion path to extract the collection element type.
 pub fn infer_variable_type_raw(idx: &Indexer, var_name: &str, uri: &Url) -> Option<String> {
-    if let Some(ll) = idx.live_lines.get(uri.as_str()) {
-        if let result @ Some(_) = ll.infer_type_raw(var_name) {
-            return result;
+    // Scope block: drop DashMap guards before method-return inference.
+    let lines = {
+        if let Some(ll) = idx.live_lines.get(uri.as_str()) {
+            if let result @ Some(_) = ll.infer_type_raw(var_name) {
+                return result;
+            }
+            (*ll).clone()
+        } else if let Some(data) = idx.files.get(uri.as_str()) {
+            if let result @ Some(_) = data.lines.infer_type_raw(var_name) {
+                return result;
+            }
+            data.lines.clone()
+        } else {
+            let path = uri.to_file_path().ok()?;
+            let content = std::fs::read_to_string(&path).ok()?;
+            let lines: Vec<String> = content.lines().map(String::from).collect();
+            return lines.infer_type_raw(var_name);
         }
-    }
-    if let Some(data) = idx.files.get(uri.as_str()) {
-        return data.lines.infer_type_raw(var_name);
-    }
-    let path = uri.to_file_path().ok()?;
-    let content = std::fs::read_to_string(&path).ok()?;
-    let lines: Vec<String> = content.lines().map(String::from).collect();
-    lines.infer_type_raw(var_name)
+    };
+    // All DashMap guards dropped. Method return type inference preserves generics.
+    infer_method_return_type(idx, var_name, &lines, uri)
 }
 
 /// Extract the Kotlin/Android collection element type from a raw generic type string.
