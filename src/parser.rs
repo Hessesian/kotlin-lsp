@@ -291,89 +291,6 @@ fn push_def_symbols(
 
 // ─── Java extraction (manual traversal — Java grammar has named fields) ──────
 
-fn extract_java(node: &Node, bytes: &[u8], data: &mut FileData) {
-    match node.kind() {
-        KIND_PACKAGE_DECL => {
-            // (package_declaration "package" (scoped_identifier | identifier) ";")
-            let mut cur = node.walk();
-            for child in node.children(&mut cur) {
-                if matches!(child.kind(), "scoped_identifier" | "identifier") {
-                    if let Ok(txt) = child.utf8_text(bytes) {
-                        data.package = Some(txt.to_owned());
-                    }
-                    break;
-                }
-            }
-        }
-        KIND_CLASS_DECL     => push_named(node, bytes, SymbolKind::CLASS,     data),
-        KIND_RECORD_DECL    => push_named(node, bytes, SymbolKind::STRUCT,    data),
-        KIND_INTERFACE_DECL => push_named(node, bytes, SymbolKind::INTERFACE, data),
-        "annotation_type_declaration" => push_named(node, bytes, SymbolKind::INTERFACE, data),
-        KIND_ENUM_DECL      => push_named(node, bytes, SymbolKind::ENUM,      data),
-        KIND_METHOD_DECL    => push_named(node, bytes, SymbolKind::METHOD,    data),
-        KIND_CTOR_DECL      => push_named(node, bytes, SymbolKind::CONSTRUCTOR, data),
-        "enum_constant"     => push_named(node, bytes, SymbolKind::ENUM_MEMBER, data),
-        KIND_FIELD_DECL     => push_field_declaration(node, bytes, data),
-        KIND_IMPORT_DECL    => push_java_import(node, bytes, data),
-        _ => {}
-    }
-}
-
-fn push_field_declaration(node: &Node, bytes: &[u8], data: &mut FileData) {
-    // Detect `static final` → CONSTANT, anything else → FIELD.
-    let kind = if node.first_child_of_kind("modifiers").is_some_and(|mods| {
-        let found_kinds: Vec<&str> = (0..mods.child_count())
-            .filter_map(|i| mods.child(i))
-            .map(|c| c.kind())
-            .collect();
-        ["static", "final"].iter().all(|&req| found_kinds.contains(&req))
-    }) {
-        SymbolKind::CONSTANT
-    } else {
-        SymbolKind::FIELD
-    };
-    let nr = ts_to_lsp(node.range());
-    let vis = visibility_at_line(&data.lines, node.range().start_point.row);
-    let detail = extract_detail(&data.lines, nr.start.line, nr.end.line);
-    for child in node.children_of_kind("variable_declarator") {
-        if let Some((name, sel)) = first_identifier(&child, bytes) {
-            data.symbols.push(SymbolEntry {
-                name,
-                kind,
-                visibility: vis,
-                range: nr,
-                selection_range: sel,
-                detail: detail.clone(),
-                type_params: Vec::new(), // fields are never generic
-            });
-        }
-    }
-}
-
-fn push_java_import(node: &Node, bytes: &[u8], data: &mut FileData) {
-    let mut cur = node.walk();
-    for child in node.children(&mut cur) {
-        if matches!(child.kind(), "scoped_identifier" | "identifier") {
-            if let Ok(txt) = child.utf8_text(bytes) {
-                let full_path  = txt.to_owned();
-                let local_name = full_path.last_segment().to_owned();
-                data.imports.push(ImportEntry { full_path, local_name, is_star: false });
-            }
-            return;
-        }
-    }
-}
-
-fn push_named(node: &Node, bytes: &[u8], kind: SymbolKind, data: &mut FileData) {
-    if let Some((name, sel)) = first_identifier(node, bytes) {
-        let visibility  = visibility_at_line(&data.lines, node.range().start_point.row);
-        let range       = ts_to_lsp(node.range());
-        let detail      = extract_detail(&data.lines, range.start.line, range.end.line);
-        let type_params = node.extract_type_params(bytes);
-        data.symbols.push(SymbolEntry { name, kind, visibility, range, selection_range: sel, detail, type_params });
-    }
-}
-
 fn first_identifier(node: &Node, bytes: &[u8]) -> Option<(String, Range)> {
     if let Some(n) = node.child_by_field_name("name") {
         if let Ok(t) = n.utf8_text(bytes) { return Some((t.to_owned(), ts_to_lsp(n.range()))); }
@@ -889,109 +806,7 @@ pub(crate) fn extract_declared_names(lines: &[String]) -> Vec<String> {
 
 // ─── supertype CST extraction ────────────────────────────────────────────────
 
-/// Walk the Kotlin CST and populate `data.supers` with `(class_name_line, supertype_name)`
-/// for every `class_declaration` and `object_declaration` that has delegation specifiers.
-fn extract_supers_kotlin(root: Node, bytes: &[u8], data: &mut FileData) {
-    let mut stack = vec![root];
-    while let Some(node) = stack.pop() {
-        if node.kind() == KIND_CLASS_DECL || node.kind() == KIND_OBJECT_DECL {
-            let name_line = node.name_line();
-            for child in node.children_of_kind(KIND_DELEGATION_SPEC) {
-                if let Some((name, type_args)) = super_name_from_delegation(&child, bytes) {
-                    data.supers.push((name_line, name, type_args));
-                }
-            }
-        }
-        let mut cur = node.walk();
-        for child in node.children(&mut cur) { stack.push(child); }
-    }
-}
-
-/// Walk the Java CST and populate `data.supers` for class/interface/enum/record
-/// declarations that extend or implement other types.
-fn extract_supers_java(node: &Node, bytes: &[u8], data: &mut FileData) {
-    let kind = node.kind();
-    if kind == KIND_CLASS_DECL || kind == KIND_RECORD_DECL || kind == KIND_ENUM_DECL {
-        let name_line = node.name_line();
-        let mut cur = node.walk();
-        for child in node.children(&mut cur) {
-            if child.kind() == KIND_SUPERCLASS {
-                // (superclass "extends" _type)
-                if let Some(name) = child.java_first_type_name(bytes) {
-                    let type_args = child.type_arg_strings(bytes);
-                    data.supers.push((name_line, name, type_args));
-                }
-            } else if child.kind() == KIND_SUPER_INTERFACES {
-                // (super_interfaces "implements" (type_list _type, ...))
-                java_collect_type_list(&child, bytes, name_line, data);
-            }
-        }
-    } else if kind == KIND_INTERFACE_DECL {
-        let name_line = node.name_line();
-        if let Some(ext) = node.first_child_of_kind(KIND_EXTENDS_INTERFACES) {
-            // (extends_interfaces "extends" (type_list ...))
-            java_collect_type_list(&ext, bytes, name_line, data);
-        }
-    }
-}
-
-/// Extract the supertype name from a `delegation_specifier` node.
-fn super_name_from_delegation(node: &Node, bytes: &[u8]) -> Option<(String, Vec<String>)> {
-    let mut cur = node.walk();
-    for child in node.children(&mut cur) {
-        let kind = child.kind();
-        if kind == "constructor_invocation" || kind == "explicit_delegation" {
-            if let Some(ut) = child.first_child_of_kind(KIND_USER_TYPE) {
-                return ut.user_type_name(bytes).map(|n| (n, ut.type_arg_strings(bytes)));
-            }
-        } else if kind == KIND_USER_TYPE {
-            return child.user_type_name(bytes).map(|n| (n, child.type_arg_strings(bytes)));
-        }
-    }
-    None
-}
-
-/// Walk a `super_interfaces` or `extends_interfaces` node, collecting all type names
-/// from its `type_list` child into `data.supers`.
-fn java_collect_type_list(node: &Node, bytes: &[u8], name_line: u32, data: &mut FileData) {
-    let Some(type_list) = node.first_child_of_kind(KIND_TYPE_LIST) else { return };
-    let mut cc = type_list.walk();
-    for type_node in type_list.children(&mut cc) {
-        // type_list children may be leaf type_identifier nodes directly,
-        // or wrapper nodes (generic_type, scoped_type_identifier) containing one.
-        let (name, type_args) = if type_node.kind() == KIND_TYPE_IDENT {
-            (type_node.utf8_text_owned(bytes), Vec::new())
-        } else {
-            (type_node.java_first_type_name(bytes), type_node.type_arg_strings(bytes))
-        };
-        if let Some(n) = name { data.supers.push((name_line, n, type_args)); }
-    }
-}
-
-/// Walk the Swift CST and populate `data.supers` with `(class_name_line, supertype_name, type_args)`
-/// for every `class_declaration` (class/struct/enum/extension) and `protocol_declaration`
-/// that has inheritance specifiers.
-fn extract_supers_swift(root: Node, bytes: &[u8], data: &mut FileData) {
-    let mut stack = vec![root];
-    while let Some(node) = stack.pop() {
-        if node.kind() == KIND_CLASS_DECL || node.kind() == KIND_PROTOCOL_DECL {
-            let name_line = node.name_line();
-            for spec in node.children_of_kind(KIND_INHERITANCE_SPEC) {
-                if let Some(ut) = spec.first_child_of_kind(KIND_USER_TYPE) {
-                    if let Some(name) = ut.user_type_name(bytes) {
-                        // Swift generics are structurally nested inside user_type,
-                        // not via type_arguments, so type_args are empty here.
-                        data.supers.push((name_line, name, Vec::new()));
-                    }
-                }
-            }
-        }
-        let mut cur = node.walk();
-        for child in node.children(&mut cur) { stack.push(child); }
-    }
-}
-
-// ─── FileData methods (thin wrappers around the free functions above) ────────
+// ─── FileData methods ────────────────────────────────────────────────────────
 
 impl crate::types::FileData {
     fn extract_package_and_imports(&mut self, root: tree_sitter::Node, bytes: &[u8]) {
@@ -1000,20 +815,147 @@ impl crate::types::FileData {
     fn extract_fun_interfaces(&mut self, root: tree_sitter::Node, bytes: &[u8]) {
         extract_fun_interfaces(root, bytes, self)
     }
-    fn extract_supers_kotlin(&mut self, root: tree_sitter::Node, bytes: &[u8]) {
-        extract_supers_kotlin(root, bytes, self)
-    }
-    fn extract_java(&mut self, node: &Node, bytes: &[u8]) {
-        extract_java(node, bytes, self)
-    }
-    fn extract_supers_java(&mut self, node: &Node, bytes: &[u8]) {
-        extract_supers_java(node, bytes, self)
-    }
     fn extract_swift_imports(&mut self, root: tree_sitter::Node, bytes: &[u8]) {
         extract_swift_imports(root, bytes, self)
     }
-    fn extract_supers_swift(&mut self, root: tree_sitter::Node, bytes: &[u8]) {
-        extract_supers_swift(root, bytes, self)
+
+    fn extract_supers_kotlin(&mut self, root: Node, bytes: &[u8]) {
+        let mut stack = vec![root];
+        while let Some(node) = stack.pop() {
+            if node.kind() == KIND_CLASS_DECL || node.kind() == KIND_OBJECT_DECL {
+                let name_line = node.name_line();
+                for child in node.children_of_kind(KIND_DELEGATION_SPEC) {
+                    if let Some((name, type_args)) = child.super_from_delegation(bytes) {
+                        self.supers.push((name_line, name, type_args));
+                    }
+                }
+            }
+            let mut cur = node.walk();
+            for child in node.children(&mut cur) { stack.push(child); }
+        }
+    }
+
+    fn extract_supers_java(&mut self, node: &Node, bytes: &[u8]) {
+        let kind = node.kind();
+        if kind == KIND_CLASS_DECL || kind == KIND_RECORD_DECL || kind == KIND_ENUM_DECL {
+            let name_line = node.name_line();
+            let mut cur = node.walk();
+            for child in node.children(&mut cur) {
+                if child.kind() == KIND_SUPERCLASS {
+                    if let Some(name) = child.java_first_type_name(bytes) {
+                        self.supers.push((name_line, name, child.type_arg_strings(bytes)));
+                    }
+                } else if child.kind() == KIND_SUPER_INTERFACES {
+                    for (name, type_args) in child.java_type_list(bytes) {
+                        self.supers.push((name_line, name, type_args));
+                    }
+                }
+            }
+        } else if kind == KIND_INTERFACE_DECL {
+            let name_line = node.name_line();
+            if let Some(ext) = node.first_child_of_kind(KIND_EXTENDS_INTERFACES) {
+                for (name, type_args) in ext.java_type_list(bytes) {
+                    self.supers.push((name_line, name, type_args));
+                }
+            }
+        }
+    }
+
+    fn extract_supers_swift(&mut self, root: Node, bytes: &[u8]) {
+        let mut stack = vec![root];
+        while let Some(node) = stack.pop() {
+            if node.kind() == KIND_CLASS_DECL || node.kind() == KIND_PROTOCOL_DECL {
+                let name_line = node.name_line();
+                for spec in node.children_of_kind(KIND_INHERITANCE_SPEC) {
+                    if let Some(ut) = spec.first_child_of_kind(KIND_USER_TYPE) {
+                        if let Some(name) = ut.user_type_name(bytes) {
+                            // Swift generics are structurally nested inside user_type,
+                            // not via type_arguments, so type_args are empty here.
+                            self.supers.push((name_line, name, Vec::new()));
+                        }
+                    }
+                }
+            }
+            let mut cur = node.walk();
+            for child in node.children(&mut cur) { stack.push(child); }
+        }
+    }
+
+    fn extract_java(&mut self, node: &Node, bytes: &[u8]) {
+        match node.kind() {
+            KIND_PACKAGE_DECL => {
+                let mut cur = node.walk();
+                for child in node.children(&mut cur) {
+                    if matches!(child.kind(), "scoped_identifier" | "identifier") {
+                        if let Ok(txt) = child.utf8_text(bytes) {
+                            self.package = Some(txt.to_owned());
+                        }
+                        break;
+                    }
+                }
+            }
+            KIND_CLASS_DECL     => self.push_named(node, bytes, SymbolKind::CLASS),
+            KIND_RECORD_DECL    => self.push_named(node, bytes, SymbolKind::STRUCT),
+            KIND_INTERFACE_DECL => self.push_named(node, bytes, SymbolKind::INTERFACE),
+            "annotation_type_declaration" => self.push_named(node, bytes, SymbolKind::INTERFACE),
+            KIND_ENUM_DECL      => self.push_named(node, bytes, SymbolKind::ENUM),
+            KIND_METHOD_DECL    => self.push_named(node, bytes, SymbolKind::METHOD),
+            KIND_CTOR_DECL      => self.push_named(node, bytes, SymbolKind::CONSTRUCTOR),
+            "enum_constant"     => self.push_named(node, bytes, SymbolKind::ENUM_MEMBER),
+            KIND_FIELD_DECL     => self.push_field_declaration(node, bytes),
+            KIND_IMPORT_DECL    => self.push_java_import(node, bytes),
+            _ => {}
+        }
+    }
+
+    fn push_named(&mut self, node: &Node, bytes: &[u8], kind: SymbolKind) {
+        if let Some((name, sel)) = first_identifier(node, bytes) {
+            let visibility  = visibility_at_line(&self.lines, node.range().start_point.row);
+            let range       = ts_to_lsp(node.range());
+            let detail      = extract_detail(&self.lines, range.start.line, range.end.line);
+            let type_params = node.extract_type_params(bytes);
+            self.symbols.push(SymbolEntry { name, kind, visibility, range, selection_range: sel, detail, type_params });
+        }
+    }
+
+    fn push_field_declaration(&mut self, node: &Node, bytes: &[u8]) {
+        let kind = if node.first_child_of_kind("modifiers").is_some_and(|mods| {
+            let found_kinds: Vec<&str> = (0..mods.child_count())
+                .filter_map(|i| mods.child(i))
+                .map(|c| c.kind())
+                .collect();
+            ["static", "final"].iter().all(|&req| found_kinds.contains(&req))
+        }) {
+            SymbolKind::CONSTANT
+        } else {
+            SymbolKind::FIELD
+        };
+        let nr     = ts_to_lsp(node.range());
+        let vis    = visibility_at_line(&self.lines, node.range().start_point.row);
+        let detail = extract_detail(&self.lines, nr.start.line, nr.end.line);
+        for child in node.children_of_kind("variable_declarator") {
+            if let Some((name, sel)) = first_identifier(&child, bytes) {
+                self.symbols.push(SymbolEntry {
+                    name, kind, visibility: vis, range: nr,
+                    selection_range: sel, detail: detail.clone(),
+                    type_params: Vec::new(),
+                });
+            }
+        }
+    }
+
+    fn push_java_import(&mut self, node: &Node, bytes: &[u8]) {
+        let mut cur = node.walk();
+        for child in node.children(&mut cur) {
+            if matches!(child.kind(), "scoped_identifier" | "identifier") {
+                if let Ok(txt) = child.utf8_text(bytes) {
+                    let full_path  = txt.to_owned();
+                    let local_name = full_path.last_segment().to_owned();
+                    self.imports.push(ImportEntry { full_path, local_name, is_star: false });
+                }
+                return;
+            }
+        }
     }
 }
 

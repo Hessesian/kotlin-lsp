@@ -7,6 +7,7 @@ use crate::StrExt;
 use crate::queries::{
     KIND_SIMPLE_IDENT, KIND_TYPE_IDENT, KIND_IDENTIFIER, KIND_VALUE_ARG, KIND_VALUE_ARGS,
     KIND_LAMBDA_PARAMS, KIND_TYPE_PARAMS, KIND_TYPE_PARAM, KIND_TYPE_ARGS,
+    KIND_USER_TYPE, KIND_TYPE_LIST,
 };
 
 pub(crate) trait NodeExt<'a>: Sized + Copy {
@@ -84,6 +85,19 @@ pub(crate) trait NodeExt<'a>: Sized + Copy {
     /// Used for `fun interface` recovery: tree-sitter may wrap the `<T>` in an ERROR
     /// child.  Search is depth-limited to one ERROR level to avoid entering class bodies.
     fn extract_type_params_or_error_child(self, bytes: &[u8]) -> Vec<String>;
+
+    /// Extract the supertype name from a Kotlin `delegation_specifier` node.
+    ///
+    /// Handles `constructor_invocation`, `explicit_delegation`, and bare `user_type`
+    /// forms.  Returns `(name, type_args)` or `None` if no supertype is found.
+    fn super_from_delegation(self, bytes: &[u8]) -> Option<(String, Vec<String>)>;
+
+    /// Collect all type names from the `type_list` child of a Java
+    /// `super_interfaces` or `extends_interfaces` node.
+    ///
+    /// Returns `(name, type_args)` pairs; the caller is responsible for supplying
+    /// the `name_line` and appending to `FileData.supers`.
+    fn java_type_list(self, bytes: &[u8]) -> Vec<(String, Vec<String>)>;
 
     /// Returns the line number (0-based) of the first named identifier child,
     /// or the node's own start line if no named child is found.
@@ -330,6 +344,38 @@ impl<'a> NodeExt<'a> for Node<'a> {
             }
         }
         Vec::new()
+    }
+
+    fn super_from_delegation(self, bytes: &[u8]) -> Option<(String, Vec<String>)> {
+        let mut cur = self.walk();
+        for child in self.children(&mut cur) {
+            let kind = child.kind();
+            if kind == "constructor_invocation" || kind == "explicit_delegation" {
+                if let Some(ut) = child.first_child_of_kind(KIND_USER_TYPE) {
+                    return ut.user_type_name(bytes).map(|n| (n, ut.type_arg_strings(bytes)));
+                }
+            } else if kind == KIND_USER_TYPE {
+                return child.user_type_name(bytes).map(|n| (n, child.type_arg_strings(bytes)));
+            }
+        }
+        None
+    }
+
+    fn java_type_list(self, bytes: &[u8]) -> Vec<(String, Vec<String>)> {
+        let Some(type_list) = self.first_child_of_kind(KIND_TYPE_LIST) else { return Vec::new() };
+        let mut result = Vec::new();
+        let mut cc = type_list.walk();
+        for type_node in type_list.children(&mut cc) {
+            // type_list children may be leaf type_identifier nodes directly,
+            // or wrapper nodes (generic_type, scoped_type_identifier) containing one.
+            let (name, type_args) = if type_node.kind() == KIND_TYPE_IDENT {
+                (type_node.utf8_text_owned(bytes), Vec::new())
+            } else {
+                (type_node.java_first_type_name(bytes), type_node.type_arg_strings(bytes))
+            };
+            if let Some(n) = name { result.push((n, type_args)); }
+        }
+        result
     }
 
     fn name_line(self) -> u32 {
