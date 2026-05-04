@@ -898,9 +898,8 @@ impl crate::types::FileData {
                 for spec in node.children_of_kind(KIND_INHERITANCE_SPEC) {
                     if let Some(ut) = spec.first_child_of_kind(KIND_USER_TYPE) {
                         if let Some(name) = ut.user_type_name(bytes) {
-                            // Swift generics are structurally nested inside user_type,
-                            // not via type_arguments, so type_args are empty here.
-                            self.supers.push((name_line, name, Vec::new()));
+                            let type_args = ut.type_arg_strings(bytes);
+                            self.supers.push((name_line, name, type_args));
                         }
                     }
                 }

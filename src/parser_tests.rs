@@ -650,9 +650,17 @@ class LoanReducer {
     #[test]
     fn swift_supers_with_generic_base() {
         let data = parse_swift("class Foo: Bar<Baz> {}");
-        let names = supers_names(&data);
-        // Base name "Bar" is captured; generic param stripped by user_type_name
-        assert!(names.contains(&"Bar".to_owned()), "missing Bar; got: {names:?}");
+        let entry = data.supers.iter().find(|(_, name, _)| name == "Bar")
+            .expect("missing Bar super");
+        assert_eq!(entry.2, vec!["Baz"], "type_args for Bar<Baz> should be [Baz]");
+    }
+
+    #[test]
+    fn swift_supers_multi_generic_args() {
+        let data = parse_swift("class Foo: Base<Int, String> {}");
+        let entry = data.supers.iter().find(|(_, name, _)| name == "Base")
+            .expect("missing Base super");
+        assert_eq!(entry.2, vec!["Int", "String"], "type_args for Base<Int, String> should be [Int, String]");
     }
 
     // ── visibility ───────────────────────────────────────────────────────────
@@ -807,15 +815,16 @@ class LoanReducer {
         }
     }
 
-    // ── Moneta real-file fixture tests ───────────────────────────────────────
-    // These tests parse actual source files from the Moneta/android workspace
-    // to verify CST extraction against production code.
-    // Skipped automatically if the path doesn't exist (not present in CI).
+    // ── fun interface CST fixture tests ──────────────────────────────────────
+    // Fixture files live in tests/fixtures/kotlin/ — they replicate the package
+    // structure of the original production sources so the package declaration
+    // and naming context are preserved.
 
     #[test]
-    fn moneta_router_fun_interface_has_type_param() {
-        let path = "/home/ocel/Work/Moneta/android/core/common/src/main/java/cz/moneta/smartbanka/common/mvi/Router.kt";
-        let Ok(src) = std::fs::read_to_string(path) else { return; };
+    fn fun_interface_single_type_param_indexed() {
+        let src = std::fs::read_to_string(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/kotlin/mvi/Router.kt")
+        ).expect("fixture Router.kt missing");
         let data = parse_kotlin(&src);
         let sym = data.symbols.iter().find(|s| s.name == "Router" && s.kind == SymbolKind::INTERFACE)
             .expect("Router interface not indexed");
@@ -823,9 +832,10 @@ class LoanReducer {
     }
 
     #[test]
-    fn moneta_iinputvalidator_variance_stripped() {
-        let path = "/home/ocel/Work/Moneta/android/core/commonui/src/main/java/cz/moneta/smartbanka/mobile/commonui/component/input/validator/IInputValidator.kt";
-        let Ok(src) = std::fs::read_to_string(path) else { return; };
+    fn fun_interface_variance_stripped() {
+        let src = std::fs::read_to_string(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/kotlin/input/validator/IInputValidator.kt")
+        ).expect("fixture IInputValidator.kt missing");
         let data = parse_kotlin(&src);
         let sym = data.symbols.iter().find(|s| s.name == "IInputValidator" && s.kind == SymbolKind::INTERFACE)
             .expect("IInputValidator should be indexed");
