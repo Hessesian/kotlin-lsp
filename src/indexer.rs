@@ -48,6 +48,7 @@ pub(crate) use self::infer::{
     line_has_lambda_param,
     lambda_brace_pos_for_param,
     find_last_dot_at_depth_zero,
+    is_inside_receiver_lambda,
 };
 
 mod cache;

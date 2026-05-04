@@ -690,6 +690,24 @@ data class State(
     }
 
     #[test]
+    fn infer_type_in_lines_raw_by_lazy_single_line() {
+        // `val repo by lazy { UserRepository() }` — no explicit annotation
+        let lines: Vec<String> = vec![
+            "    private val repo by lazy { UserRepository() }".into(),
+        ];
+        assert_eq!(infer_type_in_lines_raw(&lines, "repo"), Some("UserRepository".into()));
+    }
+
+    #[test]
+    fn infer_type_in_lines_raw_explicit_annotation_takes_priority() {
+        // `val repo: UserRepository by lazy { ... }` — annotation wins (first scan)
+        let lines: Vec<String> = vec![
+            "    private val repo: UserRepository by lazy { UserRepository() }".into(),
+        ];
+        assert_eq!(infer_type_in_lines_raw(&lines, "repo"), Some("UserRepository".into()));
+    }
+
+    #[test]
     fn goto_def_on_named_lambda_param_resolves_to_declaration_line() {
         // items.forEach { product ->
         //     product.name   ← gd on `product` here

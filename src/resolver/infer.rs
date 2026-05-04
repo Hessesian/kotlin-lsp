@@ -250,6 +250,9 @@ pub(crate) fn infer_type_in_lines(lines: &[String], var_name: &str) -> Option<St
 ///
 /// `val items: List<Product>` → `"List<Product>"`
 /// `val state: StateFlow<UiState>` → `"StateFlow<UiState>"`
+///
+/// Also handles delegate-inferred types:
+/// `val foo by lazy { SomeType() }` → `"SomeType"` (single-line only)
 pub(crate) fn infer_type_in_lines_raw(lines: &[String], var_name: &str) -> Option<String> {
     let pattern = format!("{var_name}:");
 
@@ -272,6 +275,27 @@ pub(crate) fn infer_type_in_lines_raw(lines: &[String], var_name: &str) -> Optio
             }
         }
     }
+
+    // Secondary scan: `val varName by lazy { ConstructorCall() }`
+    // Works only for single-line declarations without an explicit type annotation.
+    let lazy_pattern = format!("{var_name} by lazy");
+    for line in lines {
+        if !line.contains(&lazy_pattern) { continue; }
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//") || trimmed.starts_with('*') || trimmed.starts_with("/*") {
+            continue;
+        }
+        if let Some(brace_pos) = line.find('{') {
+            let after_brace = line[brace_pos + 1..].trim_start();
+            // Extract the first identifier (stops at `<`, `(`, whitespace, etc.)
+            let ident = after_brace.dotted_ident_prefix();
+            let base = ident.split('.').last().unwrap_or(&ident);
+            if !base.is_empty() && base.starts_with_uppercase() {
+                return Some(base.to_owned());
+            }
+        }
+    }
+
     None
 }
 

@@ -521,3 +521,72 @@ fn test_deps_unknown_fn_returns_none() {
     let result = lambda_receiver_type_from_context("unknownFn", &deps, &u);
     assert_eq!(result, None, "unknown function should return None");
 }
+
+// ── classify_this_lambda_context / is_inside_receiver_lambda ─────────────────
+
+#[test]
+fn apply_this_resolved_receiver() {
+    // `obj.apply { this }` where obj type is known → Resolved("Foo")
+    let src = "val obj: Foo = Foo()";
+    let (u, idx) = indexed("/t.kt", src);
+    let ctx = super::classify_this_lambda_context("obj.apply ", &idx, &u);
+    let is_resolved_foo = matches!(&ctx, super::ThisLambdaCtx::Resolved(t) if t == "Foo");
+    assert!(is_resolved_foo, "expected Resolved(Foo), got: {ctx:?}");
+}
+
+#[test]
+fn apply_this_unresolved_receiver_returns_receiver_ctx() {
+    // `unknown.apply { this }` — type of `unknown` not in index → Receiver (NOT NotReceiver)
+    let u = uri("/t.kt");
+    let deps = super::super::TestDeps::new();
+    let ctx = super::classify_this_lambda_context("unknown.apply ", &deps, &u);
+    assert!(matches!(ctx, super::ThisLambdaCtx::Receiver),
+        "apply with unresolvable receiver should be Receiver, got: {ctx:?}");
+}
+
+#[test]
+fn foreach_lambda_is_not_receiver_ctx() {
+    // `list.forEach { this }` — forEach is NOT a scope function → NotReceiver
+    let u = uri("/t.kt");
+    let deps = super::super::TestDeps::new();
+    let ctx = super::classify_this_lambda_context("list.forEach ", &deps, &u);
+    assert!(matches!(ctx, super::ThisLambdaCtx::NotReceiver),
+        "forEach should yield NotReceiver, got: {ctx:?}");
+}
+
+#[test]
+fn with_this_unresolved_receiver_returns_receiver_ctx() {
+    // `with(expr) { this }` — type of expr not found → Receiver
+    let u = uri("/t.kt");
+    let deps = super::super::TestDeps::new();
+    let ctx = super::classify_this_lambda_context("with(someExpr) ", &deps, &u);
+    assert!(matches!(ctx, super::ThisLambdaCtx::Receiver),
+        "with() with unresolvable arg should be Receiver, got: {ctx:?}");
+}
+
+#[test]
+fn is_inside_receiver_lambda_apply() {
+    // Cursor inside `obj.apply { <here> }` with unknown obj type.
+    // is_inside_receiver_lambda should return true (it IS inside a receiver lambda).
+    let src = "val _x = unknown.apply {\n    this\n}";
+    let u = uri("/t.kt");
+    let idx = Indexer::new();
+    idx.index_content(&u, src);
+    let lines: Vec<String> = src.lines().map(String::from).collect();
+    let pos = crate::types::CursorPos { line: 1, utf16_col: 8 };
+    let result = super::is_inside_receiver_lambda(&lines, pos, &idx, &u);
+    assert!(result, "cursor inside unknown.apply{{}} should be inside receiver lambda");
+}
+
+#[test]
+fn is_inside_receiver_lambda_foreach_is_false() {
+    // Cursor inside `list.forEach { <here> }` — NOT a receiver lambda.
+    let src = "val list = listOf(1)\nlist.forEach {\n    this\n}";
+    let u = uri("/t.kt");
+    let idx = Indexer::new();
+    idx.index_content(&u, src);
+    let lines: Vec<String> = src.lines().map(String::from).collect();
+    let pos = crate::types::CursorPos { line: 2, utf16_col: 8 };
+    let result = super::is_inside_receiver_lambda(&lines, pos, &idx, &u);
+    assert!(!result, "cursor inside forEach{{}} should NOT be inside receiver lambda");
+}

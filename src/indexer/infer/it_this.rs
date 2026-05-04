@@ -321,8 +321,14 @@ fn cst_it_or_this_type(
             let ln = cur.start_position().row;
 
             if for_this {
-                if let Some(t) = lambda_receiver_this_type_from_context(before_brace, idx, uri) {
-                    return Some(t);
+                match classify_this_lambda_context(before_brace, idx, uri) {
+                    ThisLambdaCtx::Resolved(t) => return Some(t),
+                    // Receiver-lambda context but type not found: stop walking up.
+                    // `this` here is the receiver, not an outer lambda's receiver.
+                    ThisLambdaCtx::Receiver => return None,
+                    // Non-receiver lambda (forEach, map…): keep walking outward.
+                    // `this` inside these lambdas is the enclosing class / outer receiver.
+                    ThisLambdaCtx::NotReceiver => {}
                 }
             } else {
                 // CST structural fallback: walk up the call tree to find
@@ -496,24 +502,40 @@ pub(super) fn has_lambda_named_params(lambda_node: tree_sitter::Node<'_>, bytes:
     lambda_node.has_lambda_named_params(bytes)
 }
 
+/// Tri-state result of classifying a lambda's `this`-receiver context.
 ///
-/// `this` in Kotlin refers to the implicit receiver only inside a **receiver lambda**
-/// (`T.() -> R`).  In a regular lambda (`(T) -> R`) `this` is the enclosing class —
-/// we must NOT emit a hint from the lambda in that case.
+/// Distinguishes between "receiver lambda with type resolved", "receiver lambda
+/// but type not found", and "not a receiver-`this` lambda at all".  The last
+/// case is important: in a non-receiver lambda (e.g. `forEach`) `this` refers
+/// to the enclosing class, so the walk-up to outer lambdas and the
+/// `enclosing_class_at` fallback should still be allowed.
+#[derive(Debug)]
+pub(crate) enum ThisLambdaCtx {
+    /// Receiver-`this` type resolved to the given name.
+    Resolved(String),
+    /// Lambda is a known receiver context (`apply`/`run`/`with`/indexed
+    /// receiver-lambda fn) but the receiver object's type could not be found.
+    /// Callers must NOT walk outward or fall back to the enclosing class.
+    Receiver,
+    /// Not a receiver-`this` lambda (e.g. `forEach`, `map`).
+    /// `this` refers to the enclosing class; fallback is valid.
+    NotReceiver,
+}
+
+/// Classify the `this` receiver context from the text before a lambda `{`.
 ///
 /// Rules:
-///  - Case A `receiver.method { this }`: check if `method` has a receiver-lambda last
-///    param (`T.() -> R`) — if so return `T`.  If method not indexed but is a known
-///    stdlib scope function listed in `RECEIVER_THIS_FNS` (`run`, `apply`), return the
-///    receiver type.  `also` and `let` are intentionally excluded — they expose the
-///    receiver as `it`, not `this`.
-///  - Case B `with(receiver) { this }`: return the receiver's type (special-cased).
-///  - Everything else: return `None` (don't hint `this` from the lambda).
-fn lambda_receiver_this_type_from_context(
+///  - Case A `receiver.method { this }`: if `method` has an indexed receiver-lambda
+///    type → `Resolved`.  If `method` ∈ `RECEIVER_THIS_FNS` (`run`, `apply`):
+///    resolve receiver → `Resolved`; if unresolvable → `Receiver`.
+///    Other dot-call methods → `NotReceiver`.
+///  - Case B `with(receiver) { this }` → `Resolved` or `Receiver`.
+///  - Everything else → `NotReceiver`.
+pub(crate) fn classify_this_lambda_context(
     before_brace: &str,
     deps:         &impl InferDeps,
     uri:          &Url,
-) -> Option<String> {
+) -> ThisLambdaCtx {
     let trimmed = before_brace.trim_end();
     let callee_raw = strip_trailing_call_args(trimmed).replace("?.", ".");
     let callee = callee_raw.trim();
@@ -525,23 +547,25 @@ fn lambda_receiver_this_type_from_context(
         let method = callee[dot_pos + 1..].trim_start().ident_prefix();
 
         if !receiver_var.is_empty() && !method.is_empty() {
-            // Prefer the method's own receiver-lambda type (only for indexed fns).
+            // Indexed function with a receiver-lambda last param → always Resolved.
             if let Some(ty) = fun_trailing_lambda_this_type(&method, deps, uri) {
-                return Some(ty);
+                return ThisLambdaCtx::Resolved(ty);
             }
-            // Only functions listed in `RECEIVER_THIS_FNS` (`run`, `apply`) are treated as
-            // receiver-`this` lambdas; `also`/`let` are intentionally excluded.
+            // Known stdlib scope functions (`run`, `apply`).
             if RECEIVER_THIS_FNS.contains(&method.as_str()) {
                 if let Some(raw) = deps.find_var_type(receiver_var, uri) {
                     let base = raw.ident_prefix();
-                    if !base.is_empty() { return Some(base); }
+                    if !base.is_empty() { return ThisLambdaCtx::Resolved(base); }
                 }
                 if receiver_var.starts_with_uppercase() {
-                    return Some(receiver_var.to_owned());
+                    return ThisLambdaCtx::Resolved(receiver_var.to_owned());
                 }
+                // In a known scope-fn lambda but type not found.
+                return ThisLambdaCtx::Receiver;
             }
         }
-        return None; // Non-scope, non-receiver-lambda: `this` is enclosing class.
+        // Other dot-call (forEach, map, …): `this` = enclosing class.
+        return ThisLambdaCtx::NotReceiver;
     }
 
     // ── Case B: `with(receiver) { this }` ───────────────────────────────────
@@ -550,16 +574,79 @@ fn lambda_receiver_this_type_from_context(
         if let Some(recv_name) = extract_first_arg(trimmed) {
             if let Some(raw) = deps.find_var_type(recv_name, uri) {
                 let base = raw.ident_prefix();
-                if !base.is_empty() { return Some(base); }
+                if !base.is_empty() { return ThisLambdaCtx::Resolved(base); }
             }
             let base = recv_name.ident_prefix();
             if base.starts_with_uppercase() {
-                return Some(base);
+                return ThisLambdaCtx::Resolved(base);
+            }
+        }
+        return ThisLambdaCtx::Receiver;
+    }
+
+    ThisLambdaCtx::NotReceiver
+}
+
+/// Thin wrapper kept for callers that only need `Option<String>`.
+fn lambda_receiver_this_type_from_context(
+    before_brace: &str,
+    deps:         &impl InferDeps,
+    uri:          &Url,
+) -> Option<String> {
+    match classify_this_lambda_context(before_brace, deps, uri) {
+        ThisLambdaCtx::Resolved(ty) => Some(ty),
+        _ => None,
+    }
+}
+
+/// Return `true` when the text-scan of `lines` around `pos` determines that
+/// the cursor is inside a **receiver-`this` lambda** whose receiver type is
+/// either resolved or simply not found — either way `this` refers to the
+/// lambda receiver, NOT the enclosing class.
+///
+/// Used in `infer_lambda_param_type_at` to suppress the `enclosing_class_at`
+/// fallback when `find_this_element_type_in_lines` returned `None` only
+/// because the receiver variable's type couldn't be resolved.
+pub(crate) fn is_inside_receiver_lambda(
+    lines: &[String],
+    pos:   CursorPos,
+    deps:  &impl InferDeps,
+    uri:   &Url,
+) -> bool {
+    let mut depth: i32 = 0;
+    let scan_start = pos.line.saturating_sub(IT_SCAN_BACK_LINES);
+
+    for ln in (scan_start..=pos.line).rev() {
+        let line = match lines.get(ln) { Some(l) => l, None => continue };
+        let scan_slice: &str = if ln == pos.line {
+            let byte_end = crate::indexer::live_tree::utf16_col_to_byte(line, pos.utf16_col);
+            &line[..byte_end]
+        } else {
+            line.as_str()
+        };
+
+        for (bi, ch) in scan_slice.char_indices().rev() {
+            match ch {
+                '}' => depth += 1,
+                '{' => {
+                    depth -= 1;
+                    if depth < 0 {
+                        let before_brace = &scan_slice[..bi];
+                        if before_brace.ends_with('$') { depth = 0; continue; }
+                        if has_named_params_not_it(scan_slice[bi + 1..].trim_start()) {
+                            depth = 0; continue;
+                        }
+                        return !matches!(
+                            classify_this_lambda_context(before_brace, deps, uri),
+                            ThisLambdaCtx::NotReceiver
+                        );
+                    }
+                }
+                _ => {}
             }
         }
     }
-
-    None
+    false
 }
 
 /// Handles named-arg lambdas spread across multiple lines:
