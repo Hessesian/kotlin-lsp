@@ -341,6 +341,18 @@ impl<'a> NodeExt<'a> for Node<'a> {
             if child.is_error() {
                 let params = child.extract_type_params(bytes);
                 if !params.is_empty() { return params; }
+                // `<T>` may land as raw tokens (no type_parameters node) — scan bytes directly.
+                if let Ok(text) = child.utf8_text(bytes) {
+                    let params = type_params_from_angle_brackets(text);
+                    if !params.is_empty() { return params; }
+                }
+            }
+        }
+        // No-modifiers case: the whole `fun interface Foo<T>` is an ERROR node itself,
+        // so `<T>` is a direct child token rather than nested in an ERROR child.
+        if self.is_error() {
+            if let Ok(text) = self.utf8_text(bytes) {
+                return type_params_from_angle_brackets(text);
             }
         }
         Vec::new()
@@ -396,6 +408,40 @@ impl<'a> NodeExt<'a> for Node<'a> {
     }
 }
 
+
+/// Scan `text` for the first `<…>` block and return simple identifier names inside.
+/// Used as a last-resort fallback when tree-sitter ERROR nodes don't produce a
+/// `type_parameters` child (e.g. `fun interface Foo<T>` in tree-sitter-kotlin 0.3).
+fn type_params_from_angle_brackets(text: &str) -> Vec<String> {
+    let open = match text.find('<') {
+        Some(i) => i,
+        None => return Vec::new(),
+    };
+    let rest = &text[open + 1..];
+    let mut depth: usize = 1;
+    let mut close = None;
+    for (i, c) in rest.char_indices() {
+        match c {
+            '<' => depth += 1,
+            '>' => {
+                depth -= 1;
+                if depth == 0 { close = Some(i); break; }
+            }
+            _ => {}
+        }
+    }
+    let close = match close {
+        Some(i) => i,
+        None => return Vec::new(),
+    };
+    // Only accept simple identifier names (no bounds, variance annotations, etc.)
+    rest[..close]
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_'))
+        .map(|s| s.to_owned())
+        .collect()
+}
 
 fn collect_user_type_segments(node: Node<'_>, bytes: &[u8], segments: &mut Vec<String>) {
     let mut cur = node.walk();
