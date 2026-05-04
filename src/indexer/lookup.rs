@@ -472,7 +472,7 @@ fn build_enclosing_class_subst(
 /// Extract the simple type name from a property detail string.
 /// E.g. "private val foo: DashboardProductsReducer by lazy" → "DashboardProductsReducer"
 /// E.g. "val x: List<String>" → "List"
-fn extract_property_type_name(detail: &str) -> &str {
+pub(crate) fn extract_property_type_name(detail: &str) -> &str {
     // Find ": Type" pattern
     let colon_pos = match detail.find(':') {
         Some(p) => p,

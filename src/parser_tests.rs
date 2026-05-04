@@ -749,16 +749,15 @@ class LoanReducer {
 
     #[test]
     fn fun_interface_generic_type_params() {
-        // tree-sitter-kotlin may or may not create a type_parameters node inside
-        // the ERROR recovery for `fun interface Router<Effect>`.  Assert the known
-        // behaviour so regressions are visible.
         let src = "fun interface Router<Effect> { fun route(effect: Effect) }";
         let data = parse_kotlin(src);
         let s = sym(&data, "Router").expect("Router not found");
         assert_eq!(s.kind, tower_lsp::lsp_types::SymbolKind::INTERFACE);
-        // If CST error recovery produces a type_parameters node, type_params will be
-        // populated. If not, empty is acceptable (known tree-sitter-kotlin 0.3 limitation).
-        // The important thing is that the method's type params are NOT included.
+        // Text fallback extracts type params from the declaration line when CST
+        // error recovery doesn't produce a type_parameters node.
+        assert_eq!(s.type_params, vec!["Effect".to_string()],
+            "type_params should be extracted via text fallback: {:?}", s.type_params);
         assert!(!s.type_params.contains(&"effect".to_string()),
             "method param leaked into interface type_params: {:?}", s.type_params);
     }
+

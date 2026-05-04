@@ -38,7 +38,7 @@ impl ResolveOptions {
 /// Substitution context used by the pipeline.
 pub enum SubstitutionContext<'a> {
     None,
-    CrossFile { calling_uri: &'a str },
+    CrossFile { calling_uri: &'a str, cursor_line: u32 },
     EnclosingClass { uri: &'a str, cursor_line: u32 },
     Precomputed(&'a HashMap<String, String>),
 }
@@ -194,8 +194,8 @@ fn build_subst_if_needed<I: IndexRead>(
 
     match subst_ctx {
         SubstitutionContext::None => HashMap::new(),
-        SubstitutionContext::CrossFile { calling_uri } => {
-            build_type_param_subst_impl(index, location.uri.as_str(), location.range.start.line, calling_uri)
+        SubstitutionContext::CrossFile { calling_uri, cursor_line } => {
+            build_type_param_subst_impl(index, location.uri.as_str(), location.range.start.line, calling_uri, cursor_line)
         }
         SubstitutionContext::EnclosingClass { uri, cursor_line } => {
             build_enclosing_class_subst_impl(index, uri, cursor_line)
@@ -212,6 +212,7 @@ fn build_type_param_subst_impl<I: IndexRead>(
     sym_uri: &str,
     sym_line: u32,
     calling_uri: &str,
+    caller_cursor_line: u32,
 ) -> HashMap<String, String> {
     if sym_uri == calling_uri {
         return HashMap::new();
@@ -239,8 +240,19 @@ fn build_type_param_subst_impl<I: IndexRead>(
         Some(d) => d,
         None => return HashMap::new(),
     };
+
+    // Use `caller_cursor_line` to identify the specific calling class — when multiple
+    // classes in the same file extend the same base with different type args,
+    // this ensures we pick the correct substitution for the caller.
+    let calling_class_line = find_containing_class_name(&calling_data, caller_cursor_line)
+        .and_then(|name| calling_data.symbols.iter().find(|s| s.name == name))
+        .map(|s| s.selection_range.start.line);
+
     let type_args = calling_data.supers.iter()
-        .find(|(_, base, _)| base == &container_name)
+        .find(|(line, base, _)| {
+            base == &container_name
+                && calling_class_line.map_or(true, |class_line| *line == class_line)
+        })
         .map(|(_, _, args)| args.clone())
         .unwrap_or_default();
 
@@ -303,6 +315,31 @@ fn build_enclosing_class_subst_impl<I: IndexRead>(
         }
         for (param, arg) in base_type_params.iter().zip(type_args.iter()) {
             result.entry(param.clone()).or_insert_with(|| arg.clone());
+        }
+    }
+    // Phase 2: collect substitutions from member property types.
+    // E.g. if the enclosing class has `val reducer: DashboardProductsReducer`
+    // and that type extends `FlowReducer<Event, State>`, include
+    // `{Event→…, State→…}` mappings from FlowReducer's type params.
+    for sym in data.symbols.iter() {
+        if sym.selection_range.start.line <= class_line { continue; }
+        if !matches!(sym.kind, SymbolKind::FIELD | SymbolKind::PROPERTY) { continue; }
+        let type_name = super::lookup::extract_property_type_name(&sym.detail);
+        if type_name.is_empty() { continue; }
+        let Some(locs) = index.get_definitions(type_name) else { continue };
+        let Some(loc) = locs.into_iter().next() else { continue };
+        let Some(prop_type_data) = index.get_file_data(loc.uri.as_str()) else { continue };
+        let Some(prop_sym) = prop_type_data.symbols.iter().find(|s| s.name == type_name) else { continue };
+        let prop_class_line = prop_sym.selection_range.start.line;
+        for (line, super_name, type_args) in prop_type_data.supers.iter() {
+            if *line != prop_class_line || type_args.is_empty() { continue; }
+            let Some(super_locs) = index.get_definitions(super_name) else { continue };
+            let Some(super_loc) = super_locs.into_iter().next() else { continue };
+            let Some(super_file_data) = index.get_file_data(super_loc.uri.as_str()) else { continue };
+            let Some(super_sym) = super_file_data.symbols.iter().find(|s| s.name == *super_name) else { continue };
+            for (param, arg) in super_sym.type_params.iter().zip(type_args.iter()) {
+                result.entry(param.clone()).or_insert_with(|| arg.clone());
+            }
         }
     }
     result
@@ -659,5 +696,94 @@ mod tests {
         let r = result.unwrap();
         assert!(r.signature.contains("String"), "signature should have substituted T→String: {}", r.signature);
         assert!(!r.signature.contains(": T"), "raw T should be replaced: {}", r.signature);
+    }
+
+    // ── Unb5/TRjS regression: CrossFile with cursor_line ─────────────────────
+
+    /// When two classes in the same file extend the same base with different type
+    /// args, `CrossFile { cursor_line }` must pick the right class for substitution.
+    #[test]
+    fn crossfile_cursor_line_disambiguates_multiple_callers() {
+        use crate::types::Visibility;
+
+        let base_uri   = "file:///base.kt";
+        let caller_uri = "file:///caller.kt";
+
+        // Base: class FlowReducer<E, S>  with fun reduce(e: E): S
+        let base_class = {
+            let mut s = make_sym("FlowReducer", SymbolKind::CLASS, 0, 10);
+            s.type_params = vec!["E".to_owned(), "S".to_owned()];
+            s
+        };
+        let base_method = {
+            let mut s = make_sym("reduce", SymbolKind::FUNCTION, 5, 7);
+            s.detail = "fun reduce(e: E): S".to_owned();
+            s
+        };
+        let base_data = Arc::new(crate::types::FileData {
+            symbols: vec![base_class, base_method],
+            lines: std::sync::Arc::new(vec![
+                "class FlowReducer<E, S> {".to_owned(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                "    fun reduce(e: E): S {}".to_owned(),
+                "}".to_owned(),
+            ]),
+            ..Default::default()
+        });
+
+        // Caller file has TWO classes extending FlowReducer with different args:
+        //   class DashReducer : FlowReducer<DashEvent, DashState>  (line 0)
+        //   class SettingsReducer : FlowReducer<SettEvent, SettState> (line 10)
+        let dash_class = {
+            let mut s = make_sym("DashReducer", SymbolKind::CLASS, 0, 8);
+            s.selection_range = make_range(0, 0);
+            s
+        };
+        let sett_class = {
+            let mut s = make_sym("SettingsReducer", SymbolKind::CLASS, 10, 18);
+            s.selection_range = make_range(10, 10);
+            s
+        };
+        let caller_data = Arc::new(crate::types::FileData {
+            symbols: vec![dash_class, sett_class],
+            supers: vec![
+                (0, "FlowReducer".to_owned(), vec!["DashEvent".to_owned(), "DashState".to_owned()]),
+                (10, "FlowReducer".to_owned(), vec!["SettEvent".to_owned(), "SettState".to_owned()]),
+            ],
+            ..Default::default()
+        });
+
+        let mut files = HashMap::new();
+        files.insert(base_uri.to_owned(), base_data);
+        files.insert(caller_uri.to_owned(), caller_data);
+        let mut definitions = HashMap::new();
+        definitions.insert("FlowReducer".to_owned(), vec![make_location(base_uri, 0)]);
+        definitions.insert("reduce".to_owned(), vec![make_location(base_uri, 5)]);
+        let idx = RealTestIndex { files, definitions };
+
+        // Cursor inside DashReducer (line 4): should use DashEvent/DashState
+        let result_dash = resolve_symbol_info(
+            &idx, "reduce", None,
+            &Url::parse(caller_uri).unwrap(),
+            SubstitutionContext::CrossFile { calling_uri: caller_uri, cursor_line: 4 },
+            &ResolveOptions::hover(),
+        );
+        let dash = result_dash.expect("should resolve reduce");
+        assert!(dash.signature.contains("DashEvent"), "dash: {}", dash.signature);
+        assert!(dash.signature.contains("DashState"), "dash: {}", dash.signature);
+
+        // Cursor inside SettingsReducer (line 14): should use SettEvent/SettState
+        let result_sett = resolve_symbol_info(
+            &idx, "reduce", None,
+            &Url::parse(caller_uri).unwrap(),
+            SubstitutionContext::CrossFile { calling_uri: caller_uri, cursor_line: 14 },
+            &ResolveOptions::hover(),
+        );
+        let sett = result_sett.expect("should resolve reduce");
+        assert!(sett.signature.contains("SettEvent"), "sett: {}", sett.signature);
+        assert!(sett.signature.contains("SettState"), "sett: {}", sett.signature);
     }
 }

@@ -1225,3 +1225,11 @@ data class State(
         assert_eq!(rt.leaf,      "OneYearOlderInteractor");
     }
 
+
+    #[test]
+    fn supers_swift_multiple_conformances() {
+        let src = "class Foo: UIViewController, Sendable {}";
+        let s: Vec<String> = crate::parser::parse_swift(src).supers.into_iter().map(|(_, n, _)| n).collect();
+        assert!(s.contains(&"UIViewController".to_string()), "missing UIViewController, got {s:?}");
+        assert!(s.contains(&"Sendable".to_string()), "missing Sendable, got {s:?}");
+    }

@@ -395,8 +395,49 @@ fn push_interface_symbol(name: &str, node: &Node, sel_node_range: tree_sitter::R
     let range       = ts_to_lsp(node.range());
     let sel         = ts_to_lsp(sel_node_range);
     let detail      = extract_detail(&data.lines, range.start.line, range.end.line);
-    let type_params = node.extract_type_params_or_error_child(bytes);
+    // CST primary extraction; fall back to text scan of the declaration line for
+    // `fun interface Foo<T>` when tree-sitter-kotlin 0.3 fails to recover
+    // type_parameters from its ERROR node.
+    let type_params = {
+        let cst = node.extract_type_params_or_error_child(bytes);
+        if cst.is_empty() { type_params_from_angle_brackets(&detail) } else { cst }
+    };
     data.symbols.push(SymbolEntry { name: name.to_owned(), kind: SymbolKind::INTERFACE, visibility, range, selection_range: sel, detail, type_params });
+}
+
+/// Extract simple type parameter names from the first `<…>` block in `text`.
+/// Returns empty when no well-formed `<…>` is found.
+/// E.g. `"fun interface Router<Effect>"` → `["Effect"]`
+/// E.g. `"fun interface Pair<A, B>"` → `["A", "B"]`
+fn type_params_from_angle_brackets(text: &str) -> Vec<String> {
+    let open = match text.find('<') {
+        Some(i) => i,
+        None => return Vec::new(),
+    };
+    let rest = &text[open + 1..];
+    let mut depth: usize = 1;
+    let mut close = None;
+    for (i, c) in rest.char_indices() {
+        match c {
+            '<' => depth += 1,
+            '>' => {
+                depth -= 1;
+                if depth == 0 { close = Some(i); break; }
+            }
+            _ => {}
+        }
+    }
+    let close = match close {
+        Some(i) => i,
+        None => return Vec::new(),
+    };
+    // Only accept simple identifier names (no bounds, variance annotations, etc.)
+    rest[..close]
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_'))
+        .map(|s| s.to_owned())
+        .collect()
 }
 
 /// Walk the parse tree and emit INTERFACE symbols for every `fun interface Foo` declaration.
