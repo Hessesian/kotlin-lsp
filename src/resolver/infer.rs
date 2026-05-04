@@ -210,6 +210,9 @@ impl crate::indexer::Indexer {
 ///
 /// Returns the type name without nullable marker (`?`) and generic parameters (`<…>`).
 /// Only returns names starting with an uppercase letter (skips primitives / unit).
+///
+/// When no explicit type annotation is found, falls back to RHS assignment inference
+/// (constructor calls, class literals, DI generics).
 pub(crate) fn infer_type_in_lines(lines: &[String], var_name: &str) -> Option<String> {
     let pattern = format!("{var_name}:");
 
@@ -243,6 +246,14 @@ pub(crate) fn infer_type_in_lines(lines: &[String], var_name: &str) -> Option<St
             }
         }
     }
+
+    // Secondary scan: RHS assignment inference (no explicit type annotation).
+    for line in lines {
+        if let Some(t) = infer_from_rhs_assignment(line, var_name) {
+            return Some(t);
+        }
+    }
+
     None
 }
 
@@ -291,6 +302,95 @@ pub(crate) fn infer_type_in_lines_raw(lines: &[String], var_name: &str) -> Optio
             let ident = after_brace.dotted_ident_prefix();
             let base = ident.split('.').last().unwrap_or(&ident);
             if !base.is_empty() && base.starts_with_uppercase() {
+                return Some(base.to_owned());
+            }
+        }
+    }
+
+    // Tertiary scan: assignment-based type inference.
+    for line in lines {
+        if let Some(t) = infer_from_rhs_assignment(line, var_name) {
+            return Some(t);
+        }
+    }
+
+    None
+}
+
+/// Attempt to infer the type of `var_name` from the right-hand side of an assignment.
+///
+/// Called as a secondary/tertiary scan when no explicit type annotation (`var_name:`)
+/// is found.  Handles the most common Android/Kotlin patterns:
+///
+/// 1. Constructor call:  `val x = SomeType(args)` → `"SomeType"`
+/// 2. Class literal:     `val x = retrofit.create(DashboardApi::class.java)` → `"DashboardApi"`
+/// 3. DI generic:        `val x = inject<SomeType>()` → `"SomeType"`
+///
+/// Returns `None` when none of the patterns match.
+fn infer_from_rhs_assignment(line: &str, var_name: &str) -> Option<String> {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with("//") || trimmed.starts_with('*') || trimmed.starts_with("/*") {
+        return None;
+    }
+
+    // Locate `var_name =` where var_name is a whole word boundary.
+    let assign = format!("{var_name} =");
+    let eq_start = line.find(&assign)?;
+    if eq_start > 0 {
+        let before = line[..eq_start].chars().last().unwrap_or(' ');
+        if before.is_alphanumeric() || before == '_' {
+            return None;
+        }
+    }
+
+    // Reject `var_name` appearing in type-annotation position: `val x: VarName = ...`
+    // Check the token immediately before var_name (skipping trailing spaces).
+    {
+        let before_name = line[..eq_start].trim_end();
+        let last_tok = before_name.chars().last().unwrap_or(' ');
+        if last_tok == ':' || last_tok == ',' || last_tok == '<' {
+            return None;
+        }
+    }
+
+    // Point to the `=` character (`var_name ` is `var_name.len() + 1` bytes).
+    let eq_char_idx = eq_start + var_name.len() + 1;
+    let rest = line.get(eq_char_idx..)?;
+    // Reject `==` (equality) and `=>` (unlikely in Kotlin but safe).
+    let next = rest.as_bytes().get(1).copied().unwrap_or(b' ');
+    if next == b'=' || next == b'>' {
+        return None;
+    }
+    let rhs = rest[1..].trim_start();
+
+    // Pattern 2: class literal `SomeType::class` — checked before pattern 1 so that
+    // `retrofit.create(DashboardApi::class.java)` yields `DashboardApi`, not `retrofit`.
+    if let Some(class_pos) = rhs.find("::class") {
+        let type_name = rhs[..class_pos].last_ident_in();
+        if !type_name.is_empty() && type_name.starts_with_uppercase() {
+            return Some(type_name.to_owned());
+        }
+    }
+
+    // Pattern 3: DI generic — `inject<SomeType>()`, `get<SomeType>()`, etc.
+    const DI_PREFIXES: &[&str] = &["inject<", "get<", "viewModel<", "activityViewModel<"];
+    for prefix in DI_PREFIXES {
+        if let Some(start) = rhs.find(prefix) {
+            let after = &rhs[start + prefix.len()..];
+            let type_name = after.ident_prefix();
+            if !type_name.is_empty() && type_name.starts_with_uppercase() {
+                return Some(type_name);
+            }
+        }
+    }
+
+    // Pattern 1: constructor call — RHS starts with UppercaseIdent followed by `(` or `{`.
+    let dotted = rhs.dotted_ident_prefix();
+    if !dotted.is_empty() {
+        let base = dotted.split('.').last().unwrap_or(&dotted);
+        if base.starts_with_uppercase() {
+            let after_ident = rhs[dotted.len()..].trim_start();
+            if after_ident.starts_with('(') || after_ident.starts_with('{') {
                 return Some(base.to_owned());
             }
         }

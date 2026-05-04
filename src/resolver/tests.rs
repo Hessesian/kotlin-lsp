@@ -708,6 +708,94 @@ data class State(
     }
 
     #[test]
+    fn infer_type_in_lines_constructor_call() {
+        // `val viewModel = DashboardViewModel()` — no annotation
+        let lines: Vec<String> = vec![
+            "    val viewModel = DashboardViewModel()".into(),
+        ];
+        assert_eq!(infer_type_in_lines(&lines, "viewModel"), Some("DashboardViewModel".into()));
+    }
+
+    #[test]
+    fn infer_type_in_lines_raw_constructor_call() {
+        let lines: Vec<String> = vec![
+            "    val viewModel = DashboardViewModel()".into(),
+        ];
+        assert_eq!(infer_type_in_lines_raw(&lines, "viewModel"), Some("DashboardViewModel".into()));
+    }
+
+    #[test]
+    fn infer_type_in_lines_class_literal_retrofit() {
+        // `val api = retrofit.create(DashboardApi::class.java)` — class literal pattern
+        let lines: Vec<String> = vec![
+            "    val api = retrofit.create(DashboardApi::class.java)".into(),
+        ];
+        assert_eq!(infer_type_in_lines(&lines, "api"), Some("DashboardApi".into()));
+    }
+
+    #[test]
+    fn infer_type_in_lines_raw_class_literal_kotlin() {
+        // `val api = retrofit.create(DashboardApi::class)` — Kotlin class ref
+        let lines: Vec<String> = vec![
+            "    val api = retrofit.create(DashboardApi::class)".into(),
+        ];
+        assert_eq!(infer_type_in_lines_raw(&lines, "api"), Some("DashboardApi".into()));
+    }
+
+    #[test]
+    fn infer_type_in_lines_di_inject() {
+        // `val repo by inject<UserRepository>()` — Koin DI pattern
+        let lines: Vec<String> = vec![
+            "    val repo = inject<UserRepository>()".into(),
+        ];
+        assert_eq!(infer_type_in_lines(&lines, "repo"), Some("UserRepository".into()));
+    }
+
+    #[test]
+    fn infer_type_annotation_still_wins_over_rhs() {
+        // Explicit annotation takes priority over RHS inference
+        let lines: Vec<String> = vec![
+            "    val repo: UserRepository = OtherRepository()".into(),
+        ];
+        assert_eq!(infer_type_in_lines(&lines, "repo"), Some("UserRepository".into()));
+    }
+
+    #[test]
+    fn infer_type_rhs_no_false_positive_lowercase() {
+        // `val x = someFactory.create()` — lowercase constructor → no inference
+        let lines: Vec<String> = vec![
+            "    val x = someFactory.create()".into(),
+        ];
+        assert_eq!(infer_type_in_lines(&lines, "x"), None);
+    }
+
+    #[test]
+    fn infer_type_rhs_no_false_positive_equality() {
+        // `if (x == SomeType())` must not match as an assignment
+        let lines: Vec<String> = vec![
+            "    if (x == SomeType()) {".into(),
+        ];
+        assert_eq!(infer_type_in_lines(&lines, "x"), None);
+    }
+
+    #[test]
+    fn resolve_method_via_class_literal_type_inference() {
+        // `val api = retrofit.create(DashboardApi::class.java)` — no annotation
+        // dot-completion on `api.someMethod()` should resolve into DashboardApi
+        let api_uri = uri("/DashboardApi.kt");
+        let caller_uri = uri("/Caller.kt");
+        let idx = Indexer::new();
+        idx.index_content(&api_uri,
+            "package com.example\ninterface DashboardApi {\n    fun loadData(): String\n}");
+        idx.index_content(&caller_uri,
+            "package com.example\nval retrofit = TODO()\nval api = retrofit.create(DashboardApi::class.java)\nfun test() { api.loadData() }");
+
+        let locs = resolve_symbol(&idx, "loadData", Some("api"), &caller_uri);
+        assert!(!locs.is_empty(), "loadData not found via class literal type inference");
+        assert_eq!(locs[0].uri, api_uri);
+    }
+
+    #[test]
     fn goto_def_on_named_lambda_param_resolves_to_declaration_line() {
         // items.forEach { product ->
         //     product.name   ← gd on `product` here
