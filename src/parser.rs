@@ -7,7 +7,7 @@ use tower_lsp::lsp_types::{Position, Range, SymbolKind};
 use crate::indexer::NodeExt;
 use crate::StrExt;
 use crate::queries::{self, KOTLIN_DEFINITIONS, SWIFT_DEFINITIONS,
-    KIND_SIMPLE_IDENT, KIND_TYPE_IDENT, KIND_IDENTIFIER,
+    KIND_SIMPLE_IDENT, KIND_TYPE_IDENT, KIND_IDENTIFIER, KIND_SCOPED_IDENT,
     KIND_USER_TYPE, KIND_FUN_DECL,
     KIND_CLASS_DECL, KIND_ENUM_DECL, KIND_INTERFACE_DECL,
     KIND_OBJECT_DECL, KIND_DELEGATION_SPEC,
@@ -947,7 +947,7 @@ impl crate::types::FileData {
     fn push_java_import(&mut self, node: &Node, bytes: &[u8]) {
         let mut cur = node.walk();
         for child in node.children(&mut cur) {
-            if matches!(child.kind(), "scoped_identifier" | "identifier") {
+            if matches!(child.kind(), KIND_SCOPED_IDENT | KIND_IDENTIFIER) {
                 if let Ok(txt) = child.utf8_text(bytes) {
                     let full_path  = txt.to_owned();
                     let local_name = full_path.last_segment().to_owned();

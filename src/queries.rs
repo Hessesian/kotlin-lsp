@@ -347,6 +347,7 @@ pub const SWIFT_INIT_NAME: &str = "init";
 pub(crate) const KIND_SIMPLE_IDENT:      &str = "simple_identifier";
 pub(crate) const KIND_TYPE_IDENT:        &str = "type_identifier";
 pub(crate) const KIND_IDENTIFIER:        &str = "identifier";
+pub(crate) const KIND_SCOPED_IDENT:      &str = "scoped_identifier";
 pub(crate) const KIND_CALL_EXPR:         &str = "call_expression";
 pub(crate) const KIND_LAMBDA_LIT:        &str = "lambda_literal";
 pub(crate) const KIND_LAMBDA_PARAMS:     &str = "lambda_parameters";
