@@ -90,10 +90,13 @@ pub fn resolve_contextual_info<I: IndexRead>(
     cursor_line: u32,
     options: &ResolveOptions,
 ) -> Option<ResolvedSymbol> {
+    // For qualified types like `Outer.Inner`, pass `outer` as qualifier so the
+    // resolver can narrow to the right file before searching for `leaf`.
+    let qualifier = if rt.leaf != rt.qualified { Some(rt.outer.as_str()) } else { None };
     resolve_symbol_info(
         index,
         &rt.leaf,
-        None,
+        qualifier,
         from_uri,
         SubstitutionContext::EnclosingClass {
             uri: from_uri.as_str(),
@@ -110,13 +113,14 @@ pub fn build_subst_map<I: IndexRead>(index: &I, uri: &str, cursor_line: u32) -> 
 
 // ─── Pure Data Transformation Functions ──────────────────────────────────
 
-/// Extract canonical signature (prefer cached detail, fall back to source).
+/// Extract canonical signature (prefer full source, fall back to cached detail).
+///
+/// `detail` is truncated to ~120 chars at index time; `collect_signature` reads
+/// the original source lines and returns the complete declaration up to `{`/`=`.
+/// We prefer the full source version so callers see untruncated signatures.
 fn extract_canonical_signature(sym: &SymbolEntry, data: &FileData) -> String {
-    if !sym.detail.is_empty() {
-        sym.detail.clone()
-    } else {
-        data.lines.collect_signature(sym.selection_range.start.line as usize)
-    }
+    let full = data.lines.collect_signature(sym.selection_range.start.line as usize);
+    if !full.is_empty() { full } else { sym.detail.clone() }
 }
 
 /// Apply type-parameter substitution to a signature string.
@@ -268,18 +272,36 @@ fn build_enclosing_class_subst_impl<I: IndexRead>(
         None => return HashMap::new(),
     };
 
-    let type_params = &class_sym.type_params;
-    if type_params.is_empty() { return HashMap::new(); }
-
     let class_line = class_sym.selection_range.start.line;
 
-    // Collect all supers of this class, zipping their type args against the class's type params.
+    // For each supertype with concrete type args, look up the BASE class's own
+    // type parameters (e.g., `[T, U]` from `class Base<T, U>`), then zip with
+    // the concrete args (e.g., `[Event, State]`) to build `{T→Event, U→State}`.
+    // Using the enclosing class's own type_params here would be wrong: for
+    // `class Child : Base<Event, State>`, Child itself has no type params.
     let mut result = HashMap::new();
-    for (line, _base_name, type_args) in data.supers.iter() {
+    for (line, base_name, type_args) in data.supers.iter() {
         if *line != class_line || type_args.is_empty() {
             continue;
         }
-        for (param, arg) in type_params.iter().zip(type_args.iter()) {
+
+        let base_type_params: Vec<String> = index
+            .get_definitions(base_name)
+            .and_then(|locs| locs.into_iter().next())
+            .and_then(|loc| {
+                index.get_file_data(loc.uri.as_str()).and_then(|base_data| {
+                    base_data.symbols
+                        .iter()
+                        .find(|s| s.name == *base_name)
+                        .map(|s| s.type_params.clone())
+                })
+            })
+            .unwrap_or_default();
+
+        if base_type_params.is_empty() {
+            continue;
+        }
+        for (param, arg) in base_type_params.iter().zip(type_args.iter()) {
             result.entry(param.clone()).or_insert_with(|| arg.clone());
         }
     }
@@ -327,6 +349,18 @@ impl IndexRead for super::Indexer {
         if allow_rg {
             self.resolve_symbol(name, qualifier, from_uri)
         } else {
+            if let Some(qual) = qualifier {
+                // Index-only qualified resolution: resolve the qualifier without rg,
+                // then search that file for `name`. Avoids silently dropping the
+                // qualifier and returning results for an unrelated top-level symbol.
+                let qual_locs = self.resolve_symbol_no_rg(qual, from_uri);
+                if let Some(loc) = qual_locs.into_iter().next() {
+                    let locs = self.find_name_in_uri(name, loc.uri.as_str());
+                    if !locs.is_empty() {
+                        return locs;
+                    }
+                }
+            }
             self.resolve_symbol_no_rg(name, from_uri)
         }
     }
@@ -336,6 +370,9 @@ impl IndexRead for super::Indexer {
 mod tests {
     use super::*;
     use tower_lsp::lsp_types::Url;
+    use std::collections::HashMap;
+
+    // ── Minimal stub (for tests that don't need real data) ───────────────────
 
     struct TestIndex;
     impl IndexRead for TestIndex {
@@ -344,22 +381,35 @@ mod tests {
         fn get_file_data(&self, _uri: &str) -> Option<Arc<FileData>> { None }
     }
 
-    #[test]
-    fn stub_resolve_returns_none() {
-        let idx = TestIndex;
-        let res = resolve_symbol_info(&idx, "Foo", None, &Url::parse("file:///x").unwrap(), SubstitutionContext::None, &ResolveOptions::hover());
-        assert!(res.is_none());
+    // ── Fully-populated index for end-to-end tests ───────────────────────────
+
+    struct RealTestIndex {
+        files: HashMap<String, Arc<FileData>>,
+        definitions: HashMap<String, Vec<Location>>,
     }
 
-    #[test]
-    fn apply_subst_replaces_identifiers() {
-        let mut subst = HashMap::new();
-        subst.insert("T".to_string(), "String".to_string());
-        subst.insert("U".to_string(), "Int".to_string());
-        let sig = "fun foo(x: T, y: U): T";
-        let result = apply_subst(sig, &subst);
-        assert_eq!(result, "fun foo(x: String, y: Int): String");
+    impl IndexRead for RealTestIndex {
+        fn get_file_lines(&self, uri: &str) -> Option<Vec<String>> {
+            self.files.get(uri).map(|f| f.lines.as_ref().to_vec())
+        }
+        fn get_definitions(&self, name: &str) -> Option<Vec<Location>> {
+            self.definitions.get(name).cloned()
+        }
+        fn get_file_data(&self, uri: &str) -> Option<Arc<FileData>> {
+            self.files.get(uri).cloned()
+        }
+        fn resolve_locations(
+            &self,
+            name: &str,
+            _qualifier: Option<&str>,
+            _from_uri: &Url,
+            _allow_rg: bool,
+        ) -> Vec<Location> {
+            self.definitions.get(name).cloned().unwrap_or_default()
+        }
     }
+
+    // ── Shared helpers ────────────────────────────────────────────────────────
 
     fn make_range(start_line: u32, end_line: u32) -> tower_lsp::lsp_types::Range {
         use tower_lsp::lsp_types::Position;
@@ -382,6 +432,36 @@ mod tests {
         }
     }
 
+    fn make_location(uri: &str, line: u32) -> Location {
+        Location { uri: Url::parse(uri).unwrap(), range: make_range(line, line) }
+    }
+
+    // ── Basic stub tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn stub_resolve_returns_none() {
+        let idx = TestIndex;
+        let res = resolve_symbol_info(
+            &idx, "Foo", None,
+            &Url::parse("file:///x").unwrap(),
+            SubstitutionContext::None,
+            &ResolveOptions::hover(),
+        );
+        assert!(res.is_none());
+    }
+
+    #[test]
+    fn apply_subst_replaces_identifiers() {
+        let mut subst = HashMap::new();
+        subst.insert("T".to_string(), "String".to_string());
+        subst.insert("U".to_string(), "Int".to_string());
+        let sig = "fun foo(x: T, y: U): T";
+        let result = apply_subst(sig, &subst);
+        assert_eq!(result, "fun foo(x: String, y: Int): String");
+    }
+
+    // ── find_containing_class tests ───────────────────────────────────────────
+
     #[test]
     fn find_containing_class_returns_innermost() {
         use crate::types::FileData;
@@ -392,9 +472,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        // Line 7 is inside both Outer (0-20) and Inner (5-15); should return Inner.
-        let result = find_containing_class_name(&data, 7);
-        assert_eq!(result.as_deref(), Some("Inner"));
+        assert_eq!(find_containing_class_name(&data, 7).as_deref(), Some("Inner"));
     }
 
     #[test]
@@ -404,9 +482,7 @@ mod tests {
             symbols: vec![make_sym("Outer", SymbolKind::CLASS, 5, 15)],
             ..Default::default()
         };
-        // Line 1 is outside any class.
-        let result = find_containing_class_name(&data, 1);
-        assert!(result.is_none());
+        assert!(find_containing_class_name(&data, 1).is_none());
     }
 
     #[test]
@@ -421,5 +497,167 @@ mod tests {
         };
         assert_eq!(find_containing_class_name(&data, 5).as_deref(), Some("MyEnum"));
         assert_eq!(find_containing_class_name(&data, 15).as_deref(), Some("MyObject"));
+    }
+
+    // ── build_subst_map end-to-end tests ─────────────────────────────────────
+
+    /// `class Child : Base<String, Int>` — subst should be `{T→String, U→Int}`
+    /// where T and U come from Base's declaration, NOT from Child.
+    #[test]
+    fn build_subst_map_uses_base_class_type_params() {
+        let base_uri = "file:///base.kt";
+        let child_uri = "file:///child.kt";
+
+        let mut base_sym = make_sym("Base", SymbolKind::CLASS, 0, 10);
+        base_sym.type_params = vec!["T".to_owned(), "U".to_owned()];
+
+        let base_data = Arc::new(crate::types::FileData {
+            symbols: vec![base_sym],
+            ..Default::default()
+        });
+
+        let child_data = Arc::new(crate::types::FileData {
+            symbols: vec![make_sym("Child", SymbolKind::CLASS, 0, 20)],
+            supers: vec![(0, "Base".to_owned(), vec!["String".to_owned(), "Int".to_owned()])],
+            ..Default::default()
+        });
+
+        let mut files = HashMap::new();
+        files.insert(base_uri.to_owned(), base_data);
+        files.insert(child_uri.to_owned(), child_data);
+
+        let mut definitions = HashMap::new();
+        definitions.insert("Base".to_owned(), vec![make_location(base_uri, 0)]);
+
+        let idx = RealTestIndex { files, definitions };
+
+        let subst = build_subst_map(&idx, child_uri, 5);
+        assert_eq!(subst.get("T").map(|s| s.as_str()), Some("String"));
+        assert_eq!(subst.get("U").map(|s| s.as_str()), Some("Int"));
+    }
+
+    /// A class with no type params itself but inheriting a generic base.
+    /// Previously the bug caused an empty map; now it correctly builds the map.
+    #[test]
+    fn build_subst_map_child_has_no_own_type_params() {
+        let base_uri = "file:///reducer.kt";
+        let child_uri = "file:///dashboard.kt";
+
+        let mut base_sym = make_sym("FlowReducer", SymbolKind::CLASS, 0, 5);
+        base_sym.type_params = vec!["Event".to_owned(), "State".to_owned()];
+
+        let base_data = Arc::new(crate::types::FileData {
+            symbols: vec![base_sym],
+            ..Default::default()
+        });
+
+        // DashboardReducer has NO own type params, inherits FlowReducer<DashEvent, DashState>
+        let child_data = Arc::new(crate::types::FileData {
+            symbols: vec![make_sym("DashboardReducer", SymbolKind::CLASS, 0, 50)],
+            supers: vec![(
+                0,
+                "FlowReducer".to_owned(),
+                vec!["DashEvent".to_owned(), "DashState".to_owned()],
+            )],
+            ..Default::default()
+        });
+
+        let mut files = HashMap::new();
+        files.insert(base_uri.to_owned(), base_data);
+        files.insert(child_uri.to_owned(), child_data);
+
+        let mut definitions = HashMap::new();
+        definitions.insert("FlowReducer".to_owned(), vec![make_location(base_uri, 0)]);
+
+        let idx = RealTestIndex { files, definitions };
+
+        let subst = build_subst_map(&idx, child_uri, 10);
+        assert_eq!(subst.get("Event").map(|s| s.as_str()), Some("DashEvent"));
+        assert_eq!(subst.get("State").map(|s| s.as_str()), Some("DashState"));
+    }
+
+    // ── resolve_symbol_info end-to-end tests ─────────────────────────────────
+
+    /// Basic lookup: symbol in a file with source lines, no substitution.
+    #[test]
+    fn resolve_symbol_info_basic_lookup() {
+        let file_uri = "file:///utils.kt";
+
+        let mut sym = make_sym("compute", SymbolKind::FUNCTION, 2, 5);
+        sym.detail = "fun compute(x: Int): String".to_owned();
+
+        let file_data = Arc::new(crate::types::FileData {
+            symbols: vec![sym],
+            lines: std::sync::Arc::new(vec![
+                "package com.example".to_owned(),
+                String::new(),
+                "fun compute(x: Int): String = x.toString()".to_owned(),
+            ]),
+            ..Default::default()
+        });
+
+        let mut files = HashMap::new();
+        files.insert(file_uri.to_owned(), file_data);
+
+        let mut definitions = HashMap::new();
+        definitions.insert("compute".to_owned(), vec![make_location(file_uri, 2)]);
+
+        let idx = RealTestIndex { files, definitions };
+
+        let result = resolve_symbol_info(
+            &idx, "compute", None,
+            &Url::parse("file:///caller.kt").unwrap(),
+            SubstitutionContext::None,
+            &ResolveOptions::goto_def(),
+        );
+
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert_eq!(r.location.uri.as_str(), file_uri);
+        // collect_signature reads from source lines and should prefer those
+        assert!(r.raw_signature.contains("compute"), "raw_signature: {}", r.raw_signature);
+    }
+
+    /// With substitution context: `{T→String}` applied to the signature.
+    #[test]
+    fn resolve_symbol_info_applies_precomputed_subst() {
+        let file_uri = "file:///base.kt";
+
+        let mut sym = make_sym("process", SymbolKind::FUNCTION, 3, 5);
+        sym.detail = "fun process(item: T): T".to_owned();
+
+        let file_data = Arc::new(crate::types::FileData {
+            symbols: vec![sym],
+            lines: std::sync::Arc::new(vec![
+                "package com.example".to_owned(),
+                String::new(),
+                String::new(),
+                "fun process(item: T): T {".to_owned(),
+            ]),
+            ..Default::default()
+        });
+
+        let mut files = HashMap::new();
+        files.insert(file_uri.to_owned(), file_data);
+
+        let mut definitions = HashMap::new();
+        definitions.insert("process".to_owned(), vec![make_location(file_uri, 3)]);
+
+        let idx = RealTestIndex { files, definitions };
+
+        let mut subst = HashMap::new();
+        subst.insert("T".to_owned(), "String".to_owned());
+
+        let result = resolve_symbol_info(
+            &idx, "process", None,
+            &Url::parse("file:///caller.kt").unwrap(),
+            SubstitutionContext::Precomputed(&subst),
+            &ResolveOptions::hover(),
+        );
+
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert!(r.signature.contains("String"), "signature should have substituted T→String: {}", r.signature);
+        assert!(!r.signature.contains(": T"), "raw T should be replaced: {}", r.signature);
     }
 }
