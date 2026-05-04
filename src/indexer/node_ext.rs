@@ -296,7 +296,7 @@ impl<'a> NodeExt<'a> for Node<'a> {
     }
 }
 
-// ─── Private helpers ──────────────────────────────────────────────────────────
+// ─── Shared helpers ──────────────────────────────────────────────────────────
 
 /// Split `s` at depth-0 commas (ignoring commas inside nested `<...>`).
 /// Returns trimmed, non-empty segments.
@@ -319,6 +319,32 @@ pub(super) fn split_depth0_commas(s: &str) -> Vec<String> {
     let seg = s[start..].trim();
     if !seg.is_empty() { args.push(seg.to_owned()); }
     args
+}
+
+/// Parse type parameter names from a declaration string.
+///
+/// e.g. `"interface FlowReducer<EventType, out EffectType, StateType>"` → `["EventType", "EffectType", "StateType"]`
+///
+/// Handles variance annotations (`in`, `out`) and type constraints (`T : Bound`).
+pub(crate) fn parse_type_params_from_decl(decl: &str) -> Vec<String> {
+    let search_region = match decl.find('(') {
+        Some(paren) => &decl[..paren],
+        None => decl,
+    };
+    let start = match search_region.find('<') { Some(i) => i + 1, None => return Vec::new() };
+    let end = match search_region.rfind('>') { Some(i) => i, None => return Vec::new() };
+    if end <= start { return Vec::new(); }
+
+    split_depth0_commas(&decl[start..end])
+        .into_iter()
+        .map(|s| {
+            let s = s.strip_prefix("in ").unwrap_or(&s);
+            let s = s.strip_prefix("out ").unwrap_or(s).trim();
+            let end_pos = s.find(|c: char| c == ':' || c.is_whitespace()).unwrap_or(s.len());
+            s[..end_pos].trim().to_owned()
+        })
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 fn collect_user_type_segments(node: Node<'_>, bytes: &[u8], segments: &mut Vec<String>) {

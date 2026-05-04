@@ -329,45 +329,7 @@ fn find_containing_class_name(data: &crate::types::FileData, sym_line: u32) -> O
 ///
 /// Handles variance annotations (`in`, `out`) and type constraints (`T : Bound`).
 fn parse_type_params(decl: &str) -> Vec<String> {
-    // Type params always appear before the first '(' (constructor/function params).
-    // Limit search to avoid picking up angle brackets from constructor parameter types.
-    let search_region = match decl.find('(') {
-        Some(paren) => &decl[..paren],
-        None => decl,
-    };
-    let start = match search_region.find('<') { Some(i) => i + 1, None => return Vec::new() };
-    let end   = match search_region.rfind('>') { Some(i) => i, None => return Vec::new() };
-    if end <= start { return Vec::new(); }
-    let inner = &decl[start..end];
-
-    // Re-implement depth-0 comma split here to avoid depending on node_ext internals.
-    let mut raw_params = Vec::new();
-    let mut depth = 0usize;
-    let mut seg_start = 0;
-    for (i, ch) in inner.char_indices() {
-        match ch {
-            '<' => depth += 1,
-            '>' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => {
-                let seg = inner[seg_start..i].trim();
-                if !seg.is_empty() { raw_params.push(seg); }
-                seg_start = i + 1;
-            }
-            _ => {}
-        }
-    }
-    let last = inner[seg_start..].trim();
-    if !last.is_empty() { raw_params.push(last); }
-
-    raw_params.into_iter().map(|s| {
-        // Strip variance keywords
-        let s = s.strip_prefix("in ").unwrap_or(s);
-        let s = s.strip_prefix("out ").unwrap_or(s);
-        let s = s.trim();
-        // Strip type constraint (everything from ":" onward) and whitespace
-        let end_pos = s.find(|c: char| c == ':' || c.is_whitespace()).unwrap_or(s.len());
-        s[..end_pos].trim().to_owned()
-    }).filter(|s| !s.is_empty()).collect()
+    super::parse_type_params_from_decl(decl)
 }
 
 /// Build a type-parameter → concrete-type substitution map for a symbol declared

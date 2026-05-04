@@ -106,75 +106,12 @@ fn extract_canonical_signature(sym: &SymbolEntry, data: &FileData) -> String {
 
 /// Parse type parameters from a declaration string (e.g., "class Foo<T, U>").
 fn parse_type_params(decl: &str) -> Vec<String> {
-    // Type params appear before first '(' (constructor/function params).
-    let search_region = decl.split('(').next().unwrap_or(decl);
-    let Some(start) = search_region.find('<') else { return Vec::new() };
-    let Some(end) = search_region.rfind('>') else { return Vec::new() };
-    if end <= start + 1 {
-        return Vec::new();
-    }
-
-    let inner = &decl[start + 1..end];
-    let mut raw_params = Vec::new();
-    let mut depth = 0usize;
-    let mut seg_start = 0;
-
-    for (i, ch) in inner.char_indices() {
-        match ch {
-            '<' => depth += 1,
-            '>' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => {
-                let seg = inner[seg_start..i].trim();
-                if !seg.is_empty() {
-                    raw_params.push(seg);
-                }
-                seg_start = i + 1;
-            }
-            _ => {}
-        }
-    }
-    let last = inner[seg_start..].trim();
-    if !last.is_empty() {
-        raw_params.push(last);
-    }
-
-    raw_params
-        .into_iter()
-        .map(|s| {
-            let s = s.strip_prefix("in ").unwrap_or(s);
-            let s = s.strip_prefix("out ").unwrap_or(s).trim();
-            let end_pos = s.find(|c: char| c == ':' || c.is_whitespace()).unwrap_or(s.len());
-            s[..end_pos].trim().to_owned()
-        })
-        .filter(|s| !s.is_empty())
-        .collect()
+    super::parse_type_params_from_decl(decl)
 }
 
 /// Apply type-parameter substitution to a signature string.
 fn apply_subst(sig: &str, subst: &HashMap<String, String>) -> String {
-    if subst.is_empty() {
-        return sig.to_owned();
-    }
-
-    let mut result = String::with_capacity(sig.len() + 16);
-    let chars: Vec<char> = sig.chars().collect();
-    let mut i = 0;
-
-    while i < chars.len() {
-        let ch = chars[i];
-        if ch.is_alphabetic() || ch == '_' {
-            let start = i;
-            while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
-                i += 1;
-            }
-            let ident: String = chars[start..i].iter().collect();
-            result.push_str(subst.get(&ident).map(|s| s.as_str()).unwrap_or(&ident));
-        } else {
-            result.push(ch);
-            i += 1;
-        }
-    }
-    result
+    super::apply_type_subst(sig, subst)
 }
 
 // ─── Glue Functions (coordinate I/O + data transformation) ──────────────────
@@ -320,13 +257,13 @@ fn build_enclosing_class_subst_impl<I: IndexRead>(
 
 // ─── Helper: Find Enclosing Class ────────────────────────────────────────────
 
-/// Find the name of the class that contains a symbol at the given line.
+/// Find the name of the innermost class that contains a symbol at the given line.
 fn find_containing_class_name(data: &FileData, sym_line: u32) -> Option<String> {
     data.symbols
         .iter()
         .filter(|s| s.range.start.line <= sym_line && sym_line <= s.range.end.line)
-        .filter(|s| matches!(s.kind, SymbolKind::CLASS | SymbolKind::INTERFACE | SymbolKind::STRUCT))
-        .max_by_key(|s| s.range.end.line - s.range.start.line)
+        .filter(|s| matches!(s.kind, SymbolKind::CLASS | SymbolKind::INTERFACE | SymbolKind::STRUCT | SymbolKind::ENUM | SymbolKind::OBJECT))
+        .min_by_key(|s| s.range.end.line.saturating_sub(s.range.start.line))
         .map(|s| s.name.clone())
 }
 
