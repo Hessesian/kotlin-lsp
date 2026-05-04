@@ -67,7 +67,6 @@ pub(crate) use lookup::apply_type_subst;
 
 mod node_ext;
 pub(crate) use node_ext::NodeExt;
-pub(crate) use node_ext::parse_type_params_from_decl;
 
 mod scope;
 pub(crate) use scope::is_id_char;

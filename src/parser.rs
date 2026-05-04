@@ -472,16 +472,7 @@ fn push_interface_symbol(name: &str, node: &Node, sel_node_range: tree_sitter::R
     let range       = ts_to_lsp(node.range());
     let sel         = ts_to_lsp(sel_node_range);
     let detail      = extract_detail(&data.lines, range.start.line, range.end.line);
-    // fun interface nodes are mis-parsed (ERROR or function_declaration), so the
-    // type_parameters CST child may not be present; fall back to string parsing.
-    let type_params = {
-        let cst_params = node.extract_type_params(bytes);
-        if cst_params.is_empty() {
-            crate::indexer::parse_type_params_from_decl(&detail)
-        } else {
-            cst_params
-        }
-    };
+    let type_params = node.extract_type_params_or_error_child(bytes);
     data.symbols.push(SymbolEntry { name: name.to_owned(), kind: SymbolKind::INTERFACE, visibility, range, selection_range: sel, detail, type_params });
 }
 

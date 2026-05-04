@@ -352,20 +352,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_type_params_handles_simple_case() {
-        let decl = "class Foo<T, U>";
-        let params = super::super::parse_type_params_from_decl(decl);
-        assert_eq!(params, vec!["T", "U"]);
-    }
-
-    #[test]
-    fn parse_type_params_handles_constraints() {
-        let decl = "class Foo<T: Any, U>";
-        let params = super::super::parse_type_params_from_decl(decl);
-        assert_eq!(params, vec!["T", "U"]);
-    }
-
-    #[test]
     fn apply_subst_replaces_identifiers() {
         let mut subst = HashMap::new();
         subst.insert("T".to_string(), "String".to_string());

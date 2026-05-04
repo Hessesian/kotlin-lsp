@@ -61,9 +61,11 @@ pub(crate) trait NodeExt<'a>: Sized + Copy {
     /// Extract the first type name from a Java type node.
     fn java_first_type_name(self, bytes: &[u8]) -> Option<String>;
 
-    /// Extract the type argument strings from a `type_arguments` child of this node.
-    /// Splits `<Event, Effect, State>` at depth-0 commas.
-    /// Returns an empty vec when no `type_arguments` child exists.
+    /// Extract the type argument strings from the `type_arguments` child of this node.
+    ///
+    /// Uses CST children (named children of `type_arguments` are the type nodes;
+    /// `,`/`<`/`>` are anonymous).  Returns an empty vec when no `type_arguments`
+    /// child exists.
     fn type_arg_strings(self, bytes: &[u8]) -> Vec<String>;
 
     /// Extract type parameter *names* from the `type_parameters` child of a class,
@@ -76,6 +78,12 @@ pub(crate) trait NodeExt<'a>: Sized + Copy {
     /// sibling nodes, not part of the `type_identifier`, so they are naturally
     /// skipped.  Returns an empty vec for non-generic nodes.
     fn extract_type_params(self, bytes: &[u8]) -> Vec<String>;
+
+    /// Like `extract_type_params`, but also searches direct ERROR children of the node.
+    ///
+    /// Used for `fun interface` recovery: tree-sitter may wrap the `<T>` in an ERROR
+    /// child.  Search is depth-limited to one ERROR level to avoid entering class bodies.
+    fn extract_type_params_or_error_child(self, bytes: &[u8]) -> Vec<String>;
 
     /// Returns the line number (0-based) of the first named identifier child,
     /// or the node's own start line if no named child is found.
@@ -264,9 +272,12 @@ impl<'a> NodeExt<'a> for Node<'a> {
                     return n.utf8_text_owned(bytes);
                 }
                 "scoped_type_identifier" => {
-                    let text = n.utf8_text(bytes).ok()?;
-                    let name = text.split('<').next().unwrap_or(text).trim();
-                    return if name.is_empty() { None } else { Some(name.to_owned()) };
+                    // Collect all identifier/type_identifier segments while skipping
+                    // type_arguments children (handles `Outer<String>.Inner` correctly).
+                    let mut segments = Vec::new();
+                    collect_user_type_segments(n, bytes, &mut segments);
+                    let name = segments.join(".");
+                    return if name.is_empty() { None } else { Some(name) };
                 }
                 "type_arguments" => continue,
                 _ => {}
@@ -283,13 +294,13 @@ impl<'a> NodeExt<'a> for Node<'a> {
         let Some(args_node) = self.first_child_of_kind("type_arguments") else {
             return Vec::new();
         };
-        let text = match args_node.utf8_text(bytes) {
-            Ok(t) => t.trim(),
-            Err(_) => return Vec::new(),
-        };
-        // text is like "<Event, Effect, State>" or "<Map<K,V>, String>"
-        let inner = text.trim_start_matches('<').trim_end_matches('>');
-        split_depth0_commas(inner)
+        let mut cur = args_node.walk();
+        args_node.children(&mut cur)
+            .filter(|c| c.is_named())
+            .filter_map(|c| c.utf8_text(bytes).ok())
+            .map(|t| t.trim().to_owned())
+            .filter(|t| !t.is_empty())
+            .collect()
     }
 
     fn extract_type_params(self, bytes: &[u8]) -> Vec<String> {
@@ -303,6 +314,22 @@ impl<'a> NodeExt<'a> for Node<'a> {
             }
         }
         result
+    }
+
+    fn extract_type_params_or_error_child(self, bytes: &[u8]) -> Vec<String> {
+        let direct = self.extract_type_params(bytes);
+        if !direct.is_empty() { return direct; }
+        // For `fun interface Foo<T>` misparsing, tree-sitter may wrap `<T>` in an
+        // ERROR child.  Search only ERROR children — not the full subtree — to
+        // avoid picking up type params from methods inside the interface body.
+        let mut cur = self.walk();
+        for child in self.children(&mut cur) {
+            if child.is_error() {
+                let params = child.extract_type_params(bytes);
+                if !params.is_empty() { return params; }
+            }
+        }
+        Vec::new()
     }
 
     fn name_line(self) -> u32 {
@@ -320,56 +347,6 @@ impl<'a> NodeExt<'a> for Node<'a> {
     }
 }
 
-// ─── Shared helpers ──────────────────────────────────────────────────────────
-
-/// Split `s` at depth-0 commas (ignoring commas inside nested `<...>`).
-/// Returns trimmed, non-empty segments.
-pub(super) fn split_depth0_commas(s: &str) -> Vec<String> {
-    let mut args = Vec::new();
-    let mut depth = 0usize;
-    let mut start = 0usize;
-    for (i, ch) in s.char_indices() {
-        match ch {
-            '<' => depth += 1,
-            '>' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => {
-                let seg = s[start..i].trim();
-                if !seg.is_empty() { args.push(seg.to_owned()); }
-                start = i + 1;
-            }
-            _ => {}
-        }
-    }
-    let seg = s[start..].trim();
-    if !seg.is_empty() { args.push(seg.to_owned()); }
-    args
-}
-
-/// Parse type parameter names from a declaration string.
-///
-/// e.g. `"interface FlowReducer<EventType, out EffectType, StateType>"` → `["EventType", "EffectType", "StateType"]`
-///
-/// Handles variance annotations (`in`, `out`) and type constraints (`T : Bound`).
-pub(crate) fn parse_type_params_from_decl(decl: &str) -> Vec<String> {
-    let search_region = match decl.find('(') {
-        Some(paren) => &decl[..paren],
-        None => decl,
-    };
-    let start = match search_region.find('<') { Some(i) => i + 1, None => return Vec::new() };
-    let end = match search_region.rfind('>') { Some(i) => i, None => return Vec::new() };
-    if end <= start { return Vec::new(); }
-
-    split_depth0_commas(&decl[start..end])
-        .into_iter()
-        .map(|s| {
-            let s = s.strip_prefix("in ").unwrap_or(&s);
-            let s = s.strip_prefix("out ").unwrap_or(s).trim();
-            let end_pos = s.find(|c: char| c == ':' || c.is_whitespace()).unwrap_or(s.len());
-            s[..end_pos].trim().to_owned()
-        })
-        .filter(|s| !s.is_empty())
-        .collect()
-}
 
 fn collect_user_type_segments(node: Node<'_>, bytes: &[u8], segments: &mut Vec<String>) {
     let mut cur = node.walk();
