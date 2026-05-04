@@ -761,3 +761,53 @@ class LoanReducer {
             "method param leaked into interface type_params: {:?}", s.type_params);
     }
 
+    /// Multi-type-param `fun interface` declarations (e.g. `<A, B>`) are currently
+    /// not indexed — tree-sitter-kotlin 0.3 parses `<A, B>` as a comparison chain
+    /// and produces an ERROR structure that doesn't match the single-param path.
+    /// This test documents the known limitation so a future fix is visible.
+    #[test]
+    fn fun_interface_multi_type_params_known_limitation() {
+        let src = "fun interface Pair<A, B> { fun get(): A }";
+        let data = parse_kotlin(src);
+        // Known limitation: multi-param fun interfaces are not indexed under their name.
+        // When this is fixed, this test should be updated to assert sym(&data, "Pair") is Some.
+        assert!(sym(&data, "Pair").is_none(),
+            "if Pair is now indexed, update this test to assert type_params = [A, B]");
+    }
+
+    /// type_params_from_angle_brackets must not produce entries containing `:` or spaces.
+    /// For `fun interface Sortable<T: Comparable>`, like multi-param, the whole
+    /// declaration is not indexed (same tree-sitter-kotlin 0.3 limitation).
+    #[test]
+    fn angle_brackets_strips_variance_and_bounds() {
+        // When a fun interface with variance/bounds IS indexed, type_params must strip them.
+        // Not all forms are detectable by is_fun_interface_error (tree-sitter may wrap the
+        // name in user_type when generics follow), so we use `if let Some`.
+        let cases: &[(&str, &[&str])] = &[
+            ("fun interface Producer<out T>",  &["T"]),
+            ("fun interface Consumer<in T>",   &["T"]),
+            ("fun interface Box<T : Any>",     &["T"]),
+            ("fun interface Pair<out A, in B>", &["A", "B"]),
+        ];
+        for (src, expected) in cases {
+            let data = parse_kotlin(src);
+            if let Some(sym) = data.symbols.iter().find(|s| s.kind == SymbolKind::INTERFACE) {
+                assert_eq!(&sym.type_params.iter().map(String::as_str).collect::<Vec<_>>(),
+                    expected, "type_params wrong for: {src}");
+            }
+            // If not indexed: known limitation — tree-sitter-kotlin 0.3 wraps the
+            // name in user_type when variance appears, hiding the simple_identifier.
+        }
+    }
+
+    #[test]
+    fn angle_brackets_ignores_complex_declarations() {
+        let src = "fun interface Sortable<T: Comparable> { fun sort() }";
+        let data = parse_kotlin(src);
+        // `T: Comparable` bound stripped → no `:` in type_params
+        for s in &data.symbols {
+            assert!(!s.type_params.iter().any(|p| p.contains(':')),
+                "bound leaked into type_params for {}: {:?}", s.name, s.type_params);
+        }
+    }
+

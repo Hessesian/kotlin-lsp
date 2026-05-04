@@ -285,6 +285,7 @@ fn build_enclosing_class_subst_impl<I: IndexRead>(
     };
 
     let class_line = class_sym.selection_range.start.line;
+    let class_end_line = class_sym.range.end.line;
 
     // For each supertype with concrete type args, look up the BASE class's own
     // type parameters (e.g., `[T, U]` from `class Base<T, U>`), then zip with
@@ -323,6 +324,7 @@ fn build_enclosing_class_subst_impl<I: IndexRead>(
     // `{Event→…, State→…}` mappings from FlowReducer's type params.
     for sym in data.symbols.iter() {
         if sym.selection_range.start.line <= class_line { continue; }
+        if sym.selection_range.start.line > class_end_line { continue; }
         if !matches!(sym.kind, SymbolKind::FIELD | SymbolKind::PROPERTY) { continue; }
         let type_name = super::lookup::extract_property_type_name(&sym.detail);
         if type_name.is_empty() { continue; }

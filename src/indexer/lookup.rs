@@ -418,8 +418,7 @@ fn build_enclosing_class_subst(
         None => return Default::default(),
     };
     let class_line = class_sym.selection_range.start.line;
-
-    // Gather all supers with type args for this class
+    let class_end_line = class_sym.range.end.line;
     let mut result = std::collections::HashMap::new();
 
     for (line, base_name, type_args) in data.supers.iter() {
@@ -452,6 +451,7 @@ fn build_enclosing_class_subst(
     // type param → concrete arg mappings.
     for sym in data.symbols.iter() {
         if sym.selection_range.start.line <= class_line { continue; }
+        if sym.selection_range.start.line > class_end_line { continue; }
         if !matches!(sym.kind, SymbolKind::FIELD | SymbolKind::PROPERTY) { continue; }
         // Extract type name from detail (e.g., "private val foo: SomeType by lazy")
         let type_name = extract_property_type_name(&sym.detail);
