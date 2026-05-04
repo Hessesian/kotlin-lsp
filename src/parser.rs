@@ -284,7 +284,12 @@ fn push_def_symbols(
         if kind != SymbolKind::NULL {
             let visibility = vis_fn(lines, sel.start.line as usize);
             let detail = extract_detail(lines, range.start.line, range.end.line);
-            symbols.push(SymbolEntry { name, kind, visibility, range, selection_range: sel, detail, type_params });
+            let extension_receiver = if kind == SymbolKind::FUNCTION {
+                extract_extension_receiver(&detail).to_owned()
+            } else {
+                String::new()
+            };
+            symbols.push(SymbolEntry { name, kind, visibility, range, selection_range: sel, detail, type_params, extension_receiver });
         }
     }
 }
@@ -416,7 +421,7 @@ fn push_interface_symbol(name: &str, node: &Node, sel_node_range: tree_sitter::R
     let sel         = ts_to_lsp(sel_node_range);
     let detail      = extract_detail(&data.lines, range.start.line, range.end.line);
     let type_params = node.extract_type_params_or_error_child(bytes);
-    data.symbols.push(SymbolEntry { name: name.to_owned(), kind: SymbolKind::INTERFACE, visibility, range, selection_range: sel, detail, type_params });
+    data.symbols.push(SymbolEntry { name: name.to_owned(), kind: SymbolKind::INTERFACE, visibility, range, selection_range: sel, detail, type_params, extension_receiver: String::new() });
 }
 
 /// Walk the parse tree and emit INTERFACE symbols for every `fun interface Foo` declaration.
@@ -562,6 +567,65 @@ fn collect_syntax_errors(root: Node, bytes: &[u8]) -> Vec<SyntaxError> {
 ///   `val isChecked: Boolean`
 /// Maximum number of characters in an extracted detail string before truncation.
 const MAX_DETAIL_CHARS: usize = 120;
+
+/// Extract the bare receiver type name from a `fun` declaration detail string.
+///
+/// Handles:
+/// - `fun Foo.bar()` → `"Foo"`
+/// - `fun <T> List<T>.bar()` → `"List"`
+/// - `fun Foo.Bar.baz()` → `"Bar"` (last qualified segment)
+/// - `fun bar()` (no receiver) → `""`
+/// - Non-`fun` details → `""`
+pub(crate) fn extract_extension_receiver(detail: &str) -> &str {
+    let s = detail.trim_start();
+    // Must start with `fun` (possibly after annotations/visibility modifiers).
+    let after_fun = if let Some(rest) = s.strip_prefix("fun") {
+        if rest.starts_with(|c: char| c.is_alphanumeric() || c == '_') { return ""; }
+        rest
+    } else {
+        // Try stripping a leading keyword before `fun` (e.g. `private fun`, `inline fun`).
+        let word_end = s.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(s.len());
+        let rest = s[word_end..].trim_start();
+        if let Some(r) = rest.strip_prefix("fun") {
+            if r.starts_with(|c: char| c.is_alphanumeric() || c == '_') { return ""; }
+            r
+        } else {
+            return "";
+        }
+    };
+    let after_fun = after_fun.trim_start();
+    // Skip optional type params `<T, R>`.
+    let after_type_params = if after_fun.starts_with('<') {
+        let end = skip_balanced(after_fun, '<', '>');
+        after_fun[end..].trim_start()
+    } else {
+        after_fun
+    };
+    // What follows must be `ReceiverType.funcName`.  Find the last `.` before `(`.
+    let paren_pos = after_type_params.find('(').unwrap_or(after_type_params.len());
+    let before_paren = &after_type_params[..paren_pos];
+    let dot_pos = match before_paren.rfind('.') {
+        Some(p) => p,
+        None    => return "",
+    };
+    // Receiver portion is everything before that dot; strip generics for the base name.
+    let receiver_with_generics = before_paren[..dot_pos].trim();
+    let base_end = receiver_with_generics.find('<').unwrap_or(receiver_with_generics.len());
+    let base = receiver_with_generics[..base_end].trim_end();
+    // Return only the last qualified segment (e.g. `Outer.Inner` → `Inner`).
+    base.rsplit('.').next().unwrap_or(base)
+}
+
+/// Skip over balanced delimiters starting at index 0 of `s`.
+/// Returns the index *after* the closing delimiter.
+fn skip_balanced(s: &str, open: char, close: char) -> usize {
+    let mut depth = 0usize;
+    for (i, c) in s.char_indices() {
+        if c == open  { depth += 1; }
+        if c == close { depth = depth.saturating_sub(1); if depth == 0 { return i + c.len_utf8(); } }
+    }
+    s.len()
+}
 
 pub(crate) fn extract_detail(lines: &[String], start_line: u32, end_line: u32) -> String {
     let start = start_line as usize;
@@ -942,7 +1006,9 @@ impl crate::types::FileData {
             let range       = ts_to_lsp(node.range());
             let detail      = extract_detail(&self.lines, range.start.line, range.end.line);
             let type_params = node.extract_type_params(bytes);
-            self.symbols.push(SymbolEntry { name, kind, visibility, range, selection_range: sel, detail, type_params });
+            // Java extension methods (static methods in a class annotated with @JvmName etc.)
+            // are not real Kotlin extensions; leave extension_receiver empty for Java.
+            self.symbols.push(SymbolEntry { name, kind, visibility, range, selection_range: sel, detail, type_params, extension_receiver: String::new() });
         }
     }
 
@@ -966,7 +1032,7 @@ impl crate::types::FileData {
                 self.symbols.push(SymbolEntry {
                     name, kind, visibility: vis, range: nr,
                     selection_range: sel, detail: detail.clone(),
-                    type_params: Vec::new(),
+                    type_params: Vec::new(), extension_receiver: String::new(),
                 });
             }
         }

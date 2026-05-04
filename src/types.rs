@@ -43,7 +43,12 @@ pub struct SymbolEntry {
     /// e.g. `class Foo<T, U>` → `["T", "U"]`.
     /// Empty for non-generic symbols.
     #[serde(default)]
-    pub type_params:      Vec<String>,
+    pub type_params:          Vec<String>,
+    /// For extension functions: the receiver type name (without generics).
+    /// e.g. `fun MyType.foo()` → `"MyType"`, `fun <T> List<T>.bar()` → `"List"`.
+    /// Empty string for non-extension symbols.
+    #[serde(default)]
+    pub extension_receiver:   String,
 }
 
 /// One import statement parsed from a Kotlin file.

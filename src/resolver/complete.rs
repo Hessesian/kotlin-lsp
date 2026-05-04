@@ -140,6 +140,89 @@ pub(crate) fn is_annotation_context(line: &str, prefix: &str) -> bool {
 }
 
 /// Completion for `super.` — gather all members from the parent hierarchy.
+/// Scan the index for extension functions whose `extension_receiver` matches `receiver_type`
+/// and return them as `CompletionItem`s with auto-import `additionalTextEdits` when needed.
+///
+/// Only called for Kotlin files; Java files don't consume Kotlin extension functions.
+fn extension_fn_completions(
+    idx:           &Indexer,
+    receiver_type: &str,
+    from_uri:      &Url,
+    snippets:      bool,
+) -> Vec<CompletionItem> {
+    if receiver_type.is_empty() { return vec![]; }
+
+    // Gather current imports + package once (to avoid repeating per symbol).
+    let is_java = false;
+    let live = idx.live_lines.get(from_uri.as_str()).map(|ll| ll.clone());
+    let (cur_imports, cur_pkg, cur_lines) = idx.files.get(from_uri.as_str())
+        .map(|f| {
+            let lines = live.clone().unwrap_or_else(|| f.lines.clone());
+            let imports = if live.is_some() { lines.parse_imports() } else { f.imports.clone() };
+            (imports, f.package.clone().unwrap_or_default(), lines)
+        })
+        .unwrap_or_else(|| {
+            let lines = live.clone().unwrap_or_default();
+            let imports = lines.parse_imports();
+            (imports, String::new(), lines)
+        });
+
+    let mut items = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for file_entry in idx.files.iter() {
+        let file_uri_str = file_entry.key().clone();
+        let file = file_entry.value();
+        // Skip the current file — its top-level extensions are already in scope.
+        if file_uri_str == from_uri.as_str() { continue; }
+        // Only look at Kotlin files.
+        if !file_uri_str.ends_with(".kt") && !file_uri_str.ends_with(".kts") { continue; }
+
+        for sym in &file.symbols {
+            if sym.extension_receiver != receiver_type { continue; }
+            // Skip private/protected — not accessible from other files.
+            if matches!(sym.visibility, Visibility::Private | Visibility::Protected) { continue; }
+
+            let dedup_key = format!("{}:{}", sym.name, file_uri_str);
+            if !seen.insert(dedup_key) { continue; }
+
+            // Build FQN for auto-import: package.funcName
+            let pkg = file.package.as_deref().unwrap_or("");
+            let fqn = if pkg.is_empty() { sym.name.clone() } else { format!("{pkg}.{}", sym.name) };
+
+            let pkg_of_fqn = match fqn.rfind('.') { Some(i) => &fqn[..i], None => "" };
+            let needs_import = !already_imported(&fqn, &cur_imports)
+                && !cur_imports.iter().any(|imp| imp.is_star && imp.full_path == pkg_of_fqn)
+                && pkg_of_fqn != cur_pkg;
+
+            let import_edit = if needs_import {
+                Some(vec![cur_lines.make_import_edit(&fqn, is_java)])
+            } else {
+                None
+            };
+
+            let insert_text = if snippets { Some(format!("{}($1)", sym.name)) } else { None };
+            let detail = if !sym.detail.is_empty() { Some(sym.detail.clone()) }
+                         else if needs_import { Some(pkg_of_fqn.to_string()) }
+                         else { None };
+
+            items.push(CompletionItem {
+                label:                sym.name.clone(),
+                kind:                 Some(CompletionItemKind::FUNCTION),
+                insert_text,
+                insert_text_format:   if snippets { Some(InsertTextFormat::SNIPPET) } else { None },
+                sort_text:            Some(format!("01:ext:{}", sym.name)),
+                detail,
+                command:              if snippets { Some(trigger_parameter_hints()) } else { None },
+                additional_text_edits: import_edit,
+                ..Default::default()
+            });
+        }
+    }
+
+    items
+}
+
 fn complete_super(idx: &Indexer, from_uri: &Url, snippets: bool) -> Vec<CompletionItem> {
     if idx.files.get(from_uri.as_str()).is_none() { return vec![]; }
     let mut items: Vec<CompletionItem> = Vec::new();
@@ -233,6 +316,13 @@ pub(crate) fn complete_dot(idx: &Indexer, receiver: &str, from_uri: &Url, snippe
     // when the current file is a Kotlin file; add Swift-specific snippets for Swift.
     let from_path = from_uri.path();
     items.extend(dot_completions_for_lang(from_path, &rt.qualified, snippets));
+
+    // Append indexed extension functions whose receiver matches `rt.outer`.
+    // These may be defined in other files and need an auto-import.
+    if from_path.ends_with(".kt") || from_path.ends_with(".kts") {
+        items.extend(extension_fn_completions(idx, &rt.outer, from_uri, snippets));
+    }
+
     items
 }
 

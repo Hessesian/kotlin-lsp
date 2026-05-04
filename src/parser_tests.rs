@@ -843,3 +843,50 @@ class LoanReducer {
             "variance 'in'/'out' must be stripped from type_params");
     }
 
+    // ── extract_extension_receiver ────────────────────────────────────────────
+
+    #[test]
+    fn extension_receiver_simple() {
+        assert_eq!(super::extract_extension_receiver("fun Foo.bar()"), "Foo");
+    }
+
+    #[test]
+    fn extension_receiver_with_type_params() {
+        assert_eq!(super::extract_extension_receiver("fun <T> List<T>.bar()"), "List");
+    }
+
+    #[test]
+    fn extension_receiver_qualified() {
+        // `fun Outer.Inner.baz()` — last segment is Inner
+        assert_eq!(super::extract_extension_receiver("fun Outer.Inner.baz()"), "Inner");
+    }
+
+    #[test]
+    fn extension_receiver_no_receiver() {
+        assert_eq!(super::extract_extension_receiver("fun bar()"), "");
+    }
+
+    #[test]
+    fn extension_receiver_non_fun() {
+        assert_eq!(super::extract_extension_receiver("val x: Int"), "");
+        assert_eq!(super::extract_extension_receiver("class Foo"), "");
+    }
+
+    #[test]
+    fn extension_receiver_indexed_in_symbol_entry() {
+        // A top-level extension function should have extension_receiver populated.
+        let src = "fun String.shout(): String = this.uppercase()";
+        let data = super::parse_kotlin(src);
+        let sym = data.symbols.iter().find(|s| s.name == "shout")
+            .expect("shout should be indexed");
+        assert_eq!(sym.extension_receiver, "String");
+    }
+
+    #[test]
+    fn non_extension_fun_has_empty_receiver() {
+        let src = "fun greet(name: String): String = \"Hello $name\"";
+        let data = super::parse_kotlin(src);
+        let sym = data.symbols.iter().find(|s| s.name == "greet")
+            .expect("greet should be indexed");
+        assert_eq!(sym.extension_receiver, "");
+    }

@@ -461,13 +461,14 @@ mod tests {
     fn make_sym(name: &str, kind: SymbolKind, start_line: u32, end_line: u32) -> SymbolEntry {
         use crate::types::Visibility;
         SymbolEntry {
-            name:            name.to_owned(),
+            name:               name.to_owned(),
             kind,
-            visibility:      Visibility::Public,
-            range:           make_range(start_line, end_line),
-            selection_range: make_range(start_line, start_line),
-            detail:          String::new(),
-            type_params:     Vec::new(),
+            visibility:         Visibility::Public,
+            range:              make_range(start_line, end_line),
+            selection_range:    make_range(start_line, start_line),
+            detail:             String::new(),
+            type_params:        Vec::new(),
+            extension_receiver: String::new(),
         }
     }
 
