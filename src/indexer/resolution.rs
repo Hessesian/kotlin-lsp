@@ -48,6 +48,21 @@ pub trait IndexRead {
     fn get_file_lines(&self, uri: &str) -> Option<Vec<String>>;
     fn get_definitions(&self, name: &str) -> Option<Vec<Location>>;
     fn get_file_data(&self, uri: &str) -> Option<Arc<FileData>>;
+
+    /// Resolve definition locations for `name` with qualifier and import context.
+    /// Default implementation uses the global definitions map (no import awareness).
+    /// Production `Indexer` overrides this with the full resolver.
+    fn resolve_locations(
+        &self,
+        name: &str,
+        qualifier: Option<&str>,
+        from_uri: &Url,
+        allow_rg: bool,
+    ) -> Vec<Location> {
+        let _ = (qualifier, from_uri, allow_rg);
+        self.get_definitions(name)
+            .unwrap_or_default()
+    }
 }
 
 // ─── Pipeline Entry Point (thin coordinator) ───────────────────────────────
@@ -57,12 +72,12 @@ pub trait IndexRead {
 pub fn resolve_symbol_info<I: IndexRead>(
     index: &I,
     name: &str,
-    _qualifier: Option<&str>,
-    _from_uri: &Url,
+    qualifier: Option<&str>,
+    from_uri: &Url,
     subst_ctx: SubstitutionContext<'_>,
     options: &ResolveOptions,
 ) -> Option<ResolvedSymbol> {
-    let location = locate_symbol(index, name)?;
+    let location = locate_symbol(index, name, qualifier, from_uri, options.allow_rg)?;
     let data = index.get_file_data(location.uri.as_str())?;
     enrich_symbol(index, &data, &location, name, subst_ctx, options)
 }
@@ -116,9 +131,15 @@ fn apply_subst(sig: &str, subst: &HashMap<String, String>) -> String {
 
 // ─── Glue Functions (coordinate I/O + data transformation) ──────────────────
 
-/// Locate first definition of a symbol.
-fn locate_symbol<I: IndexRead>(index: &I, name: &str) -> Option<Location> {
-    index.get_definitions(name)?.into_iter().next()
+/// Locate first definition of a symbol using import-aware resolution.
+fn locate_symbol<I: IndexRead>(
+    index: &I,
+    name: &str,
+    qualifier: Option<&str>,
+    from_uri: &Url,
+    allow_rg: bool,
+) -> Option<Location> {
+    index.resolve_locations(name, qualifier, from_uri, allow_rg).into_iter().next()
 }
 
 /// Find SymbolEntry in FileData by range or name.
@@ -285,6 +306,20 @@ impl IndexRead for super::Indexer {
     fn get_file_data(&self, uri: &str) -> Option<Arc<FileData>> {
         self.files.get(uri).map(|rf| rf.clone())
     }
+
+    fn resolve_locations(
+        &self,
+        name: &str,
+        qualifier: Option<&str>,
+        from_uri: &Url,
+        allow_rg: bool,
+    ) -> Vec<Location> {
+        if allow_rg {
+            self.resolve_symbol(name, qualifier, from_uri)
+        } else {
+            self.resolve_symbol_no_rg(name, from_uri)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -328,5 +363,66 @@ mod tests {
         let sig = "fun foo(x: T, y: U): T";
         let result = apply_subst(sig, &subst);
         assert_eq!(result, "fun foo(x: String, y: Int): String");
+    }
+
+    fn make_range(start_line: u32, end_line: u32) -> tower_lsp::lsp_types::Range {
+        use tower_lsp::lsp_types::Position;
+        tower_lsp::lsp_types::Range {
+            start: Position { line: start_line, character: 0 },
+            end:   Position { line: end_line,   character: 0 },
+        }
+    }
+
+    fn make_sym(name: &str, kind: SymbolKind, start_line: u32, end_line: u32) -> SymbolEntry {
+        use crate::types::Visibility;
+        SymbolEntry {
+            name:            name.to_owned(),
+            kind,
+            visibility:      Visibility::Public,
+            range:           make_range(start_line, end_line),
+            selection_range: make_range(start_line, start_line),
+            detail:          String::new(),
+        }
+    }
+
+    #[test]
+    fn find_containing_class_returns_innermost() {
+        use crate::types::FileData;
+        let data = FileData {
+            symbols: vec![
+                make_sym("Outer", SymbolKind::CLASS, 0, 20),
+                make_sym("Inner", SymbolKind::CLASS, 5, 15),
+            ],
+            ..Default::default()
+        };
+        // Line 7 is inside both Outer (0-20) and Inner (5-15); should return Inner.
+        let result = find_containing_class_name(&data, 7);
+        assert_eq!(result.as_deref(), Some("Inner"));
+    }
+
+    #[test]
+    fn find_containing_class_returns_none_for_top_level() {
+        use crate::types::FileData;
+        let data = FileData {
+            symbols: vec![make_sym("Outer", SymbolKind::CLASS, 5, 15)],
+            ..Default::default()
+        };
+        // Line 1 is outside any class.
+        let result = find_containing_class_name(&data, 1);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn find_containing_class_includes_enum_and_object() {
+        use crate::types::FileData;
+        let data = FileData {
+            symbols: vec![
+                make_sym("MyEnum", SymbolKind::ENUM, 0, 10),
+                make_sym("MyObject", SymbolKind::OBJECT, 12, 20),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(find_containing_class_name(&data, 5).as_deref(), Some("MyEnum"));
+        assert_eq!(find_containing_class_name(&data, 15).as_deref(), Some("MyObject"));
     }
 }
