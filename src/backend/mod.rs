@@ -657,7 +657,7 @@ impl LanguageServer for Backend {
         let sem = idx.parse_sem();
         tokio::task::spawn(async move {
             if let Ok(path) = uri.to_file_path() {
-                if let Ok(content) = std::fs::read_to_string(&path) {
+                if let Ok(content) = tokio::fs::read_to_string(&path).await {
                     if let Ok(permit) = sem.acquire_owned().await {
                         tokio::task::spawn_blocking(move || {
                             let _permit = permit;
@@ -686,7 +686,7 @@ impl LanguageServer for Backend {
             let sem = idx.parse_sem();
             tokio::task::spawn(async move {
                 if let Ok(path) = uri.to_file_path() {
-                    if let Ok(content) = std::fs::read_to_string(&path) {
+                    if let Ok(content) = tokio::fs::read_to_string(&path).await {
                         if let Ok(permit) = sem.acquire_owned().await {
                             tokio::task::spawn_blocking(move || {
                                 let _permit = permit;
