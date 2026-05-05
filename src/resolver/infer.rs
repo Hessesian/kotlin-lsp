@@ -88,12 +88,12 @@ fn infer_variable_type_impl(idx: &Indexer, var_name: &str, uri: &Url, depth: u8)
     if depth == 0 { return None; }
     // Scope block: all DashMap guards are dropped before method-return inference,
     // which may call this function recursively and must not deadlock.
-    let (lines, rhs_match, method_match) = {
+    let lines = {
         if let Some(ll) = idx.live_lines.get(uri.as_str()) {
             if let result @ Some(_) = ll.infer_type(var_name) {
                 return result;
             }
-            ((*ll).clone(), None::<String>, None::<(String, String)>)
+            (*ll).clone()
         } else if let Some(data) = idx.files.get(uri.as_str()) {
             if let result @ Some(_) = data.lines.infer_type(var_name) {
                 return result;
@@ -136,12 +136,12 @@ fn infer_variable_type_raw_impl(
     idx: &Indexer, var_name: &str, uri: &Url, depth: u8,
 ) -> Option<String> {
     if depth == 0 { return None; }
-    let (lines, rhs_match, method_match) = {
+    let lines = {
         if let Some(ll) = idx.live_lines.get(uri.as_str()) {
             if let result @ Some(_) = ll.infer_type_raw(var_name) {
                 return result;
             }
-            ((*ll).clone(), None::<String>, None::<(String, String)>)
+            (*ll).clone()
         } else if let Some(data) = idx.files.get(uri.as_str()) {
             if let result @ Some(_) = data.lines.infer_type_raw(var_name) {
                 return result;
@@ -361,7 +361,7 @@ pub(crate) fn infer_type_in_lines_raw(lines: &[String], var_name: &str) -> Optio
             let after_brace = line[brace_pos + 1..].trim_start();
             // Extract the first identifier (stops at `<`, `(`, whitespace, etc.)
             let ident = after_brace.dotted_ident_prefix();
-            let base = ident.split('.').last().unwrap_or(&ident);
+            let base = ident.split('.').next_back().unwrap_or(&ident);
             if !base.is_empty() && base.starts_with_uppercase() {
                 return Some(base.to_owned());
             }
@@ -438,7 +438,7 @@ fn infer_from_rhs_assignment(line: &str, var_name: &str) -> Option<String> {
     // Pattern 1: constructor call — RHS starts with UppercaseIdent followed by `(` or `{`.
     let dotted = rhs.dotted_ident_prefix();
     if !dotted.is_empty() {
-        let base = dotted.split('.').last().unwrap_or(&dotted);
+        let base = dotted.split('.').next_back().unwrap_or(&dotted);
         if base.starts_with_uppercase() {
             let after_ident = rhs[dotted.len()..].trim_start();
             if after_ident.starts_with('(') || after_ident.starts_with('{') {
@@ -498,7 +498,7 @@ fn infer_method_return_type(
 /// return type, extracted from `SymbolEntry.detail`.
 fn find_method_return_type(idx: &Indexer, type_name: &str, method_name: &str) -> Option<String> {
     // `definitions` is keyed by simple (unqualified) name; strip any qualifying prefix.
-    let type_base = type_name.split('.').last().unwrap_or(type_name);
+    let type_base = type_name.split('.').next_back().unwrap_or(type_name);
     let locations = idx.definitions.get(type_base)?;
     for loc in locations.iter() {
         if let Some(file_data) = idx.files.get(loc.uri.as_str()) {

@@ -408,7 +408,7 @@ fn build_type_param_subst(
     let type_args = calling_data.supers.iter()
         .find(|(line, base, _)| {
             base == &container_name
-                && calling_class_line.map_or(true, |class_line| *line == class_line)
+                && calling_class_line.is_none_or(|class_line| *line == class_line)
         })
         .map(|(_, _, args)| args.clone())
         .unwrap_or_default();

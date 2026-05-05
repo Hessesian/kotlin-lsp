@@ -392,4 +392,3 @@ pub(crate) const KIND_PROP_DELEGATE:     &str = "property_delegate";
 pub(crate) const KIND_VAR_DECL:          &str = "variable_declaration";
 pub(crate) const KIND_NAV_EXPR:          &str = "navigation_expression";
 pub(crate) const KIND_CALL_SUFFIX:       &str = "call_suffix";
-pub(crate) const KIND_CALLABLE_REF:      &str = "callable_reference";

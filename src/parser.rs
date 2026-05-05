@@ -13,10 +13,10 @@ use crate::queries::{self, KOTLIN_DEFINITIONS, SWIFT_DEFINITIONS,
     KIND_OBJECT_DECL, KIND_DELEGATION_SPEC,
     KIND_RECORD_DECL, KIND_METHOD_DECL, KIND_CTOR_DECL, KIND_FIELD_DECL,
     KIND_IMPORT_DECL, KIND_PACKAGE_DECL,
-    KIND_SUPERCLASS, KIND_SUPER_INTERFACES, KIND_EXTENDS_INTERFACES, KIND_TYPE_LIST,
+    KIND_SUPERCLASS, KIND_SUPER_INTERFACES, KIND_EXTENDS_INTERFACES,
     KIND_PROTOCOL_DECL, KIND_INHERITANCE_SPEC,
     KIND_PROP_DECL, KIND_PROP_DELEGATE, KIND_VAR_DECL, KIND_NAV_EXPR,
-    KIND_CALL_EXPR, KIND_CALL_SUFFIX, KIND_CALLABLE_REF, KIND_TYPE_ARGS,
+    KIND_CALL_EXPR, KIND_CALL_SUFFIX,
     KIND_LAMBDA_LIT};
 use crate::types::{FileData, ImportEntry, SymbolEntry, SyntaxError, Visibility};
 
@@ -981,6 +981,38 @@ fn extract_type_arg_from_call_suffix(call: Node, bytes: &[u8]) -> Option<String>
     Some(clean.ident_prefix())
 }
 
+/// If the first value argument of `call` is a class literal (`X::class` or
+/// `X::class.java`), return the type name `X`.
+///
+/// Handles Retrofit-style `create(DashboardApi::class.java)` where the callee
+/// is a library method that is not indexed, so the two-step receiver→method
+/// lookup cannot resolve the return type.
+fn extract_class_literal_arg_type(call: Node, bytes: &[u8]) -> Option<String> {
+    let call_suffix = call.first_child_of_kind(KIND_CALL_SUFFIX)?;
+    let value_args  = call_suffix.first_child_of_kind("value_arguments")?;
+    let first_arg   = value_args.first_child_of_kind("value_argument")?;
+    let arg_expr    = first_arg.named_child(0)?;
+
+    // Argument may be: `callable_reference` (X::class) or
+    // `navigation_expression` (X::class.java)
+    let callable_ref = if arg_expr.kind() == "callable_reference" {
+        arg_expr
+    } else if arg_expr.kind() == KIND_NAV_EXPR {
+        // X::class.java — first named child should be the callable_reference
+        let inner = arg_expr.named_child(0)?;
+        if inner.kind() != "callable_reference" { return None; }
+        inner
+    } else {
+        return None;
+    };
+
+    // callable_reference children: type_identifier "::" "class"
+    let type_node = callable_ref.named_child(0)?;
+    if type_node.kind() != "type_identifier" { return None; }
+    let name = type_node.utf8_text_owned(bytes)?;
+    if name.starts_with_uppercase() { Some(name) } else { None }
+}
+
 /// If `delegate` is `by lazy { SingleConstructorCall() }`, return the constructor
 /// name.  Only handles single-statement lambdas to avoid false positives.
 fn extract_lazy_type(delegate: Node, bytes: &[u8]) -> Option<String> {
@@ -1125,7 +1157,14 @@ impl crate::types::FileData {
                                     if let Some((recv, method)) =
                                         call_expr_receiver_method(rhs, bytes)
                                     {
-                                        self.method_call_rhs.push((line, name, recv, method));
+                                        // If the single argument is a class literal (X::class or
+                                        // X::class.java), extract the type directly — the callee
+                                        // (e.g. Retrofit.create) may not be indexed.
+                                        if let Some(ty) = extract_class_literal_arg_type(rhs, bytes) {
+                                            self.rhs_types.push((line, name, ty));
+                                        } else {
+                                            self.method_call_rhs.push((line, name, recv, method));
+                                        }
                                     } else if let Some(ty) = call_expr_direct_type(rhs, bytes) {
                                         self.rhs_types.push((line, name, ty));
                                     }
