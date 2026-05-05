@@ -493,7 +493,7 @@ fn infer_from_rhs_assignment(line: &str, var_name: &str) -> Option<String> {
         let inside = &rhs[paren_pos + 1..];
         if let Some(class_pos) = inside.find("::class") {
             let before_class = inside[..class_pos].trim_end();
-            let type_name = before_class.split(|c: char| !c.is_alphanumeric() && c != '_').last().unwrap_or("");
+            let type_name = before_class.split(|c: char| !c.is_alphanumeric() && c != '_').next_back().unwrap_or("");
             if !type_name.is_empty() && type_name.starts_with_uppercase() {
                 return Some(type_name.to_owned());
             }

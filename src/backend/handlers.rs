@@ -3,8 +3,7 @@ use tower_lsp::lsp_types::*;
 use crate::indexer::find_fun_signature_with_receiver;
 use crate::indexer::NodeExt;
 use crate::indexer::resolution::{
-    resolve_symbol_info, enrich_at_location, build_subst_map,
-    SubstitutionContext, ResolveOptions,
+    resolve_symbol_info, enrich_at_location, SubstitutionContext, ResolveOptions,
 };
 use crate::indexer::apply_type_subst;
 use crate::StrExt;

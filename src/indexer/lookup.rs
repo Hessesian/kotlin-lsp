@@ -16,7 +16,6 @@ use tower_lsp::lsp_types::*;
 use crate::types::SymbolEntry;
 use crate::StrExt;
 use super::Indexer;
-use super::doc::extract_doc_comment;
 
 impl Indexer {
     /// Returns true if `name` has at least one definition location inside `uri`.

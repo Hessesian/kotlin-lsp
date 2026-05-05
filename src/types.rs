@@ -29,7 +29,6 @@ impl Language {
     pub fn is_kotlin(self)  -> bool { matches!(self, Language::Kotlin) }
     pub fn is_java(self)    -> bool { matches!(self, Language::Java)   }
     pub fn is_swift(self)   -> bool { matches!(self, Language::Swift)  }
-    pub fn is_jvm(self)     -> bool { matches!(self, Language::Kotlin | Language::Java) }
 }
 
 /// A position within a document used by infer functions.
@@ -185,7 +184,6 @@ impl FileData {
             })
     }
 }
-
 
 
 /// Result of parsing a single file. Pure data, no side effects.

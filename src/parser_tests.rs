@@ -843,6 +843,27 @@ class LoanReducer {
             "variance 'in'/'out' must be stripped from type_params");
     }
 
+    #[test]
+    fn chained_call_assignment_no_false_error() {
+        // tree-sitter-kotlin 0.3 misparsed `a.method().property = value`
+        // as statements(a.method().property) + ERROR(= value).
+        // Verify we suppress these false positives.
+        let data = parse_kotlin(
+            "class A {\n\
+             override fun onResume() {\n\
+             super.onResume()\n\
+             lazyStats.get().isTrackingEnabled = true\n\
+             }\n\
+             override fun onPause() {\n\
+             lazyStats.get().isTrackingEnabled = false\n\
+             }\n\
+             }"
+        );
+        assert!(data.syntax_errors.is_empty(),
+            "chained-call property assignment should not produce false errors: {:?}",
+            data.syntax_errors);
+    }
+
     // ── extract_extension_receiver ────────────────────────────────────────────
 
     #[test]

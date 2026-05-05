@@ -18,6 +18,9 @@ use crate::queries::{self, KOTLIN_DEFINITIONS, SWIFT_DEFINITIONS,
     KIND_PROP_DECL, KIND_PROP_DELEGATE, KIND_VAR_DECL, KIND_NAV_EXPR,
     KIND_CALL_EXPR, KIND_CALL_SUFFIX,
     KIND_LAMBDA_LIT};
+
+/// (pattern_index, symbol_name, full_range, selection_range, type_params)
+type BestMatch = (usize, String, Range, Range, Vec<String>);
 use crate::types::{FileData, ImportEntry, SymbolEntry, SyntaxError, Visibility};
 
 type MatchEntry = (usize, [Option<(String, Range, Range, Vec<String>)>; 2]);
@@ -259,8 +262,8 @@ fn map_def_captures<'c, 't>(
 /// with the **lowest** pattern index — lower index = more specific pattern.
 fn dedup_matches(
     matches: &[MatchEntry],
-) -> std::collections::BTreeMap<(u32, u32), (usize, String, Range, Range, Vec<String>)> {
-    let mut best = std::collections::BTreeMap::new();
+) -> std::collections::BTreeMap<(u32, u32), BestMatch> {
+    let mut best: std::collections::BTreeMap<(u32, u32), BestMatch> = std::collections::BTreeMap::new();
     for (pidx, slot) in matches {
         if let Some((name, range, sel, type_params)) = slot[0].clone() {
             let key = (sel.start.line, sel.start.character);
@@ -277,7 +280,7 @@ fn dedup_matches(
 /// to `symbols`.  `pattern_meta` maps a pattern index to `(SymbolKind, label)`;
 /// `vis_fn` detects the visibility modifier from source lines.
 fn push_def_symbols(
-    best: std::collections::BTreeMap<(u32, u32), (usize, String, Range, Range, Vec<String>)>,
+    best: std::collections::BTreeMap<(u32, u32), BestMatch>,
     pattern_meta: fn(usize) -> (SymbolKind, Option<&'static str>),
     vis_fn: fn(&[String], usize) -> Visibility,
     lines: &[String],
@@ -376,6 +379,31 @@ fn is_fun_interface_error(node: &Node, bytes: &[u8]) -> bool {
         }
     }
     has_fun && has_interface && has_name
+}
+
+/// Returns true if this ERROR node is an orphaned assignment RHS from a chained-call setter.
+///
+/// Tree-sitter-kotlin 0.3 fails to parse `a.method().property = value` as an assignment:
+/// it parses `a.method().property` as an expression (inside `statements`), then leaves
+/// `= value` as a bare ERROR node. The code is valid Kotlin.
+///
+/// CST pattern:
+///   statements { navigation_expression { ... } }
+///   ERROR { "=" ... }    ← false positive
+fn is_chained_call_assignment_error(node: &Node, bytes: &[u8]) -> bool {
+    if !node.is_error() { return false; }
+    let text = node.utf8_text(bytes).unwrap_or("").trim_start();
+    if !text.starts_with('=') { return false; }
+    // Previous sibling must be the parsed LHS
+    let parent = match node.parent() { Some(p) => p, None => return false };
+    let mut cur = parent.walk();
+    let children: Vec<_> = parent.children(&mut cur).collect();
+    let pos = match children.iter().position(|c| c.id() == node.id()) {
+        Some(p) => p,
+        None => return false,
+    };
+    if pos == 0 { return false; }
+    matches!(children[pos - 1].kind(), "statements" | "navigation_expression" | "call_expression")
 }
 
 /// Returns the interface name if this `function_declaration` is actually a misparse
@@ -516,6 +544,10 @@ fn collect_syntax_errors(root: Node, bytes: &[u8]) -> Vec<SyntaxError> {
         } else if node.is_error() {
             // Skip errors that are actually valid `fun interface` declarations.
             if is_fun_interface_error(&node, bytes) {
+                continue;
+            }
+            // Skip errors that are chained-call property assignments: a.method().prop = value
+            if is_chained_call_assignment_error(&node, bytes) {
                 continue;
             }
             let range = ts_to_lsp(node.range());
