@@ -481,7 +481,7 @@ fn symbols_from_nested_type(
             let starts_after = start.line > type_start.line
                 || (start.line == type_start.line && start.character > type_start.character);
             let starts_before = start.line < type_end.line
-                || (start.line == type_end.line && start.character <= type_end.character);
+                || (start.line == type_end.line && start.character < type_end.character);
             starts_after && starts_before
         })
         .filter(|s| s.visibility != Visibility::Private)
