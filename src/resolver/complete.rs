@@ -124,8 +124,9 @@ pub(crate) fn complete_symbol(
     dot_receiver: Option<&str>,
     from_uri: &Url,
     snippets: bool,
+    cursor_line: Option<u32>,
 ) -> (Vec<CompletionItem>, bool) {
-    complete_symbol_with_context(idx, prefix, dot_receiver, from_uri, snippets, false)
+    complete_symbol_with_context(idx, prefix, dot_receiver, from_uri, snippets, false, cursor_line)
 }
 
 /// Like `complete_symbol` but with explicit annotation context flag.
@@ -137,9 +138,10 @@ pub(crate) fn complete_symbol_with_context(
     from_uri: &Url,
     snippets: bool,
     annotation_only: bool,
+    cursor_line: Option<u32>,
 ) -> (Vec<CompletionItem>, bool) {
     if let Some(receiver) = dot_receiver {
-        return (complete_dot(idx, receiver, from_uri, snippets), false);
+        return (complete_dot(idx, receiver, from_uri, snippets, cursor_line), false);
     }
     complete_bare(idx, prefix, from_uri, snippets, annotation_only)
 }
@@ -355,6 +357,7 @@ pub(crate) fn complete_dot(
     receiver: &str,
     from_uri: &Url,
     snippets: bool,
+    cursor_line: Option<u32>,
 ) -> Vec<CompletionItem> {
     // `super.` — collect all members from the parent class hierarchy.
     if receiver == "super" {
@@ -382,7 +385,7 @@ pub(crate) fn complete_dot(
 
     // For dotted types (e.g. `Outer.Inner`), show only the inner type's members.
     // `rt.leaf` is the last segment, so it works for both plain and dotted types.
-    let mut items = symbols_from_nested_type(idx, &file_uri, &rt.leaf, Some(from_uri.as_str()));
+    let mut items = symbols_from_nested_type(idx, &file_uri, &rt.leaf, Some(from_uri.as_str()), cursor_line);
 
     // Filter out private/protected members — they are inaccessible from outside the class.
     items.retain(|i| {
@@ -399,6 +402,7 @@ pub(crate) fn complete_dot(
         idx,
         calling_uri: from_uri,
         snippets,
+        cursor_line,
     }
     .collect(&file_uri, &rt.leaf, &mut visited, 0, &mut items);
 
@@ -440,6 +444,7 @@ struct InheritanceWalker<'a> {
     idx: &'a Indexer,
     calling_uri: &'a Url,
     snippets: bool,
+    cursor_line: Option<u32>,
 }
 
 impl<'a> InheritanceWalker<'a> {
@@ -496,8 +501,8 @@ impl<'a> InheritanceWalker<'a> {
                     loc.uri.as_str(),
                     &super_name,
                     Some(self.calling_uri.as_str()),
-                );
-                inherited.retain(|i| {
+                    self.cursor_line,
+                );                inherited.retain(|i| {
                     i.sort_text
                         .as_deref()
                         .map(|s| !s.starts_with("prv:") && !s.starts_with("prt:"))
@@ -527,6 +532,7 @@ fn completion_item_for_nested_symbol(
     s: &crate::types::SymbolEntry,
     uri_str: &str,
     calling_uri: Option<&str>,
+    caller_cursor_line: Option<u32>,
 ) -> CompletionItem {
     let kind = symbol_kind_to_completion(s.kind);
     let is_fn = matches!(
@@ -541,7 +547,7 @@ fn completion_item_for_nested_symbol(
     };
     let detail = detail_raw.map(|d| {
         if let Some(cu) = calling_uri {
-            crate::indexer::resolution::cross_file_type_subst(idx, uri_str, s.selection_start(), cu, &d)
+            crate::indexer::resolution::cross_file_type_subst(idx, uri_str, s.selection_start(), cu, caller_cursor_line, &d)
         } else {
             d
         }
@@ -583,6 +589,7 @@ fn symbols_from_nested_type(
     file_uri: &str,
     inner_name: &str,
     calling_uri: Option<&str>,
+    cursor_line: Option<u32>,
 ) -> Vec<CompletionItem> {
     // Try in-memory index first; fall back to on-demand disk parse.
     let owned: crate::types::FileData;
@@ -616,7 +623,7 @@ fn symbols_from_nested_type(
             return symbols_ref
                 .iter()
                 .filter(|s| s.visibility != Visibility::Private)
-                .map(|s| completion_item_for_nested_symbol(idx, s, file_uri, calling_uri))
+                .map(|s| completion_item_for_nested_symbol(idx, s, file_uri, calling_uri, cursor_line))
                 .collect();
         }
     };
@@ -638,7 +645,7 @@ fn symbols_from_nested_type(
             starts_after && starts_before
         })
         .filter(|s| s.visibility != Visibility::Private)
-        .map(|s| completion_item_for_nested_symbol(idx, s, file_uri, calling_uri))
+        .map(|s| completion_item_for_nested_symbol(idx, s, file_uri, calling_uri, cursor_line))
         .collect()
 }
 
@@ -1099,7 +1106,7 @@ impl crate::indexer::Indexer {
         from_uri: &Url,
         snippets: bool,
     ) -> Vec<CompletionItem> {
-        complete_dot(self, receiver, from_uri, snippets)
+        complete_dot(self, receiver, from_uri, snippets, None)
     }
     pub(crate) fn complete_bare(
         &self,
