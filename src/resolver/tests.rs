@@ -690,6 +690,156 @@ data class State(
     }
 
     #[test]
+    fn infer_type_in_lines_raw_by_lazy_single_line() {
+        // `val repo by lazy { UserRepository() }` — no explicit annotation
+        let lines: Vec<String> = vec![
+            "    private val repo by lazy { UserRepository() }".into(),
+        ];
+        assert_eq!(infer_type_in_lines_raw(&lines, "repo"), Some("UserRepository".into()));
+    }
+
+    #[test]
+    fn infer_type_in_lines_raw_explicit_annotation_takes_priority() {
+        // `val repo: UserRepository by lazy { ... }` — annotation wins (first scan)
+        let lines: Vec<String> = vec![
+            "    private val repo: UserRepository by lazy { UserRepository() }".into(),
+        ];
+        assert_eq!(infer_type_in_lines_raw(&lines, "repo"), Some("UserRepository".into()));
+    }
+
+    #[test]
+    fn infer_type_in_lines_constructor_call() {
+        // `val viewModel = DashboardViewModel()` — no annotation
+        let lines: Vec<String> = vec![
+            "    val viewModel = DashboardViewModel()".into(),
+        ];
+        assert_eq!(infer_type_in_lines(&lines, "viewModel"), Some("DashboardViewModel".into()));
+    }
+
+    #[test]
+    fn infer_type_in_lines_raw_constructor_call() {
+        let lines: Vec<String> = vec![
+            "    val viewModel = DashboardViewModel()".into(),
+        ];
+        assert_eq!(infer_type_in_lines_raw(&lines, "viewModel"), Some("DashboardViewModel".into()));
+    }
+
+    #[test]
+    fn infer_type_in_lines_class_literal_retrofit() {
+        // `val api = retrofit.create(DashboardApi::class.java)` — class literal *inside parens*
+        // should resolve to DashboardApi via the narrow pattern-3 path.
+        let lines: Vec<String> = vec![
+            "    val api = retrofit.create(DashboardApi::class.java)".into(),
+        ];
+        assert_eq!(infer_type_in_lines(&lines, "api"), Some("DashboardApi".into()));
+    }
+
+    #[test]
+    fn infer_type_in_lines_raw_class_literal_kotlin() {
+        // `val api = retrofit.create(DashboardApi::class)` (no .java suffix)
+        let lines: Vec<String> = vec![
+            "    val api = retrofit.create(DashboardApi::class)".into(),
+        ];
+        assert_eq!(infer_type_in_lines_raw(&lines, "api"), Some("DashboardApi".into()));
+    }
+
+    #[test]
+    fn infer_type_in_lines_bare_class_literal_not_matched() {
+        // `val key = SomeType::class` — bare class reference: key is KClass<SomeType>,
+        // NOT SomeType.  The narrow pattern-3 only triggers when ::class is inside parens.
+        let lines: Vec<String> = vec!["    val key = SomeType::class".into()];
+        assert_eq!(infer_type_in_lines(&lines, "key"), None);
+    }
+
+    #[test]
+    fn infer_type_in_lines_di_inject() {
+        // `val repo by inject<UserRepository>()` — Koin DI pattern
+        let lines: Vec<String> = vec![
+            "    val repo = inject<UserRepository>()".into(),
+        ];
+        assert_eq!(infer_type_in_lines(&lines, "repo"), Some("UserRepository".into()));
+    }
+
+    #[test]
+    fn infer_type_annotation_still_wins_over_rhs() {
+        // Explicit annotation takes priority over RHS inference
+        let lines: Vec<String> = vec![
+            "    val repo: UserRepository = OtherRepository()".into(),
+        ];
+        assert_eq!(infer_type_in_lines(&lines, "repo"), Some("UserRepository".into()));
+    }
+
+    #[test]
+    fn infer_type_rhs_no_false_positive_lowercase() {
+        // `val x = someFactory.create()` — lowercase constructor → no inference
+        let lines: Vec<String> = vec![
+            "    val x = someFactory.create()".into(),
+        ];
+        assert_eq!(infer_type_in_lines(&lines, "x"), None);
+    }
+
+    #[test]
+    fn infer_type_rhs_no_false_positive_equality() {
+        // `if (x == SomeType())` must not match as an assignment
+        let lines: Vec<String> = vec![
+            "    if (x == SomeType()) {".into(),
+        ];
+        assert_eq!(infer_type_in_lines(&lines, "x"), None);
+    }
+
+    #[test]
+    fn resolve_method_via_class_literal_type_inference() {
+        // `val api = retrofit.create(DashboardApi::class.java)` — no annotation
+        // dot-completion on `api.someMethod()` should resolve into DashboardApi
+        let api_uri = uri("/DashboardApi.kt");
+        let caller_uri = uri("/Caller.kt");
+        let idx = Indexer::new();
+        idx.index_content(&api_uri,
+            "package com.example\ninterface DashboardApi {\n    fun loadData(): String\n}");
+        idx.index_content(&caller_uri,
+            "package com.example\nval retrofit = TODO()\nval api = retrofit.create(DashboardApi::class.java)\nfun test() { api.loadData() }");
+
+        let locs = resolve_symbol(&idx, "loadData", Some("api"), &caller_uri);
+        assert!(!locs.is_empty(), "loadData not found via class literal type inference");
+        assert_eq!(locs[0].uri, api_uri);
+    }
+
+    // ── method return type inference (infer_variable_type) ───────────────────
+
+    #[test]
+    fn infer_variable_type_method_return_type() {
+        // `val response = accountApiService.getAccountDetail(body)` where
+        // accountApiService: AccountApiService is annotated in the same file
+        let service_uri = uri("/AccountApiService.kt");
+        let caller_uri  = uri("/Caller.kt");
+        let idx = Indexer::new();
+        idx.index_content(&service_uri,
+            "package com.example\ninterface AccountApiService {\n    fun getAccountDetail(body: AccountDetailRequestBody): Response<AccountDetail>\n}");
+        idx.index_content(&caller_uri,
+            "package com.example\nclass Repo(val accountApiService: AccountApiService) {\n    fun load() {\n        val response = accountApiService.getAccountDetail(AccountDetailRequestBody(123))\n    }\n}");
+
+        let result = infer_variable_type(&idx, "response", &caller_uri);
+        assert_eq!(result, Some("Response<AccountDetail>".into()),
+            "should infer return type via method lookup");
+    }
+
+    #[test]
+    fn infer_variable_type_unannotated_snapshot_no_declared_names_rejection() {
+        // Verify that the declared_names fast-reject no longer blocks unannotated vars
+        // when only a snapshot (no live_lines) is available.
+        let caller_uri = uri("/Caller.kt");
+        let idx = Indexer::new();
+        idx.index_content(&caller_uri,
+            "package com.example\nval vm = DashboardViewModel()");
+
+        // `vm` has no `:` annotation, so declared_names would not contain it.
+        // It must still be resolved via the assignment scan.
+        let result = infer_variable_type(&idx, "vm", &caller_uri);
+        assert_eq!(result, Some("DashboardViewModel".into()),
+            "unannotated var must still be resolved from snapshot");
+    }
+
+    #[test]
     fn goto_def_on_named_lambda_param_resolves_to_declaration_line() {
         // items.forEach { product ->
         //     product.name   ← gd on `product` here
@@ -728,6 +878,33 @@ data class State(
         assert!(labels.contains(&"fromString"),    "member fun should appear");
         assert!(labels.contains(&"CARD"),          "member val should appear");
         assert!(!labels.contains(&"topLevelHelper"), "top-level fn must NOT leak into dot completions");
+    }
+
+    #[test]
+    fn dot_complete_includes_inherited_members() {
+        // `AccountDetailResponseBody` extends `Account` (Java-style parent).
+        // Dot-completion on an instance of `AccountDetailResponseBody` must include
+        // fields declared in the parent `Account` class.
+        let account_uri  = uri("/Account.kt");
+        let response_uri = uri("/AccountDetailResponseBody.kt");
+        let caller_uri   = uri("/Caller.kt");
+        let idx = Indexer::new();
+
+        idx.index_content(&account_uri,
+            "package com.example\nopen class Account {\n    val accountName: String = \"\"\n    val accountId: String = \"\"\n}");
+        idx.index_content(&response_uri,
+            "package com.example\ndata class AccountDetailResponseBody(\n    val feePlanName: String?\n) : Account()");
+        idx.index_content(&caller_uri,
+            "package com.example\nval resp: AccountDetailResponseBody = TODO()");
+
+        let items = complete_dot(&idx, "AccountDetailResponseBody", &caller_uri, false);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+
+        // Direct members
+        assert!(labels.contains(&"feePlanName"), "direct field should appear");
+        // Inherited members from Account
+        assert!(labels.contains(&"accountName"), "inherited field from parent must appear");
+        assert!(labels.contains(&"accountId"),   "inherited field from parent must appear");
     }
 
     // ── complete_bare distance sorting ───────────────────────────────────────
@@ -1225,3 +1402,11 @@ data class State(
         assert_eq!(rt.leaf,      "OneYearOlderInteractor");
     }
 
+
+    #[test]
+    fn supers_swift_multiple_conformances() {
+        let src = "class Foo: UIViewController, Sendable {}";
+        let s: Vec<String> = crate::parser::parse_swift(src).supers.into_iter().map(|(_, n, _)| n).collect();
+        assert!(s.contains(&"UIViewController".to_string()), "missing UIViewController, got {s:?}");
+        assert!(s.contains(&"Sendable".to_string()), "missing Sendable, got {s:?}");
+    }

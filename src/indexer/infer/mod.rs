@@ -55,4 +55,5 @@ pub(crate) use it_this::{
     lambda_brace_pos_for_param,
     lambda_param_position_on_line,
     find_last_dot_at_depth_zero,
+    is_inside_receiver_lambda,
 };

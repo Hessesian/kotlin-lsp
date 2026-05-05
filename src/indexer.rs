@@ -16,6 +16,7 @@ pub use crate::rg::SOURCE_EXTENSIONS;
 mod doc;
 
 mod infer;
+mod resolution;
 // Re-export pure helpers from submodules so existing callers within this file
 // and the inline test module (`use super::*`) continue to resolve them by name.
 #[allow(unused_imports)]
@@ -47,6 +48,7 @@ pub(crate) use self::infer::{
     line_has_lambda_param,
     lambda_brace_pos_for_param,
     find_last_dot_at_depth_zero,
+    is_inside_receiver_lambda,
 };
 
 mod cache;
@@ -205,6 +207,12 @@ impl crate::indexer::infer::InferDeps for Indexer {
     }
     fn find_var_type(&self, var_name: &str, uri: &Url) -> Option<String> {
         infer_variable_type_raw(self, var_name, uri)
+    }
+    fn find_field_type(&self, class_name: &str, field_name: &str) -> Option<String> {
+        crate::resolver::infer::find_field_type_in_class(self, class_name, field_name)
+    }
+    fn find_fun_return_type(&self, fn_name: &str) -> Option<String> {
+        crate::resolver::infer::find_fun_return_type_by_name(self, fn_name)
     }
 }
 

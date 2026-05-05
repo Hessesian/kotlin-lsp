@@ -514,10 +514,151 @@ fn test_deps_case_a_var_type_no_collection() {
 }
 
 #[test]
+fn test_deps_case_a_multi_segment_field_collection() {
+    // `result.availableBanks.firstOrNull { it }` →
+    //   receiver_expr = "result.availableBanks", method = "firstOrNull"
+    //   outer_var = "result" (type "ResponseBody"), field = "availableBanks"
+    //   field type = "MutableList<Bank>" → element "Bank"
+    let u = test_uri();
+    let deps = super::super::TestDeps::new()
+        .with_var(u.as_str(), "result", "ResponseBody")
+        .with_field("ResponseBody", "availableBanks", "MutableList<Bank>");
+    let result = lambda_receiver_type_from_context("result.availableBanks.firstOrNull", &deps, &u);
+    assert_eq!(result.as_deref(), Some("Bank"),
+        "multi-segment: element of field collection resolved via find_field_type");
+}
+
+#[test]
+fn test_deps_case_a_multi_segment_field_collection_map() {
+    // `result.connectedAccounts.map { account -> }` →
+    //   outer_var = "result" (type "ResponseBody"), field = "connectedAccounts"
+    //   field type = "MutableList<MbAccount>" → element "MbAccount"
+    let u = test_uri();
+    let deps = super::super::TestDeps::new()
+        .with_var(u.as_str(), "result", "ResponseBody")
+        .with_field("ResponseBody", "connectedAccounts", "MutableList<MbAccount>");
+    let result = lambda_receiver_type_from_context("result.connectedAccounts.map", &deps, &u);
+    assert_eq!(result.as_deref(), Some("MbAccount"),
+        "multi-segment: element of connectedAccounts field via map");
+}
+
+#[test]
+fn test_deps_case_a_multi_segment_with_assignment_prefix() {
+    // `account.bankName = result.availableBanks.firstOrNull { it }` →
+    //   callee contains assignment prefix; last_ident_in correctly finds "result"
+    let u = test_uri();
+    let deps = super::super::TestDeps::new()
+        .with_var(u.as_str(), "result", "ResponseBody")
+        .with_field("ResponseBody", "availableBanks", "MutableList<Bank>");
+    // The callee string as extracted from the source line (assignment prefix included).
+    let result = lambda_receiver_type_from_context(
+        "account.bankName = result.availableBanks.firstOrNull", &deps, &u);
+    assert_eq!(result.as_deref(), Some("Bank"),
+        "multi-segment with assignment prefix: element resolved correctly");
+}
+
+#[test]
+fn test_deps_case_a_multi_segment_field_non_collection_method_lambda() {
+    // `result.foo.customOp { it }` where field `foo: Repo` and `customOp(block: (Bar) -> Unit)`.
+    // The method's lambda param type wins over the field base type.
+    let u = test_uri();
+    let deps = super::super::TestDeps::new()
+        .with_var(u.as_str(), "result", "ResponseBody")
+        .with_field("ResponseBody", "foo", "Repo")
+        .with_fun(u.as_str(), "customOp", "block: (Bar) -> Unit");
+    let result = lambda_receiver_type_from_context("result.foo.customOp", &deps, &u);
+    assert_eq!(result.as_deref(), Some("Bar"),
+        "multi-segment non-collection: method lambda param type wins over field base type");
+}
+
+#[test]
+fn test_deps_case_a_method_chain_return_type() {
+    // `getAccountList(isRefresh).joinAllAccounts().firstOrNull { it }` →
+    //   receiver_var = "joinAllAccounts", method = "firstOrNull"
+    //   joinAllAccounts() returns List<Account> → element "Account"
+    let u = test_uri();
+    let deps = super::super::TestDeps::new()
+        .with_return("joinAllAccounts", "List<Account>");
+    let result = lambda_receiver_type_from_context(
+        "getAccountList(isRefresh).joinAllAccounts().firstOrNull", &deps, &u);
+    assert_eq!(result.as_deref(), Some("Account"),
+        "method-chain: element type from joinAllAccounts() return type");
+}
+
+#[test]
 fn test_deps_unknown_fn_returns_none() {
     // Function not registered → None.
     let u = test_uri();
     let deps = super::super::TestDeps::new();
     let result = lambda_receiver_type_from_context("unknownFn", &deps, &u);
     assert_eq!(result, None, "unknown function should return None");
+}
+
+// ── classify_this_lambda_context / is_inside_receiver_lambda ─────────────────
+
+#[test]
+fn apply_this_resolved_receiver() {
+    // `obj.apply { this }` where obj type is known → Resolved("Foo")
+    let src = "val obj: Foo = Foo()";
+    let (u, idx) = indexed("/t.kt", src);
+    let ctx = super::classify_this_lambda_context("obj.apply ", &idx, &u);
+    let is_resolved_foo = matches!(&ctx, super::ThisLambdaCtx::Resolved(t) if t == "Foo");
+    assert!(is_resolved_foo, "expected Resolved(Foo), got: {ctx:?}");
+}
+
+#[test]
+fn apply_this_unresolved_receiver_returns_receiver_ctx() {
+    // `unknown.apply { this }` — type of `unknown` not in index → Receiver (NOT NotReceiver)
+    let u = uri("/t.kt");
+    let deps = super::super::TestDeps::new();
+    let ctx = super::classify_this_lambda_context("unknown.apply ", &deps, &u);
+    assert!(matches!(ctx, super::ThisLambdaCtx::Receiver),
+        "apply with unresolvable receiver should be Receiver, got: {ctx:?}");
+}
+
+#[test]
+fn foreach_lambda_is_not_receiver_ctx() {
+    // `list.forEach { this }` — forEach is NOT a scope function → NotReceiver
+    let u = uri("/t.kt");
+    let deps = super::super::TestDeps::new();
+    let ctx = super::classify_this_lambda_context("list.forEach ", &deps, &u);
+    assert!(matches!(ctx, super::ThisLambdaCtx::NotReceiver),
+        "forEach should yield NotReceiver, got: {ctx:?}");
+}
+
+#[test]
+fn with_this_unresolved_receiver_returns_receiver_ctx() {
+    // `with(expr) { this }` — type of expr not found → Receiver
+    let u = uri("/t.kt");
+    let deps = super::super::TestDeps::new();
+    let ctx = super::classify_this_lambda_context("with(someExpr) ", &deps, &u);
+    assert!(matches!(ctx, super::ThisLambdaCtx::Receiver),
+        "with() with unresolvable arg should be Receiver, got: {ctx:?}");
+}
+
+#[test]
+fn is_inside_receiver_lambda_apply() {
+    // Cursor inside `obj.apply { <here> }` with unknown obj type.
+    // is_inside_receiver_lambda should return true (it IS inside a receiver lambda).
+    let src = "val _x = unknown.apply {\n    this\n}";
+    let u = uri("/t.kt");
+    let idx = Indexer::new();
+    idx.index_content(&u, src);
+    let lines: Vec<String> = src.lines().map(String::from).collect();
+    let pos = crate::types::CursorPos { line: 1, utf16_col: 8 };
+    let result = super::is_inside_receiver_lambda(&lines, pos, &idx, &u);
+    assert!(result, "cursor inside unknown.apply{{}} should be inside receiver lambda");
+}
+
+#[test]
+fn is_inside_receiver_lambda_foreach_is_false() {
+    // Cursor inside `list.forEach { <here> }` — NOT a receiver lambda.
+    let src = "val list = listOf(1)\nlist.forEach {\n    this\n}";
+    let u = uri("/t.kt");
+    let idx = Indexer::new();
+    idx.index_content(&u, src);
+    let lines: Vec<String> = src.lines().map(String::from).collect();
+    let pos = crate::types::CursorPos { line: 2, utf16_col: 8 };
+    let result = super::is_inside_receiver_lambda(&lines, pos, &idx, &u);
+    assert!(!result, "cursor inside forEach{{}} should NOT be inside receiver lambda");
 }
