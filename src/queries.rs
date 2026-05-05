@@ -385,3 +385,11 @@ pub(crate) const KIND_INHERITANCE_SPEC:  &str = "inheritance_specifier";
 pub(crate) const KIND_TYPE_PARAMS:       &str = "type_parameters";
 pub(crate) const KIND_TYPE_PARAM:        &str = "type_parameter";
 pub(crate) const KIND_TYPE_ARGS:         &str = "type_arguments";
+
+// ─── Kotlin property / navigation / call node kinds ──────────────────────────
+pub(crate) const KIND_PROP_DECL:         &str = "property_declaration";
+pub(crate) const KIND_PROP_DELEGATE:     &str = "property_delegate";
+pub(crate) const KIND_VAR_DECL:          &str = "variable_declaration";
+pub(crate) const KIND_NAV_EXPR:          &str = "navigation_expression";
+pub(crate) const KIND_CALL_SUFFIX:       &str = "call_suffix";
+pub(crate) const KIND_CALLABLE_REF:      &str = "callable_reference";

@@ -890,3 +890,4 @@ class LoanReducer {
             .expect("greet should be indexed");
         assert_eq!(sym.extension_receiver, "");
     }
+

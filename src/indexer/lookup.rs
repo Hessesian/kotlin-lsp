@@ -94,8 +94,19 @@ impl Indexer {
             && !raw_sig.contains(&format!("{name}:"))
         {
             if let Some(inferred) = self.infer_variable_type(name, &loc.uri) {
-                let kw = if sym_kind == SymbolKind::VARIABLE { "var" } else { "val" };
-                format!("{kw} {name}: {inferred}")
+                // Keep modifiers from the original signature (e.g. `private`, `override`).
+                // Find the name in the raw_sig and replace everything from `name` onward
+                // with `name: InferredType`, discarding the `= rhs` initializer.
+                let needle = format!(" {name}");
+                let name_pos = raw_sig.find(&needle)
+                    .map(|p| p + 1)
+                    .or_else(|| if raw_sig.starts_with(name) { Some(0) } else { None });
+                if let Some(pos) = name_pos {
+                    format!("{}: {inferred}", &raw_sig[..pos + name.len()])
+                } else {
+                    let kw = if sym_kind == SymbolKind::VARIABLE { "var" } else { "val" };
+                    format!("{kw} {name}: {inferred}")
+                }
             } else {
                 raw_sig
             }

@@ -726,20 +726,23 @@ data class State(
 
     #[test]
     fn infer_type_in_lines_class_literal_retrofit() {
-        // `val api = retrofit.create(DashboardApi::class.java)` — class literal pattern
+        // `::class` inference was removed from the string-scan fallback because it is too broad:
+        // `val key = SomeType::class` would incorrectly infer `SomeType` for `key` (which is
+        // `KClass<SomeType>`). For indexed files the CST path in `extract_rhs_types_kotlin`
+        // stores `retrofit.create(X::class)` in `method_call_rhs` instead.
         let lines: Vec<String> = vec![
             "    val api = retrofit.create(DashboardApi::class.java)".into(),
         ];
-        assert_eq!(infer_type_in_lines(&lines, "api"), Some("DashboardApi".into()));
+        assert_eq!(infer_type_in_lines(&lines, "api"), None);
     }
 
     #[test]
     fn infer_type_in_lines_raw_class_literal_kotlin() {
-        // `val api = retrofit.create(DashboardApi::class)` — Kotlin class ref
+        // Same as above — string-scan fallback no longer handles `::class`.
         let lines: Vec<String> = vec![
             "    val api = retrofit.create(DashboardApi::class)".into(),
         ];
-        assert_eq!(infer_type_in_lines_raw(&lines, "api"), Some("DashboardApi".into()));
+        assert_eq!(infer_type_in_lines_raw(&lines, "api"), None);
     }
 
     #[test]

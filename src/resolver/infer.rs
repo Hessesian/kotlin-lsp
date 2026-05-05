@@ -73,19 +73,53 @@ pub fn infer_receiver_type(
 /// the declared type name if found.  Delegates to [`infer_type_in_lines`] and
 /// falls back to method return-type inference for `val x = receiver.method(...)`.
 pub(crate) fn infer_variable_type(idx: &Indexer, var_name: &str, uri: &Url) -> Option<String> {
+    infer_variable_type_impl(idx, var_name, uri, 4)
+}
+
+/// Like [`infer_variable_type`] but preserves generic parameters in the returned
+/// type string.  e.g. `val items: List<Product>` → `"List<Product>"`.
+///
+/// Used by the `it`-completion path to extract the collection element type.
+pub fn infer_variable_type_raw(idx: &Indexer, var_name: &str, uri: &Url) -> Option<String> {
+    infer_variable_type_raw_impl(idx, var_name, uri, 4)
+}
+
+fn infer_variable_type_impl(idx: &Indexer, var_name: &str, uri: &Url, depth: u8) -> Option<String> {
+    if depth == 0 { return None; }
     // Scope block: all DashMap guards are dropped before method-return inference,
     // which may call this function recursively and must not deadlock.
-    let lines = {
+    let (lines, rhs_match, method_match) = {
         if let Some(ll) = idx.live_lines.get(uri.as_str()) {
             if let result @ Some(_) = ll.infer_type(var_name) {
                 return result;
             }
-            (*ll).clone()
+            ((*ll).clone(), None::<String>, None::<(String, String)>)
         } else if let Some(data) = idx.files.get(uri.as_str()) {
             if let result @ Some(_) = data.lines.infer_type(var_name) {
                 return result;
             }
-            data.lines.clone()
+            // CST-indexed RHS types — primary path for indexed files.
+            let rhs_match = data.rhs_types.iter()
+                .find(|(_, n, _)| n == var_name)
+                .map(|(_, _, ty)| ty.clone());
+            let method_match = data.method_call_rhs.iter()
+                .find(|(_, n, _, _)| n == var_name)
+                .map(|(_, _, recv, method)| (recv.clone(), method.clone()));
+            let lines = data.lines.clone();
+            // Drop DashMap guard before any potential recursive call.
+            drop(data);
+            if let Some(ty) = rhs_match {
+                return Some(ty);
+            }
+            if let Some((recv, method)) = method_match {
+                if let Some(recv_type) = infer_variable_type_impl(idx, &recv, uri, depth - 1) {
+                    if let Some(ret) = find_method_return_type(idx, &recv_type, &method) {
+                        return Some(ret);
+                    }
+                }
+            }
+            // Lines guard was dropped above; fall through to string-based fallback.
+            return infer_method_return_type(idx, var_name, &lines, uri, depth - 1);
         } else {
             // File not indexed yet — read from disk; skip method inference.
             let path = uri.to_file_path().ok()?;
@@ -95,26 +129,42 @@ pub(crate) fn infer_variable_type(idx: &Indexer, var_name: &str, uri: &Url) -> O
         }
     };
     // All DashMap guards are dropped here.  Safe to recurse.
-    infer_method_return_type(idx, var_name, &lines, uri)
+    infer_method_return_type(idx, var_name, &lines, uri, depth - 1)
 }
 
-/// Like [`infer_variable_type`] but preserves generic parameters in the returned
-/// type string.  e.g. `val items: List<Product>` → `"List<Product>"`.
-///
-/// Used by the `it`-completion path to extract the collection element type.
-pub fn infer_variable_type_raw(idx: &Indexer, var_name: &str, uri: &Url) -> Option<String> {
-    // Scope block: drop DashMap guards before method-return inference.
-    let lines = {
+fn infer_variable_type_raw_impl(
+    idx: &Indexer, var_name: &str, uri: &Url, depth: u8,
+) -> Option<String> {
+    if depth == 0 { return None; }
+    let (lines, rhs_match, method_match) = {
         if let Some(ll) = idx.live_lines.get(uri.as_str()) {
             if let result @ Some(_) = ll.infer_type_raw(var_name) {
                 return result;
             }
-            (*ll).clone()
+            ((*ll).clone(), None::<String>, None::<(String, String)>)
         } else if let Some(data) = idx.files.get(uri.as_str()) {
             if let result @ Some(_) = data.lines.infer_type_raw(var_name) {
                 return result;
             }
-            data.lines.clone()
+            let rhs_match = data.rhs_types.iter()
+                .find(|(_, n, _)| n == var_name)
+                .map(|(_, _, ty)| ty.clone());
+            let method_match = data.method_call_rhs.iter()
+                .find(|(_, n, _, _)| n == var_name)
+                .map(|(_, _, recv, method)| (recv.clone(), method.clone()));
+            let lines = data.lines.clone();
+            drop(data);
+            if let Some(ty) = rhs_match {
+                return Some(ty);
+            }
+            if let Some((recv, method)) = method_match {
+                if let Some(recv_type) = infer_variable_type_raw_impl(idx, &recv, uri, depth - 1) {
+                    if let Some(ret) = find_method_return_type(idx, &recv_type, &method) {
+                        return Some(ret);
+                    }
+                }
+            }
+            return infer_method_return_type(idx, var_name, &lines, uri, depth - 1);
         } else {
             let path = uri.to_file_path().ok()?;
             let content = std::fs::read_to_string(&path).ok()?;
@@ -122,8 +172,7 @@ pub fn infer_variable_type_raw(idx: &Indexer, var_name: &str, uri: &Url) -> Opti
             return lines.infer_type_raw(var_name);
         }
     };
-    // All DashMap guards dropped. Method return type inference preserves generics.
-    infer_method_return_type(idx, var_name, &lines, uri)
+    infer_method_return_type(idx, var_name, &lines, uri, depth - 1)
 }
 
 /// Extract the Kotlin/Android collection element type from a raw generic type string.
@@ -329,62 +378,52 @@ pub(crate) fn infer_type_in_lines_raw(lines: &[String], var_name: &str) -> Optio
     None
 }
 
+/// Extract the right-hand side expression of `var_name = <expr>` from `line`.
+///
+/// Handles flexible whitespace (`var_name=expr` and `var_name = expr`), whole-word
+/// boundaries, and rejects type-annotation positions (`: var_name`).
+/// Returns a slice into `line` starting at the first non-space character of the RHS.
+fn find_rhs_str<'a>(line: &'a str, var_name: &str) -> Option<&'a str> {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with("//") || trimmed.starts_with('*') || trimmed.starts_with("/*") {
+        return None;
+    }
+    let pos = line.find(var_name)?;
+    // Whole-word check: character before var_name must not be alphanumeric or `_`.
+    if pos > 0 {
+        let b = line.as_bytes()[pos - 1];
+        if b.is_ascii_alphanumeric() || b == b'_' { return None; }
+    }
+    // Whole-word check: character after var_name must not be alphanumeric or `_`.
+    let end = pos + var_name.len();
+    let c_after = line.as_bytes().get(end).copied().unwrap_or(b' ');
+    if c_after.is_ascii_alphanumeric() || c_after == b'_' { return None; }
+    // Reject type-annotation position: last non-space token before name is `:`, `,`, or `<`.
+    let last_tok = line[..pos].trim_end().chars().last().unwrap_or(' ');
+    if last_tok == ':' || last_tok == ',' || last_tok == '<' { return None; }
+    // Find `=` after the name, skipping whitespace.
+    let after = &line[end..];
+    let trimmed_after = after.trim_start();
+    if !trimmed_after.starts_with('=') { return None; }
+    // Reject `==` and `=>`.
+    let next = trimmed_after.as_bytes().get(1).copied().unwrap_or(b' ');
+    if next == b'=' || next == b'>' { return None; }
+    Some(trimmed_after[1..].trim_start())
+}
+
 /// Attempt to infer the type of `var_name` from the right-hand side of an assignment.
 ///
 /// Called as a secondary/tertiary scan when no explicit type annotation (`var_name:`)
 /// is found.  Handles the most common Android/Kotlin patterns:
 ///
 /// 1. Constructor call:  `val x = SomeType(args)` → `"SomeType"`
-/// 2. Class literal:     `val x = retrofit.create(DashboardApi::class.java)` → `"DashboardApi"`
-/// 3. DI generic:        `val x = inject<SomeType>()` → `"SomeType"`
+/// 2. DI generic:        `val x = inject<SomeType>()` → `"SomeType"`
 ///
 /// Returns `None` when none of the patterns match.
 fn infer_from_rhs_assignment(line: &str, var_name: &str) -> Option<String> {
-    let trimmed = line.trim_start();
-    if trimmed.starts_with("//") || trimmed.starts_with('*') || trimmed.starts_with("/*") {
-        return None;
-    }
+    let rhs = find_rhs_str(line, var_name)?;
 
-    // Locate `var_name =` where var_name is a whole word boundary.
-    let assign = format!("{var_name} =");
-    let eq_start = line.find(&assign)?;
-    if eq_start > 0 {
-        let before = line[..eq_start].chars().last().unwrap_or(' ');
-        if before.is_alphanumeric() || before == '_' {
-            return None;
-        }
-    }
-
-    // Reject `var_name` appearing in type-annotation position: `val x: VarName = ...`
-    // Check the token immediately before var_name (skipping trailing spaces).
-    {
-        let before_name = line[..eq_start].trim_end();
-        let last_tok = before_name.chars().last().unwrap_or(' ');
-        if last_tok == ':' || last_tok == ',' || last_tok == '<' {
-            return None;
-        }
-    }
-
-    // Point to the `=` character (`var_name ` is `var_name.len() + 1` bytes).
-    let eq_char_idx = eq_start + var_name.len() + 1;
-    let rest = line.get(eq_char_idx..)?;
-    // Reject `==` (equality) and `=>` (unlikely in Kotlin but safe).
-    let next = rest.as_bytes().get(1).copied().unwrap_or(b' ');
-    if next == b'=' || next == b'>' {
-        return None;
-    }
-    let rhs = rest[1..].trim_start();
-
-    // Pattern 2: class literal `SomeType::class` — checked before pattern 1 so that
-    // `retrofit.create(DashboardApi::class.java)` yields `DashboardApi`, not `retrofit`.
-    if let Some(class_pos) = rhs.find("::class") {
-        let type_name = rhs[..class_pos].last_ident_in();
-        if !type_name.is_empty() && type_name.starts_with_uppercase() {
-            return Some(type_name.to_owned());
-        }
-    }
-
-    // Pattern 3: DI generic — `inject<SomeType>()`, `get<SomeType>()`, etc.
+    // Pattern 2: DI generic — `inject<SomeType>()`, `get<SomeType>()`, etc.
     const DI_PREFIXES: &[&str] = &["inject<", "get<", "viewModel<", "activityViewModel<"];
     for prefix in DI_PREFIXES {
         if let Some(start) = rhs.find(prefix) {
@@ -418,34 +457,14 @@ fn infer_from_rhs_assignment(line: &str, var_name: &str) -> Option<String> {
 ///
 /// Only handles one level of chaining: `simpleIdent.method(args)`.
 /// Skips `this`, `super`, and dotted/chained receivers.
-fn infer_method_return_type(idx: &Indexer, var_name: &str, lines: &[String], uri: &Url) -> Option<String> {
-    let assign = format!("{var_name} =");
+fn infer_method_return_type(
+    idx: &Indexer, var_name: &str, lines: &[String], uri: &Url, depth: u8,
+) -> Option<String> {
     for line in lines {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("//") || trimmed.starts_with('*') || trimmed.starts_with("/*") {
-            continue;
-        }
-        let eq_start = match line.find(&assign) {
-            Some(p) => p,
+        let rhs = match find_rhs_str(line, var_name) {
+            Some(r) => r,
             None => continue,
         };
-        if eq_start > 0 {
-            let before = line[..eq_start].chars().last().unwrap_or(' ');
-            if before.is_alphanumeric() || before == '_' { continue; }
-        }
-        // Reject type-annotation position: `val x: VarName = ...`
-        let before_name = line[..eq_start].trim_end();
-        let last_tok = before_name.chars().last().unwrap_or(' ');
-        if last_tok == ':' || last_tok == ',' || last_tok == '<' { continue; }
-
-        let eq_char_idx = eq_start + var_name.len() + 1;
-        let rest = match line.get(eq_char_idx..) {
-            Some(s) => s,
-            None => continue,
-        };
-        let next = rest.as_bytes().get(1).copied().unwrap_or(b' ');
-        if next == b'=' || next == b'>' { continue; }
-        let rhs = rest[1..].trim_start();
 
         // Match `receiver.method(` where receiver is a simple identifier.
         let paren_pos = match rhs.find('(') {
@@ -466,7 +485,7 @@ fn infer_method_return_type(idx: &Indexer, var_name: &str, lines: &[String], uri
         if !method.starts_with_lowercase() { continue; }
 
         // Recursively infer the receiver type (DashMap guards already dropped).
-        if let Some(receiver_type) = infer_variable_type(idx, receiver, uri) {
+        if let Some(receiver_type) = infer_variable_type_impl(idx, receiver, uri, depth) {
             if let Some(ret) = find_method_return_type(idx, &receiver_type, method) {
                 return Some(ret);
             }
@@ -478,16 +497,38 @@ fn infer_method_return_type(idx: &Indexer, var_name: &str, lines: &[String], uri
 /// Look up `method_name` in the symbol index for `type_name` and return its
 /// return type, extracted from `SymbolEntry.detail`.
 fn find_method_return_type(idx: &Indexer, type_name: &str, method_name: &str) -> Option<String> {
-    let locations = idx.definitions.get(type_name)?;
+    // `definitions` is keyed by simple (unqualified) name; strip any qualifying prefix.
+    let type_base = type_name.split('.').last().unwrap_or(type_name);
+    let locations = idx.definitions.get(type_base)?;
     for loc in locations.iter() {
         if let Some(file_data) = idx.files.get(loc.uri.as_str()) {
+            // Find the class entry for type_base so we can do range containment
+            // filtering — avoids picking a same-named method from an unrelated class
+            // in the same file.
+            let class_range = file_data.symbols.iter()
+                .find(|s| s.name == type_base)
+                .map(|s| s.range);
+
             for sym in &file_data.symbols {
-                if sym.name == method_name
-                    && matches!(sym.kind, SymbolKind::FUNCTION | SymbolKind::METHOD | SymbolKind::OPERATOR)
-                {
-                    if let Some(ret) = extract_return_type_from_detail(&sym.detail) {
-                        return Some(ret);
+                if sym.name != method_name { continue; }
+                if !matches!(sym.kind, SymbolKind::FUNCTION | SymbolKind::METHOD | SymbolKind::OPERATOR) {
+                    continue;
+                }
+                // When we know the class range, skip methods outside it.
+                if let Some(cr) = class_range {
+                    if sym.range.start.line < cr.start.line || sym.range.end.line > cr.end.line {
+                        continue;
                     }
+                }
+                // Try detail first; fall back to source lines when detail is truncated.
+                if let Some(ret) = extract_return_type_from_detail(&sym.detail) {
+                    return Some(ret);
+                }
+                // detail may be truncated (120 char limit) — try the source lines.
+                let start_line = sym.selection_range.start.line as usize;
+                let full_sig = file_data.lines.collect_signature(start_line);
+                if let Some(ret) = extract_return_type_from_detail(&full_sig) {
+                    return Some(ret);
                 }
             }
         }

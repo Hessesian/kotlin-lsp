@@ -228,8 +228,8 @@ fn complete_super(idx: &Indexer, from_uri: &Url, snippets: bool) -> Vec<Completi
     let mut items: Vec<CompletionItem> = Vec::new();
     let mut visited: Vec<String> = vec![from_uri.as_str().to_owned()];
     collect_hierarchy_completions(idx, from_uri, &mut visited, 0, &mut items, snippets);
-    // Filter out private members — inaccessible even via super.
-    items.retain(|i| i.sort_text.as_deref().map(|s| !s.starts_with("prv:")).unwrap_or(true));
+    // Filter out private/protected members — inaccessible even via super.
+    items.retain(|i| i.sort_text.as_deref().map(|s| !s.starts_with("prv:") && !s.starts_with("prt:")).unwrap_or(true));
     items.sort_by_key(|i| (kind_sort_rank(i.kind), i.label.clone()));
     items.dedup_by_key(|i| i.label.clone());
     items
@@ -298,8 +298,8 @@ pub(crate) fn complete_dot(idx: &Indexer, receiver: &str, from_uri: &Url, snippe
     // `rt.leaf` is the last segment, so it works for both plain and dotted types.
     let mut items = symbols_from_nested_type(idx, &file_uri, &rt.leaf, Some(from_uri.as_str()));
 
-    // Filter out private members — they are inaccessible from outside the class.
-    items.retain(|i| i.sort_text.as_deref().map(|s| !s.starts_with("prv:")).unwrap_or(true));
+    // Filter out private/protected members — they are inaccessible from outside the class.
+    items.retain(|i| i.sort_text.as_deref().map(|s| !s.starts_with("prv:") && !s.starts_with("prt:")).unwrap_or(true));
 
     // Walk the inheritance hierarchy to include members from parent classes/interfaces.
     // Tracks "file_uri#TypeName" to prevent cycles; seed with the direct type.
@@ -384,7 +384,7 @@ fn collect_inherited_members(
             let mut inherited = symbols_from_nested_type(
                 idx, loc.uri.as_str(), &super_name, Some(calling_uri.as_str()),
             );
-            inherited.retain(|i| i.sort_text.as_deref().map(|s| !s.starts_with("prv:")).unwrap_or(true));
+            inherited.retain(|i| i.sort_text.as_deref().map(|s| !s.starts_with("prv:") && !s.starts_with("prt:")).unwrap_or(true));
             if !snippets {
                 for item in &mut inherited { item.insert_text = None; item.insert_text_format = None; }
             }
