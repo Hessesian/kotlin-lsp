@@ -2,6 +2,7 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use super::Backend;
 use super::actions::is_non_call_keyword;
+use super::helpers::resolve_references_scope;
 use crate::StrExt;
 
 /// Replace all whole-word occurrences of `word` in `lines` with `replacement`.
@@ -181,26 +182,9 @@ impl Backend {
             None    => return Ok(None),
         };
 
-        // ── Resolve scoping (same logic as `references`) ────────────────────
+        // ── Resolve scoping (delegates to the shared helper used by findReferences) ─
         let (parent_class, declared_pkg) = if name.starts_with_uppercase() {
-            let on_decl = self.indexer.is_declared_in(uri, &name)
-                && self.indexer.definitions.get(&name)
-                    .map(|locs| locs.iter().any(|l| l.uri == *uri && l.range.start.line == pos.line))
-                    .unwrap_or(false);
-            if on_decl {
-                let parent = self.indexer.enclosing_class_at(uri, pos.line);
-                let pkg    = self.indexer.package_of(uri);
-                (parent, pkg)
-            } else {
-                let (parent, pkg) = self.indexer.resolve_symbol_via_import(uri, &name);
-                if parent.is_some() || pkg.is_some() {
-                    (parent, pkg)
-                } else {
-                    let parent = self.indexer.declared_parent_class_of(&name, uri);
-                    let pkg    = self.indexer.declared_package_of(&name);
-                    (parent, pkg)
-                }
-            }
+            resolve_references_scope(&self.indexer, uri, pos.line, &name)
         } else {
             // Lowercase symbol — limit to enclosing scope in current file only.
             let lines = match self.indexer.lines_for(uri) {

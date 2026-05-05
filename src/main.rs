@@ -14,6 +14,7 @@ mod types;
 
 pub(crate) use lines_ext::LinesExt;
 pub(crate) use str_ext::StrExt;
+pub(crate) use types::Language;
 
 use tower_lsp::{LspService, Server};
 

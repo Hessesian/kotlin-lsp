@@ -174,8 +174,8 @@ fn extension_fn_completions(
         let file_uri_str = file_entry.key().clone();
         let file = file_entry.value();
         let is_same_file = file_uri_str == from_uri.as_str();
-        // Only look at Kotlin files.
-        if !file_uri_str.ends_with(".kt") && !file_uri_str.ends_with(".kts") { continue; }
+        // Only look at Kotlin files — extension functions are a Kotlin feature.
+        if !crate::Language::from_path(&file_uri_str).is_kotlin() { continue; }
 
         for sym in &file.symbols {
             if sym.extension_receiver != receiver_type { continue; }
@@ -329,7 +329,7 @@ pub(crate) fn complete_dot(idx: &Indexer, receiver: &str, from_uri: &Url, snippe
 
     // Append indexed extension functions whose receiver matches `rt.outer`.
     // These may be defined in other files and need an auto-import.
-    if from_path.ends_with(".kt") || from_path.ends_with(".kts") {
+    if crate::Language::from_path(from_path).is_kotlin() {
         items.extend(extension_fn_completions(idx, &rt.outer, from_uri, snippets));
     }
 
@@ -622,7 +622,7 @@ pub(crate) fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippet
     //    prefix/acronym matches only (max_score=1) — no substring flood.
     // Emits one CompletionItem per distinct FQN, with additionalTextEdits for auto-import.
     if !lowercase_mode && prefix.len() >= MIN_CASE_INSENSITIVE_PREFIX {
-        let is_java = from_uri.as_str().ends_with(".java");
+        let is_java = crate::Language::from_path(from_uri.as_str()).is_java();
         // Prefer live_lines (updated on every keystroke) over the indexed snapshot so that
         // import deduplication and insertion position are based on the current buffer state.
         let live = idx.live_lines.get(from_uri.as_str()).map(|ll| ll.clone());

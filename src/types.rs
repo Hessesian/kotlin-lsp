@@ -2,6 +2,32 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tower_lsp::lsp_types::{Range, SymbolKind};
 
+/// Source language inferred from a file's path extension.
+///
+/// Used to centralise all `path.ends_with(".kt")` / `".swift"` / `".java"` dispatch.
+/// Obtain via [`Language::from_path`]; the default is `Kotlin` (most common case).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Language {
+    #[default]
+    Kotlin,
+    Java,
+    Swift,
+}
+
+impl Language {
+    /// Infer the language from a file path or URI string.
+    pub fn from_path(path: &str) -> Self {
+        if path.ends_with(".swift")                        { Language::Swift }
+        else if path.ends_with(".java")                    { Language::Java  }
+        else                                               { Language::Kotlin }
+    }
+
+    pub fn is_kotlin(self)  -> bool { matches!(self, Language::Kotlin) }
+    pub fn is_java(self)    -> bool { matches!(self, Language::Java)   }
+    pub fn is_swift(self)   -> bool { matches!(self, Language::Swift)  }
+    pub fn is_jvm(self)     -> bool { matches!(self, Language::Kotlin | Language::Java) }
+}
+
 /// A position within a document used by infer functions.
 ///
 /// `utf16_col` is a UTF-16 code unit offset, matching the LSP `Position.character` field.
@@ -112,9 +138,24 @@ pub struct FileData {
     pub syntax_errors: Vec<SyntaxError>,
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Indexing Result Types (for SOLID refactoring)
-// ────────────────────────────────────────────────────────────────────────────
+impl FileData {
+    /// Find the name of the innermost class/interface/object/enum that contains
+    /// `line` in this file's symbol list. Returns `None` if the symbol is
+    /// top-level (not inside any class).
+    pub fn containing_class_at(&self, line: u32) -> Option<String> {
+        const CLASS_KINDS: &[SymbolKind] = &[
+            SymbolKind::CLASS, SymbolKind::INTERFACE, SymbolKind::STRUCT,
+            SymbolKind::ENUM,  SymbolKind::OBJECT,
+        ];
+        self.symbols.iter()
+            .filter(|s| CLASS_KINDS.contains(&s.kind))
+            .filter(|s| s.range.start.line <= line && line <= s.range.end.line)
+            .min_by_key(|s| s.range.end.line.saturating_sub(s.range.start.line))
+            .map(|s| s.name.clone())
+    }
+}
+
+
 
 /// Result of parsing a single file. Pure data, no side effects.
 /// This is what index_content will return instead of mutating DashMaps.

@@ -223,7 +223,7 @@ fn build_type_param_subst_impl<I: IndexRead>(
         None => return HashMap::new(),
     };
 
-    let container_name = match find_containing_class_name(&sym_data, sym_line) {
+    let container_name = match sym_data.containing_class_at(sym_line) {
         Some(n) => n,
         None => return HashMap::new(),
     };
@@ -244,7 +244,7 @@ fn build_type_param_subst_impl<I: IndexRead>(
     // Use `caller_cursor_line` to identify the specific calling class — when multiple
     // classes in the same file extend the same base with different type args,
     // this ensures we pick the correct substitution for the caller.
-    let calling_class_line = find_containing_class_name(&calling_data, caller_cursor_line)
+    let calling_class_line = calling_data.containing_class_at(caller_cursor_line)
         .and_then(|name| calling_data.symbols.iter().find(|s| s.name == name))
         .map(|s| s.selection_range.start.line);
 
@@ -274,7 +274,7 @@ fn build_enclosing_class_subst_impl<I: IndexRead>(
         None => return HashMap::new(),
     };
 
-    let class_name = match find_containing_class_name(&data, cursor_line) {
+    let class_name = match data.containing_class_at(cursor_line) {
         Some(n) => n,
         None => return HashMap::new(),
     };
@@ -347,18 +347,6 @@ fn build_enclosing_class_subst_impl<I: IndexRead>(
     result
 }
 
-// ─── Helper: Find Enclosing Class ────────────────────────────────────────────
-
-/// Find the name of the innermost class that contains a symbol at the given line.
-fn find_containing_class_name(data: &FileData, sym_line: u32) -> Option<String> {
-    data.symbols
-        .iter()
-        .filter(|s| s.range.start.line <= sym_line && sym_line <= s.range.end.line)
-        .filter(|s| matches!(s.kind, SymbolKind::CLASS | SymbolKind::INTERFACE | SymbolKind::STRUCT | SymbolKind::ENUM | SymbolKind::OBJECT))
-        .min_by_key(|s| s.range.end.line.saturating_sub(s.range.start.line))
-        .map(|s| s.name.clone())
-}
-
 // ─── Indexer impl (production) ───────────────────────────────────────────────
 
 // Implement IndexRead for Indexer: production code doesn't use the trait,
@@ -386,7 +374,12 @@ impl IndexRead for super::Indexer {
         allow_rg: bool,
     ) -> Vec<Location> {
         if allow_rg {
-            self.resolve_symbol(name, qualifier, from_uri)
+            let locs = self.resolve_symbol(name, qualifier, from_uri);
+            // Ensure every rg-discovered file is indexed so get_file_data() succeeds.
+            for loc in &locs {
+                self.ensure_indexed(&loc.uri);
+            }
+            locs
         } else {
             if let Some(qual) = qualifier {
                 // Index-only qualified resolution: resolve the qualifier without rg,
@@ -512,7 +505,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        assert_eq!(find_containing_class_name(&data, 7).as_deref(), Some("Inner"));
+        assert_eq!(data.containing_class_at(7).as_deref(), Some("Inner"));
     }
 
     #[test]
@@ -522,7 +515,7 @@ mod tests {
             symbols: vec![make_sym("Outer", SymbolKind::CLASS, 5, 15)],
             ..Default::default()
         };
-        assert!(find_containing_class_name(&data, 1).is_none());
+        assert!(data.containing_class_at(1).is_none());
     }
 
     #[test]
@@ -535,8 +528,8 @@ mod tests {
             ],
             ..Default::default()
         };
-        assert_eq!(find_containing_class_name(&data, 5).as_deref(), Some("MyEnum"));
-        assert_eq!(find_containing_class_name(&data, 15).as_deref(), Some("MyObject"));
+        assert_eq!(data.containing_class_at(5).as_deref(), Some("MyEnum"));
+        assert_eq!(data.containing_class_at(15).as_deref(), Some("MyObject"));
     }
 
     // ── build_subst_map end-to-end tests ─────────────────────────────────────

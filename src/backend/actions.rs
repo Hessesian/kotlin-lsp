@@ -232,7 +232,7 @@ impl Backend {
 
         // Case A: cursor on import line — append ` as <last_segment>`.
         // Only relevant for Kotlin/KTS files (Java/Swift don't use this syntax).
-        let is_kotlin = uri.path().ends_with(".kt") || uri.path().ends_with(".kts");
+        let is_kotlin = crate::Language::from_path(uri.path()).is_kotlin();
         if is_kotlin && trimmed.starts_with("import ") && !trimmed.contains(" as ") {
             let path  = trimmed.trim_start_matches("import ").trim().trim_end_matches(".*");
             let alias = path.rsplit('.').next().unwrap_or(path);
