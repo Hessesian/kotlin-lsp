@@ -1,0 +1,84 @@
+{
+  "$schema": "https://aka.ms/codetour-schema",
+  "title": "Feature Contributor Guide",
+  "description": "Learn how to implement a new LSP feature in kotlin-lsp by adding a capability end-to-end, from handler to tests.",
+  "ref": "main",
+  "isPrimary": false,
+  "steps": [
+    {
+      "file": "README.md",
+      "line": 48,
+      "title": "Welcome: Current LSP Capabilities",
+      "description": "**Situation:** kotlin-lsp is an LSP server for Kotlin, Java, and Swift with many capabilities already implemented.\n\n**Mechanism:** Each LSP capability (hover, definition, completion, references, etc.) is a feature request from the client that the server handles and responds to.\n\n**Implication:** To add a new feature, you'll follow the same pattern for all 10+ existing capabilities.\n\n**Gotcha:** Just because a feature *could* be built doesn't mean it's worth the complexity — check if ripgrep fallback already provides it (e.g., references).\n\nLet's trace through how a feature is built, step by step. We'll use `hover` and `completion` as examples (already merged) and understand the pattern so you can add the next one."
+    },
+    {
+      "directory": "src",
+      "title": "Architecture: Four Layers",
+      "description": "**Situation:** kotlin-lsp follows hexagonal architecture (Ports & Adapters).\n\n**Mechanism:** Code is organized in four layers:\n- `backend/` = inbound adapters (LSP protocol handlers)\n- `resolver/` = domain layer (pure symbol resolution, type inference)\n- `indexer/` = application layer (orchestration, caching)\n- `parser.rs`, `types.rs` = cross-cutting domain types\n\n**Implication:** When adding a feature, you'll:\n1. Write a handler in `backend/`\n2. Call public API in `resolver/` (or create new function there)\n3. Use `Indexer` to access the symbol index\n4. Return domain types, not LSP types (conversion happens in backend)\n\n**Gotcha:** Never import `lsp_types` in `resolver/` or `indexer/` — that breaks the layer boundary. LSP types stay in `backend/`."
+    },
+    {
+      "file": "src/backend/mod.rs",
+      "line": 96,
+      "title": "The Backend Struct: LSP Entry Point",
+      "description": "**Situation:** This is where LSP protocol methods are dispatched. The `Backend` struct holds the LSP client connection and the shared index.\n\n**Mechanism:** Every LSP capability is a method on `Backend` that receives protocol params, calls resolver logic, and returns protocol response types.\n\n**Implication:** Your new feature's handler will be an `impl Backend` method that:\n- Takes LSP params (e.g., `HoverParams`, `CompletionParams`)\n- Calls a resolver function (which lives in `src/resolver/`)\n- Wraps the result in LSP types and returns `Result<T>`\n\n**Gotcha:** The LSP types you return must match the protocol spec. Don't invent field names — use the types from `tower_lsp::lsp_types`."
+    },
+    {
+      "file": "src/backend/handlers.rs",
+      "line": 22,
+      "title": "Example Handler: hover_impl",
+      "description": "**Situation:** This is a real handler that processes hover requests. Let's read it to see the pattern.\n\n**Mechanism:** The handler:\n1. Extracts the file URI and cursor position from params\n2. Builds a `CursorContext` (wrapper around cursor position)\n3. Calls resolver functions to infer type or signature\n4. Wraps the result in an LSP `Hover` struct (rich markdown content)\n5. Returns `Ok(Some(hover))` or `Ok(None)` if no result\n\n**Implication:** Your feature handler will follow this same pattern:\n- Extract params → build context → call resolver → wrap in LSP type → return\n\n**Gotcha:** Always check `if let Some(...)` rather than unwrap — the user's cursor might be on a symbol we can't resolve, and that's fine (return None, not panic)."
+    },
+    {
+      "file": "src/resolver/mod.rs",
+      "line": 1,
+      "title": "The Resolver: Pure Symbol Resolution Logic",
+      "description": "**Situation:** This module is where all the hard work happens — finding symbols, resolving types, scoring completions.\n\n**Mechanism:** Read the module documentation (lines 1–19) to understand the resolution priority:\n1. Local file → 2. Explicit imports → 3. Same package → 4. Star imports → 5. Extension functions → 6. Project-wide ripgrep\n\n**Implication:** When your handler needs to find a symbol or resolve a type, you call a function from this module. The resolver doesn't know about LSP — it works with strings, file paths, and domain types.\n\n**Gotcha:** The resolver may invoke `rg` (ripgrep) as a fallback if a symbol isn't in the index. This is *expected* and makes the LSP responsive even on large projects where initial indexing isn't done yet. Don't try to avoid the fallback — embrace it."
+    },
+    {
+      "file": "src/resolver/complete.rs",
+      "line": 26,
+      "title": "Example: Completion Scoring Algorithm",
+      "description": "**Situation:** Completion is a complex feature: find matching symbols, score them by relevance, rank them, auto-import if needed.\n\n**Mechanism:** The `match_score` function embodies the scoring logic:\n- Score 0: prefix match (e.g., typing `MyClass` matches `MyClassViewModel`)\n- Score 1: camelCase acronym (e.g., `CB` matches `ColumnButton`)\n- Score 2: substring match (e.g., `button` matches `ColumnButton`)\n- None: no match → exclude\n\n**Implication:** When designing a ranking algorithm for your feature, think about what matters to the user. Don't score everything the same — prioritize exact matches and common patterns.\n\n**Gotcha:** Substring matching floods results on short queries (e.g., `a` matches 1000 symbols). The completion handler (in `backend`) caps results at 150 and sets `isIncomplete: true` so the client re-queries as the user types."
+    },
+    {
+      "file": "src/types.rs",
+      "line": 65,
+      "title": "Domain Types: SymbolEntry and FileData",
+      "description": "**Situation:** These are the core types stored in the index. Every symbol has a `SymbolEntry`, every file has `FileData`.\n\n**Mechanism:** \n- `SymbolEntry` (line 67): name, kind (class/fun/val), visibility, location range, optional detail signature\n- `FileData` (line 86+): imports, declared symbols, raw source lines, supertypes\n\n**Implication:** When you need to understand what's available about a symbol, read these types. If you need to *add* new metadata to the index (rare), you'd extend these structs — but that's Phase 13 work.\n\n**Gotcha:** `SymbolEntry.detail` is truncated at 120 chars. If you need the full signature, use `collect_signature()` (in `indexer::infer`) instead."
+    },
+    {
+      "file": "src/indexer.rs",
+      "line": 96,
+      "title": "Indexer API: Accessing the Index",
+      "description": "**Situation:** The `Indexer` struct is your gateway to all cached symbols. It's cloned as `Arc<Indexer>` and shared across async tasks.\n\n**Mechanism:** The index is stored in DashMaps (concurrent hashmaps):\n- `definitions`: name → list of symbols\n- `qualified_definitions`: fully qualified name → symbol\n- `imports`: file → list of import entries\n- Plus file data, supertypes, and other metadata\n\n**Implication:** When your resolver function needs to look up a symbol by name or file URI, you use `indexer.definitions.get(name)` or similar. See lines 95–110+ for the full API.\n\n**Gotcha:** All lookups are `Option` — symbols might not be indexed (user hasn't saved file) or might not exist (user made a typo). Handle None gracefully; don't panic."
+    },
+    {
+      "file": "src/resolver/tests.rs",
+      "line": 7,
+      "title": "Test Pattern: Build an Indexer, Index Code, Assert Results",
+      "description": "**Situation:** Unit tests follow a simple, repeatable pattern. Let's see how tests are structured.\n\n**Mechanism:** Every test:\n1. Creates a test URI (e.g., `uri(\"/Main.kt\")`)\n2. Creates an `Indexer::new()`\n3. Calls `indexer.index_content()` with Kotlin/Java source code\n4. Calls the resolver function on that indexed code\n5. Asserts the result matches expectations\n\n**Implication:** When you write tests for your new feature, follow this pattern:\n- No mocking framework, no global state\n- Create real Indexer instances\n- Use small, focused test code snippets\n- Assert on the exact result type\n\n**Gotcha:** Tests run in `#[cfg(test)]` modules inline in the same file as the code being tested (e.g., `src/resolver/tests.rs` tests functions in `src/resolver/complete.rs`). The test file is compiled in when you run `cargo test`, but not in release builds."
+    },
+    {
+      "file": "src/resolver/tests.rs",
+      "line": 25,
+      "title": "Example Test: Simple Helper Function",
+      "description": "**Situation:** This test verifies that package prefixes are extracted correctly.\n\n**Mechanism:** Call the function → assert the result with `assert_eq!`.\n\n**Implication:** Start with unit tests for pure functions (helpers, scoring, parsing). Once those pass, add integration tests that exercise the full resolver stack with realistic code.\n\n**Gotcha:** Use `assert_eq!` or `assert!` — not `.unwrap()`. If a test fails, you want a clear error message, not a panic at the unwrap site."
+    },
+    {
+      "file": "docs/codebase/STRUCTURE.md",
+      "line": 1,
+      "title": "Appendix: Full Module Map",
+      "description": "**Situation:** You now understand the pattern. Here's the full module breakdown for reference.\n\n**Mechanism:** Use this when you need to find:\n- Where a specific LSP handler lives (`backend/handlers.rs`)\n- Where a specific resolver function lives (`resolver/complete.rs`, `resolver/infer.rs`, etc.)\n- Where the index API is (`indexer.rs`)\n- Where tests live (inline `#[cfg(test)]` in same file)\n\n**Implication:** Before you start coding, read the relevant module to understand what's already there. You might be able to reuse a helper or extend an existing function instead of building from scratch.\n\n**Gotcha:** The module map in the docs is accurate but may have evolved since this tour was written. Read the actual files to confirm current state."
+    },
+    {
+      "directory": "src/backend",
+      "title": "Implementation Checklist",
+      "description": "**Situation:** You've learned the architecture and seen real examples. Now you're ready to implement.\n\n**Mechanism:** Your feature implementation follows this sequence:\n1. Pick an LSP capability not yet in `handlers.rs` (or enhance an existing one)\n2. Sketch the handler signature and what it should return\n3. Write the resolver logic in `src/resolver/` (pure, testable)\n4. Add tests in `src/resolver/tests.rs`\n5. Wire the handler in `src/backend/handlers.rs` (convert LSP ↔ domain)\n6. Run `cargo test` — all 664 tests should pass\n7. Run `cargo clippy` — no warnings\n8. Commit and push your PR\n\n**Implication:** Start with a smaller feature (hover improvements, completion refinement) before complex ones (new type inference rules, cross-file resolution).\n\n**Gotcha:** Read the open issues first. The hardest part is understanding what users *need*, not writing the code."
+    },
+    {
+      "content": "## Summary: You now know how to add a feature",
+      "title": "Summary & Next Steps",
+      "description": "You've learned the four-layer architecture (backend → resolver → indexer → parser) and how every LSP handler follows the same pattern: extract params → build context → call resolver → wrap in LSP types. The resolver lives in pure domain functions, tests are simple and straightforward, and the index API gives you access to symbols, imports, and metadata.\n\n**To implement your feature:** Read `docs/codebase/ARCHITECTURE.md`, study a similar handler in `src/backend/handlers.rs`, write resolver logic in `src/resolver/` (start with tests), then open a PR.\n\n**Deeper learning:** Check the ProgressReporter refactoring (commit 98559a5) for a real architectural audit case study — `Option<Client>` replaced with an outbound trait port. High-churn areas: `src/indexer.rs` (85 commits), `src/parser.rs` (61 KB). Zero production debt: no FIXME/TODO in production code.\n\n**Questions?** Read the test suite in `src/resolver/tests.rs` — every test is a mini-tutorial. Happy coding! 🚀"
+    }
+  ]
+}
