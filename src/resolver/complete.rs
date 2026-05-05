@@ -173,15 +173,15 @@ fn extension_fn_completions(
     for file_entry in idx.files.iter() {
         let file_uri_str = file_entry.key().clone();
         let file = file_entry.value();
-        // Skip the current file — its top-level extensions are already in scope.
-        if file_uri_str == from_uri.as_str() { continue; }
+        let is_same_file = file_uri_str == from_uri.as_str();
         // Only look at Kotlin files.
         if !file_uri_str.ends_with(".kt") && !file_uri_str.ends_with(".kts") { continue; }
 
         for sym in &file.symbols {
             if sym.extension_receiver != receiver_type { continue; }
-            // Skip private/protected — not accessible from other files.
-            if matches!(sym.visibility, Visibility::Private | Visibility::Protected) { continue; }
+            // Skip private/protected from other files — inaccessible across file boundaries.
+            // Same-file private/protected are fine.
+            if !is_same_file && matches!(sym.visibility, Visibility::Private | Visibility::Protected) { continue; }
 
             let dedup_key = format!("{}:{}", sym.name, file_uri_str);
             if !seen.insert(dedup_key) { continue; }
@@ -191,7 +191,8 @@ fn extension_fn_completions(
             let fqn = if pkg.is_empty() { sym.name.clone() } else { format!("{pkg}.{}", sym.name) };
 
             let pkg_of_fqn = match fqn.rfind('.') { Some(i) => &fqn[..i], None => "" };
-            let needs_import = !already_imported(&fqn, &cur_imports)
+            let needs_import = !is_same_file
+                && !already_imported(&fqn, &cur_imports)
                 && !cur_imports.iter().any(|imp| imp.is_star && imp.full_path == pkg_of_fqn)
                 && pkg_of_fqn != cur_pkg;
 
