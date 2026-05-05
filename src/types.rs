@@ -167,22 +167,6 @@ impl FileData {
             .min_by_key(|s| s.range.end.line.saturating_sub(s.range.start.line))
             .map(|s| s.name.clone())
     }
-
-    /// Find a symbol at a specific position (line, utf16_col).
-    ///
-    /// Attempts exact position match first (col-aware), then falls back
-    /// to line-only match for imprecise callers. Returns None if no symbol
-    /// is found at that location.
-    pub fn symbol_at(&self, line: u32, col: u32) -> Option<&SymbolEntry> {
-        // Exact position match first
-        self.symbols.iter()
-            .find(|s| s.selection_range.start.line == line && s.selection_range.start.character == col)
-            .or_else(|| {
-                // Fallback: line-only match
-                self.symbols.iter()
-                    .find(|s| s.selection_range.start.line == line)
-            })
-    }
 }
 
 
