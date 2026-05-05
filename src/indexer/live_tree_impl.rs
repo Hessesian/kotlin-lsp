@@ -9,7 +9,7 @@ impl Indexer {
     ///
     /// If the file extension is unsupported or parsing fails, any previously
     /// stored tree for `uri` is removed so consumers never read a stale doc.
-    pub fn store_live_tree(&self, uri: &Url, content: &str) {
+    pub(crate) fn store_live_tree(&self, uri: &Url, content: &str) {
         let path = uri.path();
         match lang_for_path(path).and_then(|lang| parse_live(content, lang)) {
             Some(doc) => {
@@ -22,12 +22,12 @@ impl Indexer {
     }
 
     /// Return the `LiveDoc` for `uri`, or `None` if the file is not open.
-    pub fn live_doc(&self, uri: &Url) -> Option<Arc<LiveDoc>> {
+    pub(crate) fn live_doc(&self, uri: &Url) -> Option<Arc<LiveDoc>> {
         self.live_trees.get(uri.as_str()).map(|r| Arc::clone(&*r))
     }
 
     /// Remove the live parse tree for `uri` (called on `textDocument/didClose`).
-    pub fn remove_live_tree(&self, uri: &Url) {
+    pub(crate) fn remove_live_tree(&self, uri: &Url) {
         self.live_trees.remove(uri.as_str());
     }
 }

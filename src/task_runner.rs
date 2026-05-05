@@ -18,7 +18,7 @@ use tokio::sync::Semaphore;
 ///
 /// # Returns
 /// Vector of results in same order as input items
-pub async fn run_concurrent<T, R, F, Fut>(
+pub(crate) async fn run_concurrent<T, R, F, Fut>(
     items: Vec<T>,
     semaphore: Arc<Semaphore>,
     worker: F,

@@ -25,7 +25,7 @@ use tower_lsp::lsp_types::Url;
 /// Two concrete implementations:
 /// - `Indexer` — production, full resolution with rg fallback
 /// - `TestDeps` — test stub, drives leaf-helper unit tests from plain `HashMap`s
-pub trait InferDeps {
+pub(crate) trait InferDeps {
     /// Return the raw parameter text inside a function's outer `()`, e.g.
     /// `"key: K, flow: Flow<T>, map: (T) -> Model"` (no surrounding parens).
     ///

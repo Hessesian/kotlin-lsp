@@ -54,6 +54,18 @@ const LAMBDA_PARAM_SCAN_BACK_LINES: usize = 40;
 /// (from `find_named_lambda_param_type`).
 const LAMBDA_PARAM_SCAN_BACK: usize = 20;
 
+/// Selects which implicit lambda parameter is being inferred.
+///
+/// Replaces the `for_this: bool` flag in `find_it_element_type_in_lines_impl`
+/// and `cst_it_or_this_type` with an explicit, self-documenting variant.
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum LambdaParamKind {
+    /// Infer the type of `it` (the implicit element parameter).
+    It,
+    /// Infer the type of `this` (the receiver in a receiver lambda).
+    This,
+}
+
 /// Lines to scan backward when searching for the enclosing lambda opener
 /// in the text-fallback path of `find_it_element_type_in_lines_impl`.
 const IT_SCAN_BACK_LINES: usize = 15;
@@ -92,7 +104,7 @@ pub(crate) fn find_it_element_type_in_lines(
     idx: &Indexer,
     uri: &Url,
 ) -> Option<String> {
-    find_it_element_type_in_lines_impl(lines, pos, idx, uri, false)
+    find_it_element_type_in_lines_impl(lines, pos, idx, uri, LambdaParamKind::It)
 }
 
 pub(crate) fn find_this_element_type_in_lines(
@@ -101,7 +113,7 @@ pub(crate) fn find_this_element_type_in_lines(
     idx: &Indexer,
     uri: &Url,
 ) -> Option<String> {
-    find_it_element_type_in_lines_impl(lines, pos, idx, uri, true)
+    find_it_element_type_in_lines_impl(lines, pos, idx, uri, LambdaParamKind::This)
 }
 
 /// Multi-line version of `find_named_lambda_param_type` for hover/goto-def.
@@ -381,7 +393,7 @@ fn cst_it_or_this_type(
     start_node: tree_sitter::Node<'_>,
     doc: &crate::indexer::live_tree::LiveDoc,
     lines: &[String],
-    for_this: bool,
+    kind: LambdaParamKind,
     idx: &Indexer,
     uri: &Url,
 ) -> Option<String> {
@@ -400,7 +412,7 @@ fn cst_it_or_this_type(
                 .trim_end();
             let ln = cur.start_position().row;
 
-            if for_this {
+            if kind == LambdaParamKind::This {
                 match classify_this_lambda_context(before_brace, idx, uri) {
                     ThisLambdaCtx::Resolved(t) => return Some(t),
                     // Receiver-lambda context but type not found: stop walking up.
@@ -435,7 +447,7 @@ fn find_it_element_type_in_lines_impl(
     pos: CursorPos,
     idx: &Indexer,
     uri: &Url,
-    for_this: bool,
+    kind: LambdaParamKind,
 ) -> Option<String> {
     // ── CST fast path ────────────────────────────────────────────────────────
     if let Some(doc) = idx.live_doc(uri) {
@@ -451,7 +463,7 @@ fn find_it_element_type_in_lines_impl(
             .root_node()
             .descendant_for_point_range(point, point)
         {
-            return cst_it_or_this_type(node, &doc, lines, for_this, idx, uri);
+            return cst_it_or_this_type(node, &doc, lines, kind, idx, uri);
         }
         // Node not found for this position — fall through to text scan.
     }
@@ -501,7 +513,7 @@ fn find_it_element_type_in_lines_impl(
                             depth = 0;
                             continue;
                         }
-                        if for_this {
+                        if kind == LambdaParamKind::This {
                             // `this` only gets a hint from receiver lambdas (`T.() -> R`).
                             return lambda_receiver_this_type_from_context(before_brace, idx, uri);
                         }

@@ -109,7 +109,7 @@ thread_local! {
 
 // ─── public entry points ────────────────────────────────────────────────────
 
-pub fn parse_kotlin(content: &str) -> FileData {
+pub(crate) fn parse_kotlin(content: &str) -> FileData {
     let lines = std::sync::Arc::new(content.lines().map(str::to_owned).collect());
     let mut data = FileData {
         lines,
@@ -165,7 +165,7 @@ pub fn parse_kotlin(content: &str) -> FileData {
     data
 }
 
-pub fn parse_java(content: &str) -> FileData {
+pub(crate) fn parse_java(content: &str) -> FileData {
     let lines = std::sync::Arc::new(content.lines().map(str::to_owned).collect());
     let mut data = FileData {
         lines,
@@ -191,7 +191,7 @@ pub fn parse_java(content: &str) -> FileData {
     data
 }
 
-pub fn parse_swift(content: &str) -> FileData {
+pub(crate) fn parse_swift(content: &str) -> FileData {
     let lines = std::sync::Arc::new(content.lines().map(str::to_owned).collect());
     let mut data = FileData {
         lines,
@@ -268,7 +268,7 @@ pub fn parse_swift(content: &str) -> FileData {
 }
 
 /// Dispatch to the correct parser based on file extension.
-pub fn parse_by_extension(path: &str, content: &str) -> FileData {
+pub(crate) fn parse_by_extension(path: &str, content: &str) -> FileData {
     match crate::Language::from_path(path) {
         crate::Language::Swift => parse_swift(content),
         crate::Language::Java => parse_java(content),
@@ -945,7 +945,7 @@ fn parse_import_header(header: &tree_sitter::Node, bytes: &[u8], data: &mut File
 /// Lightweight import scanner for live (unsaved) buffer lines.
 /// Handles: `import pkg.Name`, `import pkg.Name as Alias`, `import pkg.*`
 /// Used by completion to read the current buffer state without a full re-parse.
-pub fn parse_imports_from_lines(lines: &[String]) -> Vec<crate::types::ImportEntry> {
+pub(crate) fn parse_imports_from_lines(lines: &[String]) -> Vec<crate::types::ImportEntry> {
     let mut imports = Vec::new();
     for line in lines {
         let trimmed = line.trim_start();

@@ -8,17 +8,92 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{async_trait, Client, LanguageServer};
 
 use self::helpers::syntax_diagnostics;
-use crate::indexer::{workspace_cache_path, IgnoreMatcher, Indexer};
+use crate::indexer::{workspace_cache_path, IgnoreMatcher, Indexer, ProgressReporter};
 
-pub mod actions;
-pub mod cursor;
-pub mod format;
-pub mod handlers;
-pub mod helpers;
-pub mod nav;
-pub mod rename;
+pub(crate) mod actions;
+pub(crate) mod cursor;
+pub(crate) mod format;
+pub(crate) mod handlers;
+pub(crate) mod helpers;
+pub(crate) mod nav;
+pub(crate) mod rename;
 
-pub struct Backend {
+// ─── LSP progress reporter (outbound adapter) ────────────────────────────────
+
+mod progress {
+    use tower_lsp::lsp_types::ProgressParams;
+
+    /// `$/progress` notification — reports workspace indexing status to the editor.
+    pub(super) enum KotlinProgress {}
+    impl tower_lsp::lsp_types::notification::Notification for KotlinProgress {
+        type Params = ProgressParams;
+        const METHOD: &'static str = "$/progress";
+    }
+}
+
+/// Sends LSP `$/progress` notifications via `tower_lsp::Client`.
+struct LspProgressReporter(Client);
+
+impl ProgressReporter for LspProgressReporter {
+    async fn begin(&self, token: &NumberOrString, message: &str) {
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            self.0
+                .send_request::<tower_lsp::lsp_types::request::WorkDoneProgressCreate>(
+                    WorkDoneProgressCreateParams {
+                        token: token.clone(),
+                    },
+                ),
+        )
+        .await;
+        self.0
+            .send_notification::<progress::KotlinProgress>(ProgressParams {
+                token: token.clone(),
+                value: ProgressParamsValue::WorkDone(WorkDoneProgress::Begin(
+                    WorkDoneProgressBegin {
+                        title: "kotlin-lsp".into(),
+                        cancellable: Some(false),
+                        message: Some(message.to_owned()),
+                        percentage: Some(0),
+                    },
+                )),
+            })
+            .await;
+    }
+
+    async fn report(&self, token: &NumberOrString, done: usize, total: usize) {
+        let pct = if total > 0 {
+            ((done * 100) / total) as u32
+        } else {
+            0
+        };
+        self.0
+            .send_notification::<progress::KotlinProgress>(ProgressParams {
+                token: token.clone(),
+                value: ProgressParamsValue::WorkDone(WorkDoneProgress::Report(
+                    WorkDoneProgressReport {
+                        cancellable: Some(false),
+                        message: Some(format!("{done}/{total} files…")),
+                        percentage: Some(pct),
+                    },
+                )),
+            })
+            .await;
+    }
+
+    async fn end(&self, token: &NumberOrString, message: &str) {
+        self.0
+            .send_notification::<progress::KotlinProgress>(ProgressParams {
+                token: token.clone(),
+                value: ProgressParamsValue::WorkDone(WorkDoneProgress::End(WorkDoneProgressEnd {
+                    message: Some(message.to_owned()),
+                })),
+            })
+            .await;
+    }
+}
+
+pub(crate) struct Backend {
     pub(super) client: Client,
     pub(super) indexer: Arc<Indexer>,
     /// Per-URI abort handle for the pending debounced reindex task.
@@ -31,7 +106,7 @@ pub struct Backend {
 }
 
 impl Backend {
-    pub fn new(client: Client) -> Self {
+    pub(crate) fn new(client: Client) -> Self {
         Self {
             client,
             indexer: Arc::new(Indexer::new()),
@@ -237,7 +312,11 @@ impl LanguageServer for Backend {
             tokio::spawn(async move {
                 // No specific open-file priorities at initialize.
                 indexer
-                    .index_workspace_prioritized(&path, Vec::new(), Some(client))
+                    .index_workspace_prioritized(
+                        &path,
+                        Vec::new(),
+                        Arc::new(LspProgressReporter(client)),
+                    )
                     .await;
             });
         }
@@ -303,7 +382,7 @@ impl LanguageServer for Backend {
             let client = self.client.clone();
             idx.reset_index_state();
             tokio::spawn(async move {
-                idx.index_workspace(&root, Some(client)).await;
+                idx.index_workspace(&root, Arc::new(LspProgressReporter(client))).await;
             });
             self.client
                 .show_message(MessageType::INFO, "kotlin-lsp: reindexing workspace…")
@@ -475,11 +554,12 @@ impl LanguageServer for Backend {
             let root2 = root.clone();
             let opened = opened_path_opt.clone();
             tokio::spawn(async move {
+                let reporter = Arc::new(LspProgressReporter(client));
                 if let Some(op) = opened {
-                    idx.index_workspace_prioritized(&root2, vec![op], Some(client))
+                    idx.index_workspace_prioritized(&root2, vec![op], reporter)
                         .await;
                 } else {
-                    idx.index_workspace_prioritized(&root2, Vec::new(), Some(client))
+                    idx.index_workspace_prioritized(&root2, Vec::new(), reporter)
                         .await;
                 }
             });
@@ -657,7 +737,7 @@ impl LanguageServer for Backend {
         let sem = idx.parse_sem();
         tokio::task::spawn(async move {
             if let Ok(path) = uri.to_file_path() {
-                if let Ok(content) = std::fs::read_to_string(&path) {
+                if let Ok(content) = tokio::fs::read_to_string(&path).await {
                     if let Ok(permit) = sem.acquire_owned().await {
                         tokio::task::spawn_blocking(move || {
                             let _permit = permit;
@@ -686,7 +766,7 @@ impl LanguageServer for Backend {
             let sem = idx.parse_sem();
             tokio::task::spawn(async move {
                 if let Ok(path) = uri.to_file_path() {
-                    if let Ok(content) = std::fs::read_to_string(&path) {
+                    if let Ok(content) = tokio::fs::read_to_string(&path).await {
                         if let Ok(permit) = sem.acquire_owned().await {
                             tokio::task::spawn_blocking(move || {
                                 let _permit = permit;

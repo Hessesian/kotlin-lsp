@@ -27,12 +27,12 @@ const ENCLOSING_CALL_SCAN_BACK: usize = 20;
 impl Indexer {
     /// LSP positions are UTF-16; for ASCII-heavy Kotlin/Java identifiers the
     /// character offset is identical to the UTF-16 unit offset.
-    pub fn word_at(&self, uri: &Url, position: Position) -> Option<String> {
+    pub(crate) fn word_at(&self, uri: &Url, position: Position) -> Option<String> {
         self.word_and_qualifier_at(uri, position).map(|(w, _)| w)
     }
 
     /// Like `word_at` but also returns the `Range` of the word in LSP (UTF-16) coordinates.
-    pub fn word_and_range_at(&self, uri: &Url, position: Position) -> Option<(String, Range)> {
+    pub(crate) fn word_and_range_at(&self, uri: &Url, position: Position) -> Option<(String, Range)> {
         let lines = self.lines_for(uri)?;
         let line_text = lines.get(position.line as usize)?;
         let target_utf16 = position.character as usize;
@@ -86,7 +86,7 @@ impl Indexer {
     }
 
     /// Returns a clone of the live (possibly unsaved) lines for a URI.
-    pub fn lines_for(&self, uri: &Url) -> Option<Arc<Vec<String>>> {
+    pub(crate) fn lines_for(&self, uri: &Url) -> Option<Arc<Vec<String>>> {
         // Prefer live (unsaved) lines, fall back to indexed file.
         if let Some(live) = self.live_lines.get(uri.as_str()) {
             return Some(live.clone());
@@ -113,7 +113,7 @@ impl Indexer {
     ///
     /// `List<StaticDocument>` cursor on `StaticDocument`
     ///   → `Some(("StaticDocument", None))`
-    pub fn word_and_qualifier_at(
+    pub(crate) fn word_and_qualifier_at(
         &self,
         uri: &Url,
         position: Position,
@@ -200,7 +200,7 @@ impl Indexer {
     /// Used by hover and go-to-definition to provide useful info for lambda params.
     /// Handles both same-line and multi-line lambda declarations by scanning
     /// backward through file lines (not just the text before the cursor).
-    pub fn infer_lambda_param_type_at(
+    pub(crate) fn infer_lambda_param_type_at(
         &self,
         name: &str,
         uri: &Url,
@@ -270,7 +270,7 @@ impl Indexer {
     /// Example — cursor inside `{ resultState -> … }`:
     ///   `reloadableProduct(…, { isRefresh -> … }) { resultState -> │ }`
     ///   → returns `["resultState"]`,  NOT `["isRefresh", "resultState"]`
-    pub fn lambda_params_at(&self, uri: &Url, cursor_line: usize) -> Vec<String> {
+    pub(crate) fn lambda_params_at(&self, uri: &Url, cursor_line: usize) -> Vec<String> {
         self.lambda_params_at_col(uri, cursor_line, usize::MAX)
     }
 
@@ -283,7 +283,7 @@ impl Indexer {
     ///                                                  ^ cursor here
     /// Without the limit, the scan hits `}` first (depth→1), then `{` resets to 0
     /// (not <0), so the lambda params are never collected.
-    pub fn lambda_params_at_col(
+    pub(crate) fn lambda_params_at_col(
         &self,
         uri: &Url,
         cursor_line: usize,
@@ -391,7 +391,7 @@ impl Indexer {
     /// Find the `{ name ->` declaration line for a lambda parameter in scope at
     /// `cursor_line`.  Returns a `Location` pointing to the opening `{` of the
     /// enclosing lambda (the parameter's declaration site).
-    pub fn find_lambda_param_decl(
+    pub(crate) fn find_lambda_param_decl(
         &self,
         uri: &Url,
         param_name: &str,
@@ -438,7 +438,7 @@ impl Indexer {
     /// Used by `references` to scope a short symbol name (e.g. `Loading`) to
     /// its parent sealed class so we can filter out unrelated `Loading` classes
     /// in other sealed hierarchies.
-    pub fn enclosing_class_at(&self, uri: &Url, row: u32) -> Option<String> {
+    pub(crate) fn enclosing_class_at(&self, uri: &Url, row: u32) -> Option<String> {
         let row = row as usize;
 
         // ── CST fast path ────────────────────────────────────────────────────

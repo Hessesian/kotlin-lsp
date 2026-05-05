@@ -30,7 +30,7 @@ use crate::types::ImportEntry;
 use crate::LinesExt;
 use crate::StrExt;
 
-pub mod complete;
+pub(crate) mod complete;
 pub(crate) mod find;
 pub(crate) mod infer;
 #[cfg(test)]
@@ -39,10 +39,10 @@ mod tests;
 // ─── re-exports ───────────────────────────────────────────────────────────────
 
 pub(crate) use complete::is_annotation_context;
-pub use complete::{
+pub(crate) use complete::{
     complete_symbol, complete_symbol_with_context, symbols_from_uri_as_completions_pub,
 };
-pub use infer::{
+pub(crate) use infer::{
     extract_collection_element_type, infer_receiver_type, infer_variable_type_raw, ReceiverKind,
     ReceiverType,
 };
@@ -151,7 +151,7 @@ pub(crate) fn make_import_edit(fqn: &str, lines: &[String], needs_semicolon: boo
 /// Resolve `name` as seen from `from_uri`, returning all known definition
 /// `Location`s in priority order.  Returns an empty vec only when nothing was
 /// found by any strategy including `rg`.
-pub fn resolve_symbol(
+pub(crate) fn resolve_symbol(
     idx: &Indexer,
     name: &str,
     qualifier: Option<&str>,
@@ -966,7 +966,7 @@ pub(crate) fn is_stdlib(pkg: &str) -> bool {
 
 #[allow(dead_code)]
 impl crate::indexer::Indexer {
-    pub fn resolve_symbol(
+    pub(crate) fn resolve_symbol(
         &self,
         name: &str,
         qualifier: Option<&str>,

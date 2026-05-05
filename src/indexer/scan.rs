@@ -7,6 +7,7 @@
 //! - [`Indexer::index_workspace_prioritized`]— fast first-open: priority files first, then full scan.
 //! - [`Indexer::save_cache_to_disk`]         — serialise current index to `~/.cache/kotlin-lsp/`.
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -27,15 +28,44 @@ use crate::types::{FileIndexResult, IndexStats, WorkspaceIndexResult};
 
 // ─── LSP progress notification ────────────────────────────────────────────────
 
-mod progress {
-    use tower_lsp::lsp_types::ProgressParams;
+/// Counters describing a workspace scan pass, used for progress notifications
+/// and the status-file JSON.
+#[derive(Copy, Clone)]
+struct ProgressSummary {
+    /// Number of files that need (re-)parsing (cache misses).
+    parse_count: usize,
+    /// Number of files discovered minus truncation (used in progress message).
+    indexed_count: usize,
+    /// Total files discovered before any truncation limit.
+    total: usize,
+    /// Number of files satisfied from disk cache.
+    cache_hits: usize,
+    /// Whether discovery was truncated by a file-count limit.
+    truncated: bool,
+}
 
-    /// `$/progress` notification — reports workspace indexing status to the editor.
-    pub(super) enum KotlinProgress {}
-    impl tower_lsp::lsp_types::notification::Notification for KotlinProgress {
-        type Params = ProgressParams;
-        const METHOD: &'static str = "$/progress";
-    }
+/// Outbound port for LSP progress notifications.
+///
+/// The indexer calls these methods during workspace scanning;
+/// the concrete adapter (`LspProgressReporter` in `backend`) sends the
+/// actual `$/progress` notifications.  `NoopReporter` is used in CLI mode
+/// and in tests where no LSP client is connected.
+pub(crate) trait ProgressReporter: Send + Sync {
+    /// Register the progress token and send the WorkDone Begin notification.
+    fn begin(&self, token: &NumberOrString, message: &str) -> impl Future<Output = ()> + Send;
+    /// Send an intermediate progress update (called periodically during parse).
+    fn report(&self, token: &NumberOrString, done: usize, total: usize) -> impl Future<Output = ()> + Send;
+    /// Send the WorkDone End notification.
+    fn end(&self, token: &NumberOrString, message: &str) -> impl Future<Output = ()> + Send;
+}
+
+/// No-op reporter used when no LSP client is connected (CLI `--index-only`, tests).
+pub(crate) struct NoopReporter;
+
+impl ProgressReporter for NoopReporter {
+    async fn begin(&self, _: &NumberOrString, _: &str) {}
+    async fn report(&self, _: &NumberOrString, _: usize, _: usize) {}
+    async fn end(&self, _: &NumberOrString, _: &str) {}
 }
 
 // ─── RAII guard ───────────────────────────────────────────────────────────────
@@ -70,7 +100,7 @@ pub(super) const DEFAULT_MAX_INDEX_FILES: usize = MAX_FILES_UNLIMITED;
 /// - LSP mode callers pass `DEFAULT_MAX_INDEX_FILES` (unlimited).
 /// - CLI `--index-only` callers pass `MAX_FILES_UNLIMITED`.
 ///   Note: setting `KOTLIN_LSP_MAX_FILES` in the environment will still cap the count.
-pub fn resolve_max_files(default: usize) -> usize {
+pub(super) fn resolve_max_files(default: usize) -> usize {
     std::env::var("KOTLIN_LSP_MAX_FILES")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -267,14 +297,17 @@ fn discover_workspace_paths(
     cache: &Option<super::cache::IndexCache>,
     matcher_ref: Option<&IgnoreMatcher>,
 ) -> DiscoveredPaths {
-    let warm_start = cache.as_ref().map(|c| c.complete_scan).unwrap_or(false);
-    let mut paths = if warm_start {
-        warm_discover_files(root, cache.as_ref().unwrap(), matcher_ref)
+    let mut paths = if let Some(cache) = cache.as_ref().filter(|c| c.complete_scan) {
+        warm_discover_files(root, cache, matcher_ref)
     } else {
         find_source_files(root, matcher_ref)
     };
     let total = paths.len();
-    let effective_max = if warm_start { MAX_FILES_UNLIMITED } else { max };
+    let effective_max = if cache.as_ref().is_some_and(|c| c.complete_scan) {
+        MAX_FILES_UNLIMITED
+    } else {
+        max
+    };
 
     paths.sort_by_key(|p| p.components().count());
     let paths: Vec<_> = paths.into_iter().take(effective_max).collect();
@@ -378,14 +411,14 @@ fn schedule_parse_work(
     (work_items, aborted)
 }
 
-fn spawn_progress_reporter(
+fn spawn_progress_reporter<R: ProgressReporter + 'static>(
     idx: Arc<Indexer>,
-    client: Option<tower_lsp::Client>,
+    reporter: Arc<R>,
     token: NumberOrString,
     total: usize,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        if client.is_none() || total == 0 {
+        if total == 0 {
             return;
         }
 
@@ -396,20 +429,7 @@ fn spawn_progress_reporter(
             let done = idx
                 .parse_tasks_completed
                 .load(std::sync::atomic::Ordering::Relaxed);
-            let pct = ((done * 100) / total) as u32;
-            if let Some(ref c) = client {
-                c.send_notification::<progress::KotlinProgress>(ProgressParams {
-                    token: token.clone(),
-                    value: ProgressParamsValue::WorkDone(WorkDoneProgress::Report(
-                        WorkDoneProgressReport {
-                            cancellable: Some(false),
-                            message: Some(format!("{done}/{total} files…")),
-                            percentage: Some(pct),
-                        },
-                    )),
-                })
-                .await;
-            }
+            reporter.report(&token, done, total).await;
             if done >= total {
                 break;
             }
@@ -417,12 +437,13 @@ fn spawn_progress_reporter(
     })
 }
 
-fn write_indexing_started_status(root: &Path, parse_count: usize, cache_hits: usize) {
+fn write_indexing_started_status(root: &Path, summary: &ProgressSummary) {
     let started_unix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let root_escaped = serde_json::to_string(&root.to_string_lossy().as_ref()).unwrap_or_default();
+    let (parse_count, cache_hits) = (summary.parse_count, summary.cache_hits);
     write_status_file(&format!(
         r#"{{"phase":"indexing","workspace":{root_escaped},"indexed":0,"total":{parse_count},"cache_hits":{cache_hits},"symbols":0,"started_at":{started_unix},"elapsed_secs":0,"estimated_total_secs":null}}"#
     ));
@@ -442,27 +463,18 @@ fn write_indexing_done_status(
     ));
 }
 
-async fn send_progress_begin(
-    client: &Option<tower_lsp::Client>,
+async fn send_progress_begin<R: ProgressReporter>(
+    reporter: &R,
     token: &NumberOrString,
-    parse_count: usize,
-    indexed_count: usize,
-    total: usize,
-    cache_hits: usize,
-    truncated: bool,
+    summary: &ProgressSummary,
 ) {
-    if let Some(client) = client.as_ref() {
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            client.send_request::<tower_lsp::lsp_types::request::WorkDoneProgressCreate>(
-                WorkDoneProgressCreateParams {
-                    token: token.clone(),
-                },
-            ),
-        )
-        .await;
-    }
-
+    let (parse_count, indexed_count, total, cache_hits, truncated) = (
+        summary.parse_count,
+        summary.indexed_count,
+        summary.total,
+        summary.cache_hits,
+        summary.truncated,
+    );
     let begin_msg = if cache_hits > 0 {
         format!("Indexing {parse_count}/{indexed_count} files ({cache_hits} cached)…")
     } else if truncated {
@@ -470,29 +482,14 @@ async fn send_progress_begin(
     } else {
         format!("Indexing {total} Kotlin files…")
     };
-
-    if let Some(client) = client.as_ref() {
-        client
-            .send_notification::<progress::KotlinProgress>(ProgressParams {
-                token: token.clone(),
-                value: ProgressParamsValue::WorkDone(WorkDoneProgress::Begin(
-                    WorkDoneProgressBegin {
-                        title: "kotlin-lsp".into(),
-                        cancellable: Some(false),
-                        message: Some(begin_msg),
-                        percentage: Some(0),
-                    },
-                )),
-            })
-            .await;
-    }
+    reporter.begin(token, &begin_msg).await;
 }
 
-async fn run_parse_phase(
+async fn run_parse_phase<R: ProgressReporter + 'static>(
     idx: Arc<Indexer>,
     need_parse: Vec<PathBuf>,
     session: &ScanSession<'_>,
-    client: &Option<tower_lsp::Client>,
+    reporter: &Arc<R>,
     token: &NumberOrString,
     parse_count: usize,
 ) -> (Vec<Option<FileIndexResult>>, bool) {
@@ -503,7 +500,7 @@ async fn run_parse_phase(
     let idx_ref = Arc::clone(&idx);
     let sem = Arc::clone(&idx.parse_sem);
     let progress_handle =
-        spawn_progress_reporter(Arc::clone(&idx), client.clone(), token.clone(), parse_count);
+        spawn_progress_reporter(Arc::clone(&idx), Arc::clone(reporter), token.clone(), parse_count);
     let counters = ParseCounters::default();
     let task_counters = counters.clone();
     let results = run_concurrent(work_items, sem, move |item, sem| {
@@ -561,26 +558,22 @@ fn build_workspace_result(
     }
 }
 
-async fn send_progress_end(
-    client: &Option<tower_lsp::Client>,
+async fn send_progress_end<R: ProgressReporter>(
+    reporter: &R,
     token: &NumberOrString,
     result: &WorkspaceIndexResult,
 ) {
-    if let Some(client) = client.as_ref() {
-        client
-            .send_notification::<progress::KotlinProgress>(ProgressParams {
-                token: token.clone(),
-                value: ProgressParamsValue::WorkDone(WorkDoneProgress::End(WorkDoneProgressEnd {
-                    message: Some(format!(
-                        "Indexed {} files ({} cached, {} parsed)",
-                        result.files.len(),
-                        result.stats.cache_hits,
-                        result.stats.files_parsed
-                    )),
-                })),
-            })
-            .await;
-    }
+    reporter
+        .end(
+            token,
+            &format!(
+                "Indexed {} files ({} cached, {} parsed)",
+                result.files.len(),
+                result.stats.cache_hits,
+                result.stats.files_parsed
+            ),
+        )
+        .await;
 }
 
 async fn parse_work_item(
@@ -626,7 +619,7 @@ async fn parse_work_item(
         }
     };
 
-    let _permit = sem.acquire().await.unwrap();
+    let _permit = sem.acquire().await.expect("parse semaphore closed unexpectedly");
     let t0 = std::time::Instant::now();
     let uri_clone = uri.clone();
     let parse_result = match tokio::task::spawn_blocking(move || {
@@ -676,54 +669,54 @@ impl Indexer {
     /// Full reindex passing `MAX_FILES_UNLIMITED` as the default file cap —
     /// used by `--index-only` CLI mode and the `kotlin-lsp/reindex` workspace command.
     /// The `KOTLIN_LSP_MAX_FILES` environment variable can still override the count.
-    pub async fn index_workspace_full(
+    pub(crate) async fn index_workspace_full<R: ProgressReporter + 'static>(
         self: Arc<Self>,
         root: &Path,
-        client: Option<tower_lsp::Client>,
+        reporter: Arc<R>,
     ) {
         let max = resolve_max_files(MAX_FILES_UNLIMITED);
         let (result, guard_opt) = Arc::clone(&self)
-            .index_workspace_impl(root, max, client.clone())
+            .index_workspace_impl(root, max, Arc::clone(&reporter))
             .await;
         if let Some(guard) = guard_opt {
             if !result.aborted {
                 Arc::clone(&self)
-                    .finalize_workspace_scan(result, guard, client.clone())
+                    .finalize_workspace_scan(result, guard)
                     .await;
             }
         }
-        Arc::clone(&self).run_pending_reindex(client).await;
+        Arc::clone(&self).run_pending_reindex(reporter).await;
     }
 
-    /// Normal LSP startup: bounded workspace scan.
-    /// Sends LSP `$/progress` notifications so the editor shows a status spinner.
-    /// On subsequent startups the on-disk cache is used for unchanged files so only
-    /// modified or new files need to be re-parsed by tree-sitter.
-    pub async fn index_workspace(self: Arc<Self>, root: &Path, client: Option<tower_lsp::Client>) {
+    pub(crate) async fn index_workspace<R: ProgressReporter + 'static>(
+        self: Arc<Self>,
+        root: &Path,
+        reporter: Arc<R>,
+    ) {
         // workspace_root is updated inside index_workspace_impl after the
         // concurrency guard is acquired, so we never set a stale root here.
         let max = resolve_max_files(DEFAULT_MAX_INDEX_FILES);
         let (result, guard_opt) = Arc::clone(&self)
-            .index_workspace_impl(root, max, client.clone())
+            .index_workspace_impl(root, max, Arc::clone(&reporter))
             .await;
         if let Some(guard) = guard_opt {
             if !result.aborted {
                 Arc::clone(&self)
-                    .finalize_workspace_scan(result, guard, client.clone())
+                    .finalize_workspace_scan(result, guard)
                     .await;
             }
         }
-        Arc::clone(&self).run_pending_reindex(client).await;
+        Arc::clone(&self).run_pending_reindex(reporter).await;
     }
 
     /// Prioritized indexing: parse `initial_paths` first (high-priority files such as the
     /// currently-open document and its supertypes), then continue with normal bounded indexing.
     /// This gives fast symbol availability for the files the user is actually working on.
-    pub async fn index_workspace_prioritized(
+    pub(crate) async fn index_workspace_prioritized<R: ProgressReporter + 'static>(
         self: Arc<Self>,
         root: &Path,
         initial_paths: Vec<PathBuf>,
-        client: Option<tower_lsp::Client>,
+        reporter: Arc<R>,
     ) {
         // workspace_root is updated inside index_workspace_impl; don't set it
         // here to avoid leaving a stale root if the impl aborts early.
@@ -803,16 +796,16 @@ impl Indexer {
 
         let max = resolve_max_files(DEFAULT_MAX_INDEX_FILES);
         let (result, guard_opt) = Arc::clone(&self)
-            .index_workspace_impl(root, max, client.clone())
+            .index_workspace_impl(root, max, Arc::clone(&reporter))
             .await;
         if let Some(guard) = guard_opt {
             if !result.aborted {
                 Arc::clone(&self)
-                    .finalize_workspace_scan(result, guard, client.clone())
+                    .finalize_workspace_scan(result, guard)
                     .await;
             }
         }
-        Arc::clone(&self).run_pending_reindex(client).await;
+        Arc::clone(&self).run_pending_reindex(reporter).await;
     }
 
     /// If a reindex was queued while a scan was in progress, run it now.
@@ -820,7 +813,10 @@ impl Indexer {
     /// Called at the end of every public scan function, after the full workflow
     /// (impl + apply + source_paths + save_cache) completes. Mirrors RA's
     /// `OpQueue` pattern: at most one pending request is retained (last wins).
-    async fn run_pending_reindex(self: Arc<Self>, client: Option<tower_lsp::Client>) {
+    async fn run_pending_reindex<R: ProgressReporter + 'static>(
+        self: Arc<Self>,
+        reporter: Arc<R>,
+    ) {
         loop {
             // Never consume the pending flag while another scan is still active.
             // The finishing scan will call run_pending_reindex itself and drain it.
@@ -861,7 +857,7 @@ impl Indexer {
                 root.display()
             );
             let (result, guard_opt) = Arc::clone(&self)
-                .index_workspace_impl(&root, max, client.clone())
+                .index_workspace_impl(&root, max, Arc::clone(&reporter))
                 .await;
             if result.aborted {
                 // Lost the scan guard to a concurrent caller — restore the queued
@@ -878,7 +874,7 @@ impl Indexer {
             }
             if let Some(guard) = guard_opt {
                 Arc::clone(&self)
-                    .finalize_workspace_scan(result, guard, client.clone())
+                    .finalize_workspace_scan(result, guard)
                     .await;
             }
             // Loop: drain any request that arrived while this queued reindex was running.
@@ -891,7 +887,6 @@ impl Indexer {
         self: Arc<Self>,
         result: WorkspaceIndexResult,
         _guard: IndexingGuard,
-        _client: Option<tower_lsp::Client>,
     ) {
         self.last_scan_complete
             .store(result.complete_scan, std::sync::atomic::Ordering::Release);
@@ -908,11 +903,11 @@ impl Indexer {
     /// (apply + source_paths + save_cache). `result.aborted` may be true with either
     /// `Some` or `None` guard depending on the abort reason; callers should skip finalization
     /// whenever `result.aborted` is true.
-    async fn index_workspace_impl(
+    async fn index_workspace_impl<R: ProgressReporter + 'static>(
         self: Arc<Self>,
         root: &Path,
         max: usize,
-        client: Option<tower_lsp::Client>,
+        reporter: Arc<R>,
     ) -> (WorkspaceIndexResult, Option<IndexingGuard>) {
         if self
             .indexing_in_progress
@@ -955,23 +950,21 @@ impl Indexer {
 
         let index_start = std::time::Instant::now();
         let token = NumberOrString::String("kotlin-lsp/indexing".into());
-        write_indexing_started_status(root, parse_count, cache_hits);
-        send_progress_begin(
-            &client,
-            &token,
+        let progress = ProgressSummary {
             parse_count,
-            discovered.indexed_count,
-            discovered.total,
+            indexed_count: discovered.indexed_count,
+            total: discovered.total,
             cache_hits,
-            discovered.truncated,
-        )
-        .await;
+            truncated: discovered.truncated,
+        };
+        write_indexing_started_status(root, &progress);
+        send_progress_begin(&*reporter, &token, &progress).await;
 
         let (results, scheduling_aborted) = run_parse_phase(
             Arc::clone(&self),
             need_parse,
             &session,
-            &client,
+            &reporter,
             &token,
             parse_count,
         )
@@ -993,7 +986,7 @@ impl Indexer {
             parse_count,
             cache_hits,
         );
-        send_progress_end(&client, &token, &result).await;
+        send_progress_end(&*reporter, &token, &result).await;
         write_indexing_done_status(
             root,
             result.stats.files_parsed,
@@ -1007,7 +1000,7 @@ impl Indexer {
 
     /// Serialize the current index to `~/.cache/kotlin-lsp/<root-hash>/index.bin`.
     /// Safe to call from a background thread. Logs warnings on error; never panics.
-    pub fn save_cache_to_disk(&self) {
+    pub(crate) fn save_cache_to_disk(&self) {
         let root_guard = self.workspace_root.read().unwrap();
         let root = match root_guard.as_ref() {
             Some(r) => r,

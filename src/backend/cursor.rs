@@ -17,7 +17,7 @@ use crate::resolver::{infer_receiver_type, ReceiverKind, ReceiverType};
 /// Cursor context for identifier-based LSP features (hover, goto-def, completion).
 ///
 /// Built once per request; individual fields are `None` when not applicable.
-pub struct CursorContext {
+pub(crate) struct CursorContext {
     /// The identifier token under the cursor.
     pub word: String,
     /// The dot-qualifier to the left of the cursor (e.g. `"it"`, `"viewModel"`).
@@ -38,7 +38,7 @@ impl CursorContext {
     ///
     /// Returns `None` only when there is no identifier under the cursor
     /// (e.g. cursor is in whitespace or on a non-identifier token).
-    pub fn build(idx: &Indexer, uri: &Url, position: Position) -> Option<Self> {
+    pub(crate) fn build(idx: &Indexer, uri: &Url, position: Position) -> Option<Self> {
         let (word, qualifier) = idx.word_and_qualifier_at(uri, position)?;
 
         let line = position.line as usize;

@@ -13,7 +13,7 @@ use crate::StrExt;
 /// - `Contextual`: `it`, `this`, or a named lambda parameter.
 ///   Requires cursor `position` for scope analysis; falls back to
 ///   `infer_variable_type_raw` only if scope analysis returns nothing.
-pub enum ReceiverKind<'a> {
+pub(crate) enum ReceiverKind<'a> {
     Variable(&'a str),
     Contextual { name: &'a str, position: Position },
 }
@@ -25,7 +25,7 @@ pub enum ReceiverKind<'a> {
 /// - `qualified` — no generics, dots preserved: `"Outer.Inner"`
 /// - `outer`     — first dot-segment: `"Outer"`  (used for file lookup)
 /// - `leaf`      — last dot-segment: `"Inner"`   (used for fallback member lookup)
-pub struct ReceiverType {
+pub(crate) struct ReceiverType {
     pub raw: String,
     pub qualified: String,
     pub outer: String,
@@ -33,7 +33,7 @@ pub struct ReceiverType {
 }
 
 impl ReceiverType {
-    pub fn from_raw(raw: String) -> Self {
+    pub(crate) fn from_raw(raw: String) -> Self {
         // Strip generics: take chars until first `<`.
         let qualified: String = raw.chars().take_while(|&c| c != '<').collect();
         let outer = qualified
@@ -61,7 +61,7 @@ impl ReceiverType {
 /// Returns `None` when type inference fails (no annotation, unindexed file,
 /// or lambda scope not resolvable).  Call sites then decide whether to skip
 /// or fall back; this function never performs a global rg scan.
-pub fn infer_receiver_type(
+pub(crate) fn infer_receiver_type(
     idx: &Indexer,
     kind: ReceiverKind<'_>,
     uri: &Url,
@@ -93,7 +93,7 @@ pub(crate) fn infer_variable_type(idx: &Indexer, var_name: &str, uri: &Url) -> O
 /// type string.  e.g. `val items: List<Product>` → `"List<Product>"`.
 ///
 /// Used by the `it`-completion path to extract the collection element type.
-pub fn infer_variable_type_raw(idx: &Indexer, var_name: &str, uri: &Url) -> Option<String> {
+pub(crate) fn infer_variable_type_raw(idx: &Indexer, var_name: &str, uri: &Url) -> Option<String> {
     infer_variable_type_raw_impl(idx, var_name, uri, 4)
 }
 
@@ -216,7 +216,7 @@ fn infer_variable_type_raw_impl(
 /// Returns `None` when the base type is not in the known collection list, or when
 /// the generic parameter is a primitive/lowercase type.  In those cases the
 /// caller should treat `it` as the receiver type itself (scope functions).
-pub fn extract_collection_element_type(raw_type: &str) -> Option<String> {
+pub(crate) fn extract_collection_element_type(raw_type: &str) -> Option<String> {
     const COLLECTION_TYPES: &[&str] = &[
         "List",
         "MutableList",
@@ -346,7 +346,7 @@ impl crate::indexer::Indexer {
     pub(crate) fn infer_variable_type(&self, var_name: &str, uri: &Url) -> Option<String> {
         infer_variable_type(self, var_name, uri)
     }
-    pub fn infer_variable_type_raw(&self, var_name: &str, uri: &Url) -> Option<String> {
+    pub(crate) fn infer_variable_type_raw(&self, var_name: &str, uri: &Url) -> Option<String> {
         infer_variable_type_raw(self, var_name, uri)
     }
     pub(crate) fn infer_field_type(&self, file_uri: &str, field_name: &str) -> Option<String> {

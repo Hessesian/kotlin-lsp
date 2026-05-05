@@ -11,7 +11,7 @@ use crate::types::{FileData, SymbolEntry};
 use crate::LinesExt;
 
 /// Domain-level resolution result. Small, owned data suitable for LSP adapters.
-pub struct ResolvedSymbol {
+pub(crate) struct ResolvedSymbol {
     /// Symbol definition location; only accessed in tests and future callers.
     #[allow(dead_code)]
     pub location: Location,
@@ -29,7 +29,7 @@ pub struct ResolvedSymbol {
 }
 
 /// Options controlling resolution behaviour and allowed fallbacks.
-pub struct ResolveOptions {
+pub(crate) struct ResolveOptions {
     pub allow_rg: bool,
     pub include_doc: bool,
     pub apply_subst: bool,
@@ -39,7 +39,7 @@ pub struct ResolveOptions {
 }
 
 impl ResolveOptions {
-    pub fn hover() -> Self {
+    pub(crate) fn hover() -> Self {
         Self {
             allow_rg: true,
             include_doc: true,
@@ -47,7 +47,7 @@ impl ResolveOptions {
             prefer_cached_detail: false,
         }
     }
-    pub fn completion() -> Self {
+    pub(crate) fn completion() -> Self {
         Self {
             allow_rg: false,
             include_doc: true,
@@ -56,7 +56,7 @@ impl ResolveOptions {
         }
     }
     #[allow(dead_code)]
-    pub fn goto_def() -> Self {
+    pub(crate) fn goto_def() -> Self {
         Self {
             allow_rg: true,
             include_doc: false,
@@ -67,7 +67,7 @@ impl ResolveOptions {
 }
 
 /// Substitution context used by the pipeline.
-pub enum SubstitutionContext<'a> {
+pub(crate) enum SubstitutionContext<'a> {
     None,
     /// Cross-file substitution: the symbol is from another file and we need to
     /// substitute generic type params with the concrete args used by the caller.
@@ -84,7 +84,7 @@ pub enum SubstitutionContext<'a> {
 }
 
 /// Test seam trait: read-only view into index state. Keep this lightweight for tests.
-pub trait IndexRead {
+pub(crate) trait IndexRead {
     fn get_definitions(&self, name: &str) -> Option<Vec<Location>>;
     fn get_file_data(&self, uri: &str) -> Option<Arc<FileData>>;
 
@@ -116,7 +116,7 @@ pub trait IndexRead {
 
 /// Core resolution pipeline: locate → load → enrich → substitute → extract.
 /// Thin coordinator that delegates to pure functions and trait methods.
-pub fn resolve_symbol_info<I: IndexRead>(
+pub(crate) fn resolve_symbol_info<I: IndexRead>(
     index: &I,
     name: &str,
     qualifier: Option<&str>,
@@ -133,7 +133,7 @@ pub fn resolve_symbol_info<I: IndexRead>(
 ///
 /// Used when the caller already holds a `Location` (e.g., from
 /// `resolve_with_receiver_fallback`) and only needs enrichment.
-pub fn enrich_at_location<I: IndexRead>(
+pub(crate) fn enrich_at_location<I: IndexRead>(
     index: &I,
     location: &Location,
     name: &str,
@@ -149,7 +149,7 @@ pub fn enrich_at_location<I: IndexRead>(
 /// Used by `completion_resolve` which stores line/col in the completion item
 /// data rather than a full `Location`.  If no symbol is at the exact position,
 /// falls back to first symbol whose selection range starts on `line`.
-pub fn enrich_at_line<I: IndexRead>(
+pub(crate) fn enrich_at_line<I: IndexRead>(
     index: &I,
     uri_str: &str,
     line: u32,
@@ -177,7 +177,7 @@ pub fn enrich_at_line<I: IndexRead>(
 }
 
 /// Build substitution map for enclosing class at cursor position.
-pub fn build_subst_map<I: IndexRead>(
+pub(crate) fn build_subst_map<I: IndexRead>(
     index: &I,
     uri: &str,
     cursor_line: u32,

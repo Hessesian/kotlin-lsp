@@ -23,7 +23,7 @@
 // ────────────────────────────────────────────────────────────────────────────
 
 /// Pattern indices → SymbolKind mapping lives in `parser.rs`.
-pub const KOTLIN_DEFINITIONS: &str = r#"
+pub(crate) const KOTLIN_DEFINITIONS: &str = r#"
 ; 0 — enum class  MUST be before plain "class" pattern (both have "class" keyword).
 ;     enum_class_body is unique to enum classes — no ambiguity.
 (class_declaration
@@ -149,7 +149,7 @@ pub const KOTLIN_DEFINITIONS: &str = r#"
 // child or by checking whether @path ends with ".*".
 // ────────────────────────────────────────────────────────────────────────────
 #[allow(dead_code)]
-pub const KOTLIN_IMPORTS: &str = r#"
+pub(crate) const KOTLIN_IMPORTS: &str = r#"
 ; plain import
 (import_header
   (identifier) @path)
@@ -168,7 +168,7 @@ pub const KOTLIN_IMPORTS: &str = r#"
 //   @name — full dotted package name, e.g. "com.example.app"
 // ────────────────────────────────────────────────────────────────────────────
 #[allow(dead_code)]
-pub const KOTLIN_PACKAGE: &str = r#"
+pub(crate) const KOTLIN_PACKAGE: &str = r#"
 (package_header
   (identifier) @name)
 "#;
@@ -194,7 +194,7 @@ pub const KOTLIN_PACKAGE: &str = r#"
 //   type_identifier    — type annotations, super-types, generic args
 // ────────────────────────────────────────────────────────────────────────────
 #[allow(dead_code)]
-pub const KOTLIN_REFS_ALL: &str = r#"
+pub(crate) const KOTLIN_REFS_ALL: &str = r#"
 [
   (simple_identifier) @ref
   (type_identifier)   @ref
@@ -209,7 +209,7 @@ pub const KOTLIN_REFS_ALL: &str = r#"
 /// // → r#"[(simple_identifier) @ref (type_identifier) @ref] (#eq? @ref "MyClass")"#
 /// ```
 #[allow(dead_code)]
-pub fn kotlin_refs_for(name: &str) -> String {
+pub(crate) fn kotlin_refs_for(name: &str) -> String {
     // Escape any double-quotes in the name (identifiers normally can't have them,
     // but be defensive).
     let safe = name.replace('\\', r"\\").replace('"', r#"\""#);
@@ -231,7 +231,7 @@ use tower_lsp::lsp_types::SymbolKind;
 /// Maps a pattern index from `KOTLIN_DEFINITIONS` to `(SymbolKind, detail_label)`.
 ///
 /// `detail_label` is shown as `DocumentSymbol::detail` (e.g. "data class").
-pub fn def_pattern_meta(pattern_index: usize) -> (SymbolKind, Option<&'static str>) {
+pub(crate) fn def_pattern_meta(pattern_index: usize) -> (SymbolKind, Option<&'static str>) {
     match pattern_index {
         0 => (SymbolKind::ENUM, None),                 // enum class
         1 => (SymbolKind::STRUCT, Some("data class")), // data class
@@ -276,7 +276,7 @@ pub fn def_pattern_meta(pattern_index: usize) -> (SymbolKind, Option<&'static st
 // • init → `init_declaration` (no name capture; caller can label "init").
 // ────────────────────────────────────────────────────────────────────────────
 
-pub const SWIFT_DEFINITIONS: &str = r#"
+pub(crate) const SWIFT_DEFINITIONS: &str = r#"
 ; 0 — class
 (class_declaration "class" name: (type_identifier) @name) @def
 
@@ -315,7 +315,7 @@ pub const SWIFT_DEFINITIONS: &str = r#"
 "#;
 
 /// Maps a pattern index from `SWIFT_DEFINITIONS` to `(SymbolKind, detail_label)`.
-pub fn swift_def_pattern_meta(pattern_index: usize) -> (SymbolKind, Option<&'static str>) {
+pub(crate) fn swift_def_pattern_meta(pattern_index: usize) -> (SymbolKind, Option<&'static str>) {
     match pattern_index {
         0 => (SymbolKind::CLASS, None),                 // class
         1 => (SymbolKind::STRUCT, None),                // struct
@@ -335,10 +335,10 @@ pub fn swift_def_pattern_meta(pattern_index: usize) -> (SymbolKind, Option<&'sta
 
 /// Pattern index of `init_declaration` in `SWIFT_DEFINITIONS`.
 /// Pattern 8 has no `@name` capture — the parser synthesises `"init"` instead.
-pub const SWIFT_INIT_PATTERN_IDX: usize = 8;
+pub(crate) const SWIFT_INIT_PATTERN_IDX: usize = 8;
 
 /// Synthesised name for Swift init declarations.
-pub const SWIFT_INIT_NAME: &str = "init";
+pub(crate) const SWIFT_INIT_NAME: &str = "init";
 
 // ─── tree-sitter node kind constants ─────────────────────────────────────────
 // These match the `node.kind()` strings produced by tree-sitter-kotlin,

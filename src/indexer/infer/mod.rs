@@ -7,11 +7,11 @@
 //! - `args`     — call argument parsing (pure)
 //! - `it_this`  — resolving `it`/`this` element types inside Kotlin lambda bodies
 
-pub mod args;
-pub mod deps;
-pub mod it_this;
-pub mod lambda;
-pub mod sig;
+pub(super) mod args;
+pub(super) mod deps;
+pub(super) mod it_this;
+pub(super) mod lambda;
+pub(super) mod sig;
 
 pub(crate) use deps::InferDeps;
 #[cfg(test)]

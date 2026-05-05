@@ -7,7 +7,7 @@
 
 /// A single stdlib entry: name, signature (shown in hover), and kind.
 #[derive(Clone, Copy)]
-pub struct StdlibEntry {
+pub(crate) struct StdlibEntry {
     pub name: &'static str,
     pub signature: &'static str,
     /// True = method/extension (dot-completable).  False = top-level.
@@ -28,7 +28,7 @@ impl StdlibEntry {
 
 // ─── scope / control-flow functions (available on every type) ─────────────────
 
-pub static SCOPE_FUNS: &[StdlibEntry] = &[
+pub(crate) static SCOPE_FUNS: &[StdlibEntry] = &[
     StdlibEntry {
         name: "let",
         signature: "inline fun <T, R> T.let(block: (T) -> R): R",
@@ -78,7 +78,7 @@ pub static SCOPE_FUNS: &[StdlibEntry] = &[
 
 // ─── collection / iterable extension functions ────────────────────────────────
 
-pub static COLLECTION_FUNS: &[StdlibEntry] = &[
+pub(crate) static COLLECTION_FUNS: &[StdlibEntry] = &[
     StdlibEntry { name: "map",              signature: "inline fun <T, R> Iterable<T>.map(transform: (T) -> R): List<R>",                            is_extension: true },
     StdlibEntry { name: "mapNotNull",       signature: "inline fun <T, R: Any> Iterable<T>.mapNotNull(transform: (T) -> R?): List<R>",               is_extension: true },
     StdlibEntry { name: "mapIndexed",       signature: "inline fun <T, R> Iterable<T>.mapIndexed(transform: (Int, T) -> R): List<R>",                is_extension: true },
@@ -146,7 +146,7 @@ pub static COLLECTION_FUNS: &[StdlibEntry] = &[
 
 // ─── String / CharSequence extension functions ────────────────────────────────
 
-pub static STRING_FUNS: &[StdlibEntry] = &[
+pub(crate) static STRING_FUNS: &[StdlibEntry] = &[
     StdlibEntry { name: "isEmpty",          signature: "fun CharSequence.isEmpty(): Boolean",                                       is_extension: true },
     StdlibEntry { name: "isNotEmpty",       signature: "fun CharSequence.isNotEmpty(): Boolean",                                    is_extension: true },
     StdlibEntry { name: "isBlank",          signature: "fun CharSequence.isBlank(): Boolean",                                       is_extension: true },
@@ -190,7 +190,7 @@ pub static STRING_FUNS: &[StdlibEntry] = &[
 
 // ─── Nullable extensions ──────────────────────────────────────────────────────
 
-pub static NULLABLE_FUNS: &[StdlibEntry] = &[
+pub(crate) static NULLABLE_FUNS: &[StdlibEntry] = &[
     StdlibEntry {
         name: "orEmpty",
         signature: "fun <T> List<T>?.orEmpty(): List<T>",
@@ -210,7 +210,7 @@ pub static NULLABLE_FUNS: &[StdlibEntry] = &[
 
 // ─── Top-level functions ──────────────────────────────────────────────────────
 
-pub static TOP_LEVEL_FUNS: &[StdlibEntry] = &[
+pub(crate) static TOP_LEVEL_FUNS: &[StdlibEntry] = &[
     StdlibEntry { name: "run",          signature: "inline fun <R> run(block: () -> R): R",                                         is_extension: false },
     StdlibEntry { name: "with",         signature: "inline fun <T, R> with(receiver: T, block: T.() -> R): R",                     is_extension: false },
     StdlibEntry { name: "repeat",       signature: "inline fun repeat(times: Int, action: (Int) -> Unit)",                          is_extension: false },
@@ -273,7 +273,7 @@ fn all() -> impl Iterator<Item = &'static StdlibEntry> {
 }
 
 /// Hover markdown for a stdlib symbol, or `None` if not known.
-pub fn hover(name: &str) -> Option<String> {
+pub(crate) fn hover(name: &str) -> Option<String> {
     // Collect all matching signatures (same name can appear in multiple tables).
     let sigs: Vec<&str> = all()
         .filter(|e| e.name == name)
@@ -330,7 +330,7 @@ fn build_bare_completions(snippets: bool) -> Vec<tower_lsp::lsp_types::Completio
 
 /// Returns stdlib dot-completions filtered to those applicable for `receiver_type`.
 /// Falls back to scope-functions-only for unknown project types.
-pub fn dot_completions_for(
+pub(crate) fn dot_completions_for(
     receiver_type: &str,
     snippets: bool,
 ) -> Vec<tower_lsp::lsp_types::CompletionItem> {
@@ -395,7 +395,7 @@ pub fn dot_completions_for(
 }
 
 /// Completion items for bare (non-dot) trigger — returns a shared cached slice.
-pub fn bare_completions(snippets: bool) -> Vec<tower_lsp::lsp_types::CompletionItem> {
+pub(crate) fn bare_completions(snippets: bool) -> Vec<tower_lsp::lsp_types::CompletionItem> {
     if snippets {
         BARE_COMPLETIONS_SNIPPETS
             .get_or_init(|| build_bare_completions(true))
@@ -411,7 +411,7 @@ pub fn bare_completions(snippets: bool) -> Vec<tower_lsp::lsp_types::CompletionI
 ///
 /// Modelled on IntelliJ's built-in Kotlin live templates.
 /// Each item has a short trigger label and expands to a multi-line snippet.
-pub fn live_templates() -> Vec<tower_lsp::lsp_types::CompletionItem> {
+pub(crate) fn live_templates() -> Vec<tower_lsp::lsp_types::CompletionItem> {
     use tower_lsp::lsp_types::{
         CompletionItem, CompletionItemKind, Documentation, InsertTextFormat, MarkupContent,
         MarkupKind,
