@@ -510,6 +510,46 @@ fn infer_from_rhs_assignment(line: &str, var_name: &str) -> Option<String> {
 ///
 /// Only handles one level of chaining: `simpleIdent.method(args)`.
 /// Skips `this`, `super`, and dotted/chained receivers.
+/// Returns `true` when the first function call in `rhs` (opening paren at
+/// `paren_pos`) is followed by a dot at depth 0, indicating a method chain.
+///
+/// `"getFoo(args).bar()"` → `true`   (chained — don't infer from `getFoo` alone)
+/// `"getFoo(args)"` → `false`        (standalone — safe to use `getFoo`'s return type)
+fn has_dot_after_first_call(rhs: &str, paren_pos: usize) -> bool {
+    let mut depth = 0i32;
+    for c in rhs[paren_pos..].chars() {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    // Found the matching close — check for a dot immediately after
+                    // (allowing whitespace).
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    // After the loop `depth == 0` means we found the matching paren.
+    // Walk past the matched segment and check for a following `.`.
+    let mut depth2 = 0i32;
+    let mut past_close = false;
+    for c in rhs[paren_pos..].chars() {
+        match c {
+            '(' | '[' | '{' => depth2 += 1,
+            ')' | ']' | '}' => {
+                depth2 -= 1;
+                if depth2 == 0 { past_close = true; }
+            }
+            '.' if past_close => return true,
+            c if past_close && !c.is_whitespace() => return false,
+            _ => {}
+        }
+    }
+    false
+}
+
 fn infer_method_return_type(
     idx: &Indexer, var_name: &str, lines: &[String], uri: &Url, depth: u8,
 ) -> Option<String> {
@@ -546,8 +586,14 @@ fn infer_method_return_type(
             }
             None => {
                 // Plain function call: `val result = getFoo(args)` — no dot-receiver.
+                // Guard: skip when the first call is part of a chain (`getFoo(...).bar()`).
+                // In that case `paren_pos` is inside the first segment only; the overall
+                // expression has chaining we can't track with a single name lookup.
                 let fn_name = before_paren.trim();
-                if !fn_name.is_empty() && fn_name.starts_with_lowercase() {
+                if !fn_name.is_empty()
+                    && fn_name.starts_with_lowercase()
+                    && !has_dot_after_first_call(rhs, paren_pos)
+                {
                     plain_fn_candidates.push(fn_name.to_owned());
                 }
             }
@@ -779,5 +825,22 @@ mod infer_tests {
             extract_return_type_from_detail("fun find(): User?"),
             Some("User".into()),
         );
+    }
+
+    #[test]
+    fn has_dot_after_first_call_chained() {
+        // paren_pos=7: "getList" is 7 chars, then "("
+        assert!(super::has_dot_after_first_call("getList(isRefresh).joinAll()", 7));
+    }
+
+    #[test]
+    fn has_dot_after_first_call_standalone() {
+        assert!(!super::has_dot_after_first_call("getConnectedAccounts(isRefresh)", 20));
+    }
+
+    #[test]
+    fn has_dot_after_first_call_nested_parens() {
+        // Nested parens inside arg list must not fool the scanner.
+        assert!(super::has_dot_after_first_call("getList(foo(x)).map()", 7));
     }
 }
