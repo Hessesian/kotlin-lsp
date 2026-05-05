@@ -173,6 +173,40 @@ pub fn build_subst_map<I: IndexRead>(index: &I, uri: &str, cursor_line: u32) -> 
     build_enclosing_class_subst_impl(index, uri, cursor_line)
 }
 
+/// Apply cross-file type-parameter substitution to a signature string.
+///
+/// Equivalent to the old `Indexer::type_subst_sig` but works over `IndexRead`
+/// so it can be used from `resolver/complete.rs` without depending on `Indexer`.
+pub(crate) fn cross_file_type_subst<I: IndexRead>(
+    index: &I,
+    sym_uri: &str,
+    sym_line: u32,
+    calling_uri: &str,
+    sig: &str,
+) -> String {
+    let subst = build_type_param_subst_impl(index, sym_uri, sym_line, calling_uri, None);
+    if subst.is_empty() { sig.to_owned() } else { super::apply_type_subst(sig, &subst) }
+}
+
+/// Extract the simple type name from a property detail string.
+/// E.g. `"private val foo: DashboardProductsReducer by lazy"` → `"DashboardProductsReducer"`
+/// E.g. `"val x: List<String>"` → `"List"`
+pub(crate) fn extract_property_type_name(detail: &str) -> &str {
+    let colon_pos = match detail.find(':') {
+        Some(p) => p,
+        None => return "",
+    };
+    let after_colon = detail[colon_pos + 1..].trim_start();
+    let end = after_colon
+        .find(|c: char| !c.is_alphanumeric() && c != '_')
+        .unwrap_or(after_colon.len());
+    let name = &after_colon[..end];
+    if name.is_empty() || !name.chars().next().unwrap_or(' ').is_uppercase() {
+        return "";
+    }
+    name
+}
+
 // ─── Pure Data Transformation Functions ──────────────────────────────────
 
 /// Extract canonical signature respecting caller intent.
@@ -431,7 +465,7 @@ fn build_enclosing_class_subst_impl<I: IndexRead>(
         if sym.selection_range.start.line <= class_line { continue; }
         if sym.selection_range.start.line > class_end_line { continue; }
         if !matches!(sym.kind, SymbolKind::FIELD | SymbolKind::PROPERTY) { continue; }
-        let type_name = super::lookup::extract_property_type_name(&sym.detail);
+        let type_name = extract_property_type_name(&sym.detail);
         if type_name.is_empty() { continue; }
         let Some(locs) = index.get_definitions(type_name) else { continue };
         let Some(loc) = locs.into_iter().next() else { continue };
