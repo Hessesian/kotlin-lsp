@@ -11,7 +11,9 @@ use super::{
     line_has_lambda_param, Indexer,
 };
 use crate::indexer::NodeExt;
-use crate::queries::KIND_LAMBDA_LIT;
+use crate::queries::{
+    KIND_CLASS_DECL, KIND_COMPANION_OBJ, KIND_INTERFACE_DECL, KIND_LAMBDA_LIT, KIND_OBJECT_DECL,
+};
 use crate::types::CursorPos;
 use crate::StrExt;
 
@@ -466,10 +468,8 @@ impl Indexer {
                 let mut cur = node;
                 loop {
                     match cur.kind() {
-                        "class_declaration"
-                        | "interface_declaration"
-                        | "object_declaration"
-                        | "companion_object" => {
+                        KIND_CLASS_DECL | KIND_INTERFACE_DECL | KIND_OBJECT_DECL
+                        | KIND_COMPANION_OBJ => {
                             // Preserve existing semantics: exclude the node if its
                             // declaration starts on the query row (cursor is on the
                             // class's own declaration line).

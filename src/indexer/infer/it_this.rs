@@ -37,7 +37,7 @@ use super::{
 };
 
 use crate::indexer::NodeExt;
-use crate::queries::{KIND_CALL_EXPR, KIND_LAMBDA_LIT};
+use crate::queries::{KIND_CALL_EXPR, KIND_CALL_SUFFIX, KIND_LAMBDA_LIT};
 use crate::resolver::extract_collection_element_type;
 use crate::StrExt;
 
@@ -888,7 +888,7 @@ fn cst_lambda_param_type_via_call(
                 }?;
                 return lambda_type_first_input(&param_type);
             }
-            "call_suffix" => {
+            k if k == KIND_CALL_SUFFIX => {
                 // Trailing lambda: `fn(...) { it }` or `fn { it }`.
                 let call_expr = parent.parent()?;
                 if call_expr.kind() != KIND_CALL_EXPR {

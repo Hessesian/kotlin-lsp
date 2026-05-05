@@ -17,7 +17,7 @@ use crate::indexer::apply_type_subst;
 use crate::indexer::live_tree::{lang_for_path, parse_live};
 use crate::indexer::Indexer;
 use crate::indexer::NodeExt;
-use crate::queries::{KIND_CALL_EXPR, KIND_LAMBDA_PARAMS};
+use crate::queries::{KIND_CALL_EXPR, KIND_LAMBDA_PARAMS, KIND_VAR_DECL};
 use crate::resolver::{infer_receiver_type, ReceiverKind};
 use crate::StrExt;
 
@@ -202,7 +202,7 @@ fn hint_lambda(ctx: &HintCtx<'_>, node: &tree_sitter::Node<'_>, hints: &mut Vec<
 
         let mut pc = child.walk();
         for param in child.children(&mut pc) {
-            if param.kind() != "variable_declaration" {
+            if param.kind() != KIND_VAR_DECL {
                 continue;
             }
 
@@ -274,7 +274,7 @@ fn hint_property(ctx: &HintCtx<'_>, node: &tree_sitter::Node<'_>, hints: &mut Ve
     let mut nc = node.walk();
     let mut var_decl = None;
     for child in node.children(&mut nc) {
-        if child.kind() == "variable_declaration" {
+        if child.kind() == KIND_VAR_DECL {
             var_decl = Some(child);
             break;
         }

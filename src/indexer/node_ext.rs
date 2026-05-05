@@ -3,9 +3,10 @@
 //! These methods are lightweight convenience wrappers around tree-sitter node
 //! traversal; their bodies were extracted from the free functions they replace.
 use crate::queries::{
-    KIND_IDENTIFIER, KIND_LAMBDA_PARAMS, KIND_SIMPLE_IDENT, KIND_TYPE_ARGS, KIND_TYPE_IDENT,
-    KIND_TYPE_LIST, KIND_TYPE_PARAM, KIND_TYPE_PARAMS, KIND_USER_TYPE, KIND_VALUE_ARG,
-    KIND_VALUE_ARGS,
+    KIND_CALL_SUFFIX, KIND_IDENTIFIER, KIND_LAMBDA_PARAMS, KIND_NAV_EXPR, KIND_NAV_SUFFIX,
+    KIND_SCOPED_TYPE_IDENT, KIND_SIMPLE_IDENT, KIND_TYPE_ARGS, KIND_TYPE_IDENT, KIND_TYPE_LIST,
+    KIND_TYPE_PARAM, KIND_TYPE_PARAMS, KIND_USER_TYPE, KIND_VALUE_ARG, KIND_VALUE_ARGS,
+    KIND_VAR_DECL,
 };
 use crate::StrExt;
 use tree_sitter::Node;
@@ -162,7 +163,7 @@ impl<'a> NodeExt<'a> for Node<'a> {
             if child.kind() == KIND_VALUE_ARGS {
                 return Some(child);
             }
-            if child.kind() == "call_suffix" {
+            if child.kind() == KIND_CALL_SUFFIX {
                 let mut w2 = child.walk();
                 for gc in child.children(&mut w2) {
                     if gc.kind() == KIND_VALUE_ARGS {
@@ -181,7 +182,7 @@ impl<'a> NodeExt<'a> for Node<'a> {
 
         (0..lp.child_count())
             .filter_map(|i| lp.child(i))
-            .filter(|c| c.kind() == "variable_declaration")
+            .filter(|c| c.kind() == KIND_VAR_DECL)
             .any(|vd| {
                 let Some(si) = vd.child(0).filter(|n| n.kind() == KIND_SIMPLE_IDENT) else {
                     return false;
@@ -200,7 +201,7 @@ impl<'a> NodeExt<'a> for Node<'a> {
 
         (0..lp.child_count())
             .filter_map(|i| lp.child(i))
-            .filter(|c| c.kind() == "variable_declaration")
+            .filter(|c| c.kind() == KIND_VAR_DECL)
             .filter_map(|vd| {
                 let si = vd.child(0).filter(|n| n.kind() == KIND_SIMPLE_IDENT)?;
                 si.utf8_text_owned(bytes)
@@ -226,7 +227,7 @@ impl<'a> NodeExt<'a> for Node<'a> {
             if let Some(child) = self.child(i) {
                 if matches!(
                     child.kind(),
-                    "type_identifier" | "simple_identifier" | "identifier"
+                    k if k == KIND_TYPE_IDENT || k == KIND_SIMPLE_IDENT || k == KIND_IDENTIFIER
                 ) {
                     if let Some(s) = child.utf8_text_owned(bytes) {
                         if s.starts_with_uppercase() {
@@ -242,28 +243,23 @@ impl<'a> NodeExt<'a> for Node<'a> {
     fn call_fn_and_qualifier(self, bytes: &[u8]) -> Option<(String, Option<String>)> {
         let callee = self.child(0)?;
         match callee.kind() {
-            "simple_identifier" | "type_identifier" => {
+            k if k == KIND_SIMPLE_IDENT || k == KIND_TYPE_IDENT => {
                 let name = callee.utf8_text_owned(bytes)?;
                 Some((name, None))
             }
-            "navigation_expression" => {
+            k if k == KIND_NAV_EXPR => {
                 let mut walker = callee.walk();
                 let mut qualifier_opt: Option<String> = None;
                 let mut fn_name_opt: Option<String> = None;
                 for child in callee.children(&mut walker) {
-                    match child.kind() {
-                        "simple_identifier" | "type_identifier" => {
-                            qualifier_opt = child.utf8_text_owned(bytes);
-                        }
-                        "navigation_suffix" => {
-                            fn_name_opt = (0..child.child_count())
-                                .filter_map(|i| child.child(i))
-                                .find(|c| {
-                                    c.kind() == KIND_SIMPLE_IDENT || c.kind() == KIND_TYPE_IDENT
-                                })
-                                .and_then(|c| c.utf8_text_owned(bytes));
-                        }
-                        _ => {}
+                    let ck = child.kind();
+                    if ck == KIND_SIMPLE_IDENT || ck == KIND_TYPE_IDENT {
+                        qualifier_opt = child.utf8_text_owned(bytes);
+                    } else if ck == KIND_NAV_SUFFIX {
+                        fn_name_opt = (0..child.child_count())
+                            .filter_map(|i| child.child(i))
+                            .find(|c| c.kind() == KIND_SIMPLE_IDENT || c.kind() == KIND_TYPE_IDENT)
+                            .and_then(|c| c.utf8_text_owned(bytes));
                     }
                 }
                 Some((fn_name_opt?, qualifier_opt))
@@ -289,7 +285,7 @@ impl<'a> NodeExt<'a> for Node<'a> {
                 KIND_TYPE_IDENT => {
                     return n.utf8_text_owned(bytes);
                 }
-                "scoped_type_identifier" => {
+                KIND_SCOPED_TYPE_IDENT => {
                     // Collect all identifier/type_identifier segments while skipping
                     // type_arguments children (handles `Outer<String>.Inner` correctly).
                     let mut segments = Vec::new();

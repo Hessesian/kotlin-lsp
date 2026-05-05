@@ -3,7 +3,9 @@ use super::helpers::resolve_references_scope;
 use super::Backend;
 use crate::indexer::live_tree::utf16_col_to_byte;
 use crate::queries::{
-    KIND_FUN_DECL, KIND_METHOD_DECL, KIND_NAV_EXPR, KIND_PROP_DECL, KIND_VAR_DECL,
+    KIND_ANON_FUN, KIND_CLASS_BODY, KIND_COMPANION_OBJ, KIND_FUN_DECL, KIND_METHOD_DECL,
+    KIND_MULTI_VAR_DECL, KIND_NAV_EXPR, KIND_OBJECT_DECL, KIND_PROP_DECL, KIND_SOURCE_FILE,
+    KIND_VAR_DECL,
 };
 use crate::StrExt;
 use tower_lsp::jsonrpc::Result;
@@ -51,13 +53,13 @@ fn cst_cursor_is_method(indexer: &crate::indexer::Indexer, uri: &Url, pos: Posit
         let kind = cur.kind();
         match kind {
             // These indicate we're inside a variable / property binding → not a method.
-            KIND_PROP_DECL | KIND_VAR_DECL | "multi_variable_declaration" => return false,
+            KIND_PROP_DECL | KIND_VAR_DECL | KIND_MULTI_VAR_DECL => return false,
             // These indicate a method/function context → treat as method.
-            KIND_FUN_DECL | KIND_METHOD_DECL | "anonymous_function" => return true,
+            KIND_FUN_DECL | KIND_METHOD_DECL | KIND_ANON_FUN => return true,
             // A navigation expression means the identifier is a qualified member access.
             KIND_NAV_EXPR => return true,
             // Stop at top-level scope boundaries without a verdict.
-            "source_file" | "class_body" | "object_declaration" | "companion_object" => {
+            KIND_SOURCE_FILE | KIND_CLASS_BODY | KIND_OBJECT_DECL | KIND_COMPANION_OBJ => {
                 return false
             }
             _ => {}
