@@ -630,7 +630,7 @@ pub(crate) fn find_fun_return_type_by_name(idx: &Indexer, fn_name: &str) -> Opti
                 if let Some(ret) = extract_return_type_from_detail(&sym.detail) {
                     return Some(ret);
                 }
-                let start_line = sym.selection_range.start.line as usize;
+                let start_line = sym.start_line() as usize;
                 let full_sig = file_data.lines.collect_signature(start_line);
                 if let Some(ret) = extract_return_type_from_detail(&full_sig) {
                     return Some(ret);
@@ -670,7 +670,7 @@ fn find_method_return_type(idx: &Indexer, type_name: &str, method_name: &str) ->
                     return Some(ret);
                 }
                 // detail may be truncated (120 char limit) — try the source lines.
-                let start_line = sym.selection_range.start.line as usize;
+                let start_line = sym.start_line() as usize;
                 let full_sig = file_data.lines.collect_signature(start_line);
                 if let Some(ret) = extract_return_type_from_detail(&full_sig) {
                     return Some(ret);

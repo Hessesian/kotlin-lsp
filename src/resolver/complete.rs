@@ -362,7 +362,7 @@ fn collect_inherited_members(
         };
         let class_line = data.symbols.iter()
             .find(|s| s.name == type_name)
-            .map(|s| s.selection_range.start.line);
+            .map(|s| s.start_line());
         match class_line {
             Some(line) => data.supers.iter()
                 .filter(|(l, _, _)| *l == line)
@@ -413,12 +413,12 @@ fn completion_item_for_nested_symbol(
     let detail_raw = if s.detail.is_empty() { None } else { Some(s.detail.clone()) };
     let detail = detail_raw.map(|d| {
         if let Some(cu) = calling_uri {
-            crate::indexer::resolution::cross_file_type_subst(idx, uri_str, s.selection_range.start.line, cu, &d)
+            crate::indexer::resolution::cross_file_type_subst(idx, uri_str, s.start_line(), cu, &d)
         } else {
             d
         }
     });
-    let mut data = serde_json::json!({"u": uri_str, "l": s.selection_range.start.line, "c": s.selection_range.start.character});
+    let mut data = serde_json::json!({"u": uri_str, "l": s.start_line(), "c": s.selection_range.start.character});
     if let Some(cu) = calling_uri { data["cu"] = serde_json::Value::String(cu.to_owned()); }
     CompletionItem {
         label:              s.name.clone(),
@@ -589,7 +589,7 @@ pub(crate) fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippet
         for sym in &f.symbols {
             add(&sym.name, symbol_kind_to_completion(sym.kind), 0, local_max_score,
                 &sym.detail,
-                Some(serde_json::json!({"u": from_uri.as_str(), "l": sym.selection_range.start.line, "c": sym.selection_range.start.character})));
+                Some(serde_json::json!({"u": from_uri.as_str(), "l": sym.start_line(), "c": sym.selection_range.start.character})));
         }
         // Constructor params / local vars from declared_names (lowercase only).
         if lowercase_mode {
@@ -611,7 +611,7 @@ pub(crate) fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippet
                     for sym in &f.symbols {
                         add(&sym.name, symbol_kind_to_completion(sym.kind), 1, local_max_score,
                             &sym.detail,
-                            Some(serde_json::json!({"u": uri_str.as_str(), "l": sym.selection_range.start.line, "c": sym.selection_range.start.character})));
+                            Some(serde_json::json!({"u": uri_str.as_str(), "l": sym.start_line(), "c": sym.selection_range.start.character})));
                     }
                 }
             }

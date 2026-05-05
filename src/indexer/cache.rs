@@ -146,7 +146,7 @@ pub(crate) fn cache_entry_to_file_result(uri: &Url, entry: &FileCacheEntry) -> F
     let mut supertypes: Vec<(String, Location)> = Vec::new();
     for sym in &data.symbols {
         if !class_kinds.contains(&sym.kind) { continue; }
-        let start_line = sym.selection_range.start.line;
+        let start_line = sym.start_line();
         let class_loc = Location { uri: uri.clone(), range: sym.selection_range };
         for (_, super_name, _) in data.supers.iter().filter(|(l, _, _)| *l == start_line) {
             supertypes.push((super_name.clone(), class_loc.clone()));

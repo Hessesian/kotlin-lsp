@@ -58,8 +58,8 @@ pub(crate) fn find_name_in_uri_after_line(idx: &Indexer, name: &str, file_uri: &
     if let Some(f) = idx.files.get(file_uri) {
         // a) Symbol table: find the closest symbol at or after `after_line`.
         let best = f.symbols.iter()
-            .filter(|s| s.name == name && s.selection_range.start.line >= after_line)
-            .min_by_key(|s| s.selection_range.start.line);
+            .filter(|s| s.name == name && s.start_line() >= after_line)
+            .min_by_key(|s| s.start_line());
 
         if let Some(sym) = best {
             return vec![Location { uri, range: sym.selection_range }];
