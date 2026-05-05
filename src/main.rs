@@ -53,7 +53,7 @@ async fn async_main() {
         let root = pb.canonicalize().unwrap_or(pb);
         println!("Indexing workspace: {}", root.display());
         std::sync::Arc::clone(&idx)
-            .index_workspace_full(&root, None)
+            .index_workspace_full(&root, std::sync::Arc::new(indexer::NoopReporter))
             .await;
         println!(
             "Indexing complete: {} files, {} symbols",
