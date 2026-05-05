@@ -10,15 +10,15 @@ use tower_lsp::{async_trait, Client, LanguageServer};
 use self::helpers::syntax_diagnostics;
 use crate::indexer::{workspace_cache_path, IgnoreMatcher, Indexer};
 
-pub mod actions;
-pub mod cursor;
-pub mod format;
-pub mod handlers;
-pub mod helpers;
-pub mod nav;
-pub mod rename;
+pub(crate) mod actions;
+pub(crate) mod cursor;
+pub(crate) mod format;
+pub(crate) mod handlers;
+pub(crate) mod helpers;
+pub(crate) mod nav;
+pub(crate) mod rename;
 
-pub struct Backend {
+pub(crate) struct Backend {
     pub(super) client: Client,
     pub(super) indexer: Arc<Indexer>,
     /// Per-URI abort handle for the pending debounced reindex task.
@@ -31,7 +31,7 @@ pub struct Backend {
 }
 
 impl Backend {
-    pub fn new(client: Client) -> Self {
+    pub(crate) fn new(client: Client) -> Self {
         Self {
             client,
             indexer: Arc::new(Indexer::new()),

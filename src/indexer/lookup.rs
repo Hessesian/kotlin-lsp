@@ -19,7 +19,7 @@ use crate::StrExt;
 
 impl Indexer {
     /// Returns true if `name` has at least one definition location inside `uri`.
-    pub fn is_declared_in(&self, uri: &Url, name: &str) -> bool {
+    pub(crate) fn is_declared_in(&self, uri: &Url, name: &str) -> bool {
         self.definitions
             .get(name)
             .map(|locs| locs.iter().any(|l| l.uri == *uri))
@@ -28,11 +28,11 @@ impl Indexer {
 
     /// Resolve definition locations for `name` (with optional dot-qualifier).
     #[allow(dead_code)]
-    pub fn find_definition(&self, name: &str, from_uri: &Url) -> Vec<Location> {
+    pub(crate) fn find_definition(&self, name: &str, from_uri: &Url) -> Vec<Location> {
         self.resolve_symbol(name, None, from_uri)
     }
 
-    pub fn find_definition_qualified(
+    pub(crate) fn find_definition_qualified(
         &self,
         name: &str,
         qualifier: Option<&str>,
@@ -42,7 +42,7 @@ impl Indexer {
     }
 
     /// All symbols declared in the given file (for `documentSymbol`).
-    pub fn file_symbols(&self, uri: &Url) -> Vec<SymbolEntry> {
+    pub(crate) fn file_symbols(&self, uri: &Url) -> Vec<SymbolEntry> {
         self.files
             .get(uri.as_str())
             .map(|d| d.symbols.clone())
@@ -50,13 +50,13 @@ impl Indexer {
     }
 
     /// Return the package declared in the given file, if any.
-    pub fn package_of(&self, uri: &Url) -> Option<String> {
+    pub(crate) fn package_of(&self, uri: &Url) -> Option<String> {
         self.files.get(uri.as_str())?.package.clone()
     }
 
     /// Return the package in which `name` is declared, by looking up its
     /// definition locations and reading the `package` field of those files.
-    pub fn declared_package_of(&self, name: &str) -> Option<String> {
+    pub(crate) fn declared_package_of(&self, name: &str) -> Option<String> {
         let locs = self.definitions.get(name)?;
         for loc in locs.iter() {
             if let Some(f) = self.files.get(loc.uri.as_str()) {
@@ -71,7 +71,7 @@ impl Indexer {
     /// If `name` is declared as an inner/nested class, return the name of its
     /// enclosing class at the declaration site in `preferred_uri` (if found there),
     /// otherwise the first definition site.
-    pub fn declared_parent_class_of(&self, name: &str, preferred_uri: &Url) -> Option<String> {
+    pub(crate) fn declared_parent_class_of(&self, name: &str, preferred_uri: &Url) -> Option<String> {
         let locs = self.definitions.get(name)?;
         // Try declaration in the preferred (current) file first.
         for loc in locs.iter() {
@@ -92,7 +92,7 @@ impl Indexer {
     /// as resolved from the import statement.  E.g.:
     ///   `import com.example.DashboardViewModel.Effect`
     ///   → parent_class = Some("DashboardViewModel"), pkg = Some("com.example.DashboardViewModel")
-    pub fn resolve_symbol_via_import(
+    pub(crate) fn resolve_symbol_via_import(
         &self,
         uri: &Url,
         name: &str,

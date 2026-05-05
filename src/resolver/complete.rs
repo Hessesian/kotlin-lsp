@@ -118,7 +118,7 @@ const MIN_CASE_INSENSITIVE_PREFIX: usize = 2;
 /// - **Bare-word** (`dot_receiver = None`): return all symbols from the current
 ///   file, same-package files, and the whole project index whose name starts with
 ///   `prefix` (case-insensitive).
-pub fn complete_symbol(
+pub(crate) fn complete_symbol(
     idx: &Indexer,
     prefix: &str,
     dot_receiver: Option<&str>,
@@ -130,7 +130,7 @@ pub fn complete_symbol(
 
 /// Like `complete_symbol` but with explicit annotation context flag.
 /// Called from `indexer::completions` after detecting a `@` trigger.
-pub fn complete_symbol_with_context(
+pub(crate) fn complete_symbol_with_context(
     idx: &Indexer,
     prefix: &str,
     dot_receiver: Option<&str>,
@@ -1073,7 +1073,7 @@ fn make_completion_item(
 
 /// Public wrapper around `symbols_from_uri_as_completions` for use by the
 /// pre-warmer in `indexer.rs`.  Builds + caches completion items for a file.
-pub fn symbols_from_uri_as_completions_pub(idx: &Indexer, file_uri: &str) -> Vec<CompletionItem> {
+pub(crate) fn symbols_from_uri_as_completions_pub(idx: &Indexer, file_uri: &str) -> Vec<CompletionItem> {
     symbols_from_uri_as_completions(idx, file_uri)
 }
 
@@ -1119,7 +1119,7 @@ impl crate::indexer::Indexer {
     pub(super) fn build_completion_items_w(&self, file_uri: &str) -> Vec<CompletionItem> {
         build_completion_items(self, file_uri)
     }
-    pub fn symbols_from_uri_as_completions_pub(&self, file_uri: &str) -> Vec<CompletionItem> {
+    pub(crate) fn symbols_from_uri_as_completions_pub(&self, file_uri: &str) -> Vec<CompletionItem> {
         symbols_from_uri_as_completions_pub(self, file_uri)
     }
 }

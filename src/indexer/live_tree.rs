@@ -1,6 +1,6 @@
 use tree_sitter::{Language, Parser, Tree};
 
-pub struct LiveDoc {
+pub(crate) struct LiveDoc {
     pub bytes: Vec<u8>,
     pub tree: Tree,
 }
@@ -11,7 +11,7 @@ pub struct LiveDoc {
 /// recognised by `parser.rs`'s `parse_by_extension`.  Unlike that function,
 /// `lang_for_path` never falls back to a default language for unknown
 /// extensions — it returns `None` so callers can skip live-tree work entirely.
-pub fn lang_for_path(path: &str) -> Option<Language> {
+pub(crate) fn lang_for_path(path: &str) -> Option<Language> {
     if path.ends_with(".swift") {
         Some(tree_sitter_swift_bundled::language())
     } else if path.ends_with(".java") {
@@ -25,7 +25,7 @@ pub fn lang_for_path(path: &str) -> Option<Language> {
 
 /// Convert a UTF-16 column offset (as used in LSP positions) to a byte offset
 /// within `line_text`.  Tree-sitter `Point::column` expects byte offsets.
-pub fn utf16_col_to_byte(line_text: &str, utf16_col: usize) -> usize {
+pub(crate) fn utf16_col_to_byte(line_text: &str, utf16_col: usize) -> usize {
     let mut utf16 = 0usize;
     for (bi, ch) in line_text.char_indices() {
         if utf16 >= utf16_col {
@@ -38,7 +38,7 @@ pub fn utf16_col_to_byte(line_text: &str, utf16_col: usize) -> usize {
 
 /// Parse `content` with `lang` and return a `LiveDoc`, or `None` if the
 /// parser fails (malformed grammar state — extremely rare).
-pub fn parse_live(content: &str, lang: Language) -> Option<LiveDoc> {
+pub(crate) fn parse_live(content: &str, lang: Language) -> Option<LiveDoc> {
     let mut parser = Parser::new();
     parser.set_language(&lang).ok()?;
     let tree = parser.parse(content, None)?;

@@ -7,7 +7,7 @@ use tower_lsp::lsp_types::{Range, SymbolKind};
 /// Used to centralise all `path.ends_with(".kt")` / `".swift"` / `".java"` dispatch.
 /// Obtain via [`Language::from_path`]; the default is `Kotlin` (most common case).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Language {
+pub(crate) enum Language {
     #[default]
     Kotlin,
     Java,
@@ -20,7 +20,7 @@ impl Language {
     /// Explicit matches: `.java` → Java, `.swift` → Swift.
     /// Everything else (`.kt`, `.kts`, unknown extensions) → Kotlin, since this
     /// server is Kotlin-primary and `.kts` files use the same language features.
-    pub fn from_path(path: &str) -> Self {
+    pub(crate) fn from_path(path: &str) -> Self {
         if path.ends_with(".swift") {
             Language::Swift
         } else if path.ends_with(".java") {
@@ -30,13 +30,13 @@ impl Language {
         }
     }
 
-    pub fn is_kotlin(self) -> bool {
+    pub(crate) fn is_kotlin(self) -> bool {
         matches!(self, Language::Kotlin)
     }
-    pub fn is_java(self) -> bool {
+    pub(crate) fn is_java(self) -> bool {
         matches!(self, Language::Java)
     }
-    pub fn is_swift(self) -> bool {
+    pub(crate) fn is_swift(self) -> bool {
         matches!(self, Language::Swift)
     }
 }
@@ -47,14 +47,14 @@ impl Language {
 /// Using a named struct (rather than a bare `(usize, usize)` pair) prevents silent
 /// transposition of line and column arguments at call sites.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CursorPos {
+pub(crate) struct CursorPos {
     pub line: usize,
     pub utf16_col: usize,
 }
 
 /// Kotlin/Java visibility of a declared symbol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub enum Visibility {
+pub(crate) enum Visibility {
     #[default]
     Public,
     Internal,
@@ -64,7 +64,7 @@ pub enum Visibility {
 
 /// Single symbol definition entry stored in the index.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SymbolEntry {
+pub(crate) struct SymbolEntry {
     pub name: String,
     pub kind: SymbolKind,
     pub visibility: Visibility,
@@ -96,14 +96,14 @@ impl SymbolEntry {
     /// This is a convenience accessor for `.selection_range.start.line` (the identifier line),
     /// distinguishing it from `.range.start.line` (the full declaration start, which may differ on
     /// multiline declarations). Reduces coupling and avoids repeated deep field access.
-    pub fn selection_start(&self) -> u32 {
+    pub(crate) fn selection_start(&self) -> u32 {
         self.selection_range.start.line
     }
 }
 
 /// One import statement parsed from a Kotlin file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ImportEntry {
+pub(crate) struct ImportEntry {
     /// Fully-qualified path without the trailing `.*`.
     /// e.g. `"com.example.Foo"` or `"com.example"` for star imports.
     pub full_path: String,
@@ -119,14 +119,14 @@ pub struct ImportEntry {
 /// garbled syntax from a bad edit.  They are NOT serialized to the disk cache
 /// (cheap to recompute on every parse).
 #[derive(Debug, Clone)]
-pub struct SyntaxError {
+pub(crate) struct SyntaxError {
     pub range: Range,
     pub message: String,
 }
 
 /// All data we keep in memory for one source file.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct FileData {
+pub(crate) struct FileData {
     pub symbols: Vec<SymbolEntry>,
     pub imports: Vec<ImportEntry>,
     /// Package declaration, e.g. `"com.example.app"`.
@@ -166,7 +166,7 @@ impl FileData {
     /// Find the name of the innermost class/interface/object/enum that contains
     /// `line` in this file's symbol list. Returns `None` if the symbol is
     /// top-level (not inside any class).
-    pub fn containing_class_at(&self, line: u32) -> Option<String> {
+    pub(crate) fn containing_class_at(&self, line: u32) -> Option<String> {
         const CLASS_KINDS: &[SymbolKind] = &[
             SymbolKind::CLASS,
             SymbolKind::INTERFACE,
@@ -186,7 +186,7 @@ impl FileData {
 /// Result of parsing a single file. Pure data, no side effects.
 /// This is what index_content will return instead of mutating DashMaps.
 #[derive(Debug, Clone)]
-pub struct FileIndexResult {
+pub(crate) struct FileIndexResult {
     /// File URI that was parsed.
     pub uri: tower_lsp::lsp_types::Url,
     /// Parsed file data (symbols, imports, package, lines).
@@ -203,7 +203,7 @@ pub struct FileIndexResult {
 
 /// Statistics about an indexing run.
 #[derive(Debug, Clone, Default)]
-pub struct IndexStats {
+pub(crate) struct IndexStats {
     /// Total files discovered.
     #[allow(dead_code)]
     pub files_discovered: usize,
@@ -224,7 +224,7 @@ pub struct IndexStats {
 /// Result of indexing an entire workspace. Pure data, no side effects.
 /// This is what index_workspace will return instead of mutating state.
 #[derive(Debug, Clone)]
-pub struct WorkspaceIndexResult {
+pub(crate) struct WorkspaceIndexResult {
     /// All successfully parsed files.
     pub files: Vec<FileIndexResult>,
     /// Statistics about the indexing run.

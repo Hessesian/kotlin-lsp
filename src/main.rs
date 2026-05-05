@@ -1,3 +1,4 @@
+#![warn(unreachable_pub)]
 mod backend;
 mod indexer;
 mod inlay_hints;

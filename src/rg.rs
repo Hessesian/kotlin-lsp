@@ -24,7 +24,7 @@ use tower_lsp::lsp_types::{Location, Position, Range, Url};
 /// - A bare pattern with no `/` (e.g. `bazel-*`) matches at any depth.
 /// - A pattern containing `/` (e.g. `build/**`) matches relative to the workspace root.
 /// - Absolute paths under the workspace root are normalized to relative before matching.
-pub struct IgnoreMatcher {
+pub(crate) struct IgnoreMatcher {
     /// Original patterns as provided by the client (passed to `fd --exclude` as-is).
     pub patterns: Vec<String>,
     /// Arc-wrapped so the compiled set can be shared into `filter_entry` closures.
@@ -35,7 +35,7 @@ pub struct IgnoreMatcher {
 
 impl IgnoreMatcher {
     /// Build an `IgnoreMatcher` from raw client patterns against `root`.
-    pub fn new(patterns: Vec<String>, root: &Path) -> Self {
+    pub(crate) fn new(patterns: Vec<String>, root: &Path) -> Self {
         let mut builder = globset::GlobSetBuilder::new();
         for pat in &patterns {
             // Normalize absolute paths that fall under the workspace root.
@@ -87,23 +87,23 @@ impl IgnoreMatcher {
         }
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.patterns.is_empty()
     }
 
     /// Returns `true` if `rel_path` (relative to workspace root) should be excluded.
-    pub fn matches(&self, rel_path: &Path) -> bool {
+    pub(crate) fn matches(&self, rel_path: &Path) -> bool {
         self.glob_set.is_match(rel_path)
     }
 
     /// Clone the Arc-wrapped glob set for use in `filter_entry` closures.
-    pub fn glob_set(&self) -> Arc<globset::GlobSet> {
+    pub(crate) fn glob_set(&self) -> Arc<globset::GlobSet> {
         Arc::clone(&self.glob_set)
     }
 
     /// Remove locations whose file path is inside an ignored directory.
     /// Paths are relativized against the workspace root this matcher was built for.
-    pub fn filter_locs(&self, locs: Vec<Location>) -> Vec<Location> {
+    pub(crate) fn filter_locs(&self, locs: Vec<Location>) -> Vec<Location> {
         locs.into_iter()
             .filter(|loc| {
                 if let Ok(path) = loc.uri.to_file_path() {
@@ -117,7 +117,7 @@ impl IgnoreMatcher {
     }
 
     /// Remove file paths (absolute strings) that fall inside an ignored directory.
-    pub fn filter_file_strings(&self, files: Vec<String>) -> Vec<String> {
+    pub(crate) fn filter_file_strings(&self, files: Vec<String>) -> Vec<String> {
         files
             .into_iter()
             .filter(|f| {
@@ -129,7 +129,7 @@ impl IgnoreMatcher {
     }
 
     /// Remove `PathBuf` entries that fall inside an ignored directory.
-    pub fn filter_paths(&self, paths: Vec<std::path::PathBuf>) -> Vec<std::path::PathBuf> {
+    pub(crate) fn filter_paths(&self, paths: Vec<std::path::PathBuf>) -> Vec<std::path::PathBuf> {
         paths
             .into_iter()
             .filter(|p| {
@@ -143,7 +143,7 @@ impl IgnoreMatcher {
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 /// Supported file extensions for indexing and rg/fd searches.
-pub const SOURCE_EXTENSIONS: &[&str] = &["kt", "java", "swift"];
+pub(crate) const SOURCE_EXTENSIONS: &[&str] = &["kt", "java", "swift"];
 
 // ─── Pattern builder ─────────────────────────────────────────────────────────
 
@@ -274,7 +274,7 @@ pub(crate) fn rg_find_definition(
 ///
 /// Results in directories matched by `matcher` are filtered out.
 #[allow(clippy::too_many_arguments)]
-pub fn rg_find_references(
+pub(crate) fn rg_find_references(
     name: &str,
     parent_class: Option<&str>,
     declared_pkg: Option<&str>,
@@ -483,7 +483,7 @@ pub fn rg_find_references(
 /// subtype index is empty during cold indexing.
 ///
 /// Results in directories matched by `matcher` are filtered out.
-pub fn rg_find_implementors(
+pub(crate) fn rg_find_implementors(
     name: &str,
     root: Option<&Path>,
     matcher: Option<&IgnoreMatcher>,

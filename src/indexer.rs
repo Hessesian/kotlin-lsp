@@ -11,7 +11,7 @@ use crate::StrExt;
 
 // Re-export rg-module items that existing callers reach via `crate::indexer::`.
 pub(crate) use crate::rg::IgnoreMatcher;
-pub use crate::rg::SOURCE_EXTENSIONS;
+pub(crate) use crate::rg::SOURCE_EXTENSIONS;
 
 mod doc;
 
@@ -57,7 +57,7 @@ pub(crate) use self::cache::workspace_cache_path;
 mod discover;
 
 mod scan;
-pub const MAX_FILES_UNLIMITED: usize = usize::MAX;
+pub(crate) const MAX_FILES_UNLIMITED: usize = usize::MAX;
 
 mod apply;
 #[allow(unused_imports)]
@@ -116,7 +116,7 @@ pub(crate) struct StaleKeys {
     pub package: Option<String>,
 }
 
-pub struct Indexer {
+pub(crate) struct Indexer {
     /// URI string → parsed file data.
     pub(crate) files: DashMap<String, Arc<FileData>>,
     /// Short name → definition locations  (fast first-pass lookup).
@@ -219,11 +219,11 @@ impl crate::indexer::infer::InferDeps for Indexer {
 }
 
 impl Indexer {
-    pub fn parse_sem(&self) -> Arc<tokio::sync::Semaphore> {
+    pub(crate) fn parse_sem(&self) -> Arc<tokio::sync::Semaphore> {
         Arc::clone(&self.parse_sem)
     }
 
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             files: DashMap::new(),
             definitions: DashMap::new(),
@@ -273,7 +273,7 @@ impl Indexer {
     /// Clears everything: files, definitions, qualified, packages, subtypes, content_hashes,
     /// completion_cache, bare_name_cache. Does NOT touch orchestration fields
     /// (workspace_root, parse_sem, generation counters, live_lines).
-    pub fn reset_index_state(&self) {
+    pub(crate) fn reset_index_state(&self) {
         self.files.clear();
         self.definitions.clear();
         self.qualified.clear();
@@ -296,7 +296,7 @@ impl Indexer {
     /// Update the live-lines cache for `uri` without any debounce.
     /// Called from `did_change` before the debounced re-index so that
     /// `completions()` always sees the current document text.
-    pub fn set_live_lines(&self, uri: &Url, content: &str) {
+    pub(crate) fn set_live_lines(&self, uri: &Url, content: &str) {
         let lines: Arc<Vec<String>> = Arc::new(content.lines().map(String::from).collect());
         self.live_lines.insert(uri.to_string(), lines);
     }
@@ -401,7 +401,7 @@ impl Indexer {
     ///
     /// Uses `live_lines` (updated synchronously on every keystroke) for the
     /// current file's line text, falling back to indexed lines or disk.
-    pub fn completions(
+    pub(crate) fn completions(
         &self,
         uri: &Url,
         position: Position,

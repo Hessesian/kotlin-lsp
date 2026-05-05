@@ -144,7 +144,7 @@ pub(crate) fn build_bare_names(definitions: &DashMap<String, Vec<Location>>) -> 
 impl Indexer {
     /// Parse a single file via tree-sitter and extract symbols, supertypes, and a
     /// content hash.  Pure — no writes to any `Indexer` field.
-    pub fn parse_file(uri: &Url, content: &str) -> FileIndexResult {
+    pub(crate) fn parse_file(uri: &Url, content: &str) -> FileIndexResult {
         let data = parse_by_extension(uri.path(), content);
         let hash = hash_str(content);
 
@@ -185,7 +185,7 @@ impl Indexer {
     ///
     /// Uses pure [`stale_keys_for`] to compute removals and [`file_contributions`]
     /// to compute insertions. This is the per-file delta path (live edits, on_open).
-    pub fn apply_file_result(&self, result: &FileIndexResult) {
+    pub(crate) fn apply_file_result(&self, result: &FileIndexResult) {
         let uri_str = result.uri.to_string();
 
         // ── Remove stale entries ──────────────────────────────────────────────
@@ -221,7 +221,7 @@ impl Indexer {
     /// Full-replace path: resets all index maps first, then inserts all file
     /// contributions. Cache hits are already converted to `FileIndexResult` by
     /// `cache_entry_to_file_result` (supertypes included).
-    pub fn apply_workspace_result(&self, result: &WorkspaceIndexResult) {
+    pub(crate) fn apply_workspace_result(&self, result: &WorkspaceIndexResult) {
         log::info!(
             "Applying workspace results: {} files parsed, {} cache hits",
             result.stats.files_parsed,
@@ -255,7 +255,7 @@ impl Indexer {
     ///
     /// Generation-safe: captures `root_generation` at the start and discards results
     /// if it changes during async I/O (root switch / explicit reindex).
-    pub async fn index_source_paths(self: Arc<Self>, workspace_root: PathBuf) {
+    pub(crate) async fn index_source_paths(self: Arc<Self>, workspace_root: PathBuf) {
         let raw_paths = self.source_paths_raw.read().unwrap().clone();
         if raw_paths.is_empty() {
             return;
@@ -398,7 +398,7 @@ impl Indexer {
     }
 
     /// Coordinator: rebuild bare-name cache from current definitions map.
-    pub fn rebuild_bare_name_cache(&self) {
+    pub(crate) fn rebuild_bare_name_cache(&self) {
         if let Ok(mut cache) = self.bare_name_cache.write() {
             *cache = build_bare_names(&self.definitions);
         }
@@ -447,7 +447,7 @@ impl Indexer {
     /// when the content-hash matched the previous parse (no work done).
     /// Callers that need to publish diagnostics should read `data.syntax_errors`
     /// from the returned value.
-    pub fn index_content(&self, uri: &Url, content: &str) -> Option<Arc<FileData>> {
+    pub(crate) fn index_content(&self, uri: &Url, content: &str) -> Option<Arc<FileData>> {
         // Fast-path: skip re-parse if content hasn't changed since last index.
         let hash = hash_str(content);
         let uri_str = uri.to_string();
@@ -480,7 +480,7 @@ impl Indexer {
     ///
     /// This runs after `index_content` so that when the user types `repo.` the
     /// cache is already populated and the response is instant.
-    pub fn prewarm_completion_cache(self: Arc<Self>, uri: &Url) {
+    pub(crate) fn prewarm_completion_cache(self: Arc<Self>, uri: &Url) {
         let Some(data) = self.files.get(uri.as_str()) else {
             return;
         };

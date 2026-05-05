@@ -86,7 +86,7 @@ pub(super) const DEFAULT_MAX_INDEX_FILES: usize = MAX_FILES_UNLIMITED;
 /// - LSP mode callers pass `DEFAULT_MAX_INDEX_FILES` (unlimited).
 /// - CLI `--index-only` callers pass `MAX_FILES_UNLIMITED`.
 ///   Note: setting `KOTLIN_LSP_MAX_FILES` in the environment will still cap the count.
-pub fn resolve_max_files(default: usize) -> usize {
+pub(super) fn resolve_max_files(default: usize) -> usize {
     std::env::var("KOTLIN_LSP_MAX_FILES")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -699,7 +699,7 @@ impl Indexer {
     /// Full reindex passing `MAX_FILES_UNLIMITED` as the default file cap —
     /// used by `--index-only` CLI mode and the `kotlin-lsp/reindex` workspace command.
     /// The `KOTLIN_LSP_MAX_FILES` environment variable can still override the count.
-    pub async fn index_workspace_full(
+    pub(crate) async fn index_workspace_full(
         self: Arc<Self>,
         root: &Path,
         client: Option<tower_lsp::Client>,
@@ -722,7 +722,7 @@ impl Indexer {
     /// Sends LSP `$/progress` notifications so the editor shows a status spinner.
     /// On subsequent startups the on-disk cache is used for unchanged files so only
     /// modified or new files need to be re-parsed by tree-sitter.
-    pub async fn index_workspace(self: Arc<Self>, root: &Path, client: Option<tower_lsp::Client>) {
+    pub(crate) async fn index_workspace(self: Arc<Self>, root: &Path, client: Option<tower_lsp::Client>) {
         // workspace_root is updated inside index_workspace_impl after the
         // concurrency guard is acquired, so we never set a stale root here.
         let max = resolve_max_files(DEFAULT_MAX_INDEX_FILES);
@@ -742,7 +742,7 @@ impl Indexer {
     /// Prioritized indexing: parse `initial_paths` first (high-priority files such as the
     /// currently-open document and its supertypes), then continue with normal bounded indexing.
     /// This gives fast symbol availability for the files the user is actually working on.
-    pub async fn index_workspace_prioritized(
+    pub(crate) async fn index_workspace_prioritized(
         self: Arc<Self>,
         root: &Path,
         initial_paths: Vec<PathBuf>,
@@ -1028,7 +1028,7 @@ impl Indexer {
 
     /// Serialize the current index to `~/.cache/kotlin-lsp/<root-hash>/index.bin`.
     /// Safe to call from a background thread. Logs warnings on error; never panics.
-    pub fn save_cache_to_disk(&self) {
+    pub(crate) fn save_cache_to_disk(&self) {
         let root_guard = self.workspace_root.read().unwrap();
         let root = match root_guard.as_ref() {
             Some(r) => r,

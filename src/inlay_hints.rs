@@ -21,7 +21,7 @@ use crate::queries::{KIND_CALL_EXPR, KIND_LAMBDA_PARAMS};
 use crate::resolver::{infer_receiver_type, ReceiverKind};
 use crate::StrExt;
 
-pub fn compute_inlay_hints(idx: &Arc<Indexer>, uri: &Url, range: Range) -> Vec<InlayHint> {
+pub(crate) fn compute_inlay_hints(idx: &Arc<Indexer>, uri: &Url, range: Range) -> Vec<InlayHint> {
     // Fast path: editor has the file open → use pre-parsed live tree.
     if let Some(doc) = idx.live_doc(uri) {
         return cst_hints(idx, uri, &doc.tree, &doc.bytes, range);
