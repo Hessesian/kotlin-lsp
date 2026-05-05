@@ -513,6 +513,8 @@ fn infer_from_rhs_assignment(line: &str, var_name: &str) -> Option<String> {
 fn infer_method_return_type(
     idx: &Indexer, var_name: &str, lines: &[String], uri: &Url, depth: u8,
 ) -> Option<String> {
+    let mut plain_fn_candidates: Vec<String> = Vec::new();
+
     for line in lines {
         let rhs = match find_rhs_str(line, var_name) {
             Some(r) => r,
@@ -525,25 +527,41 @@ fn infer_method_return_type(
             None => continue,
         };
         let before_paren = &rhs[..paren_pos];
-        let dot_pos = match before_paren.rfind('.') {
-            Some(d) => d,
-            None => continue,
-        };
-        let receiver = before_paren[..dot_pos].trim();
-        let method   = before_paren[dot_pos + 1..].trim();
+        match before_paren.rfind('.') {
+            Some(dot_pos) => {
+                let receiver = before_paren[..dot_pos].trim();
+                let method   = before_paren[dot_pos + 1..].trim();
 
-        if receiver.is_empty() || method.is_empty() { continue; }
-        // Skip `this`/`super` and multi-segment receivers.
-        if receiver == "this" || receiver == "super" || receiver.contains('.') { continue; }
-        if !method.starts_with_lowercase() { continue; }
+                if receiver.is_empty() || method.is_empty() { continue; }
+                // Skip `this`/`super` and multi-segment receivers.
+                if receiver == "this" || receiver == "super" || receiver.contains('.') { continue; }
+                if !method.starts_with_lowercase() { continue; }
 
-        // Recursively infer the receiver type (DashMap guards already dropped).
-        if let Some(receiver_type) = infer_variable_type_impl(idx, receiver, uri, depth) {
-            if let Some(ret) = find_method_return_type(idx, &receiver_type, method) {
-                return Some(ret);
+                // Recursively infer the receiver type (DashMap guards already dropped).
+                if let Some(receiver_type) = infer_variable_type_impl(idx, receiver, uri, depth) {
+                    if let Some(ret) = find_method_return_type(idx, &receiver_type, method) {
+                        return Some(ret);
+                    }
+                }
+            }
+            None => {
+                // Plain function call: `val result = getFoo(args)` — no dot-receiver.
+                let fn_name = before_paren.trim();
+                if !fn_name.is_empty() && fn_name.starts_with_lowercase() {
+                    plain_fn_candidates.push(fn_name.to_owned());
+                }
             }
         }
     }
+
+    // Secondary pass: plain function calls whose return type is in the definitions index.
+    // Handles `val result = getConnectedAccounts(isRefresh)` → look up `getConnectedAccounts`.
+    for fn_name in &plain_fn_candidates {
+        if let Some(ret) = find_fun_return_type_by_name(idx, fn_name) {
+            return Some(ret);
+        }
+    }
+
     None
 }
 
