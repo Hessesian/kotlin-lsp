@@ -28,6 +28,9 @@ pub(crate) trait StrExt {
 
     /// Returns the declaration-keyword prefix of `self` — strips leading whitespace and annotations.
     fn decl_prefix(&self) -> &str;
+
+    /// Returns the identifier word at `utf16_col` (a UTF-16 code-unit offset, as in LSP positions).
+    fn word_at_utf16_col(&self, utf16_col: usize) -> String;
 }
 
 impl StrExt for str {
@@ -83,5 +86,24 @@ impl StrExt for str {
             .split_once('=')
             .map(|(l, _)| l)
             .unwrap_or(self)
+    }
+
+    fn word_at_utf16_col(&self, utf16_col: usize) -> String {
+        let chars: Vec<char> = self.chars().collect();
+        // Convert UTF-16 code-unit offset to char index.
+        let col = {
+            let mut cu = 0usize;
+            let mut idx = chars.len();
+            for (i, c) in chars.iter().enumerate() {
+                if cu >= utf16_col { idx = i; break; }
+                cu += c.len_utf16();
+            }
+            idx
+        };
+        let mut ws = col;
+        while ws > 0 && (chars[ws - 1].is_alphanumeric() || chars[ws - 1] == '_') { ws -= 1; }
+        let mut we = col;
+        while we < chars.len() && (chars[we].is_alphanumeric() || chars[we] == '_') { we += 1; }
+        chars[ws..we].iter().collect()
     }
 }

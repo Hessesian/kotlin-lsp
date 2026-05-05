@@ -202,7 +202,7 @@ impl Backend {
             }
         };
 
-        let cursor_word = cursor_word_at(&line_text, range.start.character as usize);
+        let cursor_word = line_text.word_at_utf16_col(range.start.character as usize);
         let is_kotlin = crate::Language::from_path(uri.path()).is_kotlin();
 
         if let Some(a) = build_import_alias_action(&trimmed, uri, range, is_kotlin) {
@@ -225,32 +225,6 @@ impl Backend {
             Some(actions)
         })
     }
-}
-
-/// Returns the word (identifier) at `utf16_col` in `line_text`.
-fn cursor_word_at(line_text: &str, utf16_col: usize) -> String {
-    let chars: Vec<char> = line_text.chars().collect();
-    let col = {
-        let mut cu = 0usize;
-        let mut idx = chars.len();
-        for (i, c) in chars.iter().enumerate() {
-            if cu >= utf16_col {
-                idx = i;
-                break;
-            }
-            cu += c.len_utf16();
-        }
-        idx
-    };
-    let mut ws = col;
-    while ws > 0 && (chars[ws - 1].is_alphanumeric() || chars[ws - 1] == '_') {
-        ws -= 1;
-    }
-    let mut we = col;
-    while we < chars.len() && (chars[we].is_alphanumeric() || chars[we] == '_') {
-        we += 1;
-    }
-    chars[ws..we].iter().collect()
 }
 
 /// Builds the "Introduce local variable" code action for the selected expression.
