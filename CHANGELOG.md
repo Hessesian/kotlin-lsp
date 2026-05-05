@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.4
+
+- **Phase 12 refactoring complete** — replaced bool/tuple returns with named `struct`s for clarity (e.g., `ScanResult`, `NamedResult`); downgraded unreachable `pub` to `pub(crate)` across the binary crate; fixed bare `unwrap()` and double-ref anti-patterns; replaced blocking `std::fs::read_to_string` with `tokio::fs` in spawned tasks.
+- **Hexagonal architecture cleanup** — replaced `Option<tower_lsp::Client>` in `Indexer` with `ProgressReporter` outbound port trait. `LspProgressReporter` adapter in backend sends `$/progress` notifications; `NoopReporter` used in CLI/tests. Fixes LSP violation where domain layer depended on protocol types.
+- **Comprehensive codebase documentation** — 7 new markdown guides in `docs/codebase/` covering architecture, module structure, conventions, integrations, testing, and known concerns. Includes hexagonal layer breakdown, design patterns, concurrency model, and high-churn risk areas.
+- **Feature contributor onboarding** — CodeTour (13-step walkthrough) at `.tours/feature-contributor-guide.tour` teaches how to implement a new LSP feature from handler to tests. Covers architecture layers, handler pattern, resolver logic, and test strategy.
+
 ## 0.9.3
 
 - **Performance: no more file cap** — the default file limit is now unlimited. Previously the LSP mode only eagerly indexed 2000 files; larger projects (especially iOS) fell back to on-demand `rg` for deeper files. After the query/parser caching fix in 0.9.2, the per-file parse cost is low enough that indexing everything upfront is the right default. Use `KOTLIN_LSP_MAX_FILES` env var to set a custom limit if needed.
