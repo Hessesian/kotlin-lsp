@@ -315,15 +315,6 @@ impl Indexer {
         if subst.is_empty() { sig.to_owned() } else { apply_subst(sig, &subst) }
     }
 
-    /// Build a combined type-parameter substitution map for the enclosing class at
-    /// `cursor_line` in `uri`.  Gathers type params from ALL supertypes of that class
-    /// and maps them to concrete type arguments.
-    ///
-    /// Used by inlay hints to convert inferred types like `EffectType` → `Effect`
-    /// when the cursor is inside a class that specialises a generic base.
-    pub(crate) fn type_subst_for_enclosing_class(&self, uri: &str, cursor_line: u32) -> std::collections::HashMap<String, String> {
-        super::resolution::build_subst_map(self, uri, cursor_line)
-    }
 }
 
 pub(crate) fn symbol_kw(kind: SymbolKind) -> &'static str {

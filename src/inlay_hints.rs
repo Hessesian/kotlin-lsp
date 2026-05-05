@@ -67,7 +67,7 @@ fn cst_hints(
     // Build a generic type-param substitution map for the enclosing class context.
     // This lets inlay hints show concrete types (e.g. `Effect`) instead of raw
     // type params (e.g. `EffectType`) when inside a class that specialises a generic base.
-    let subst = idx.type_subst_for_enclosing_class(uri.as_str(), range.start.line);
+    let subst = crate::indexer::resolution::build_subst_map(idx.as_ref(), uri.as_str(), range.start.line);
 
     'walk: loop {
         let node = cursor.node();

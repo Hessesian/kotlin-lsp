@@ -291,7 +291,7 @@ class DashViewModel {
     // Inlay hint substitution from inside DashViewModel (line 2 = inside the class):
     // Phase 2 of build_enclosing_class_subst should trace:
     //   property `reducer: DashReducer` → DashReducer supers → FlowReducer<E=DashEvent, S=DashState>
-    let subst = idx.type_subst_for_enclosing_class(owner_u.as_str(), 2);
+    let subst = crate::indexer::resolution::build_subst_map(&idx, owner_u.as_str(), 2);
     assert!(subst.contains_key("E") || subst.contains_key("S"),
         "property harvesting should produce substitution for FlowReducer params, got: {subst:?}");
     if let Some(e_val) = subst.get("E") {
