@@ -6,19 +6,24 @@ use std::sync::Arc;
 use tower_lsp::lsp_types::{Url, SymbolKind};
 
 use crate::indexer::Location;
-use crate::resolver::ReceiverType;
 use crate::types::{FileData, SymbolEntry};
 use crate::LinesExt;
 use crate::indexer::doc::extract_doc_comment;
 
 /// Domain-level resolution result. Small, owned data suitable for LSP adapters.
 pub struct ResolvedSymbol {
+    /// Symbol definition location; only accessed in tests and future callers.
+    #[allow(dead_code)]
     pub location: Location,
     /// The original symbol name (from the index), independent of signature parsing.
     pub name: String,
     pub kind: SymbolKind,
+    /// Pre-substitution signature; kept for test assertions.
+    #[allow(dead_code)]
     pub raw_signature: String,
     pub signature: String,
+    /// Substitution map used to build `signature`; kept for test assertions.
+    #[allow(dead_code)]
     pub subst: HashMap<String, String>,
     pub doc: String,
 }
@@ -35,8 +40,8 @@ pub struct ResolveOptions {
 
 impl ResolveOptions {
     pub fn hover()      -> Self { Self { allow_rg: true,  include_doc: true,  apply_subst: true,  prefer_cached_detail: false } }
-    pub fn inlay()      -> Self { Self { allow_rg: false, include_doc: false, apply_subst: true,  prefer_cached_detail: false } }
     pub fn completion() -> Self { Self { allow_rg: false, include_doc: true,  apply_subst: true,  prefer_cached_detail: true  } }
+    #[allow(dead_code)]
     pub fn goto_def()   -> Self { Self { allow_rg: true,  include_doc: false, apply_subst: false, prefer_cached_detail: false } }
 }
 
@@ -50,13 +55,12 @@ pub enum SubstitutionContext<'a> {
     /// class is calling (when a file has multiple classes extending the same base).
     /// `None` = unknown / don't disambiguate → picks the first matching class.
     CrossFile { calling_uri: &'a str, cursor_line: Option<u32> },
-    EnclosingClass { uri: &'a str, cursor_line: u32 },
+    #[allow(dead_code)]
     Precomputed(&'a HashMap<String, String>),
 }
 
 /// Test seam trait: read-only view into index state. Keep this lightweight for tests.
 pub trait IndexRead {
-    fn get_file_lines(&self, uri: &str) -> Option<Vec<String>>;
     fn get_definitions(&self, name: &str) -> Option<Vec<Location>>;
     fn get_file_data(&self, uri: &str) -> Option<Arc<FileData>>;
 
@@ -144,30 +148,6 @@ pub fn enrich_at_line<I: IndexRead>(
     enrich_symbol(index, &data, &location, &sym.name, subst_ctx, options)
 }
 
-/// Resolve contextual receiver information (it/this).
-pub fn resolve_contextual_info<I: IndexRead>(
-    index: &I,
-    rt: &ReceiverType,
-    from_uri: &Url,
-    cursor_line: u32,
-    options: &ResolveOptions,
-) -> Option<ResolvedSymbol> {
-    // For qualified types like `Outer.Inner`, pass `outer` as qualifier so the
-    // resolver can narrow to the right file before searching for `leaf`.
-    let qualifier = if rt.leaf != rt.qualified { Some(rt.outer.as_str()) } else { None };
-    resolve_symbol_info(
-        index,
-        &rt.leaf,
-        qualifier,
-        from_uri,
-        SubstitutionContext::EnclosingClass {
-            uri: from_uri.as_str(),
-            cursor_line,
-        },
-        options,
-    )
-}
-
 /// Build substitution map for enclosing class at cursor position.
 pub fn build_subst_map<I: IndexRead>(index: &I, uri: &str, cursor_line: u32) -> HashMap<String, String> {
     build_enclosing_class_subst_impl(index, uri, cursor_line)
@@ -220,8 +200,10 @@ pub(crate) fn extract_property_type_name(detail: &str) -> &str {
 /// and can accidentally collect sibling constructor params, so `detail` is
 /// always used for those kinds regardless of the `prefer_cached_detail` flag.
 fn extract_canonical_signature(sym: &SymbolEntry, data: &FileData, prefer_cached: bool) -> String {
-    if prefer_cached || matches!(sym.kind, SymbolKind::PROPERTY | SymbolKind::VARIABLE) {
-        if !sym.detail.is_empty() { return sym.detail.clone(); }
+    if (prefer_cached || matches!(sym.kind, SymbolKind::PROPERTY | SymbolKind::VARIABLE))
+        && !sym.detail.is_empty()
+    {
+        return sym.detail.clone();
     }
     let full = data.lines.collect_signature(sym.start_line() as usize);
     if !full.is_empty() { full } else { sym.detail.clone() }
@@ -333,9 +315,6 @@ fn build_subst_if_needed<I: IndexRead>(
         SubstitutionContext::None => HashMap::new(),
         SubstitutionContext::CrossFile { calling_uri, cursor_line } => {
             build_type_param_subst_impl(index, location.uri.as_str(), location.range.start.line, calling_uri, cursor_line)
-        }
-        SubstitutionContext::EnclosingClass { uri, cursor_line } => {
-            build_enclosing_class_subst_impl(index, uri, cursor_line)
         }
         SubstitutionContext::Precomputed(m) => m.clone(),
     }
@@ -491,12 +470,6 @@ fn build_enclosing_class_subst_impl<I: IndexRead>(
 // Implement IndexRead for Indexer: production code doesn't use the trait,
 // but this enables unit tests to use a TestIndex stub.
 impl IndexRead for super::Indexer {
-    fn get_file_lines(&self, uri: &str) -> Option<Vec<String>> {
-        self.files
-            .get(uri)
-            .map(|rf| rf.lines.as_ref().as_slice().to_vec())
-    }
-
     fn get_definitions(&self, name: &str) -> Option<Vec<Location>> {
         self.definitions.get(name).map(|rf| rf.clone())
     }
@@ -551,7 +524,6 @@ mod tests {
 
     struct TestIndex;
     impl IndexRead for TestIndex {
-        fn get_file_lines(&self, _uri: &str) -> Option<Vec<String>> { None }
         fn get_definitions(&self, _name: &str) -> Option<Vec<Location>> { None }
         fn get_file_data(&self, _uri: &str) -> Option<Arc<FileData>> { None }
     }
@@ -564,9 +536,6 @@ mod tests {
     }
 
     impl IndexRead for RealTestIndex {
-        fn get_file_lines(&self, uri: &str) -> Option<Vec<String>> {
-            self.files.get(uri).map(|f| f.lines.as_ref().to_vec())
-        }
         fn get_definitions(&self, name: &str) -> Option<Vec<Location>> {
             self.definitions.get(name).cloned()
         }
