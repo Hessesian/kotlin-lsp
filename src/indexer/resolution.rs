@@ -133,11 +133,11 @@ pub fn enrich_at_line<I: IndexRead>(
     let data = index.get_file_data(uri_str)?;
     let sym = data.symbols.iter()
         .find(|s| {
-            s.selection_range.start.line == line
+            s.start_line() == line
                 && s.selection_range.start.character <= col
                 && col < s.selection_range.end.character
         })
-        .or_else(|| data.symbols.iter().find(|s| s.selection_range.start.line == line))?;
+        .or_else(|| data.symbols.iter().find(|s| s.start_line() == line))?;
 
     let uri = Url::parse(uri_str).ok()?;
     let location = Location { uri, range: sym.selection_range };
@@ -223,7 +223,7 @@ fn extract_canonical_signature(sym: &SymbolEntry, data: &FileData, prefer_cached
     if prefer_cached || matches!(sym.kind, SymbolKind::PROPERTY | SymbolKind::VARIABLE) {
         if !sym.detail.is_empty() { return sym.detail.clone(); }
     }
-    let full = data.lines.collect_signature(sym.selection_range.start.line as usize);
+    let full = data.lines.collect_signature(sym.start_line() as usize);
     if !full.is_empty() { full } else { sym.detail.clone() }
 }
 
@@ -283,7 +283,7 @@ fn enrich_symbol<I: IndexRead>(
     let subst = build_subst_if_needed(index, location, sym, &raw_signature, subst_ctx, options);
     let signature = apply_subst(&raw_signature, &subst);
     let doc = if options.include_doc {
-        extract_doc_comment(&data.lines, sym.selection_range.start.line as usize).unwrap_or_default()
+        extract_doc_comment(&data.lines, sym.start_line() as usize).unwrap_or_default()
     } else {
         String::new()
     };
@@ -385,7 +385,7 @@ fn build_type_param_subst_impl<I: IndexRead>(
     let calling_class_line = caller_cursor_line
         .and_then(|line| calling_data.containing_class_at(line))
         .and_then(|name| calling_data.symbols.iter().find(|s| s.name == name))
-        .map(|s| s.selection_range.start.line);
+        .map(|s| s.start_line());
 
     let type_args = calling_data.supers.iter()
         .find(|(line, base, _)| {
@@ -423,7 +423,7 @@ fn build_enclosing_class_subst_impl<I: IndexRead>(
         None => return HashMap::new(),
     };
 
-    let class_line = class_sym.selection_range.start.line;
+    let class_line = class_sym.start_line();
     let class_end_line = class_sym.range.end.line;
 
     // For each supertype with concrete type args, look up the BASE class's own
@@ -462,8 +462,8 @@ fn build_enclosing_class_subst_impl<I: IndexRead>(
     // and that type extends `FlowReducer<Event, State>`, include
     // `{Event→…, State→…}` mappings from FlowReducer's type params.
     for sym in data.symbols.iter() {
-        if sym.selection_range.start.line <= class_line { continue; }
-        if sym.selection_range.start.line > class_end_line { continue; }
+        if sym.start_line() <= class_line { continue; }
+        if sym.start_line() > class_end_line { continue; }
         if !matches!(sym.kind, SymbolKind::FIELD | SymbolKind::PROPERTY) { continue; }
         let type_name = extract_property_type_name(&sym.detail);
         if type_name.is_empty() { continue; }
@@ -471,7 +471,7 @@ fn build_enclosing_class_subst_impl<I: IndexRead>(
         let Some(loc) = locs.into_iter().next() else { continue };
         let Some(prop_type_data) = index.get_file_data(loc.uri.as_str()) else { continue };
         let Some(prop_sym) = prop_type_data.symbols.iter().find(|s| s.name == type_name) else { continue };
-        let prop_class_line = prop_sym.selection_range.start.line;
+        let prop_class_line = prop_sym.start_line();
         for (line, super_name, type_args) in prop_type_data.supers.iter() {
             if *line != prop_class_line || type_args.is_empty() { continue; }
             let Some(super_locs) = index.get_definitions(super_name) else { continue };

@@ -173,7 +173,7 @@
     fn class_name_position() {
         let data = parse_kotlin("class Foo");
         let s = sym(&data, "Foo").unwrap();
-        assert_eq!(s.selection_range.start.line,      0);
+        assert_eq!(s.start_line(),      0);
         assert_eq!(s.selection_range.start.character, 6);
         assert_eq!(s.selection_range.end.character,   9);
     }
