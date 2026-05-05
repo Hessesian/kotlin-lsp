@@ -23,12 +23,12 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use tower_lsp::lsp_types::*;
 
+use super::{FileContributions, Indexer, StaleKeys};
 use crate::indexer::discover::find_source_files_unconstrained;
-use crate::types::{FileData, FileIndexResult, WorkspaceIndexResult};
-use crate::StrExt;
 use crate::parser::parse_by_extension;
 use crate::resolver::symbols_from_uri_as_completions_pub;
-use super::{FileContributions, StaleKeys, Indexer};
+use crate::types::{FileData, FileIndexResult, WorkspaceIndexResult};
+use crate::StrExt;
 
 // ─── hash helper ─────────────────────────────────────────────────────────────
 
@@ -48,15 +48,24 @@ pub(super) fn hash_str(s: &str) -> u64 {
 /// No side effects. Call [`Indexer::apply_contributions`] to commit.
 pub(crate) fn file_contributions(result: &FileIndexResult) -> FileContributions {
     let uri_str = result.uri.to_string();
-    let file_stem: Option<String> = result.uri.to_file_path().ok()
+    let file_stem: Option<String> = result
+        .uri
+        .to_file_path()
+        .ok()
         .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()));
 
     let mut definitions: HashMap<String, Vec<Location>> = HashMap::new();
-    let mut qualified:   HashMap<String, Location>      = HashMap::new();
+    let mut qualified: HashMap<String, Location> = HashMap::new();
 
     for sym in &result.data.symbols {
-        let loc = Location { uri: result.uri.clone(), range: sym.selection_range };
-        definitions.entry(sym.name.clone()).or_default().push(loc.clone());
+        let loc = Location {
+            uri: result.uri.clone(),
+            range: sym.selection_range,
+        };
+        definitions
+            .entry(sym.name.clone())
+            .or_default()
+            .push(loc.clone());
         if let Some(ref pkg) = result.data.package {
             qualified.insert(format!("{pkg}.{}", sym.name), loc.clone());
             if let Some(ref stem) = file_stem {
@@ -69,12 +78,18 @@ pub(crate) fn file_contributions(result: &FileIndexResult) -> FileContributions 
 
     let mut packages: HashMap<String, Vec<String>> = HashMap::new();
     if let Some(ref pkg) = result.data.package {
-        packages.entry(pkg.clone()).or_default().push(uri_str.clone());
+        packages
+            .entry(pkg.clone())
+            .or_default()
+            .push(uri_str.clone());
     }
 
     let mut subtypes: HashMap<String, Vec<Location>> = HashMap::new();
     for (super_name, class_loc) in &result.supertypes {
-        subtypes.entry(super_name.clone()).or_default().push(class_loc.clone());
+        subtypes
+            .entry(super_name.clone())
+            .or_default()
+            .push(class_loc.clone());
     }
 
     FileContributions {
@@ -90,12 +105,12 @@ pub(crate) fn file_contributions(result: &FileIndexResult) -> FileContributions 
 /// Pure: compute which keys to remove from each index map when `uri` is re-indexed.
 /// Requires the *old* `FileData` to know what the file previously contributed.
 pub(crate) fn stale_keys_for(uri: &Url, old_data: &FileData) -> StaleKeys {
-    let file_stem: Option<String> = uri.to_file_path().ok()
+    let file_stem: Option<String> = uri
+        .to_file_path()
+        .ok()
         .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()));
 
-    let definition_names: Vec<String> = old_data.symbols.iter()
-        .map(|s| s.name.clone())
-        .collect();
+    let definition_names: Vec<String> = old_data.symbols.iter().map(|s| s.name.clone()).collect();
 
     let mut qualified_keys: Vec<String> = Vec::new();
     if let Some(ref pkg) = old_data.package {
@@ -136,14 +151,22 @@ impl Indexer {
         // Extract supertype relationships for goToImplementation.
         let mut supertypes = Vec::new();
         let class_kinds = [
-            SymbolKind::CLASS, SymbolKind::INTERFACE, SymbolKind::STRUCT,
-            SymbolKind::ENUM, SymbolKind::OBJECT,
+            SymbolKind::CLASS,
+            SymbolKind::INTERFACE,
+            SymbolKind::STRUCT,
+            SymbolKind::ENUM,
+            SymbolKind::OBJECT,
         ];
 
         for sym in &data.symbols {
-            if !class_kinds.contains(&sym.kind) { continue; }
+            if !class_kinds.contains(&sym.kind) {
+                continue;
+            }
             let start_line = sym.start_line();
-            let class_loc = Location { uri: uri.clone(), range: sym.selection_range };
+            let class_loc = Location {
+                uri: uri.clone(),
+                range: sym.selection_range,
+            };
             for (_, super_name, _) in data.supers.iter().filter(|(l, _, _)| *l == start_line) {
                 supertypes.push((super_name.clone(), class_loc.clone()));
             }
@@ -182,7 +205,9 @@ impl Indexer {
                 }
             }
             for mut entry in self.subtypes.iter_mut() {
-                entry.value_mut().retain(|l| l.uri.as_str() != uri_str.as_str());
+                entry
+                    .value_mut()
+                    .retain(|l| l.uri.as_str() != uri_str.as_str());
             }
         }
 
@@ -199,7 +224,8 @@ impl Indexer {
     pub fn apply_workspace_result(&self, result: &WorkspaceIndexResult) {
         log::info!(
             "Applying workspace results: {} files parsed, {} cache hits",
-            result.stats.files_parsed, result.stats.cache_hits
+            result.stats.files_parsed,
+            result.stats.cache_hits
         );
 
         // Full replace — clear stale state from any previous root or run.
@@ -214,7 +240,8 @@ impl Indexer {
 
         log::info!(
             "Index ready: {} symbols from {} files",
-            self.definitions.len(), self.files.len()
+            self.definitions.len(),
+            self.files.len()
         );
     }
 
@@ -230,15 +257,24 @@ impl Indexer {
     /// if it changes during async I/O (root switch / explicit reindex).
     pub async fn index_source_paths(self: Arc<Self>, workspace_root: PathBuf) {
         let raw_paths = self.source_paths_raw.read().unwrap().clone();
-        if raw_paths.is_empty() { return; }
+        if raw_paths.is_empty() {
+            return;
+        }
 
         let gen = self.root_generation.load(Ordering::SeqCst);
 
         // Resolve raw paths against workspace root at call time.
-        let source_paths: Vec<PathBuf> = raw_paths.iter().map(|s| {
-            let p = PathBuf::from(s);
-            if p.is_absolute() { p } else { workspace_root.join(s) }
-        }).collect();
+        let source_paths: Vec<PathBuf> = raw_paths
+            .iter()
+            .map(|s| {
+                let p = PathBuf::from(s);
+                if p.is_absolute() {
+                    p
+                } else {
+                    workspace_root.join(s)
+                }
+            })
+            .collect();
 
         let sem = Arc::clone(&self.parse_sem);
         let mut new_library_uris: Vec<String> = Vec::new();
@@ -252,7 +288,11 @@ impl Indexer {
             log::info!("Indexing source path: {}", source_path.display());
 
             let files = find_source_files_unconstrained(source_path);
-            log::info!("  Found {} source files in {}", files.len(), source_path.display());
+            log::info!(
+                "  Found {} source files in {}",
+                files.len(),
+                source_path.display()
+            );
 
             let mut tasks = Vec::new();
             for path in files {
@@ -268,11 +308,12 @@ impl Indexer {
                     new_library_uris.push(uri_str.clone());
                 }
                 let sem2 = Arc::clone(&sem);
-                let task: tokio::task::JoinHandle<Option<FileIndexResult>> = tokio::spawn(async move {
-                    let _permit = sem2.acquire_owned().await.ok()?;
-                    let content = tokio::fs::read_to_string(&path).await.ok()?;
-                    Some(Indexer::parse_file(&uri, &content))
-                });
+                let task: tokio::task::JoinHandle<Option<FileIndexResult>> =
+                    tokio::spawn(async move {
+                        let _permit = sem2.acquire_owned().await.ok()?;
+                        let content = tokio::fs::read_to_string(&path).await.ok()?;
+                        Some(Indexer::parse_file(&uri, &content))
+                    });
                 tasks.push(task);
             }
 
@@ -285,7 +326,9 @@ impl Indexer {
 
         // Bail if workspace switched during async I/O.
         if self.root_generation.load(Ordering::SeqCst) != gen {
-            log::info!("index_source_paths: generation changed during async I/O, discarding results");
+            log::info!(
+                "index_source_paths: generation changed during async I/O, discarding results"
+            );
             return;
         }
 
@@ -302,7 +345,8 @@ impl Indexer {
         self.rebuild_bare_name_cache();
         log::info!(
             "Source paths indexed: {} library files, {} total indexed files",
-            self.library_uris.len(), self.files.len()
+            self.library_uris.len(),
+            self.files.len()
         );
     }
 
@@ -318,7 +362,10 @@ impl Indexer {
         for (name, locs) in contrib.definitions {
             let mut entry = self.definitions.entry(name).or_default();
             for loc in locs {
-                if !entry.iter().any(|l| l.uri == loc.uri && l.range == loc.range) {
+                if !entry
+                    .iter()
+                    .any(|l| l.uri == loc.uri && l.range == loc.range)
+                {
                     entry.push(loc);
                 }
             }
@@ -340,7 +387,10 @@ impl Indexer {
         for (super_name, locs) in contrib.subtypes {
             let mut entry = self.subtypes.entry(super_name).or_default();
             for loc in locs {
-                if !entry.iter().any(|l| l.uri == loc.uri && l.range == loc.range) {
+                if !entry
+                    .iter()
+                    .any(|l| l.uri == loc.uri && l.range == loc.range)
+                {
                     entry.push(loc);
                 }
             }
@@ -401,7 +451,12 @@ impl Indexer {
         // Fast-path: skip re-parse if content hasn't changed since last index.
         let hash = hash_str(content);
         let uri_str = uri.to_string();
-        if self.content_hashes.get(&uri_str).map(|h| *h == hash).unwrap_or(false) {
+        if self
+            .content_hashes
+            .get(&uri_str)
+            .map(|h| *h == hash)
+            .unwrap_or(false)
+        {
             return None;
         }
 
@@ -426,7 +481,9 @@ impl Indexer {
     /// This runs after `index_content` so that when the user types `repo.` the
     /// cache is already populated and the response is instant.
     pub fn prewarm_completion_cache(self: Arc<Self>, uri: &Url) {
-        let Some(data) = self.files.get(uri.as_str()) else { return };
+        let Some(data) = self.files.get(uri.as_str()) else {
+            return;
+        };
         let from_uri = uri.clone();
 
         // Collect unique type names from this file's lines.
@@ -435,7 +492,9 @@ impl Indexer {
             let mut seen = std::collections::HashSet::new();
             for line in data.lines.iter() {
                 let t = line.trim_start();
-                if t.starts_with("//") || t.starts_with('*') { continue; }
+                if t.starts_with("//") || t.starts_with('*') {
+                    continue;
+                }
                 let mut rest = t;
                 while let Some(ci) = rest.find(':') {
                     let after = rest[ci + 1..].trim_start();
@@ -464,10 +523,14 @@ impl Indexer {
                     let locs = idx.resolve_symbol(&type_name, None, &uri2);
                     if let Some(loc) = locs.first() {
                         let file_uri = loc.uri.to_string();
-                        if idx.completion_cache.contains_key(&file_uri) { return; }
+                        if idx.completion_cache.contains_key(&file_uri) {
+                            return;
+                        }
                         symbols_from_uri_as_completions_pub(&idx, &file_uri);
                     }
-                }).await.ok();
+                })
+                .await
+                .ok();
             });
         }
     }

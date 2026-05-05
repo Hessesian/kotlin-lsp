@@ -26,19 +26,32 @@ pub enum ReceiverKind<'a> {
 /// - `outer`     — first dot-segment: `"Outer"`  (used for file lookup)
 /// - `leaf`      — last dot-segment: `"Inner"`   (used for fallback member lookup)
 pub struct ReceiverType {
-    pub raw:       String,
+    pub raw: String,
     pub qualified: String,
-    pub outer:     String,
-    pub leaf:      String,
+    pub outer: String,
+    pub leaf: String,
 }
 
 impl ReceiverType {
     pub fn from_raw(raw: String) -> Self {
         // Strip generics: take chars until first `<`.
         let qualified: String = raw.chars().take_while(|&c| c != '<').collect();
-        let outer = qualified.split('.').next().unwrap_or(&qualified).to_string();
-        let leaf  = qualified.rsplit('.').next().unwrap_or(&qualified).to_string();
-        ReceiverType { raw, qualified, outer, leaf }
+        let outer = qualified
+            .split('.')
+            .next()
+            .unwrap_or(&qualified)
+            .to_string();
+        let leaf = qualified
+            .rsplit('.')
+            .next()
+            .unwrap_or(&qualified)
+            .to_string();
+        ReceiverType {
+            raw,
+            qualified,
+            outer,
+            leaf,
+        }
     }
 }
 
@@ -49,9 +62,9 @@ impl ReceiverType {
 /// or lambda scope not resolvable).  Call sites then decide whether to skip
 /// or fall back; this function never performs a global rg scan.
 pub fn infer_receiver_type(
-    idx:  &Indexer,
+    idx: &Indexer,
     kind: ReceiverKind<'_>,
-    uri:  &Url,
+    uri: &Url,
 ) -> Option<ReceiverType> {
     let raw = match kind {
         ReceiverKind::Variable(name) => infer_variable_type_raw(idx, name, uri)?,
@@ -85,7 +98,9 @@ pub fn infer_variable_type_raw(idx: &Indexer, var_name: &str, uri: &Url) -> Opti
 }
 
 fn infer_variable_type_impl(idx: &Indexer, var_name: &str, uri: &Url, depth: u8) -> Option<String> {
-    if depth == 0 { return None; }
+    if depth == 0 {
+        return None;
+    }
     // Scope block: all DashMap guards are dropped before method-return inference,
     // which may call this function recursively and must not deadlock.
     let lines = {
@@ -99,10 +114,14 @@ fn infer_variable_type_impl(idx: &Indexer, var_name: &str, uri: &Url, depth: u8)
                 return result;
             }
             // CST-indexed RHS types — primary path for indexed files.
-            let rhs_match = data.rhs_types.iter()
+            let rhs_match = data
+                .rhs_types
+                .iter()
                 .find(|(_, n, _)| n == var_name)
                 .map(|(_, _, ty)| ty.clone());
-            let method_match = data.method_call_rhs.iter()
+            let method_match = data
+                .method_call_rhs
+                .iter()
                 .find(|(_, n, _, _)| n == var_name)
                 .map(|(_, _, recv, method)| (recv.clone(), method.clone()));
             let lines = data.lines.clone();
@@ -133,9 +152,14 @@ fn infer_variable_type_impl(idx: &Indexer, var_name: &str, uri: &Url, depth: u8)
 }
 
 fn infer_variable_type_raw_impl(
-    idx: &Indexer, var_name: &str, uri: &Url, depth: u8,
+    idx: &Indexer,
+    var_name: &str,
+    uri: &Url,
+    depth: u8,
 ) -> Option<String> {
-    if depth == 0 { return None; }
+    if depth == 0 {
+        return None;
+    }
     let lines = {
         if let Some(ll) = idx.live_lines.get(uri.as_str()) {
             if let result @ Some(_) = ll.infer_type_raw(var_name) {
@@ -146,10 +170,14 @@ fn infer_variable_type_raw_impl(
             if let result @ Some(_) = data.lines.infer_type_raw(var_name) {
                 return result;
             }
-            let rhs_match = data.rhs_types.iter()
+            let rhs_match = data
+                .rhs_types
+                .iter()
                 .find(|(_, n, _)| n == var_name)
                 .map(|(_, _, ty)| ty.clone());
-            let method_match = data.method_call_rhs.iter()
+            let method_match = data
+                .method_call_rhs
+                .iter()
                 .find(|(_, n, _, _)| n == var_name)
                 .map(|(_, _, recv, method)| (recv.clone(), method.clone()));
             let lines = data.lines.clone();
@@ -190,20 +218,37 @@ fn infer_variable_type_raw_impl(
 /// caller should treat `it` as the receiver type itself (scope functions).
 pub fn extract_collection_element_type(raw_type: &str) -> Option<String> {
     const COLLECTION_TYPES: &[&str] = &[
-        "List", "MutableList", "ArrayList",
-        "Set", "MutableSet", "HashSet", "LinkedHashSet",
-        "Collection", "MutableCollection", "Iterable", "MutableIterable",
-        "Sequence", "Flow", "StateFlow", "SharedFlow",
-        "Channel", "SendChannel", "ReceiveChannel",
+        "List",
+        "MutableList",
+        "ArrayList",
+        "Set",
+        "MutableSet",
+        "HashSet",
+        "LinkedHashSet",
+        "Collection",
+        "MutableCollection",
+        "Iterable",
+        "MutableIterable",
+        "Sequence",
+        "Flow",
+        "StateFlow",
+        "SharedFlow",
+        "Channel",
+        "SendChannel",
+        "ReceiveChannel",
         "Array",
     ];
 
     let base = raw_type.ident_prefix();
-    if !COLLECTION_TYPES.contains(&base.as_str()) { return None; }
+    if !COLLECTION_TYPES.contains(&base.as_str()) {
+        return None;
+    }
 
-    let open  = raw_type.find('<')?;
+    let open = raw_type.find('<')?;
     let close = raw_type.rfind('>')?;
-    if close <= open { return None; }
+    if close <= open {
+        return None;
+    }
     let inner = &raw_type[open + 1..close];
 
     // Take first type argument (before the first `,` at depth 0).
@@ -240,7 +285,10 @@ pub(crate) fn infer_field_type(idx: &Indexer, file_uri: &str, field_name: &str) 
     if let Some(data) = idx.files.get(file_uri) {
         return data.lines.infer_type(field_name);
     }
-    let path = tower_lsp::lsp_types::Url::parse(file_uri).ok()?.to_file_path().ok()?;
+    let path = tower_lsp::lsp_types::Url::parse(file_uri)
+        .ok()?
+        .to_file_path()
+        .ok()?;
     let content = std::fs::read_to_string(&path).ok()?;
     let lines: Vec<String> = content.lines().map(String::from).collect();
     lines.infer_type(field_name)
@@ -252,14 +300,21 @@ pub(crate) fn infer_field_type(idx: &Indexer, file_uri: &str, field_name: &str) 
 /// needed for collection element type extraction via `extract_collection_element_type`.
 /// Checks live editor lines first (most up-to-date), then falls back to indexed
 /// lines and finally to a disk read for un-indexed files.
-pub(crate) fn infer_field_type_raw(idx: &Indexer, file_uri: &str, field_name: &str) -> Option<String> {
+pub(crate) fn infer_field_type_raw(
+    idx: &Indexer,
+    file_uri: &str,
+    field_name: &str,
+) -> Option<String> {
     if let Some(live) = idx.live_lines.get(file_uri) {
         return live.infer_type_raw(field_name);
     }
     if let Some(data) = idx.files.get(file_uri) {
         return data.lines.infer_type_raw(field_name);
     }
-    let path = tower_lsp::lsp_types::Url::parse(file_uri).ok()?.to_file_path().ok()?;
+    let path = tower_lsp::lsp_types::Url::parse(file_uri)
+        .ok()?
+        .to_file_path()
+        .ok()?;
     let content = std::fs::read_to_string(&path).ok()?;
     let lines: Vec<String> = content.lines().map(String::from).collect();
     lines.infer_type_raw(field_name)
@@ -270,7 +325,11 @@ pub(crate) fn infer_field_type_raw(idx: &Indexer, file_uri: &str, field_name: &s
 ///
 /// Used for multi-segment receiver chains like `result.availableBanks.map { it }`:
 /// resolves `result` → `ResponseBody`, then looks up `availableBanks` in `ResponseBody`.
-pub(crate) fn find_field_type_in_class(idx: &Indexer, class_name: &str, field_name: &str) -> Option<String> {
+pub(crate) fn find_field_type_in_class(
+    idx: &Indexer,
+    class_name: &str,
+    field_name: &str,
+) -> Option<String> {
     let locs = idx.definitions.get(class_name)?;
     for loc in locs.iter() {
         if let Some(ty) = infer_field_type_raw(idx, loc.uri.as_str(), field_name) {
@@ -312,7 +371,9 @@ pub(crate) fn infer_type_in_lines(lines: &[String], var_name: &str) -> Option<St
     let pattern = format!("{var_name}:");
 
     for line in lines {
-        if !line.contains(&pattern) { continue; }
+        if !line.contains(&pattern) {
+            continue;
+        }
 
         let trimmed = line.trim_start();
         if trimmed.starts_with("//") || trimmed.starts_with('*') || trimmed.starts_with("/*") {
@@ -322,21 +383,23 @@ pub(crate) fn infer_type_in_lines(lines: &[String], var_name: &str) -> Option<St
         if let Some(pos) = line.find(&pattern) {
             // Ensure var_name is not a suffix of a longer identifier.
             let before_char = line[..pos].chars().last();
-            if before_char.map(|c| c.is_alphanumeric() || c == '_').unwrap_or(false) {
+            if before_char
+                .map(|c| c.is_alphanumeric() || c == '_')
+                .unwrap_or(false)
+            {
                 continue;
             }
             let after = &line[pos + var_name.len()..];
             let after = after.trim_start_matches(':').trim_start();
             // Allow dotted type names like `DashboardProductsReducer.Factory`
             // Stop at generic params (`<`), nullability (`?`), spaces, assignment.
-            let type_name: String = after.chars()
+            let type_name: String = after
+                .chars()
                 .take_while(|&c| c.is_alphanumeric() || c == '_' || c == '.')
                 .collect();
             // Trim any trailing dots.
             let type_name = type_name.trim_end_matches('.').to_owned();
-            if !type_name.is_empty()
-                && type_name.starts_with_uppercase()
-            {
+            if !type_name.is_empty() && type_name.starts_with_uppercase() {
                 return Some(type_name);
             }
         }
@@ -363,14 +426,19 @@ pub(crate) fn infer_type_in_lines_raw(lines: &[String], var_name: &str) -> Optio
     let pattern = format!("{var_name}:");
 
     for line in lines {
-        if !line.contains(&pattern) { continue; }
+        if !line.contains(&pattern) {
+            continue;
+        }
         let trimmed = line.trim_start();
         if trimmed.starts_with("//") || trimmed.starts_with('*') || trimmed.starts_with("/*") {
             continue;
         }
         if let Some(pos) = line.find(&pattern) {
             let before_char = line[..pos].chars().last();
-            if before_char.map(|c| c.is_alphanumeric() || c == '_').unwrap_or(false) {
+            if before_char
+                .map(|c| c.is_alphanumeric() || c == '_')
+                .unwrap_or(false)
+            {
                 continue;
             }
             let after = &line[pos + var_name.len()..];
@@ -386,7 +454,9 @@ pub(crate) fn infer_type_in_lines_raw(lines: &[String], var_name: &str) -> Optio
     // Works only for single-line declarations without an explicit type annotation.
     let lazy_pattern = format!("{var_name} by lazy");
     for line in lines {
-        if !line.contains(&lazy_pattern) { continue; }
+        if !line.contains(&lazy_pattern) {
+            continue;
+        }
         let trimmed = line.trim_start();
         if trimmed.starts_with("//") || trimmed.starts_with('*') || trimmed.starts_with("/*") {
             continue;
@@ -426,22 +496,32 @@ fn find_rhs_str<'a>(line: &'a str, var_name: &str) -> Option<&'a str> {
     // Whole-word check: character before var_name must not be alphanumeric or `_`.
     if pos > 0 {
         let b = line.as_bytes()[pos - 1];
-        if b.is_ascii_alphanumeric() || b == b'_' { return None; }
+        if b.is_ascii_alphanumeric() || b == b'_' {
+            return None;
+        }
     }
     // Whole-word check: character after var_name must not be alphanumeric or `_`.
     let end = pos + var_name.len();
     let c_after = line.as_bytes().get(end).copied().unwrap_or(b' ');
-    if c_after.is_ascii_alphanumeric() || c_after == b'_' { return None; }
+    if c_after.is_ascii_alphanumeric() || c_after == b'_' {
+        return None;
+    }
     // Reject type-annotation position: last non-space token before name is `:`, `,`, or `<`.
     let last_tok = line[..pos].trim_end().chars().last().unwrap_or(' ');
-    if last_tok == ':' || last_tok == ',' || last_tok == '<' { return None; }
+    if last_tok == ':' || last_tok == ',' || last_tok == '<' {
+        return None;
+    }
     // Find `=` after the name, skipping whitespace.
     let after = &line[end..];
     let trimmed_after = after.trim_start();
-    if !trimmed_after.starts_with('=') { return None; }
+    if !trimmed_after.starts_with('=') {
+        return None;
+    }
     // Reject `==` and `=>`.
     let next = trimmed_after.as_bytes().get(1).copied().unwrap_or(b' ');
-    if next == b'=' || next == b'>' { return None; }
+    if next == b'=' || next == b'>' {
+        return None;
+    }
     Some(trimmed_after[1..].trim_start())
 }
 
@@ -493,7 +573,10 @@ fn infer_from_rhs_assignment(line: &str, var_name: &str) -> Option<String> {
         let inside = &rhs[paren_pos + 1..];
         if let Some(class_pos) = inside.find("::class") {
             let before_class = inside[..class_pos].trim_end();
-            let type_name = before_class.split(|c: char| !c.is_alphanumeric() && c != '_').next_back().unwrap_or("");
+            let type_name = before_class
+                .split(|c: char| !c.is_alphanumeric() && c != '_')
+                .next_back()
+                .unwrap_or("");
             if !type_name.is_empty() && type_name.starts_with_uppercase() {
                 return Some(type_name.to_owned());
             }
@@ -540,7 +623,9 @@ fn has_dot_after_first_call(rhs: &str, paren_pos: usize) -> bool {
             '(' | '[' | '{' => depth2 += 1,
             ')' | ']' | '}' => {
                 depth2 -= 1;
-                if depth2 == 0 { past_close = true; }
+                if depth2 == 0 {
+                    past_close = true;
+                }
             }
             '.' if past_close => return true,
             c if past_close && !c.is_whitespace() => return false,
@@ -551,7 +636,11 @@ fn has_dot_after_first_call(rhs: &str, paren_pos: usize) -> bool {
 }
 
 fn infer_method_return_type(
-    idx: &Indexer, var_name: &str, lines: &[String], uri: &Url, depth: u8,
+    idx: &Indexer,
+    var_name: &str,
+    lines: &[String],
+    uri: &Url,
+    depth: u8,
 ) -> Option<String> {
     let mut plain_fn_candidates: Vec<String> = Vec::new();
 
@@ -570,12 +659,18 @@ fn infer_method_return_type(
         match before_paren.rfind('.') {
             Some(dot_pos) => {
                 let receiver = before_paren[..dot_pos].trim();
-                let method   = before_paren[dot_pos + 1..].trim();
+                let method = before_paren[dot_pos + 1..].trim();
 
-                if receiver.is_empty() || method.is_empty() { continue; }
+                if receiver.is_empty() || method.is_empty() {
+                    continue;
+                }
                 // Skip `this`/`super` and multi-segment receivers.
-                if receiver == "this" || receiver == "super" || receiver.contains('.') { continue; }
-                if !method.starts_with_lowercase() { continue; }
+                if receiver == "this" || receiver == "super" || receiver.contains('.') {
+                    continue;
+                }
+                if !method.starts_with_lowercase() {
+                    continue;
+                }
 
                 // Recursively infer the receiver type (DashMap guards already dropped).
                 if let Some(receiver_type) = infer_variable_type_impl(idx, receiver, uri, depth) {
@@ -623,8 +718,13 @@ pub(crate) fn find_fun_return_type_by_name(idx: &Indexer, fn_name: &str) -> Opti
     for loc in locations.iter() {
         if let Some(file_data) = idx.files.get(loc.uri.as_str()) {
             for sym in &file_data.symbols {
-                if sym.name != fn_name { continue; }
-                if !matches!(sym.kind, SymbolKind::FUNCTION | SymbolKind::METHOD | SymbolKind::OPERATOR) {
+                if sym.name != fn_name {
+                    continue;
+                }
+                if !matches!(
+                    sym.kind,
+                    SymbolKind::FUNCTION | SymbolKind::METHOD | SymbolKind::OPERATOR
+                ) {
                     continue;
                 }
                 if let Some(ret) = extract_return_type_from_detail(&sym.detail) {
@@ -641,7 +741,6 @@ pub(crate) fn find_fun_return_type_by_name(idx: &Indexer, fn_name: &str) -> Opti
     None
 }
 
-
 fn find_method_return_type(idx: &Indexer, type_name: &str, method_name: &str) -> Option<String> {
     let type_base = type_name.split('.').next_back().unwrap_or(type_name);
     let locations = idx.definitions.get(type_base)?;
@@ -650,13 +749,20 @@ fn find_method_return_type(idx: &Indexer, type_name: &str, method_name: &str) ->
             // Find the class entry for type_base so we can do range containment
             // filtering — avoids picking a same-named method from an unrelated class
             // in the same file.
-            let class_range = file_data.symbols.iter()
+            let class_range = file_data
+                .symbols
+                .iter()
                 .find(|s| s.name == type_base)
                 .map(|s| s.range);
 
             for sym in &file_data.symbols {
-                if sym.name != method_name { continue; }
-                if !matches!(sym.kind, SymbolKind::FUNCTION | SymbolKind::METHOD | SymbolKind::OPERATOR) {
+                if sym.name != method_name {
+                    continue;
+                }
+                if !matches!(
+                    sym.kind,
+                    SymbolKind::FUNCTION | SymbolKind::METHOD | SymbolKind::OPERATOR
+                ) {
                     continue;
                 }
                 // When we know the class range, skip methods outside it.
@@ -688,7 +794,9 @@ fn find_method_return_type(idx: &Indexer, type_name: &str, method_name: &str) ->
 fn extract_return_type_from_detail(detail: &str) -> Option<String> {
     let close_paren = detail.rfind(')')?;
     let after = detail[close_paren + 1..].trim_start();
-    if !after.starts_with(':') { return None; }
+    if !after.starts_with(':') {
+        return None;
+    }
     let type_part = after[1..].trim_start();
     let type_name = extract_type_with_generics(type_part);
     if !type_name.is_empty() && type_name.starts_with_uppercase() {
@@ -706,13 +814,20 @@ fn extract_type_with_generics(s: &str) -> String {
     let mut depth = 0i32;
     for c in s.chars() {
         match c {
-            '<' => { depth += 1; result.push(c); }
+            '<' => {
+                depth += 1;
+                result.push(c);
+            }
             '>' => {
                 if depth > 0 {
                     depth -= 1;
                     result.push(c);
-                    if depth == 0 { break; }
-                } else { break; }
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
+                    break;
+                }
             }
             // Stop at these outside of generic brackets.
             '?' | ' ' | '=' | ',' | ')' | '\n' if depth == 0 => break,
@@ -733,7 +848,7 @@ pub(crate) fn find_declaration_range_in_lines(lines: &[String], name: &str) -> O
 
     // Pattern 2: `{ name ->` or `name ->` — untyped lambda / trailing-lambda parameter
     let lambda_arrow = format!("{name} ->");
-    let lambda_brace = format!("{{ {name} ->");  // with brace prefix
+    let lambda_brace = format!("{{ {name} ->"); // with brace prefix
 
     for (line_num, line) in lines.iter().enumerate() {
         let trimmed = line.trim_start();
@@ -745,13 +860,21 @@ pub(crate) fn find_declaration_range_in_lines(lines: &[String], name: &str) -> O
         if line.contains(&typed_pattern) {
             if let Some(pos) = line.find(&typed_pattern) {
                 let before = line[..pos].chars().last();
-                if !before.map(|c| c.is_alphanumeric() || c == '_').unwrap_or(false)
+                if !before
+                    .map(|c| c.is_alphanumeric() || c == '_')
+                    .unwrap_or(false)
                     && !line[..pos].trim_end().ends_with('"')
                 {
                     let col = pos as u32;
                     return Some(Range {
-                        start: Position { line: line_num as u32, character: col },
-                        end:   Position { line: line_num as u32, character: col + name.len() as u32 },
+                        start: Position {
+                            line: line_num as u32,
+                            character: col,
+                        },
+                        end: Position {
+                            line: line_num as u32,
+                            character: col + name.len() as u32,
+                        },
                     });
                 }
             }
@@ -771,15 +894,28 @@ pub(crate) fn find_declaration_range_in_lines(lines: &[String], name: &str) -> O
             if is_lambda {
                 if let Some(pos) = line.find(name) {
                     // Make sure we matched the right token (word boundary check)
-                    let before = pos.checked_sub(1).and_then(|i| line.as_bytes().get(i)).copied();
-                    let after  = line.as_bytes().get(pos + name.len()).copied();
-                    let boundary = before.map(|b| !b.is_ascii_alphanumeric() && b != b'_').unwrap_or(true)
-                        && after.map(|b| !b.is_ascii_alphanumeric() && b != b'_').unwrap_or(true);
+                    let before = pos
+                        .checked_sub(1)
+                        .and_then(|i| line.as_bytes().get(i))
+                        .copied();
+                    let after = line.as_bytes().get(pos + name.len()).copied();
+                    let boundary = before
+                        .map(|b| !b.is_ascii_alphanumeric() && b != b'_')
+                        .unwrap_or(true)
+                        && after
+                            .map(|b| !b.is_ascii_alphanumeric() && b != b'_')
+                            .unwrap_or(true);
                     if boundary {
                         let col = pos as u32;
                         return Some(Range {
-                            start: Position { line: line_num as u32, character: col },
-                            end:   Position { line: line_num as u32, character: col + name.len() as u32 },
+                            start: Position {
+                                line: line_num as u32,
+                                character: col,
+                            },
+                            end: Position {
+                                line: line_num as u32,
+                                character: col + name.len() as u32,
+                            },
                         });
                     }
                 }
@@ -804,14 +940,19 @@ mod infer_tests {
     #[test]
     fn return_type_generic() {
         assert_eq!(
-            extract_return_type_from_detail("fun getAccountDetail(body: Body): Response<AccountDetail>"),
+            extract_return_type_from_detail(
+                "fun getAccountDetail(body: Body): Response<AccountDetail>"
+            ),
             Some("Response<AccountDetail>".into()),
         );
     }
 
     #[test]
     fn return_type_unit_returns_none() {
-        assert_eq!(extract_return_type_from_detail("fun doSomething(x: Int)"), None);
+        assert_eq!(
+            extract_return_type_from_detail("fun doSomething(x: Int)"),
+            None
+        );
     }
 
     #[test]
@@ -830,12 +971,18 @@ mod infer_tests {
     #[test]
     fn has_dot_after_first_call_chained() {
         // paren_pos=7: "getList" is 7 chars, then "("
-        assert!(super::has_dot_after_first_call("getList(isRefresh).joinAll()", 7));
+        assert!(super::has_dot_after_first_call(
+            "getList(isRefresh).joinAll()",
+            7
+        ));
     }
 
     #[test]
     fn has_dot_after_first_call_standalone() {
-        assert!(!super::has_dot_after_first_call("getConnectedAccounts(isRefresh)", 20));
+        assert!(!super::has_dot_after_first_call(
+            "getConnectedAccounts(isRefresh)",
+            20
+        ));
     }
 
     #[test]

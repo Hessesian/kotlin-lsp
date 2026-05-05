@@ -7,53 +7,35 @@
 //! - `args`     — call argument parsing (pure)
 //! - `it_this`  — resolving `it`/`this` element types inside Kotlin lambda bodies
 
+pub mod args;
 pub mod deps;
+pub mod it_this;
 pub mod lambda;
 pub mod sig;
-pub mod args;
-pub mod it_this;
 
 pub(crate) use deps::InferDeps;
 #[cfg(test)]
 pub(crate) use deps::TestDeps;
 
 pub(crate) use lambda::{
-    RECEIVER_THIS_FNS,
-    lambda_type_first_input,
-    lambda_type_nth_input,
-    lambda_type_receiver,
+    lambda_type_first_input, lambda_type_nth_input, lambda_type_receiver, RECEIVER_THIS_FNS,
 };
 
 pub(crate) use sig::{
-    collect_signature,
-    collect_params_from_line,
-    find_fun_signature_full,
-    find_fun_signature_with_receiver,
-    collect_all_fun_params_texts,
-    nth_fun_param_type_str,
-    last_fun_param_type_str,
-    strip_trailing_call_args,
+    collect_all_fun_params_texts, collect_params_from_line, collect_signature,
+    find_fun_signature_full, find_fun_signature_with_receiver, last_fun_param_type_str,
+    nth_fun_param_type_str, strip_trailing_call_args,
 };
 
 pub(crate) use args::{
-    find_as_call_arg_type,
-    extract_first_arg,
-    extract_named_arg_name,
-    find_named_param_type_in_sig,
+    extract_first_arg, extract_named_arg_name, find_as_call_arg_type, find_named_param_type_in_sig,
     has_named_params_not_it,
 };
 
 pub(crate) use it_this::{
-    find_it_element_type,
-    find_it_element_type_in_lines,
-    find_this_element_type_in_lines,
-    find_named_lambda_param_type_in_lines,
-    find_named_lambda_param_type,
-    is_lambda_param,
-    lambda_receiver_type_from_context,
+    find_it_element_type, find_it_element_type_in_lines, find_last_dot_at_depth_zero,
+    find_named_lambda_param_type, find_named_lambda_param_type_in_lines,
+    find_this_element_type_in_lines, is_inside_receiver_lambda, is_lambda_param,
+    lambda_brace_pos_for_param, lambda_param_position_on_line, lambda_receiver_type_from_context,
     line_has_lambda_param,
-    lambda_brace_pos_for_param,
-    lambda_param_position_on_line,
-    find_last_dot_at_depth_zero,
-    is_inside_receiver_lambda,
 };

@@ -3,8 +3,8 @@
 //! Each method is a thin façade over the original free function; no logic
 //! lives here.  The original free functions are kept intact so existing
 //! callers continue to compile during the incremental migration.
-use tower_lsp::lsp_types::{Range, TextEdit};
 use crate::types::{ImportEntry, Visibility};
+use tower_lsp::lsp_types::{Range, TextEdit};
 
 pub(crate) trait LinesExt {
     /// Concatenate lines from `start_line..=end_line` into a single detail string.

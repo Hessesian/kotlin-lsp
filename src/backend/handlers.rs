@@ -1,27 +1,27 @@
+use super::actions::is_non_call_keyword;
+use super::cursor::CursorContext;
+use super::format::{format_contextual_hover, format_symbol_hover};
+use super::helpers::resolve_references_scope;
+use super::Backend;
+use crate::indexer::apply_type_subst;
+use crate::indexer::find_fun_signature_with_receiver;
+use crate::indexer::resolution::{
+    enrich_at_location, resolve_symbol_info, ResolveOptions, SubstitutionContext,
+};
+use crate::indexer::NodeExt;
+use crate::inlay_hints::compute_inlay_hints;
+use crate::queries::KIND_VALUE_ARG;
+use crate::StrExt;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
-use crate::indexer::find_fun_signature_with_receiver;
-use crate::indexer::NodeExt;
-use crate::indexer::resolution::{
-    resolve_symbol_info, enrich_at_location, SubstitutionContext, ResolveOptions,
-};
-use crate::indexer::apply_type_subst;
-use crate::StrExt;
-use crate::queries::KIND_VALUE_ARG;
-use crate::inlay_hints::compute_inlay_hints;
-use super::Backend;
-use super::cursor::CursorContext;
-use super::helpers::resolve_references_scope;
-use super::actions::is_non_call_keyword;
-use super::format::{format_symbol_hover, format_contextual_hover};
 
 /// Maximum number of workspace symbol results to return.
 const WORKSPACE_SYMBOL_CAP: usize = 512;
 
 impl Backend {
     pub(super) async fn hover_impl(&self, params: HoverParams) -> Result<Option<Hover>> {
-        let pp       = params.text_document_position_params;
-        let uri      = &pp.text_document.uri;
+        let pp = params.text_document_position_params;
+        let uri = &pp.text_document.uri;
         let position = pp.position;
 
         let Some(ctx) = CursorContext::build(&self.indexer, uri, position) else {
@@ -39,8 +39,16 @@ impl Backend {
         // Path 1: `it` / named lambda param — show inferred type + optional type detail.
         if ctx.qualifier.is_none() {
             if let Some(ref rt) = ctx.contextual {
-                let kw = if crate::Language::from_path(uri.path()).is_swift() { "let" } else { "val" };
-                let subst = crate::indexer::resolution::build_subst_map(self.indexer.as_ref(), uri.as_str(), position.line);
+                let kw = if crate::Language::from_path(uri.path()).is_swift() {
+                    "let"
+                } else {
+                    "val"
+                };
+                let subst = crate::indexer::resolution::build_subst_map(
+                    self.indexer.as_ref(),
+                    uri.as_str(),
+                    position.line,
+                );
                 let type_name = if subst.is_empty() {
                     rt.raw.clone()
                 } else {
@@ -50,11 +58,18 @@ impl Backend {
                 let type_sig_md = format!("{kw} {}: {type_name}", ctx.word);
                 // Resolve the type's own hover: import-aware, rg fallback, then stdlib.
                 let type_detail = resolve_symbol_info(
-                        self.indexer.as_ref(), leaf, None, uri,
-                        SubstitutionContext::CrossFile { calling_uri: uri.as_str(), cursor_line: Some(position.line) },
-                        &ResolveOptions::hover())
-                    .map(|i| format_symbol_hover(&i, uri.path()))
-                    .or_else(|| crate::stdlib::hover(leaf));
+                    self.indexer.as_ref(),
+                    leaf,
+                    None,
+                    uri,
+                    SubstitutionContext::CrossFile {
+                        calling_uri: uri.as_str(),
+                        cursor_line: Some(position.line),
+                    },
+                    &ResolveOptions::hover(),
+                )
+                .map(|i| format_symbol_hover(&i, uri.path()))
+                .or_else(|| crate::stdlib::hover(leaf));
                 let md = format_contextual_hover(&type_sig_md, uri.path(), type_detail.as_deref());
                 return Ok(Some(make_hover(md)));
             }
@@ -75,7 +90,13 @@ impl Backend {
                         calling_uri: uri.as_str(),
                         cursor_line: Some(position.line),
                     };
-                    if let Some(info) = enrich_at_location(self.indexer.as_ref(), loc, &ctx.word, subst_ctx, &ResolveOptions::hover()) {
+                    if let Some(info) = enrich_at_location(
+                        self.indexer.as_ref(),
+                        loc,
+                        &ctx.word,
+                        subst_ctx,
+                        &ResolveOptions::hover(),
+                    ) {
                         return Ok(Some(make_hover(format_symbol_hover(&info, uri.path()))));
                     }
                 }
@@ -88,10 +109,15 @@ impl Backend {
             cursor_line: Some(position.line),
         };
         let hover_md = resolve_symbol_info(
-                self.indexer.as_ref(), &ctx.word, ctx.qualifier.as_deref(), uri,
-                subst_ctx, &ResolveOptions::hover())
-            .map(|i| format_symbol_hover(&i, uri.path()))
-            .or_else(|| crate::stdlib::hover(&ctx.word));
+            self.indexer.as_ref(),
+            &ctx.word,
+            ctx.qualifier.as_deref(),
+            uri,
+            subst_ctx,
+            &ResolveOptions::hover(),
+        )
+        .map(|i| format_symbol_hover(&i, uri.path()))
+        .or_else(|| crate::stdlib::hover(&ctx.word));
 
         Ok(hover_md.map(make_hover))
     }
@@ -100,39 +126,45 @@ impl Backend {
         &self,
         params: ReferenceParams,
     ) -> Result<Option<Vec<Location>>> {
-        let uri  = &params.text_document_position.text_document.uri;
-        let pos  = params.text_document_position.position;
+        let uri = &params.text_document_position.text_document.uri;
+        let pos = params.text_document_position.position;
         let include_decl = params.context.include_declaration;
 
         let (name, _qualifier) = match self.indexer.word_and_qualifier_at(uri, pos) {
             Some(pair) => pair,
-            None       => return Ok(None),
+            None => return Ok(None),
         };
 
         // For uppercase symbols, determine parent_class and declared_pkg:
         // - If cursor is ON the declaration of this symbol → use enclosing_class_at(cursor)
         // - If cursor is on a REFERENCE → scan imports in current file to find which
         //   specific class is meant (handles multiple `Effect` classes across files)
-        let (parent_class, declared_pkg) = resolve_references_scope(
-            &self.indexer, uri, pos.line, &name,
-        );
+        let (parent_class, declared_pkg) =
+            resolve_references_scope(&self.indexer, uri, pos.line, &name);
         // Collect declaration file paths — but only those where the enclosing class
         // matches parent_class (if known).  Without this filter, every contract file
         // that has `sealed interface Event` would be included, causing false positives
         // for unrelated ViewModels in other packages.
-        let decl_files: Vec<String> = self.indexer.definitions.get(&name)
-            .map(|locs| locs.iter()
-                .filter(|l| {
-                    if let Some(ref parent) = parent_class {
-                        self.indexer.enclosing_class_at(&l.uri, l.range.start.line)
-                            .as_deref() == Some(parent.as_str())
-                    } else {
-                        true
-                    }
-                })
-                .filter_map(|l| l.uri.to_file_path().ok())
-                .filter_map(|p| p.to_str().map(|s| s.to_owned()))
-                .collect())
+        let decl_files: Vec<String> = self
+            .indexer
+            .definitions
+            .get(&name)
+            .map(|locs| {
+                locs.iter()
+                    .filter(|l| {
+                        if let Some(ref parent) = parent_class {
+                            self.indexer
+                                .enclosing_class_at(&l.uri, l.range.start.line)
+                                .as_deref()
+                                == Some(parent.as_str())
+                        } else {
+                            true
+                        }
+                    })
+                    .filter_map(|l| l.uri.to_file_path().ok())
+                    .filter_map(|p| p.to_str().map(|s| s.to_owned()))
+                    .collect()
+            })
             .unwrap_or_default();
 
         // Run rg off the async executor to avoid blocking the Tokio runtime.
@@ -171,20 +203,29 @@ impl Backend {
         let cur_uri_str = uri.as_str();
         if let Some(data) = self.indexer.files.get(cur_uri_str) {
             for (line_idx, line) in data.lines.iter().enumerate() {
-                let dup_line = locs.iter().any(|l: &Location| {
-                    l.uri == *uri && l.range.start.line == line_idx as u32
-                });
-                if dup_line { continue; }
+                let dup_line = locs
+                    .iter()
+                    .any(|l: &Location| l.uri == *uri && l.range.start.line == line_idx as u32);
+                if dup_line {
+                    continue;
+                }
                 for abs in word_byte_offsets(line, name.as_str()) {
                     // Compute UTF-16 column (LSP units) for the match start.
                     let col: u32 = line[..abs].chars().map(|c| c.len_utf16() as u32).sum();
-                    let col_end: u32 = col + name.chars().map(|c| c.len_utf16() as u32).sum::<u32>();
+                    let col_end: u32 =
+                        col + name.chars().map(|c| c.len_utf16() as u32).sum::<u32>();
                     let range = Range::new(
                         Position::new(line_idx as u32, col),
                         Position::new(line_idx as u32, col_end),
                     );
-                    if !locs.iter().any(|l: &Location| l.uri == *uri && l.range.start == range.start) {
-                        locs.push(Location { uri: uri.clone(), range });
+                    if !locs
+                        .iter()
+                        .any(|l: &Location| l.uri == *uri && l.range.start == range.start)
+                    {
+                        locs.push(Location {
+                            uri: uri.clone(),
+                            range,
+                        });
                     }
                 }
             }
@@ -216,14 +257,18 @@ impl Backend {
         let doc_symbols = symbols
             .into_iter()
             .map(|s| DocumentSymbol {
-                name:             s.name,
-                detail:           if s.detail.is_empty() { None } else { Some(s.detail) },
-                kind:             s.kind,
-                tags:             None,
-                deprecated:       None,
-                range:            s.range,
-                selection_range:  s.selection_range,
-                children:         None,
+                name: s.name,
+                detail: if s.detail.is_empty() {
+                    None
+                } else {
+                    Some(s.detail)
+                },
+                kind: s.kind,
+                tags: None,
+                deprecated: None,
+                range: s.range,
+                selection_range: s.selection_range,
+                children: None,
             })
             .collect();
 
@@ -234,7 +279,7 @@ impl Backend {
         &self,
         params: InlayHintParams,
     ) -> Result<Option<Vec<InlayHint>>> {
-        let uri   = &params.text_document.uri;
+        let uri = &params.text_document.uri;
         let range = params.range;
         let hints = compute_inlay_hints(&self.indexer, uri, range);
         Ok(if hints.is_empty() { None } else { Some(hints) })
@@ -272,8 +317,7 @@ impl Backend {
                 } else if let Some(qualifier) = query_qualifier {
                     // Dot-qualified: name must match AND detail must contain
                     // the receiver type (e.g. "fun StoreState.isReady()")
-                    name_lower.contains(query_name)
-                        && sym.detail.to_lowercase().contains(qualifier)
+                    name_lower.contains(query_name) && sym.detail.to_lowercase().contains(qualifier)
                 } else {
                     name_lower.contains(&query)
                 };
@@ -282,15 +326,19 @@ impl Backend {
                 }
                 #[allow(deprecated)]
                 results.push(SymbolInformation {
-                    name:           sym.name.clone(),
-                    kind:           sym.kind,
-                    tags:           None,
-                    deprecated:     None,
-                    location:       Location {
-                        uri:   uri.clone(),
+                    name: sym.name.clone(),
+                    kind: sym.kind,
+                    tags: None,
+                    deprecated: None,
+                    location: Location {
+                        uri: uri.clone(),
                         range: sym.selection_range,
                     },
-                    container_name: if sym.detail.is_empty() { None } else { Some(sym.detail.clone()) },
+                    container_name: if sym.detail.is_empty() {
+                        None
+                    } else {
+                        Some(sym.detail.clone())
+                    },
                 });
                 if results.len() >= WORKSPACE_SYMBOL_CAP {
                     break;
@@ -310,24 +358,33 @@ impl Backend {
             let q = query.to_string();
             let rg_locs = tokio::task::spawn_blocking(move || {
                 crate::rg::rg_find_definition(&q, root_opt.as_deref(), matcher.as_deref())
-            }).await.unwrap_or_default();
+            })
+            .await
+            .unwrap_or_default();
             if !rg_locs.is_empty() {
-                let rg_syms: Vec<SymbolInformation> = rg_locs.into_iter().map(|loc| {
-                    #[allow(deprecated)]
-                    SymbolInformation {
-                        name: query_name.to_string(),
-                        kind: tower_lsp::lsp_types::SymbolKind::FILE,
-                        tags: None,
-                        deprecated: None,
-                        location: loc,
-                        container_name: Some("rg fallback".to_string()),
-                    }
-                }).collect();
+                let rg_syms: Vec<SymbolInformation> = rg_locs
+                    .into_iter()
+                    .map(|loc| {
+                        #[allow(deprecated)]
+                        SymbolInformation {
+                            name: query_name.to_string(),
+                            kind: tower_lsp::lsp_types::SymbolKind::FILE,
+                            tags: None,
+                            deprecated: None,
+                            location: loc,
+                            container_name: Some("rg fallback".to_string()),
+                        }
+                    })
+                    .collect();
                 return Ok(Some(rg_syms));
             }
         }
 
-        Ok(if results.is_empty() { None } else { Some(results) })
+        Ok(if results.is_empty() {
+            None
+        } else {
+            Some(results)
+        })
     }
 
     pub(super) async fn signature_help_impl(
@@ -361,9 +418,8 @@ impl Backend {
             return Ok(None);
         };
 
-        let params_text = find_fun_signature_with_receiver(
-            &self.indexer, uri, &name, qualifier.as_deref(),
-        );
+        let params_text =
+            find_fun_signature_with_receiver(&self.indexer, uri, &name, qualifier.as_deref());
         if params_text.is_empty() {
             return Ok(None);
         }
@@ -378,7 +434,7 @@ impl Backend {
         let uri = &params.text_document.uri;
         let data = match self.indexer.files.get(uri.as_str()) {
             Some(d) => d,
-            None    => return Ok(None),
+            None => return Ok(None),
         };
 
         let mut ranges: Vec<FoldingRange> = Vec::new();
@@ -387,7 +443,7 @@ impl Backend {
 
         for (i, line) in lines.iter().enumerate() {
             let trimmed = line.trim();
-            let opens  = trimmed.chars().filter(|&c| c == '{').count() as i32;
+            let opens = trimmed.chars().filter(|&c| c == '{').count() as i32;
             let closes = trimmed.chars().filter(|&c| c == '}').count() as i32;
             let net = opens - closes;
 
@@ -403,9 +459,9 @@ impl Backend {
                                 start_line,
                                 end_line: i as u32,
                                 start_character: None,
-                                end_character:   None,
-                                kind:            Some(FoldingRangeKind::Region),
-                                collapsed_text:  None,
+                                end_character: None,
+                                kind: Some(FoldingRangeKind::Region),
+                                collapsed_text: None,
                             });
                         }
                     }
@@ -424,17 +480,21 @@ impl Backend {
                 if i as u32 > cs + 1 {
                     ranges.push(FoldingRange {
                         start_line: cs,
-                        end_line:   (i as u32) - 1,
+                        end_line: (i as u32) - 1,
                         start_character: None,
-                        end_character:   None,
-                        kind:        Some(FoldingRangeKind::Comment),
+                        end_character: None,
+                        kind: Some(FoldingRangeKind::Comment),
                         collapsed_text: None,
                     });
                 }
             }
         }
 
-        Ok(if ranges.is_empty() { None } else { Some(ranges) })
+        Ok(if ranges.is_empty() {
+            None
+        } else {
+            Some(ranges)
+        })
     }
 
     // ── textDocument/documentHighlight ───────────────────────────────────────
@@ -468,7 +528,7 @@ impl Backend {
 
         let data = match self.indexer.files.get(uri.as_str()) {
             Some(d) => d,
-            None    => return Ok(None),
+            None => return Ok(None),
         };
 
         let mut highlights = Vec::new();
@@ -485,26 +545,42 @@ impl Backend {
                 } else {
                     DocumentHighlightKind::READ
                 };
-                highlights.push(DocumentHighlight { range, kind: Some(kind) });
+                highlights.push(DocumentHighlight {
+                    range,
+                    kind: Some(kind),
+                });
             }
         }
 
-        Ok(if highlights.is_empty() { None } else { Some(highlights) })
+        Ok(if highlights.is_empty() {
+            None
+        } else {
+            Some(highlights)
+        })
     }
 }
 
 // ─── Private helpers for signature_help_impl ─────────────────────────────────
 
 /// Build a `SignatureHelp` response from pre-computed parts.
-fn build_signature_help(fn_name: &str, params_text: &str, active_param: u32) -> Option<SignatureHelp> {
+fn build_signature_help(
+    fn_name: &str,
+    params_text: &str,
+    active_param: u32,
+) -> Option<SignatureHelp> {
     let raw = params_text.trim_matches(|c| c == '(' || c == ')');
-    let param_parts: Vec<&str> = raw.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
-    let parameters: Vec<ParameterInformation> = param_parts.iter().map(|p| {
-        ParameterInformation {
+    let param_parts: Vec<&str> = raw
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let parameters: Vec<ParameterInformation> = param_parts
+        .iter()
+        .map(|p| ParameterInformation {
             label: ParameterLabel::Simple(p.to_string()),
             documentation: None,
-        }
-    }).collect();
+        })
+        .collect();
     let label = format!("{}({})", fn_name, param_parts.join(", "));
     let active_param = active_param.min(parameters.len().saturating_sub(1) as u32);
     Some(SignatureHelp {
@@ -525,11 +601,11 @@ fn build_signature_help(fn_name: &str, params_text: &str, active_param: u32) -> 
 /// Falls back to a text scan when no live tree is available, when the cursor
 /// is inside a lambda literal, or when the callee shape is not recognised.
 fn extract_call_info(
-    pos:      Position,
-    indexer:  &crate::indexer::Indexer,
-    uri:      &Url,
-    lines:    &[String],
-    before:   &str,
+    pos: Position,
+    indexer: &crate::indexer::Indexer,
+    uri: &Url,
+    lines: &[String],
+    before: &str,
     line_idx: usize,
 ) -> Option<(String, Option<String>, u32)> {
     // ── CST path ─────────────────────────────────────────────────────────────
@@ -548,12 +624,12 @@ fn extract_call_info(
 /// - cursor is inside a `lambda_literal`
 /// - callee shape not recognised (`simple_identifier` / `navigation_expression`)
 fn cst_call_info(
-    pos:     Position,
+    pos: Position,
     indexer: &crate::indexer::Indexer,
-    uri:     &Url,
+    uri: &Url,
 ) -> Option<(String, Option<String>, u32)> {
-    use tree_sitter::Point;
     use crate::indexer::live_tree::utf16_col_to_byte;
+    use tree_sitter::Point;
 
     let doc = indexer.live_doc(uri)?;
     let bytes = &doc.bytes;
@@ -562,8 +638,14 @@ fn cst_call_info(
     let line_idx = pos.line as usize;
     let line_text = full_text.lines().nth(line_idx)?;
     let byte_col = utf16_col_to_byte(line_text, pos.character as usize);
-    let point = Point { row: line_idx, column: byte_col };
-    let start_node = doc.tree.root_node().descendant_for_point_range(point, point)?;
+    let point = Point {
+        row: line_idx,
+        column: byte_col,
+    };
+    let start_node = doc
+        .tree
+        .root_node()
+        .descendant_for_point_range(point, point)?;
 
     // Walk up: find call_expression; bail out if we cross into a lambda literal.
     let mut cur = start_node;
@@ -574,7 +656,7 @@ fn cst_call_info(
             _ => match cur.parent() {
                 Some(p) => cur = p,
                 None => break None,
-            }
+            },
         }
     }?;
 
@@ -585,16 +667,22 @@ fn cst_call_info(
     let value_arguments = call_expr.find_value_arguments()?;
 
     // Count active param: how many value_argument children end before the cursor.
-    let cursor_byte = full_text.lines()
+    let cursor_byte = full_text
+        .lines()
         .take(line_idx)
         .map(|l| l.len() + 1) // +1 for the newline
-        .sum::<usize>() + byte_col;
+        .sum::<usize>()
+        + byte_col;
     let active_param = {
         let mut count = 0u32;
         let mut walker = value_arguments.walk();
         for child in value_arguments.children(&mut walker) {
             if child.kind() == KIND_VALUE_ARG {
-                if child.end_byte() <= cursor_byte { count += 1; } else { break; }
+                if child.end_byte() <= cursor_byte {
+                    count += 1;
+                } else {
+                    break;
+                }
             }
         }
         count
@@ -607,21 +695,40 @@ fn cst_call_info(
 /// Returns `(call_name, qualifier)` if an unbalanced `name(` is found,
 /// where net > 0 means more opens than closes on this line.
 fn find_call_open_on_line(line: &str) -> Option<(String, Option<String>)> {
-    for (p, _) in line.char_indices().filter(|&(_, c)| c == '(')
-        .collect::<Vec<_>>().into_iter().rev()
+    for (p, _) in line
+        .char_indices()
+        .filter(|&(_, c)| c == '(')
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
     {
         let before_paren = &line[..p];
         let name = before_paren.last_ident_in();
         if !name.is_empty() && !is_non_call_keyword(name) {
-            let net: i32 = line[p..].chars()
-                .map(|c| match c { '(' => 1, ')' => -1, _ => 0 }).sum();
+            let net: i32 = line[p..]
+                .chars()
+                .map(|c| match c {
+                    '(' => 1,
+                    ')' => -1,
+                    _ => 0,
+                })
+                .sum();
             if net > 0 {
                 // Qualifier before the dot on the same line.
                 let before_name = &before_paren[..before_paren.len() - name.len()];
                 let qualifier = if before_name.ends_with('.') {
-                    let q = before_name.strip_suffix('.').unwrap_or(before_name).last_ident_in();
-                    if q.is_empty() { None } else { Some(q.to_owned()) }
-                } else { None };
+                    let q = before_name
+                        .strip_suffix('.')
+                        .unwrap_or(before_name)
+                        .last_ident_in();
+                    if q.is_empty() {
+                        None
+                    } else {
+                        Some(q.to_owned())
+                    }
+                } else {
+                    None
+                };
                 return Some((name.to_owned(), qualifier));
             }
         }
@@ -643,7 +750,9 @@ fn scan_multiline_call_open(
     let scan_start = line_idx.saturating_sub(MAX_SCAN_BACK_LINES);
     for scan_line in (scan_start..line_idx).rev() {
         let l = &lines[scan_line];
-        if l.contains('{') || l.contains('}') { break; }
+        if l.contains('{') || l.contains('}') {
+            break;
+        }
         if let Some((name, qualifier)) = find_call_open_on_line(l) {
             let mut extra: u32 = 0;
             if scan_line + 1 < line_idx {
@@ -666,7 +775,11 @@ fn extract_dot_qualifier(chars: &[char], j: usize) -> Option<String> {
             k -= 1;
         }
         let q: String = chars[k..j - 1].iter().collect();
-        if !q.is_empty() { Some(q) } else { None }
+        if !q.is_empty() {
+            Some(q)
+        } else {
+            None
+        }
     } else {
         None
     }
@@ -675,8 +788,8 @@ fn extract_dot_qualifier(chars: &[char], j: usize) -> Option<String> {
 /// Text-scan fallback: extract `(fn_name, qualifier, active_param)` by walking
 /// backwards through `before` (and up to 10 previous lines for multiline calls).
 fn text_call_info(
-    lines:    &[String],
-    before:   &str,
+    lines: &[String],
+    before: &str,
     line_idx: usize,
 ) -> Option<(String, Option<String>, u32)> {
     let mut depth: i32 = 0;
@@ -689,8 +802,12 @@ fn text_call_info(
     while i > 0 {
         i -= 1;
         match chars[i] {
-            ')' | ']' => { depth += 1; }
-            '{' | '}' => { break; }
+            ')' | ']' => {
+                depth += 1;
+            }
+            '{' | '}' => {
+                break;
+            }
             '(' => {
                 if depth == 0 {
                     let mut j = i;
@@ -706,13 +823,16 @@ fn text_call_info(
                 }
                 depth -= 1;
             }
-            ',' if depth == 0 => { active_param += 1; }
+            ',' if depth == 0 => {
+                active_param += 1;
+            }
             _ => {}
         }
     }
 
     // Multiline: scan up to 10 lines back when the call opens on a previous line.
-    let in_block_body = before.contains('{') || before.contains('}')
+    let in_block_body = before.contains('{')
+        || before.contains('}')
         || lines[line_idx].trim_start().starts_with('}');
     if call_name.is_none() && line_idx > 0 && !in_block_body {
         if let Some((name, qual, extra)) = scan_multiline_call_open(lines, line_idx) {
@@ -737,9 +857,11 @@ fn word_byte_offsets<'a>(line: &'a str, word: &'a str) -> impl Iterator<Item = u
             let pos = search_from + rel;
             search_from = pos + word_len;
             let before_ok = pos == 0 || !is_id(line[..pos].chars().next_back()?);
-            let after_ok = pos + word_len >= line.len()
-                || !is_id(line[pos + word_len..].chars().next()?);
-            if before_ok && after_ok { return Some(pos); }
+            let after_ok =
+                pos + word_len >= line.len() || !is_id(line[pos + word_len..].chars().next()?);
+            if before_ok && after_ok {
+                return Some(pos);
+            }
         }
         None
     })

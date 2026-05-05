@@ -1,9 +1,9 @@
-use tower_lsp::jsonrpc::Result;
-use tower_lsp::lsp_types::*;
-use super::Backend;
 use super::actions::is_non_call_keyword;
 use super::helpers::resolve_references_scope;
+use super::Backend;
 use crate::StrExt;
+use tower_lsp::jsonrpc::Result;
+use tower_lsp::lsp_types::*;
 
 /// Replace all whole-word occurrences of `word` in `lines` with `replacement`.
 /// Returns the full new file content as a single string (lines joined with `\n`).
@@ -13,7 +13,9 @@ pub(super) fn whole_word_replace_file(lines: &[String], word: &str, replacement:
     let wlen = wchars.len();
     let mut result = String::new();
     for (i, line) in lines.iter().enumerate() {
-        if i > 0 { result.push('\n'); }
+        if i > 0 {
+            result.push('\n');
+        }
         let trimmed = line.trim_start();
         if trimmed.starts_with("import ") || trimmed.starts_with("package ") {
             result.push_str(line);
@@ -24,9 +26,10 @@ pub(super) fn whole_word_replace_file(lines: &[String], word: &str, replacement:
         while j < chars.len() {
             // Check whole-word match at position j.
             if chars[j..].starts_with(&wchars) {
-                let before_ok = j == 0 || !(chars[j-1].is_alphanumeric() || chars[j-1] == '_');
+                let before_ok = j == 0 || !(chars[j - 1].is_alphanumeric() || chars[j - 1] == '_');
                 let end = j + wlen;
-                let after_ok  = end >= chars.len() || !(chars[end].is_alphanumeric() || chars[end] == '_');
+                let after_ok =
+                    end >= chars.len() || !(chars[end].is_alphanumeric() || chars[end] == '_');
                 if before_ok && after_ok {
                     result.push_str(replacement);
                     j = end;
@@ -93,7 +96,9 @@ pub(super) fn rename_in_scope(
 ) -> Vec<TextEdit> {
     let wchars: Vec<char> = word.chars().collect();
     let wlen = wchars.len();
-    if wlen == 0 { return vec![]; }
+    if wlen == 0 {
+        return vec![];
+    }
     let mut edits: Vec<TextEdit> = Vec::new();
 
     let end = scope.1.min(lines.len().saturating_sub(1));
@@ -118,17 +123,17 @@ pub(super) fn rename_in_scope(
 
         while j < chars.len() {
             if chars[j..].starts_with(&wchars) {
-                let before_ok = j == 0 || !(chars[j-1].is_alphanumeric() || chars[j-1] == '_');
+                let before_ok = j == 0 || !(chars[j - 1].is_alphanumeric() || chars[j - 1] == '_');
                 let end_idx = j + wlen;
                 let after_ok = end_idx >= chars.len()
                     || !(chars[end_idx].is_alphanumeric() || chars[end_idx] == '_');
                 if before_ok && after_ok {
                     let start_utf16 = char_to_utf16[j];
-                    let end_utf16   = char_to_utf16[end_idx];
+                    let end_utf16 = char_to_utf16[end_idx];
                     edits.push(TextEdit {
                         range: Range {
                             start: Position::new(ln as u32, start_utf16),
-                            end:   Position::new(ln as u32, end_utf16),
+                            end: Position::new(ln as u32, end_utf16),
                         },
                         new_text: new_name.to_owned(),
                     });
@@ -169,17 +174,14 @@ impl Backend {
         }))
     }
 
-    pub(super) async fn rename_impl(
-        &self,
-        params: RenameParams,
-    ) -> Result<Option<WorkspaceEdit>> {
+    pub(super) async fn rename_impl(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
         let uri = &params.text_document_position.text_document.uri;
         let pos = params.text_document_position.position;
         let new_name = &params.new_name;
 
         let name = match self.indexer.word_at(uri, pos) {
             Some(w) => w,
-            None    => return Ok(None),
+            None => return Ok(None),
         };
 
         // ── Resolve scoping (delegates to the shared helper used by findReferences) ─
@@ -189,30 +191,43 @@ impl Backend {
             // Lowercase symbol — limit to enclosing scope in current file only.
             let lines = match self.indexer.lines_for(uri) {
                 Some(l) => l,
-                None    => return Ok(None),
+                None => return Ok(None),
             };
             let scope = enclosing_scope(&lines, pos.line as usize);
             let mut file_edits = rename_in_scope(&lines, &name, new_name, scope);
-            if file_edits.is_empty() { return Ok(None); }
+            if file_edits.is_empty() {
+                return Ok(None);
+            }
             file_edits.sort_by(|a, b| b.range.start.cmp(&a.range.start));
             let mut changes = std::collections::HashMap::new();
             changes.insert(uri.clone(), file_edits);
-            return Ok(Some(WorkspaceEdit { changes: Some(changes), document_changes: None, change_annotations: None }));
+            return Ok(Some(WorkspaceEdit {
+                changes: Some(changes),
+                document_changes: None,
+                change_annotations: None,
+            }));
         };
 
-        let decl_files: Vec<String> = self.indexer.definitions.get(&name)
-            .map(|locs| locs.iter()
-                .filter(|l| {
-                    if let Some(ref parent) = parent_class {
-                        self.indexer.enclosing_class_at(&l.uri, l.range.start.line)
-                            .as_deref() == Some(parent.as_str())
-                    } else {
-                        true
-                    }
-                })
-                .filter_map(|l| l.uri.to_file_path().ok())
-                .filter_map(|p| p.to_str().map(|s| s.to_owned()))
-                .collect())
+        let decl_files: Vec<String> = self
+            .indexer
+            .definitions
+            .get(&name)
+            .map(|locs| {
+                locs.iter()
+                    .filter(|l| {
+                        if let Some(ref parent) = parent_class {
+                            self.indexer
+                                .enclosing_class_at(&l.uri, l.range.start.line)
+                                .as_deref()
+                                == Some(parent.as_str())
+                        } else {
+                            true
+                        }
+                    })
+                    .filter_map(|l| l.uri.to_file_path().ok())
+                    .filter_map(|p| p.to_str().map(|s| s.to_owned()))
+                    .collect()
+            })
             .unwrap_or_default();
 
         // ── Find all reference locations (off-thread, same as references handler) ──
@@ -245,7 +260,9 @@ impl Backend {
             ref_locs.retain(|loc| !lib.contains(loc.uri.as_str()));
         }
 
-        if ref_locs.is_empty() { return Ok(None); }
+        if ref_locs.is_empty() {
+            return Ok(None);
+        }
 
         // ── Collect unique files that have references ───────────────────────
         // Always include current file (may have unsaved content rg can't see).
@@ -255,7 +272,11 @@ impl Backend {
                 files.push(loc.uri.clone());
             }
         }
-        eprintln!("[rename] rg found {} locs across {} files", ref_locs.len(), files.len());
+        eprintln!(
+            "[rename] rg found {} locs across {} files",
+            ref_locs.len(),
+            files.len()
+        );
 
         // ── Build TextEdits per file using rename_in_scope ──────────────────
         // We do NOT use rg location columns directly because Pass A uses a
@@ -272,9 +293,9 @@ impl Backend {
             let disk_lines: Vec<String>;
             let lines: &[String] = match mem_lines {
                 Some(ref arc) => arc.as_slice(),
-                None    => {
+                None => {
                     let path = match file_uri.to_file_path() {
-                        Ok(p)  => p,
+                        Ok(p) => p,
                         Err(_) => continue,
                     };
                     match std::fs::read_to_string(&path) {
@@ -298,7 +319,13 @@ impl Backend {
             }
         }
 
-        if changes.is_empty() { return Ok(None); }
-        Ok(Some(WorkspaceEdit { changes: Some(changes), document_changes: None, change_annotations: None }))
+        if changes.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(WorkspaceEdit {
+            changes: Some(changes),
+            document_changes: None,
+            change_annotations: None,
+        }))
     }
 }

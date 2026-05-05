@@ -31,7 +31,10 @@ fn stale_removed_on_reindex() {
     let idx = Indexer::new();
     idx.index_content(&u, "class OldName");
     idx.index_content(&u, "class NewName");
-    assert!(idx.find_definition("OldName", &u).is_empty(), "stale entry not removed");
+    assert!(
+        idx.find_definition("OldName", &u).is_empty(),
+        "stale entry not removed"
+    );
     assert!(!idx.find_definition("NewName", &u).is_empty());
 }
 
@@ -47,7 +50,10 @@ fn qualified_removed_on_reindex() {
     let idx = Indexer::new();
     idx.index_content(&u, "package com.example\nclass OldName");
     idx.index_content(&u, "package com.example\nclass NewName");
-    assert!(!idx.qualified.contains_key("com.example.OldName"), "stale qualified entry");
+    assert!(
+        !idx.qualified.contains_key("com.example.OldName"),
+        "stale qualified entry"
+    );
     assert!(idx.qualified.contains_key("com.example.NewName"));
 }
 
@@ -62,7 +68,7 @@ fn packages_map_populated() {
 
 #[test]
 fn index_same_content_parses_only_once() {
-    let u   = uri("/Dedup.kt");
+    let u = uri("/Dedup.kt");
     let idx = Indexer::new();
     let src = "package com.test\nclass Dedup";
 
@@ -79,7 +85,7 @@ fn index_same_content_parses_only_once() {
 
 #[test]
 fn index_changed_content_reparses() {
-    let u   = uri("/Changed.kt");
+    let u = uri("/Changed.kt");
     let idx = Indexer::new();
 
     idx.index_content(&u, "class A");
@@ -98,7 +104,7 @@ fn index_changed_content_reparses() {
 
 #[test]
 fn dot_completion_triggers_on_dot() {
-    let vm_uri   = uri("/ViewModel.kt");
+    let vm_uri = uri("/ViewModel.kt");
     let repo_uri = uri("/Repository.kt");
     let idx = Indexer::new();
     idx.index_content(&repo_uri,
@@ -111,17 +117,22 @@ fn dot_completion_triggers_on_dot() {
     let dot_col = (line.find("repo.").unwrap() + "repo.".len()) as u32;
     let (items, _) = idx.completions(&vm_uri, Position::new(4, dot_col), true);
     let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
-    assert!(labels.contains(&"findById"), "findById missing; got: {labels:?}");
-    assert!(labels.contains(&"save"),     "save missing; got: {labels:?}");
+    assert!(
+        labels.contains(&"findById"),
+        "findById missing; got: {labels:?}"
+    );
+    assert!(labels.contains(&"save"), "save missing; got: {labels:?}");
 }
 
 #[test]
 fn dot_completion_with_prefix() {
-    let vm_uri   = uri("/ViewModel2.kt");
+    let vm_uri = uri("/ViewModel2.kt");
     let repo_uri = uri("/Repo2.kt");
     let idx = Indexer::new();
-    idx.index_content(&repo_uri,
-        "package com.pkg2\nclass Repo2 {\n  fun findAll() {}\n  fun save() {}\n}");
+    idx.index_content(
+        &repo_uri,
+        "package com.pkg2\nclass Repo2 {\n  fun findAll() {}\n  fun save() {}\n}",
+    );
     idx.index_content(&vm_uri,
         "package com.pkg2\nclass ViewModel2(\n  private val repo: Repo2\n) {\n  fun run() { repo.fin }\n}");
 
@@ -129,7 +140,10 @@ fn dot_completion_with_prefix() {
     let col = (line.find("repo.fin").unwrap() + "repo.fin".len()) as u32;
     let (items, _) = idx.completions(&vm_uri, Position::new(4, col), true);
     let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
-    assert!(labels.contains(&"findAll"), "findAll missing; got: {labels:?}");
+    assert!(
+        labels.contains(&"findAll"),
+        "findAll missing; got: {labels:?}"
+    );
 }
 
 #[test]
@@ -148,10 +162,22 @@ fn dot_completion_qualified_nested_type() {
     let col = (line.find("DPSCoordinator.Kind.").unwrap() + "DPSCoordinator.Kind.".len()) as u32;
     let (items, _) = idx.completions(&vm_uri, Position::new(2, col), false);
     let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
-    assert!(labels.contains(&"victory"), "victory case missing; got: {labels:?}");
-    assert!(labels.contains(&"defeat"),  "defeat case missing; got: {labels:?}");
-    assert!(!labels.contains(&"deposit"),  "deposit (DPSCoordinator method) must NOT appear; got: {labels:?}");
-    assert!(!labels.contains(&"strategy"), "strategy (DPSCoordinator prop) must NOT appear; got: {labels:?}");
+    assert!(
+        labels.contains(&"victory"),
+        "victory case missing; got: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"defeat"),
+        "defeat case missing; got: {labels:?}"
+    );
+    assert!(
+        !labels.contains(&"deposit"),
+        "deposit (DPSCoordinator method) must NOT appear; got: {labels:?}"
+    );
+    assert!(
+        !labels.contains(&"strategy"),
+        "strategy (DPSCoordinator prop) must NOT appear; got: {labels:?}"
+    );
 }
 
 #[test]
@@ -176,8 +202,14 @@ fun use() { lazyLoad { it. } }
     let col = (line.find("it.").unwrap() + "it.".len()) as u32;
     let (items, _) = idx2.completions(&u2, Position::new(3, col), false);
     // Must include a hint item labelled `it: T`
-    let hint = items.iter().find(|i| i.label.contains("it:") && i.label.contains('T'));
-    assert!(hint.is_some(), "expected `it: T` hint item; got: {:?}", items.iter().map(|i| &i.label).collect::<Vec<_>>());
+    let hint = items
+        .iter()
+        .find(|i| i.label.contains("it:") && i.label.contains('T'));
+    assert!(
+        hint.is_some(),
+        "expected `it: T` hint item; got: {:?}",
+        items.iter().map(|i| &i.label).collect::<Vec<_>>()
+    );
     let _ = (u, idx); // suppress unused warning
 }
 
@@ -192,12 +224,20 @@ fn nested_class_qualified_key() {
     idx.index_content(&uri,
         "package com.example\nclass AccountContract {\n  sealed class State\n  sealed class Event\n}");
 
-    assert!(idx.qualified.contains_key("com.example.State"),
-        "primary qualified key missing");
-    assert!(idx.qualified.contains_key("com.example.AccountContract.State"),
-        "nested qualified key missing");
-    assert!(idx.qualified.contains_key("com.example.AccountContract.Event"),
-        "nested Event qualified key missing");
+    assert!(
+        idx.qualified.contains_key("com.example.State"),
+        "primary qualified key missing"
+    );
+    assert!(
+        idx.qualified
+            .contains_key("com.example.AccountContract.State"),
+        "nested qualified key missing"
+    );
+    assert!(
+        idx.qualified
+            .contains_key("com.example.AccountContract.Event"),
+        "nested Event qualified key missing"
+    );
 }
 
 // ── enclosing_class_at ───────────────────────────────────────────────────
@@ -226,11 +266,17 @@ super.doIt()
     assert_eq!(class_name.as_deref(), Some("Foo"), "enclosing class");
 
     // 2. Find Foo's definition and extract supertypes
-    let locs = idx.definitions.get("Foo").map(|v| v.clone()).unwrap_or_default();
+    let locs = idx
+        .definitions
+        .get("Foo")
+        .map(|v| v.clone())
+        .unwrap_or_default();
     assert!(!locs.is_empty(), "Foo must be in definitions");
     let file = idx.files.get(locs[0].uri.as_str()).unwrap();
     let start_line = locs[0].range.start.line;
-    let supers: Vec<String> = file.supers.iter()
+    let supers: Vec<String> = file
+        .supers
+        .iter()
         .filter(|(l, _, _)| *l == start_line)
         .map(|(_, n, _)| n.clone())
         .collect();
@@ -270,14 +316,17 @@ fn signature_multiline_constructor() {
     ];
     let sig = collect_signature(&lines, 0);
     assert!(sig.contains("DetailViewModel"), "should contain class name");
-    assert!(sig.contains("MviViewModel"),    "should contain superclass");
-    assert!(!sig.contains('{'),              "should not include body brace");
+    assert!(sig.contains("MviViewModel"), "should contain superclass");
+    assert!(!sig.contains('{'), "should not include body brace");
 }
 
 #[test]
 fn signature_fun_single_line() {
     let lines = vec!["fun doSomething(x: Int): Boolean".to_owned()];
-    assert_eq!(collect_signature(&lines, 0), "fun doSomething(x: Int): Boolean");
+    assert_eq!(
+        collect_signature(&lines, 0),
+        "fun doSomething(x: Int): Boolean"
+    );
 }
 
 #[test]
@@ -300,7 +349,11 @@ fn hover_it_type_detection() {
     // `it` starts at column 16
     let col = "items.forEach { ".len() as u32;
     let result = idx.infer_lambda_param_type_at("it", &u, Position::new(1, col));
-    assert_eq!(result.as_deref(), Some("Product"), "hover should detect it: Product");
+    assert_eq!(
+        result.as_deref(),
+        Some("Product"),
+        "hover should detect it: Product"
+    );
 }
 
 #[test]
@@ -338,8 +391,11 @@ fn trailing_lambda_it_from_fun_def() {
     // `before_brace` as seen by lambda_receiver_type_from_context
     let before = "loadProduct(k, f) ";
     let result = lambda_receiver_type_from_context(before, &idx, &u);
-    assert_eq!(result.as_deref(), Some("ResultState"),
-        "trailing lambda it should resolve to ResultState, got: {result:?}");
+    assert_eq!(
+        result.as_deref(),
+        Some("ResultState"),
+        "trailing lambda it should resolve to ResultState, got: {result:?}"
+    );
 }
 
 #[test]
@@ -357,8 +413,11 @@ class State
     // before_brace as it arrives from the nested-lambda context
     let before = "    { setState ";
     let result = lambda_receiver_type_from_context(before, &idx, &u);
-    assert_eq!(result.as_deref(), Some("State"),
-        "it inside nested setState lambda should resolve to State, got: {result:?}");
+    assert_eq!(
+        result.as_deref(),
+        Some("State"),
+        "it inside nested setState lambda should resolve to State, got: {result:?}"
+    );
 }
 
 // ── inline-lambda param type (Case C) ────────────────────────────────────
@@ -376,8 +435,11 @@ fn inline_lambda_param_type_detection() {
     // before_brace = "reloadableProduct(ProductKey.FAMILY, "
     let before = "reloadableProduct(ProductKey.FAMILY, ";
     let result = lambda_receiver_type_from_context(before, &idx, &u);
-    assert_eq!(result.as_deref(), Some("Boolean"),
-        "inline lambda param should be Boolean, got: {result:?}");
+    assert_eq!(
+        result.as_deref(),
+        Some("Boolean"),
+        "inline lambda param should be Boolean, got: {result:?}"
+    );
 }
 
 #[test]
@@ -401,8 +463,11 @@ fn trailing_lambda_method_it_not_confused_by_arg_dot() {
     // After strip_trailing_call_args: "reloadableProduct"
     let before = "reloadableProduct(ProductKey.FAMILY) ";
     let result = lambda_receiver_type_from_context(before, &idx, &u);
-    assert_eq!(result.as_deref(), Some("ResultState"),
-        "trailing lambda with dot-in-arg should still resolve, got: {result:?}");
+    assert_eq!(
+        result.as_deref(),
+        Some("ResultState"),
+        "trailing lambda with dot-in-arg should still resolve, got: {result:?}"
+    );
 }
 
 #[test]
@@ -424,8 +489,11 @@ fn trailing_lambda_it_with_method_call_arg() {
     // Test via lambda_receiver_type_from_context directly.
     let before = "    loadProduct(ProductKey.DEPOSIT, productsUseCases.getDepositAccountData()) ";
     let result = lambda_receiver_type_from_context(before, &idx, &u);
-    assert_eq!(result.as_deref(), Some("ResultState"),
-        "loadProduct trailing lambda it type, got: {result:?}");
+    assert_eq!(
+        result.as_deref(),
+        Some("ResultState"),
+        "loadProduct trailing lambda it type, got: {result:?}"
+    );
 }
 
 /// `reloadableProduct` has a `(Boolean) -> Flow<T>` param followed by a
@@ -451,8 +519,11 @@ fn reloadable_product_resultstate_not_boolean() {
     // should resolve `resultState` to `ResultState`, not `Boolean`.
     let before = "    reloadableProduct(ProductKey.FAMILY, { isRefresh -> null }) ";
     let result = lambda_receiver_type_from_context(before, &idx, &u);
-    assert_eq!(result.as_deref(), Some("ResultState"),
-        "resultState should resolve to ResultState not Boolean, got: {result:?}");
+    assert_eq!(
+        result.as_deref(),
+        Some("ResultState"),
+        "resultState should resolve to ResultState not Boolean, got: {result:?}"
+    );
 }
 
 #[test]
@@ -472,8 +543,11 @@ fn trailing_lambda_it_infer_at_cursor() {
     let call_line = "    loadProduct(ProductKey.DEPOSIT, productsUseCases.getDepositAccountData()) { overviewMapper.depositAccToView(";
     let col = call_line.len() as u32;
     let result = idx.infer_lambda_param_type_at("it", &u, Position::new(6, col));
-    assert_eq!(result.as_deref(), Some("ResultState"),
-        "infer_lambda_param_type_at for it in loadProduct, got: {result:?}");
+    assert_eq!(
+        result.as_deref(),
+        Some("ResultState"),
+        "infer_lambda_param_type_at for it in loadProduct, got: {result:?}"
+    );
 }
 
 // ── `this` in scope functions ─────────────────────────────────────────────
@@ -487,8 +561,11 @@ fn this_in_run_resolves_to_receiver_type() {
     // `before_brace` via lambda_receiver_type_from_context
     let before = "user.run ";
     let result = lambda_receiver_type_from_context(before, &idx, &u);
-    assert_eq!(result.as_deref(), Some("User"),
-        "this in obj.run should be User, got: {result:?}");
+    assert_eq!(
+        result.as_deref(),
+        Some("User"),
+        "this in obj.run should be User, got: {result:?}"
+    );
 }
 
 #[test]
@@ -497,8 +574,11 @@ fn this_infer_lambda_param_type_at() {
     let (u, idx) = indexed("/t.kt", src);
     let col = "user.run { ".len() as u32;
     let result = idx.infer_lambda_param_type_at("this", &u, Position::new(1, col));
-    assert_eq!(result.as_deref(), Some("User"),
-        "infer_lambda_param_type_at for this, got: {result:?}");
+    assert_eq!(
+        result.as_deref(),
+        Some("User"),
+        "infer_lambda_param_type_at for this, got: {result:?}"
+    );
 }
 
 #[test]
@@ -508,8 +588,11 @@ fn with_scope_function_this_type() {
     let (u, idx) = indexed("/t.kt", src);
     let before = "with(user) ";
     let result = lambda_receiver_type_from_context(before, &idx, &u);
-    assert_eq!(result.as_deref(), Some("User"),
-        "with(user) this should be User, got: {result:?}");
+    assert_eq!(
+        result.as_deref(),
+        Some("User"),
+        "with(user) this should be User, got: {result:?}"
+    );
 }
 
 // ── `this` in class method body ───────────────────────────────────────────
@@ -527,8 +610,11 @@ fn this_in_class_method_resolves_to_class() {
     // Cursor on `this` at line 2, col 8
     let col = "        ".len() as u32;
     let result = idx.infer_lambda_param_type_at("this", &u, Position::new(2, col));
-    assert_eq!(result.as_deref(), Some("OverviewViewModel"),
-        "this in class method should resolve to enclosing class, got: {result:?}");
+    assert_eq!(
+        result.as_deref(),
+        Some("OverviewViewModel"),
+        "this in class method should resolve to enclosing class, got: {result:?}"
+    );
 }
 
 #[test]
@@ -549,8 +635,11 @@ fn this_in_class_method_lambda_scope_wins() {
     // Cursor on line 4 (inside user.run lambda)
     let col = "            ".len() as u32;
     let result = idx.infer_lambda_param_type_at("this", &u, Position::new(4, col));
-    assert_eq!(result.as_deref(), Some("User"),
-        "this inside run lambda should be User not Vm, got: {result:?}");
+    assert_eq!(
+        result.as_deref(),
+        Some("User"),
+        "this inside run lambda should be User not Vm, got: {result:?}"
+    );
 }
 
 #[test]
@@ -560,14 +649,17 @@ fn this_as_named_arg_resolves_param_type() {
     let src = concat!(
         "fun send(channel: SendChannel): Unit = TODO()\n",
         "fun go() {\n",
-        "    something.send(channel = this)\n",  // line 2, `this` at col 28
+        "    something.send(channel = this)\n", // line 2, `this` at col 28
         "}\n",
     );
     let (u, idx) = indexed("/t.kt", src);
     let col = "    something.send(channel = ".len() as u32;
     let result = idx.infer_lambda_param_type_at("this", &u, Position::new(2, col));
-    assert_eq!(result.as_deref(), Some("SendChannel"),
-        "this as named arg should hint param type, got: {result:?}");
+    assert_eq!(
+        result.as_deref(),
+        Some("SendChannel"),
+        "this as named arg should hint param type, got: {result:?}"
+    );
 }
 
 #[test]
@@ -576,7 +668,7 @@ fn it_as_positional_arg_resolves_param_type() {
     let src = concat!(
         "fun process(value: Item): Unit = TODO()\n",
         "fun go() {\n",
-        "    list.forEach { process(it) }\n",  // line 2, `it` at col 26
+        "    list.forEach { process(it) }\n", // line 2, `it` at col 26
         "}\n",
     );
     let (u, idx) = indexed("/t.kt", src);
@@ -584,8 +676,11 @@ fn it_as_positional_arg_resolves_param_type() {
     let result = idx.infer_lambda_param_type_at("it", &u, Position::new(2, col));
     // Lambda inference for `list.forEach` fails (list not typed).
     // Positional arg fallback: `process(it)` → param 0 = `Item`.
-    assert_eq!(result.as_deref(), Some("Item"),
-        "it as positional arg should hint param type, got: {result:?}");
+    assert_eq!(
+        result.as_deref(),
+        Some("Item"),
+        "it as positional arg should hint param type, got: {result:?}"
+    );
 }
 
 #[test]
@@ -594,14 +689,17 @@ fn it_as_named_arg_resolves_param_type() {
     let src = concat!(
         "fun process(value: Widget): Unit = TODO()\n",
         "fun go() {\n",
-        "    process(value = it)\n",  // line 2, `it` at col 20
+        "    process(value = it)\n", // line 2, `it` at col 20
         "}\n",
     );
     let (u, idx) = indexed("/t.kt", src);
     let col = "    process(value = ".len() as u32;
     let result = idx.infer_lambda_param_type_at("it", &u, Position::new(2, col));
-    assert_eq!(result.as_deref(), Some("Widget"),
-        "it as named arg should hint param type, got: {result:?}");
+    assert_eq!(
+        result.as_deref(),
+        Some("Widget"),
+        "it as named arg should hint param type, got: {result:?}"
+    );
 }
 
 #[test]
@@ -610,16 +708,18 @@ fn it_positional_second_arg() {
     let src = concat!(
         "fun pair(a: String, b: Number): Unit = TODO()\n",
         "fun go() {\n",
-        "    pair(\"x\", it)\n",  // line 2, `it` at col 14
+        "    pair(\"x\", it)\n", // line 2, `it` at col 14
         "}\n",
     );
     let (u, idx) = indexed("/t.kt", src);
     let col = "    pair(\"x\", ".len() as u32;
     let result = idx.infer_lambda_param_type_at("it", &u, Position::new(2, col));
-    assert_eq!(result.as_deref(), Some("Number"),
-        "it as second positional arg should be Number, got: {result:?}");
+    assert_eq!(
+        result.as_deref(),
+        Some("Number"),
+        "it as second positional arg should be Number, got: {result:?}"
+    );
 }
-
 
 #[test]
 fn this_in_regular_lambda_no_lambda_hint() {
@@ -629,7 +729,7 @@ fn this_in_regular_lambda_no_lambda_hint() {
         "class Reducer {\n",
         "    fun reduce(event: String, block: (String) -> String): Unit = TODO()\n",
         "    fun go(event: String) {\n",
-        "        reduce(event) { this }\n",  // line 3, `this` at col 24
+        "        reduce(event) { this }\n", // line 3, `this` at col 24
         "    }\n",
         "}\n",
     );
@@ -638,8 +738,11 @@ fn this_in_regular_lambda_no_lambda_hint() {
     let result = idx.infer_lambda_param_type_at("this", &u, Position::new(3, col));
     // `this` inside regular (T)->R lambda must NOT get a lambda-param hint.
     // Falls through to enclosing_class_at → returns enclosing class.
-    assert_eq!(result.as_deref(), Some("Reducer"),
-        "this in regular lambda should be enclosing class, got: {result:?}");
+    assert_eq!(
+        result.as_deref(),
+        Some("Reducer"),
+        "this in regular lambda should be enclosing class, got: {result:?}"
+    );
 }
 
 #[test]
@@ -649,13 +752,16 @@ fn this_in_receiver_lambda_indexed_function() {
         "class Ctx\n",
         "fun withCtx(block: Ctx.() -> Unit): Unit = TODO()\n",
         "val ctx: Ctx = Ctx()\n",
-        "val _ = ctx.withCtx { this }\n",  // line 3, `this` after `{ `
+        "val _ = ctx.withCtx { this }\n", // line 3, `this` after `{ `
     );
     let (u, idx) = indexed("/t.kt", src);
     let col = "val _ = ctx.withCtx { ".len() as u32;
     let result = idx.infer_lambda_param_type_at("this", &u, Position::new(3, col));
-    assert_eq!(result.as_deref(), Some("Ctx"),
-        "this inside receiver lambda withCtx should be Ctx, got: {result:?}");
+    assert_eq!(
+        result.as_deref(),
+        Some("Ctx"),
+        "this inside receiver lambda withCtx should be Ctx, got: {result:?}"
+    );
 }
 
 #[test]
@@ -671,7 +777,7 @@ fn named_arg_lambda_it_type_multiline() {
         ")\n",
         "fun use() {\n",
         "  SheetReloadActions(\n",
-        "    buildingSavings = { it },\n",  // line 7, cursor on `it`
+        "    buildingSavings = { it },\n", // line 7, cursor on `it`
         "    cards = {},\n",
         "  )\n",
         "}\n",
@@ -679,8 +785,11 @@ fn named_arg_lambda_it_type_multiline() {
     let (u, idx) = indexed("/t.kt", src);
     // cursor is on line 7, col inside `it`
     let result = idx.infer_lambda_param_type_at("it", &u, Position::new(7, 25));
-    assert_eq!(result.as_deref(), Some("SaveInfo"),
-        "it in named-arg lambda should be SaveInfo, got: {result:?}");
+    assert_eq!(
+        result.as_deref(),
+        Some("SaveInfo"),
+        "it in named-arg lambda should be SaveInfo, got: {result:?}"
+    );
 }
 
 #[test]
@@ -694,35 +803,44 @@ fn named_arg_lambda_multi_param_type() {
         ")\n",
         "fun use() {\n",
         "  SheetReloadActions(\n",
-        "    loan = { loanId, isWustenrot -> loanId },\n",  // line 6
+        "    loan = { loanId, isWustenrot -> loanId },\n", // line 6
         "  )\n",
         "}\n",
     );
     let (u, idx) = indexed("/t.kt", src);
     let result_loanid = idx.infer_lambda_param_type_at("loanId", &u, Position::new(6, 22));
-    assert_eq!(result_loanid.as_deref(), Some("String"),
-        "loanId should be String, got: {result_loanid:?}");
+    assert_eq!(
+        result_loanid.as_deref(),
+        Some("String"),
+        "loanId should be String, got: {result_loanid:?}"
+    );
     let result_is = idx.infer_lambda_param_type_at("isWustenrot", &u, Position::new(6, 30));
-    assert_eq!(result_is.as_deref(), Some("Boolean"),
-        "isWustenrot should be Boolean, got: {result_is:?}");
+    assert_eq!(
+        result_is.as_deref(),
+        Some("Boolean"),
+        "isWustenrot should be Boolean, got: {result_is:?}"
+    );
 }
 
 #[test]
 fn extract_named_arg_name_test() {
-    assert_eq!(super::extract_named_arg_name("  buildingSavings = "), Some("buildingSavings"));
-    assert_eq!(super::extract_named_arg_name("  loan = "),            Some("loan"));
-    assert_eq!(super::extract_named_arg_name("  loan="),              Some("loan"));
+    assert_eq!(
+        super::extract_named_arg_name("  buildingSavings = "),
+        Some("buildingSavings")
+    );
+    assert_eq!(super::extract_named_arg_name("  loan = "), Some("loan"));
+    assert_eq!(super::extract_named_arg_name("  loan="), Some("loan"));
     // Same-line comma-separated: `, cards = ` — should match
-    assert_eq!(super::extract_named_arg_name(", cards = "),           Some("cards"));
+    assert_eq!(super::extract_named_arg_name(", cards = "), Some("cards"));
     // Uppercase — should NOT match (constructors, not named args)
-    assert_eq!(super::extract_named_arg_name("  Foo = "),             None);
+    assert_eq!(super::extract_named_arg_name("  Foo = "), None);
     // operator — should NOT match
-    assert_eq!(super::extract_named_arg_name("a != "),                None);
-    assert_eq!(super::extract_named_arg_name("a <= "),                None);
+    assert_eq!(super::extract_named_arg_name("a != "), None);
+    assert_eq!(super::extract_named_arg_name("a <= "), None);
     // Nested: `(isRefresh = ` — opening `(` before the ident disqualifies
-    assert_eq!(super::extract_named_arg_name("(isRefresh = "),        None);
+    assert_eq!(super::extract_named_arg_name("(isRefresh = "), None);
     // Nested inside call args: `fn(x, isRefresh = ` — still has non-ws prefix
-    assert_eq!(super::extract_named_arg_name("fn(x, isRefresh = "),   None);
+    assert_eq!(super::extract_named_arg_name("fn(x, isRefresh = "), None);
 }
 
 // ── LoanReducer-style patterns ────────────────────────────────────────────
@@ -733,65 +851,73 @@ fn named_arg_lambda_extension_function_callee() {
     // Extension function callee + double-paren `((T) -> R)` param type.
     // `it` inside `map = {` should resolve to the first input of `((LoanDetail) -> Sheet)`.
     let src = concat!(
-        "class LoanDetail\n",                                                 // line 0
-        "class ProductDetailSheetModel\n",                                    // line 1
-        "class Flow\n",                                                       // line 2
-        "fun Flow.lazyLoadProductBottomSheet(\n",                             // line 3
-        "  reloadAction: () -> Unit,\n",                                      // line 4
-        "  map: ((LoanDetail) -> ProductDetailSheetModel),\n",                // line 5
-        ") {}\n",                                                             // line 6
-        "fun use(flow: Flow) {\n",                                            // line 7
-        "  flow.lazyLoadProductBottomSheet(\n",                               // line 8
-        "    reloadAction = { },\n",                                          // line 9
-        "    map = { it },\n",                                                // line 10
-        "  )\n",                                                              // line 11
-        "}\n",                                                                // line 12
+        "class LoanDetail\n",                                  // line 0
+        "class ProductDetailSheetModel\n",                     // line 1
+        "class Flow\n",                                        // line 2
+        "fun Flow.lazyLoadProductBottomSheet(\n",              // line 3
+        "  reloadAction: () -> Unit,\n",                       // line 4
+        "  map: ((LoanDetail) -> ProductDetailSheetModel),\n", // line 5
+        ") {}\n",                                              // line 6
+        "fun use(flow: Flow) {\n",                             // line 7
+        "  flow.lazyLoadProductBottomSheet(\n",                // line 8
+        "    reloadAction = { },\n",                           // line 9
+        "    map = { it },\n",                                 // line 10
+        "  )\n",                                               // line 11
+        "}\n",                                                 // line 12
     );
     let (u, idx) = indexed("/LoanReducer.kt", src);
     // `it` on line 10, col inside the lambda body
     let result = idx.infer_lambda_param_type_at("it", &u, Position::new(10, 13));
-    assert_eq!(result.as_deref(), Some("LoanDetail"),
-        "it inside map lambda should be LoanDetail, got: {result:?}");
+    assert_eq!(
+        result.as_deref(),
+        Some("LoanDetail"),
+        "it inside map lambda should be LoanDetail, got: {result:?}"
+    );
 }
 
 #[test]
 fn named_arg_reload_action_no_it() {
     // `reloadAction: () -> Unit` — lambda has no params, `it` should not resolve.
     let src = concat!(
-        "class Flow\n",                                              // line 0
-        "fun Flow.lazyLoadProductBottomSheet(\n",                   // line 1
-        "  reloadAction: () -> Unit,\n",                            // line 2
-        ") {}\n",                                                    // line 3
-        "fun use(flow: Flow) {\n",                                  // line 4
-        "  flow.lazyLoadProductBottomSheet(\n",                     // line 5
-        "    reloadAction = { it },\n",                             // line 6
-        "  )\n",                                                     // line 7
-        "}\n",                                                       // line 8
+        "class Flow\n",                           // line 0
+        "fun Flow.lazyLoadProductBottomSheet(\n", // line 1
+        "  reloadAction: () -> Unit,\n",          // line 2
+        ") {}\n",                                 // line 3
+        "fun use(flow: Flow) {\n",                // line 4
+        "  flow.lazyLoadProductBottomSheet(\n",   // line 5
+        "    reloadAction = { it },\n",           // line 6
+        "  )\n",                                  // line 7
+        "}\n",                                    // line 8
     );
     let (u, idx) = indexed("/t.kt", src);
     let result = idx.infer_lambda_param_type_at("it", &u, Position::new(6, 21));
-    assert_eq!(result, None,
-        "it inside reloadAction lambda should not resolve (no params), got: {result:?}");
+    assert_eq!(
+        result, None,
+        "it inside reloadAction lambda should not resolve (no params), got: {result:?}"
+    );
 }
 
 #[test]
 fn named_arg_lambda_double_paren_function_type() {
     // Double-paren `((T) -> R)` type — should still extract T as first input.
     let src = concat!(
-        "class Item\n",                                              // line 0
-        "fun process(\n",                                            // line 1
-        "  mapper: ((Item) -> String),\n",                          // line 2
-        ") {}\n",                                                    // line 3
-        "fun use() {\n",                                             // line 4
-        "  process(\n",                                              // line 5
-        "    mapper = { it },\n",                                    // line 6
-        "  )\n",                                                     // line 7
-        "}\n",                                                       // line 8
+        "class Item\n",                    // line 0
+        "fun process(\n",                  // line 1
+        "  mapper: ((Item) -> String),\n", // line 2
+        ") {}\n",                          // line 3
+        "fun use() {\n",                   // line 4
+        "  process(\n",                    // line 5
+        "    mapper = { it },\n",          // line 6
+        "  )\n",                           // line 7
+        "}\n",                             // line 8
     );
     let (u, idx) = indexed("/t.kt", src);
     let result = idx.infer_lambda_param_type_at("it", &u, Position::new(6, 16));
-    assert_eq!(result.as_deref(), Some("Item"),
-        "it inside double-paren type lambda should be Item, got: {result:?}");
+    assert_eq!(
+        result.as_deref(),
+        Some("Item"),
+        "it inside double-paren type lambda should be Item, got: {result:?}"
+    );
 }
 
 // ── Full LoanReducer integration ─────────────────────────────────────────
@@ -804,25 +930,25 @@ fn named_arg_lambda_double_paren_function_type() {
 //   ).collect { bottomSheetState ->       ← bottomSheetState: T (Flow element)
 fn loan_reducer_src() -> &'static str {
     concat!(
-        "class LoanDetail\n",                                                // 0
-        "class ProductDetailSheetModel\n",                                   // 1
-        "class Flow\n",                                                      // 2
-        "class BottomSheetState\n",                                          // 3
-        "fun <T> Flow.lazyLoadProductBottomSheet(\n",                        // 4
-        "  state: BottomSheetState,\n",                                      // 5
-        "  reloadAction: () -> Unit,\n",                                     // 6
-        "  map: ((T) -> ProductDetailSheetModel),\n",                        // 7
-        "): Flow {}\n",                                                      // 8
-        "fun <T> Flow.collect(action: (T) -> Unit) {}\n",                    // 9
-        "fun use(flow: Flow) {\n",                                           // 10
-        "  flow.lazyLoadProductBottomSheet(\n",                              // 11
-        "    state = flow,\n",                                               // 12
-        "    reloadAction = { },\n",                                         // 13
-        "    map = { mapSheet(it) },\n",                                     // 14
-        "  ).collect { bottomSheetState ->\n",                               // 15
-        "    use(bottomSheetState)\n",                                       // 16
-        "  }\n",                                                             // 17
-        "}\n",                                                               // 18
+        "class LoanDetail\n",                             // 0
+        "class ProductDetailSheetModel\n",                // 1
+        "class Flow\n",                                   // 2
+        "class BottomSheetState\n",                       // 3
+        "fun <T> Flow.lazyLoadProductBottomSheet(\n",     // 4
+        "  state: BottomSheetState,\n",                   // 5
+        "  reloadAction: () -> Unit,\n",                  // 6
+        "  map: ((T) -> ProductDetailSheetModel),\n",     // 7
+        "): Flow {}\n",                                   // 8
+        "fun <T> Flow.collect(action: (T) -> Unit) {}\n", // 9
+        "fun use(flow: Flow) {\n",                        // 10
+        "  flow.lazyLoadProductBottomSheet(\n",           // 11
+        "    state = flow,\n",                            // 12
+        "    reloadAction = { },\n",                      // 13
+        "    map = { mapSheet(it) },\n",                  // 14
+        "  ).collect { bottomSheetState ->\n",            // 15
+        "    use(bottomSheetState)\n",                    // 16
+        "  }\n",                                          // 17
+        "}\n",                                            // 18
     )
 }
 
@@ -831,8 +957,11 @@ fn loan_reducer_map_it_resolves_to_T() {
     let (u, idx) = indexed("/LoanReducer.kt", loan_reducer_src());
     // `it` in `map = { mapSheet(it) }` — line 14, col inside lambda body
     let result = idx.infer_lambda_param_type_at("it", &u, Position::new(14, 20));
-    assert_eq!(result.as_deref(), Some("T"),
-        "it in map lambda should be T (generic param), got: {result:?}");
+    assert_eq!(
+        result.as_deref(),
+        Some("T"),
+        "it in map lambda should be T (generic param), got: {result:?}"
+    );
 }
 
 #[test]
@@ -840,8 +969,10 @@ fn loan_reducer_reload_action_no_it() {
     let (u, idx) = indexed("/LoanReducer.kt", loan_reducer_src());
     // `reloadAction: () -> Unit` — empty param type, no `it`
     let result = idx.infer_lambda_param_type_at("it", &u, Position::new(13, 21));
-    assert_eq!(result, None,
-        "it in reloadAction lambda should be None (no params), got: {result:?}");
+    assert_eq!(
+        result, None,
+        "it in reloadAction lambda should be None (no params), got: {result:?}"
+    );
 }
 
 #[test]
@@ -849,24 +980,30 @@ fn loan_reducer_collect_bottomsheetstate_resolves_to_T() {
     let (u, idx) = indexed("/LoanReducer.kt", loan_reducer_src());
     // `bottomSheetState` in `.collect { bottomSheetState -> ... }` — line 15
     let result = idx.infer_lambda_param_type_at("bottomSheetState", &u, Position::new(16, 8));
-    assert_eq!(result.as_deref(), Some("T"),
-        "bottomSheetState in collect lambda should be T, got: {result:?}");
+    assert_eq!(
+        result.as_deref(),
+        Some("T"),
+        "bottomSheetState in collect lambda should be T, got: {result:?}"
+    );
 }
 
 #[test]
 fn suspend_param_type_resolves_it() {
     // `collectIn` has `block: suspend (T) -> Unit` — `suspend` prefix must not block inference.
     let src = concat!(
-        "class Flow\n",                                          // 0
+        "class Flow\n",                                            // 0
         "fun <T> Flow.collectIn(block: suspend (T) -> Unit) {}\n", // 1
-        "fun use(flow: Flow) {\n",                               // 2
-        "  flow.collectIn { it.doSomething() }\n",               // 3  col 19 = 'it'
-        "}\n",                                                   // 4
+        "fun use(flow: Flow) {\n",                                 // 2
+        "  flow.collectIn { it.doSomething() }\n",                 // 3  col 19 = 'it'
+        "}\n",                                                     // 4
     );
     let (u, idx) = indexed("/t.kt", src);
     let result = idx.infer_lambda_param_type_at("it", &u, Position::new(3, 19));
-    assert_eq!(result.as_deref(), Some("T"),
-        "it in suspend-param collectIn lambda should be T, got: {result:?}");
+    assert_eq!(
+        result.as_deref(),
+        Some("T"),
+        "it in suspend-param collectIn lambda should be T, got: {result:?}"
+    );
 }
 
 #[test]
@@ -888,7 +1025,9 @@ fn has_named_params_not_it_test() {
     // Single-param named → true
     assert!(super::has_named_params_not_it("item -> item.name"));
     // Multi-param named → true
-    assert!(super::has_named_params_not_it("loanId, isWustenrot -> setEvent(loanId)"));
+    assert!(super::has_named_params_not_it(
+        "loanId, isWustenrot -> setEvent(loanId)"
+    ));
     // Implicit `it` → false
     assert!(!super::has_named_params_not_it("it.name"));
     // Block / empty → false
@@ -908,8 +1047,8 @@ fn it_not_resolved_inside_multi_param_named_lambda() {
         ")\n",
         "fun use() {\n",
         "  SheetReloadActions(\n",
-        "    loan = { loanId, isWustenrot ->\n",  // line 5
-        "      it\n",                               // line 6, cursor here
+        "    loan = { loanId, isWustenrot ->\n", // line 5
+        "      it\n",                            // line 6, cursor here
         "    }\n",
         "  )\n",
         "}\n",
@@ -918,8 +1057,10 @@ fn it_not_resolved_inside_multi_param_named_lambda() {
     // `it` inside the multi-param lambda body — should NOT resolve
     // (no implicit `it` when explicit params exist)
     let result = idx.infer_lambda_param_type_at("it", &u, Position::new(6, 6));
-    assert!(result.is_none(),
-        "it inside multi-param lambda should be None, got: {result:?}");
+    assert!(
+        result.is_none(),
+        "it inside multi-param lambda should be None, got: {result:?}"
+    );
 }
 
 // ── subtypes index (goToImplementation) ──────────────────────────────────
@@ -928,16 +1069,34 @@ fn it_not_resolved_inside_multi_param_named_lambda() {
 fn subtypes_index_basic() {
     let idx = Indexer::new();
     let iface_uri = uri("/IAnimal.kt");
-    idx.index_content(&iface_uri, "interface IAnimal {\n    fun speak(): String\n}");
+    idx.index_content(
+        &iface_uri,
+        "interface IAnimal {\n    fun speak(): String\n}",
+    );
     let dog_uri = uri("/Dog.kt");
-    idx.index_content(&dog_uri, "class Dog : IAnimal {\n    override fun speak() = \"woof\"\n}");
+    idx.index_content(
+        &dog_uri,
+        "class Dog : IAnimal {\n    override fun speak() = \"woof\"\n}",
+    );
     let cat_uri = uri("/Cat.kt");
-    idx.index_content(&cat_uri, "class Cat : IAnimal {\n    override fun speak() = \"meow\"\n}");
+    idx.index_content(
+        &cat_uri,
+        "class Cat : IAnimal {\n    override fun speak() = \"meow\"\n}",
+    );
 
-    let subs = idx.subtypes.get("IAnimal").expect("should have subtypes for IAnimal");
+    let subs = idx
+        .subtypes
+        .get("IAnimal")
+        .expect("should have subtypes for IAnimal");
     let sub_uris: Vec<_> = subs.iter().map(|l| l.uri.to_string()).collect();
-    assert!(sub_uris.contains(&dog_uri.to_string()), "Dog should be a subtype");
-    assert!(sub_uris.contains(&cat_uri.to_string()), "Cat should be a subtype");
+    assert!(
+        sub_uris.contains(&dog_uri.to_string()),
+        "Dog should be a subtype"
+    );
+    assert!(
+        sub_uris.contains(&cat_uri.to_string()),
+        "Cat should be a subtype"
+    );
     assert_eq!(subs.len(), 2);
 }
 
@@ -972,9 +1131,12 @@ fn subtypes_index_reindex_cleans_stale() {
 fn subtypes_no_false_positive_across_classes() {
     // File with two classes — each should only register its own supertypes.
     let idx = Indexer::new();
-    idx.index_content(&uri("/multi.kt"), "\
+    idx.index_content(
+        &uri("/multi.kt"),
+        "\
 class Foo : Alpha {\n}\n\
-class Bar : Beta {\n}");
+class Bar : Beta {\n}",
+    );
 
     let alpha_subs = idx.subtypes.get("Alpha").map(|s| s.len()).unwrap_or(0);
     let beta_subs = idx.subtypes.get("Beta").map(|s| s.len()).unwrap_or(0);
@@ -982,12 +1144,25 @@ class Bar : Beta {\n}");
     assert_eq!(beta_subs, 1, "Beta should have exactly 1 subtype (Bar)");
     // Foo should NOT appear as subtype of Beta, and vice versa.
     if let Some(alpha) = idx.subtypes.get("Alpha") {
-        let names: Vec<_> = alpha.iter().filter_map(|l| {
-            idx.files.get(l.uri.as_str()).and_then(|f|
-                f.symbols.iter().find(|s| s.selection_range == l.range).map(|s| s.name.clone()))
-        }).collect();
-        assert!(names.contains(&"Foo".to_string()), "Alpha subtype should be Foo, got {names:?}");
-        assert!(!names.contains(&"Bar".to_string()), "Bar should NOT be Alpha subtype");
+        let names: Vec<_> = alpha
+            .iter()
+            .filter_map(|l| {
+                idx.files.get(l.uri.as_str()).and_then(|f| {
+                    f.symbols
+                        .iter()
+                        .find(|s| s.selection_range == l.range)
+                        .map(|s| s.name.clone())
+                })
+            })
+            .collect();
+        assert!(
+            names.contains(&"Foo".to_string()),
+            "Alpha subtype should be Foo, got {names:?}"
+        );
+        assert!(
+            !names.contains(&"Bar".to_string()),
+            "Bar should NOT be Alpha subtype"
+        );
     };
 }
 
@@ -995,20 +1170,42 @@ class Bar : Beta {\n}");
 fn subtypes_sealed_class_inner_objects() {
     // sealed class with inner subtypes — a common Kotlin MVI pattern.
     let idx = Indexer::new();
-    idx.index_content(&uri("/StoreState.kt"), "\
+    idx.index_content(
+        &uri("/StoreState.kt"),
+        "\
 sealed class StoreState {
 object Uninitialized : StoreState()
 data class Ready(val data: String) : StoreState()
 data class Error(val msg: String) : StoreState()
-}");
-    let subs = idx.subtypes.get("StoreState").expect("should have subtypes for StoreState");
-    let names: Vec<String> = subs.iter().filter_map(|l| {
-        idx.files.get(l.uri.as_str()).and_then(|f|
-            f.symbols.iter().find(|s| s.selection_range == l.range).map(|s| s.name.clone()))
-    }).collect();
-    assert!(names.contains(&"Uninitialized".to_string()), "Uninitialized should be a subtype, got {names:?}");
-    assert!(names.contains(&"Ready".to_string()), "Ready should be a subtype, got {names:?}");
-    assert!(names.contains(&"Error".to_string()), "Error should be a subtype, got {names:?}");
+}",
+    );
+    let subs = idx
+        .subtypes
+        .get("StoreState")
+        .expect("should have subtypes for StoreState");
+    let names: Vec<String> = subs
+        .iter()
+        .filter_map(|l| {
+            idx.files.get(l.uri.as_str()).and_then(|f| {
+                f.symbols
+                    .iter()
+                    .find(|s| s.selection_range == l.range)
+                    .map(|s| s.name.clone())
+            })
+        })
+        .collect();
+    assert!(
+        names.contains(&"Uninitialized".to_string()),
+        "Uninitialized should be a subtype, got {names:?}"
+    );
+    assert!(
+        names.contains(&"Ready".to_string()),
+        "Ready should be a subtype, got {names:?}"
+    );
+    assert!(
+        names.contains(&"Error".to_string()),
+        "Error should be a subtype, got {names:?}"
+    );
     assert_eq!(subs.len(), 3, "should find exactly 3 sealed subtypes");
 }
 
@@ -1017,16 +1214,30 @@ fn subtypes_generic_supertype() {
     // class extends a generic base: `class Concrete : Base<String>()`
     let idx = Indexer::new();
     idx.index_content(&uri("/ILoader.kt"), "interface ILoader<out T>");
-    idx.index_content(&uri("/BaseLoader.kt"), "abstract class BaseLoader<T> : ILoader<T>");
-    idx.index_content(&uri("/StringLoader.kt"), "class StringLoader : BaseLoader<String>()");
+    idx.index_content(
+        &uri("/BaseLoader.kt"),
+        "abstract class BaseLoader<T> : ILoader<T>",
+    );
+    idx.index_content(
+        &uri("/StringLoader.kt"),
+        "class StringLoader : BaseLoader<String>()",
+    );
 
     // Direct: BaseLoader is subtype of ILoader
     let iloader_subs = idx.subtypes.get("ILoader").expect("ILoader subtypes");
-    assert_eq!(iloader_subs.len(), 1, "ILoader should have 1 direct subtype (BaseLoader)");
+    assert_eq!(
+        iloader_subs.len(),
+        1,
+        "ILoader should have 1 direct subtype (BaseLoader)"
+    );
 
     // Direct: StringLoader is subtype of BaseLoader
     let base_subs = idx.subtypes.get("BaseLoader").expect("BaseLoader subtypes");
-    assert_eq!(base_subs.len(), 1, "BaseLoader should have 1 direct subtype (StringLoader)");
+    assert_eq!(
+        base_subs.len(),
+        1,
+        "BaseLoader should have 1 direct subtype (StringLoader)"
+    );
 }
 
 #[test]
@@ -1034,7 +1245,10 @@ fn subtypes_constructor_with_params() {
     // Class with constructor params before supertype: `class Foo(val x: Int) : Bar(x)`
     let idx = Indexer::new();
     idx.index_content(&uri("/Bar.kt"), "open class Bar(val x: Int)");
-    idx.index_content(&uri("/Foo.kt"), "class Foo(val x: Int) : Bar(x) {\n    fun doStuff() {}\n}");
+    idx.index_content(
+        &uri("/Foo.kt"),
+        "class Foo(val x: Int) : Bar(x) {\n    fun doStuff() {}\n}",
+    );
 
     let subs = idx.subtypes.get("Bar").expect("Bar subtypes");
     assert_eq!(subs.len(), 1, "Bar should have 1 subtype (Foo)");
@@ -1044,20 +1258,42 @@ fn subtypes_constructor_with_params() {
 fn subtypes_sealed_generic() {
     // Generic sealed class — subtypes use concrete type args: `StoreState<Nothing>()`
     let idx = Indexer::new();
-    idx.index_content(&uri("/State.kt"), "\
+    idx.index_content(
+        &uri("/State.kt"),
+        "\
 sealed class StoreState<out T> {
 object Uninitialized : StoreState<Nothing>()
 data class Ready<out T>(val data: T) : StoreState<T>()
 data class Error(val error: Throwable) : StoreState<Nothing>()
-}");
-    let subs = idx.subtypes.get("StoreState").expect("should have subtypes for generic StoreState");
-    let names: Vec<String> = subs.iter().filter_map(|l| {
-        idx.files.get(l.uri.as_str()).and_then(|f|
-            f.symbols.iter().find(|s| s.selection_range == l.range).map(|s| s.name.clone()))
-    }).collect();
-    assert!(names.contains(&"Uninitialized".to_string()), "Uninitialized missing, got {names:?}");
-    assert!(names.contains(&"Ready".to_string()), "Ready missing, got {names:?}");
-    assert!(names.contains(&"Error".to_string()), "Error missing, got {names:?}");
+}",
+    );
+    let subs = idx
+        .subtypes
+        .get("StoreState")
+        .expect("should have subtypes for generic StoreState");
+    let names: Vec<String> = subs
+        .iter()
+        .filter_map(|l| {
+            idx.files.get(l.uri.as_str()).and_then(|f| {
+                f.symbols
+                    .iter()
+                    .find(|s| s.selection_range == l.range)
+                    .map(|s| s.name.clone())
+            })
+        })
+        .collect();
+    assert!(
+        names.contains(&"Uninitialized".to_string()),
+        "Uninitialized missing, got {names:?}"
+    );
+    assert!(
+        names.contains(&"Ready".to_string()),
+        "Ready missing, got {names:?}"
+    );
+    assert!(
+        names.contains(&"Error".to_string()),
+        "Error missing, got {names:?}"
+    );
     assert_eq!(subs.len(), 3, "should find exactly 3 sealed subtypes");
 }
 
@@ -1067,38 +1303,58 @@ fn subtypes_transitive_chain_realistic() {
     // ISimpleLoadDataInteractor <- SimpleLoadDataInteractor (abstract generic base)
     // SimpleLoadDataInteractor <- ConcreteInteractor1, ConcreteInteractor2, ...
     let idx = Indexer::new();
-    idx.index_content(&uri("/ISimpleLoadDataInteractor.kt"), "\
+    idx.index_content(
+        &uri("/ISimpleLoadDataInteractor.kt"),
+        "\
 interface ISimpleLoadDataInteractor<out T> {
 suspend fun loadData(): T
-}");
-    idx.index_content(&uri("/SimpleLoadDataInteractor.kt"), "\
+}",
+    );
+    idx.index_content(
+        &uri("/SimpleLoadDataInteractor.kt"),
+        "\
 abstract class SimpleLoadDataInteractor<out T>(
 private val dispatcher: String
 ) : ISimpleLoadDataInteractor<T> {
 override suspend fun loadData(): T = withContext(dispatcher) { doLoad() }
 protected abstract suspend fun doLoad(): T
-}");
-    idx.index_content(&uri("/ContactLoader.kt"), "\
+}",
+    );
+    idx.index_content(
+        &uri("/ContactLoader.kt"),
+        "\
 class ContactAddressInteractor(
 dispatcher: String
 ) : SimpleLoadDataInteractor<String>(dispatcher) {
 override suspend fun doLoad(): String = \"contacts\"
-}");
-    idx.index_content(&uri("/BalanceLoader.kt"), "\
+}",
+    );
+    idx.index_content(
+        &uri("/BalanceLoader.kt"),
+        "\
 class BalanceInteractor(
 dispatcher: String,
 private val repo: String
 ) : SimpleLoadDataInteractor<Int>(dispatcher) {
 override suspend fun doLoad(): Int = 42
-}");
+}",
+    );
 
     // Direct subtypes of ISimpleLoadDataInteractor
-    let direct = idx.subtypes.get("ISimpleLoadDataInteractor")
+    let direct = idx
+        .subtypes
+        .get("ISimpleLoadDataInteractor")
         .expect("ISimpleLoadDataInteractor should have direct subtypes");
-    assert_eq!(direct.len(), 1, "should have 1 direct subtype (SimpleLoadDataInteractor)");
+    assert_eq!(
+        direct.len(),
+        1,
+        "should have 1 direct subtype (SimpleLoadDataInteractor)"
+    );
 
     // Direct subtypes of SimpleLoadDataInteractor
-    let base_subs = idx.subtypes.get("SimpleLoadDataInteractor")
+    let base_subs = idx
+        .subtypes
+        .get("SimpleLoadDataInteractor")
         .expect("SimpleLoadDataInteractor should have subtypes");
     assert_eq!(base_subs.len(), 2, "should have 2 direct subtypes");
 }
@@ -1112,13 +1368,16 @@ fn subtypes_multiline_constructor() {
     // ) : Bar(x) {
     let idx = Indexer::new();
     idx.index_content(&uri("/Base.kt"), "open class Base");
-    idx.index_content(&uri("/Sub.kt"), "\
+    idx.index_content(
+        &uri("/Sub.kt"),
+        "\
 class Sub(
 val x: Int,
 val y: String
 ) : Base() {
 fun doStuff() {}
-}");
+}",
+    );
     let subs = idx.subtypes.get("Base").expect("Base subtypes");
     assert_eq!(subs.len(), 1, "Base should have 1 subtype (Sub)");
 }
@@ -1128,15 +1387,24 @@ fn subtypes_annotation_with_braces() {
     // Annotation on the class declaration that contains `{}`
     // should not stop header collection prematurely.
     let idx = Indexer::new();
-    idx.index_content(&uri("/Mod.kt"), "\
+    idx.index_content(
+        &uri("/Mod.kt"),
+        "\
 @Module
 @Provides({Foo::class, Bar::class})
 class FooModule : BaseModule() {
 fun provide() {}
-}");
-    let subs = idx.subtypes.get("BaseModule")
+}",
+    );
+    let subs = idx
+        .subtypes
+        .get("BaseModule")
         .expect("BaseModule should have subtypes");
-    assert_eq!(subs.len(), 1, "annotation braces should not prevent supertype extraction");
+    assert_eq!(
+        subs.len(),
+        1,
+        "annotation braces should not prevent supertype extraction"
+    );
 }
 
 #[test]
@@ -1149,7 +1417,10 @@ fn subtypes_survive_cache_roundtrip() {
 
     // Grab the FileData that index_content produced.
     let data = idx1.files.get(u.as_str()).unwrap().clone();
-    assert!(idx1.subtypes.get("IAnimal").is_some(), "subtypes populated after index_content");
+    assert!(
+        idx1.subtypes.get("IAnimal").is_some(),
+        "subtypes populated after index_content"
+    );
 
     // Simulate loading from cache into a new indexer.
     let idx2 = Indexer::new();
@@ -1164,9 +1435,15 @@ fn subtypes_survive_cache_roundtrip() {
     idx2.apply_file_result(&result);
 
     // subtypes should be populated from cache restore.
-    let subs = idx2.subtypes.get("IAnimal")
+    let subs = idx2
+        .subtypes
+        .get("IAnimal")
         .expect("subtypes should be populated after cache restore");
-    assert_eq!(subs.len(), 1, "Dog should be a subtype of IAnimal after cache restore");
+    assert_eq!(
+        subs.len(),
+        1,
+        "Dog should be a subtype of IAnimal after cache restore"
+    );
 }
 
 // ── real-world patterns from Moneta/android ──────────────────────────────
@@ -1174,7 +1451,9 @@ fn subtypes_survive_cache_roundtrip() {
 #[test]
 fn real_sealed_interface_store_state() {
     let idx = Indexer::new();
-    idx.index_content(&uri("/StoreState.kt"), "\
+    idx.index_content(
+        &uri("/StoreState.kt"),
+        "\
 package cz.moneta.smartbanka.common.mvi.store
 
 sealed interface StoreState<out S> : BusinessState {
@@ -1187,55 +1466,91 @@ return when (this) {
   Uninitialized -> null
 }
   }
-}");
-    let subs = idx.subtypes.get("StoreState")
+}",
+    );
+    let subs = idx
+        .subtypes
+        .get("StoreState")
         .expect("StoreState should have subtypes");
-    let names: Vec<String> = subs.iter().filter_map(|l| {
-        idx.files.get(l.uri.as_str()).and_then(|f|
-            f.symbols.iter().find(|s| s.selection_range == l.range).map(|s| s.name.clone()))
-    }).collect();
-    assert!(names.contains(&"Uninitialized".to_string()), "Uninitialized missing: {names:?}");
-    assert!(names.contains(&"Ready".to_string()), "Ready missing: {names:?}");
+    let names: Vec<String> = subs
+        .iter()
+        .filter_map(|l| {
+            idx.files.get(l.uri.as_str()).and_then(|f| {
+                f.symbols
+                    .iter()
+                    .find(|s| s.selection_range == l.range)
+                    .map(|s| s.name.clone())
+            })
+        })
+        .collect();
+    assert!(
+        names.contains(&"Uninitialized".to_string()),
+        "Uninitialized missing: {names:?}"
+    );
+    assert!(
+        names.contains(&"Ready".to_string()),
+        "Ready missing: {names:?}"
+    );
     assert_eq!(subs.len(), 2);
 }
 
 #[test]
 fn real_isimpleloaddatainteractor_chain() {
     let idx = Indexer::new();
-    idx.index_content(&uri("/IInteractor.kt"), "\
+    idx.index_content(
+        &uri("/IInteractor.kt"),
+        "\
 package cz.moneta.smartbanka.shared_logic.product
-interface IInteractor<Output>");
-    idx.index_content(&uri("/ISimpleLoadDataInteractor.kt"), "\
+interface IInteractor<Output>",
+    );
+    idx.index_content(
+        &uri("/ISimpleLoadDataInteractor.kt"),
+        "\
 package cz.moneta.smartbanka.shared_logic.product
 interface ISimpleLoadDataInteractor<Output> : IInteractor<Output> {
   suspend fun loadData(): Output
-}");
-    idx.index_content(&uri("/ContactAddressInteractor.kt"), "\
+}",
+    );
+    idx.index_content(
+        &uri("/ContactAddressInteractor.kt"),
+        "\
 package cz.moneta.smartbanka.feature.gold_conversion.model.goldcard
 internal class ContactAddressInteractor @Inject constructor(
   private val repo: IGoldConversionRepository,
 ) : ISimpleLoadDataInteractor<PersonalAddress> {
   override suspend fun loadData(): PersonalAddress =
 requireNotNull(repo.contactAddressSetup().contactAddress)
-}");
-    idx.index_content(&uri("/PermanentAddressInteractor.kt"), "\
+}",
+    );
+    idx.index_content(
+        &uri("/PermanentAddressInteractor.kt"),
+        "\
 package cz.moneta.smartbanka.feature.gold_conversion.model.goldcard
 internal class PermanentAddressInteractor @Inject constructor(
   private val repo: IGoldConversionRepository,
 ) : ISimpleLoadDataInteractor<PersonalAddress> {
   override suspend fun loadData(): PersonalAddress =
 requireNotNull(repo.permanentAddressSetup().permanentAddress)
-}");
+}",
+    );
 
     // Direct subtypes of ISimpleLoadDataInteractor
-    let subs = idx.subtypes.get("ISimpleLoadDataInteractor")
+    let subs = idx
+        .subtypes
+        .get("ISimpleLoadDataInteractor")
         .expect("ISimpleLoadDataInteractor should have subtypes");
     assert_eq!(subs.len(), 2, "should find both interactors");
 
     // ISimpleLoadDataInteractor itself is a subtype of IInteractor
-    let iinteractor_subs = idx.subtypes.get("IInteractor")
+    let iinteractor_subs = idx
+        .subtypes
+        .get("IInteractor")
         .expect("IInteractor should have subtypes");
-    assert_eq!(iinteractor_subs.len(), 1, "ISimpleLoadDataInteractor is subtype of IInteractor");
+    assert_eq!(
+        iinteractor_subs.len(),
+        1,
+        "ISimpleLoadDataInteractor is subtype of IInteractor"
+    );
 }
 
 // ─── Pure function tests ──────────────────────────────────────────────────
@@ -1257,7 +1572,10 @@ fn file_contributions_definitions() {
         "package com.example\nclass Foo",
     );
     let contrib = super::file_contributions(&result);
-    assert!(contrib.definitions.contains_key("Foo"), "should have Foo in definitions");
+    assert!(
+        contrib.definitions.contains_key("Foo"),
+        "should have Foo in definitions"
+    );
     let locs = &contrib.definitions["Foo"];
     assert_eq!(locs.len(), 1);
     assert_eq!(locs[0].uri.as_str(), "file:///pkg/Foo.kt");
@@ -1273,8 +1591,14 @@ fn file_contributions_qualified_both_keys() {
         "package com.example\nclass Bar",
     );
     let contrib = super::file_contributions(&result);
-    assert!(contrib.qualified.contains_key("com.example.Bar"), "pkg.Sym key missing");
-    assert!(contrib.qualified.contains_key("com.example.Foo.Bar"), "pkg.Stem.Sym key missing");
+    assert!(
+        contrib.qualified.contains_key("com.example.Bar"),
+        "pkg.Sym key missing"
+    );
+    assert!(
+        contrib.qualified.contains_key("com.example.Foo.Bar"),
+        "pkg.Stem.Sym key missing"
+    );
 }
 
 #[test]
@@ -1287,8 +1611,14 @@ fn file_contributions_qualified_stem_same_as_sym_no_alias() {
         "package com.example\nclass Foo",
     );
     let contrib = super::file_contributions(&result);
-    assert!(contrib.qualified.contains_key("com.example.Foo"), "pkg.Sym key missing");
-    assert!(!contrib.qualified.contains_key("com.example.Foo.Foo"), "alias should not appear when stem == sym");
+    assert!(
+        contrib.qualified.contains_key("com.example.Foo"),
+        "pkg.Sym key missing"
+    );
+    assert!(
+        !contrib.qualified.contains_key("com.example.Foo.Foo"),
+        "alias should not appear when stem == sym"
+    );
 }
 
 #[test]
@@ -1309,8 +1639,18 @@ fn stale_keys_includes_both_qualified_aliases() {
     };
     data.symbols.push(sym);
     let stale = super::stale_keys_for(&uri, &data);
-    assert!(stale.qualified_keys.contains(&"com.example.Bar".to_string()), "pkg.Sym missing");
-    assert!(stale.qualified_keys.contains(&"com.example.Foo.Bar".to_string()), "pkg.Stem.Sym missing");
+    assert!(
+        stale
+            .qualified_keys
+            .contains(&"com.example.Bar".to_string()),
+        "pkg.Sym missing"
+    );
+    assert!(
+        stale
+            .qualified_keys
+            .contains(&"com.example.Foo.Bar".to_string()),
+        "pkg.Stem.Sym missing"
+    );
 }
 
 #[test]
@@ -1331,8 +1671,18 @@ fn stale_keys_stem_equals_sym_no_alias() {
     };
     data.symbols.push(sym);
     let stale = super::stale_keys_for(&uri, &data);
-    assert!(stale.qualified_keys.contains(&"com.example.Foo".to_string()), "pkg.Sym missing");
-    assert!(!stale.qualified_keys.contains(&"com.example.Foo.Foo".to_string()), "alias should not appear");
+    assert!(
+        stale
+            .qualified_keys
+            .contains(&"com.example.Foo".to_string()),
+        "pkg.Sym missing"
+    );
+    assert!(
+        !stale
+            .qualified_keys
+            .contains(&"com.example.Foo.Foo".to_string()),
+        "alias should not appear"
+    );
 }
 
 #[test]
@@ -1354,9 +1704,12 @@ fn debug_super_chain() {
     let (_, idx) = indexed("/Bar.kt", bar_src);
     let foo_uri = uri("/Foo.kt");
     idx.index_content(&foo_uri, foo_src);
-    
+
     let bar_locs = idx.find_definition_qualified("Bar", None, &foo_uri);
-    assert!(!bar_locs.is_empty(), "Bar should resolve via same-package or import");
+    assert!(
+        !bar_locs.is_empty(),
+        "Bar should resolve via same-package or import"
+    );
 }
 
 // ── super / this go-to-def TDD tests ──────────────────────────────────────
@@ -1372,7 +1725,8 @@ fn two_file_idx(a_path: &str, a_src: &str, b_path: &str, b_src: &str) -> (Url, U
 #[test]
 fn goto_super_resolves_to_parent_class() {
     let bar_src = "package com.example\nopen class Bar\n";
-    let foo_src = "package com.example\nclass Foo : Bar() {\n  fun test() {\n    super.toString()\n  }\n}";
+    let foo_src =
+        "package com.example\nclass Foo : Bar() {\n  fun test() {\n    super.toString()\n  }\n}";
     let (bar_uri, foo_uri, idx) = two_file_idx("/Bar.kt", bar_src, "/Foo.kt", foo_src);
 
     // Simulate `super` keyword lookup: find parent type names, then resolve them.
@@ -1395,7 +1749,10 @@ fn goto_super_method_resolves_in_parent() {
     // should find onCleared defined in Bar.kt, NOT Foo.kt.
     let locs = idx.find_definition_qualified("onCleared", Some("super"), &foo_uri);
     assert!(!locs.is_empty(), "super.onCleared should resolve");
-    assert_eq!(locs[0].uri, bar_uri, "super.onCleared should resolve to Bar.kt, not Foo.kt");
+    assert_eq!(
+        locs[0].uri, bar_uri,
+        "super.onCleared should resolve to Bar.kt, not Foo.kt"
+    );
 }
 
 /// `this` (standalone) resolves to the enclosing class definition.
@@ -1405,7 +1762,11 @@ fn goto_this_resolves_to_enclosing_class() {
     let (u, idx) = indexed("/MyClass.kt", src);
 
     let enclosing = idx.enclosing_class_at(&u, 3);
-    assert_eq!(enclosing.as_deref(), Some("MyClass"), "enclosing class for this");
+    assert_eq!(
+        enclosing.as_deref(),
+        Some("MyClass"),
+        "enclosing class for this"
+    );
 
     let locs = idx.find_definition_qualified("MyClass", None, &u);
     assert!(!locs.is_empty(), "this should resolve to MyClass");
@@ -1424,7 +1785,10 @@ fn goto_super_method_no_fallthrough_to_override() {
     // With super qualifier, result must NOT be in Foo.kt
     let locs = idx.find_definition_qualified("doWork", Some("super"), &foo_uri);
     for loc in &locs {
-        assert_ne!(loc.uri, foo_uri, "super.doWork must not resolve to overriding file");
+        assert_ne!(
+            loc.uri, foo_uri,
+            "super.doWork must not resolve to overriding file"
+        );
     }
 }
 
@@ -1502,20 +1866,25 @@ async fn e2e_ignore_patterns_excludes_symbols() {
 
     // Normal source file.
     std::fs::create_dir_all(root.join("src")).unwrap();
-    std::fs::write(root.join("src/Main.kt"),
-        "package com.example\nclass MainClass {\n    fun hello(): String = \"world\"\n}\n"
-    ).unwrap();
+    std::fs::write(
+        root.join("src/Main.kt"),
+        "package com.example\nclass MainClass {\n    fun hello(): String = \"world\"\n}\n",
+    )
+    .unwrap();
 
     // File inside a directory that should be ignored.
     std::fs::create_dir_all(root.join("bazel-bin/src")).unwrap();
-    std::fs::write(root.join("bazel-bin/src/Generated.kt"),
-        "package com.generated\nclass BazelGenerated {\n    fun run(): Int = 42\n}\n"
-    ).unwrap();
+    std::fs::write(
+        root.join("bazel-bin/src/Generated.kt"),
+        "package com.generated\nclass BazelGenerated {\n    fun run(): Int = 42\n}\n",
+    )
+    .unwrap();
 
     let indexer = Arc::new(Indexer::new());
-    *indexer.ignore_matcher.write().unwrap() = Some(Arc::new(
-        IgnoreMatcher::new(vec!["bazel-bin/**".to_owned()], root),
-    ));
+    *indexer.ignore_matcher.write().unwrap() = Some(Arc::new(IgnoreMatcher::new(
+        vec!["bazel-bin/**".to_owned()],
+        root,
+    )));
 
     Arc::clone(&indexer).index_workspace_full(root, None).await;
 
@@ -1536,20 +1905,25 @@ async fn e2e_ignore_patterns_bare_pattern_any_depth() {
     let root = dir.path();
 
     std::fs::create_dir_all(root.join("src")).unwrap();
-    std::fs::write(root.join("src/Keep.kt"),
-        "package com.example\nclass KeepMe\n"
-    ).unwrap();
+    std::fs::write(
+        root.join("src/Keep.kt"),
+        "package com.example\nclass KeepMe\n",
+    )
+    .unwrap();
 
     // Bare pattern "third-party" — should match nested dir at any depth.
     std::fs::create_dir_all(root.join("modules/third-party/lib")).unwrap();
-    std::fs::write(root.join("modules/third-party/lib/Vendor.kt"),
-        "package com.vendor\nclass VendorClass\n"
-    ).unwrap();
+    std::fs::write(
+        root.join("modules/third-party/lib/Vendor.kt"),
+        "package com.vendor\nclass VendorClass\n",
+    )
+    .unwrap();
 
     let indexer = Arc::new(Indexer::new());
-    *indexer.ignore_matcher.write().unwrap() = Some(Arc::new(
-        IgnoreMatcher::new(vec!["third-party".to_owned()], root),
-    ));
+    *indexer.ignore_matcher.write().unwrap() = Some(Arc::new(IgnoreMatcher::new(
+        vec!["third-party".to_owned()],
+        root,
+    )));
 
     Arc::clone(&indexer).index_workspace_full(root, None).await;
 
@@ -1606,7 +1980,10 @@ fn dot_receiver_simple() {
 }
 #[test]
 fn dot_receiver_qualified() {
-    assert_eq!(dot_receiver("Outer.Inner."), Some("Outer.Inner".to_string()));
+    assert_eq!(
+        dot_receiver("Outer.Inner."),
+        Some("Outer.Inner".to_string())
+    );
 }
 #[test]
 fn dot_receiver_none() {
@@ -1633,15 +2010,15 @@ fn it_infer_result_field_firstornull() {
     //   result.availableBanks.firstOrNull { it.code == "X" }
     //                                       ^^ should resolve to MultibankingBank
     let src = concat!(
-        "data class MultibankingBank(val code: String, val name: String)\n",  // 0
-        "data class ConnectedAccountsResponse(\n",                             // 1
+        "data class MultibankingBank(val code: String, val name: String)\n", // 0
+        "data class ConnectedAccountsResponse(\n",                           // 1
         "  val availableBanks: MutableList<MultibankingBank> = mutableListOf(),\n", // 2
-        ")\n",                                                                  // 3
+        ")\n",                                                               // 3
         "fun getConnectedAccounts(isRefresh: Boolean): ConnectedAccountsResponse {}\n", // 4
-        "fun use(isRefresh: Boolean) {\n",                                      // 5
-        "  val result = getConnectedAccounts(isRefresh)\n",                     // 6
-        "  result.availableBanks.firstOrNull { it.code == \"X\" }\n",          // 7
-        "}\n",                                                                  // 8
+        "fun use(isRefresh: Boolean) {\n",                                   // 5
+        "  val result = getConnectedAccounts(isRefresh)\n",                  // 6
+        "  result.availableBanks.firstOrNull { it.code == \"X\" }\n",        // 7
+        "}\n",                                                               // 8
     );
     let (u, idx) = indexed("/ConnectedAccounts.kt", src);
     // `it` is on line 7, inside the firstOrNull lambda body
@@ -1673,8 +2050,11 @@ fn it_infer_method_chain_firstornull() {
     let (u, idx) = indexed("/AccountChain.kt", src);
     // `it` is on line 5 at col 74 (0-indexed), inside the firstOrNull lambda
     let result = idx.infer_lambda_param_type_at("it", &u, Position::new(5, 74));
-    assert_eq!(result.as_deref(), Some("Account"),
-        "it inside method-chain firstOrNull should be Account, got: {result:?}");
+    assert_eq!(
+        result.as_deref(),
+        Some("Account"),
+        "it inside method-chain firstOrNull should be Account, got: {result:?}"
+    );
 }
 
 #[test]
@@ -1700,7 +2080,9 @@ fn account_var_type_not_inferred_from_wrong_chain_segment() {
     // We accept None (couldn't trace chain) OR the correct type.
     // We reject "AccountList" — that was the regression.
     if let Some(ref t) = inferred {
-        assert!(!t.contains("AccountList"),
-            "inferred type for `account` must not be AccountList (regression), got: {t}");
+        assert!(
+            !t.contains("AccountList"),
+            "inferred type for `account` must not be AccountList (regression), got: {t}"
+        );
     }
 }

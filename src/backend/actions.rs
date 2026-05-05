@@ -1,17 +1,33 @@
+use super::rename::whole_word_replace_file;
+use super::Backend;
+use crate::StrExt;
 use std::sync::atomic::Ordering;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
-use super::Backend;
-use super::rename::whole_word_replace_file;
-use crate::StrExt;
 
 /// Returns true if `name` is a keyword that precedes a block but is NOT
 /// a function call — i.e. we should NOT show signature help for it.
 pub(super) fn is_non_call_keyword(name: &str) -> bool {
-    matches!(name,
-        "fun" | "if" | "while" | "for" | "when" | "catch" | "constructor"
-        | "override" | "else" | "return" | "throw" | "try" | "finally"
-        | "object" | "class" | "interface" | "enum" | "init"
+    matches!(
+        name,
+        "fun"
+            | "if"
+            | "while"
+            | "for"
+            | "when"
+            | "catch"
+            | "constructor"
+            | "override"
+            | "else"
+            | "return"
+            | "throw"
+            | "try"
+            | "finally"
+            | "object"
+            | "class"
+            | "interface"
+            | "enum"
+            | "init"
     )
 }
 
@@ -24,25 +40,46 @@ fn expand_call_expr(chars: &[char], s: usize, e: usize) -> (usize, usize) {
     let mut new_s = s;
     while new_s > 0 {
         let c = chars[new_s - 1];
-        if c.is_alphanumeric() || c == '_' || c == '.' { new_s -= 1; } else { break; }
+        if c.is_alphanumeric() || c == '_' || c == '.' {
+            new_s -= 1;
+        } else {
+            break;
+        }
     }
     // Strip leading dots we may have swallowed.
-    while new_s < e && chars[new_s] == '.' { new_s += 1; }
+    while new_s < e && chars[new_s] == '.' {
+        new_s += 1;
+    }
 
     // Expand right over remaining identifier chars.
     let mut new_e = e;
     while new_e < chars.len() {
         let c = chars[new_e];
-        if c.is_alphanumeric() || c == '_' { new_e += 1; } else { break; }
+        if c.is_alphanumeric() || c == '_' {
+            new_e += 1;
+        } else {
+            break;
+        }
     }
     // Eat balanced `(…)` if present.
     if new_e < chars.len() && chars[new_e] == '(' {
         let mut depth = 0usize;
         while new_e < chars.len() {
             match chars[new_e] {
-                '(' => { depth += 1; new_e += 1; }
-                ')' => { new_e += 1; depth -= 1; if depth == 0 { break; } }
-                _   => { new_e += 1; }
+                '(' => {
+                    depth += 1;
+                    new_e += 1;
+                }
+                ')' => {
+                    new_e += 1;
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {
+                    new_e += 1;
+                }
             }
         }
     }
@@ -57,7 +94,11 @@ fn expand_call_expr(chars: &[char], s: usize, e: usize) -> (usize, usize) {
 fn derive_var_name(expr: &str) -> String {
     // Take the last `.`-separated segment, strip trailing `()` / `(…)`.
     let seg = expr.trim().rsplit('.').next().unwrap_or(expr.trim());
-    let seg = if let Some(p) = seg.find('(') { &seg[..p] } else { seg };
+    let seg = if let Some(p) = seg.find('(') {
+        &seg[..p]
+    } else {
+        seg
+    };
     let seg = seg.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
 
     // Strip common accessor prefixes: getXxx → xxx, isXxx → isXxx (keep),
@@ -81,7 +122,11 @@ fn derive_var_name(expr: &str) -> String {
         seg.to_string()
     };
 
-    if result.is_empty() { "value".to_string() } else { result }
+    if result.is_empty() {
+        "value".to_string()
+    } else {
+        result
+    }
 }
 
 impl Backend {
@@ -89,8 +134,8 @@ impl Backend {
         &self,
         params: CompletionParams,
     ) -> Result<Option<CompletionResponse>> {
-        let pp       = params.text_document_position;
-        let uri      = &pp.text_document.uri;
+        let pp = params.text_document_position;
+        let uri = &pp.text_document.uri;
         let position = pp.position;
         let snippets = self.snippet_support.load(Ordering::Relaxed);
 
@@ -119,8 +164,8 @@ impl Backend {
         &self,
         params: CodeActionParams,
     ) -> Result<Option<Vec<CodeActionOrCommand>>> {
-        let uri      = &params.text_document.uri;
-        let range    = params.range;
+        let uri = &params.text_document.uri;
+        let range = params.range;
 
         // Read the current line from live_lines (most up-to-date).
         let line_text: String = {
@@ -143,7 +188,7 @@ impl Backend {
         // Available when there is a non-empty selection on a single line,
         // but NOT on import/package lines.
         let sel_start = range.start;
-        let sel_end   = range.end;
+        let sel_end = range.end;
         let has_selection = sel_start != sel_end && sel_start.line == sel_end.line;
 
         if has_selection && !is_import_line {
@@ -152,7 +197,9 @@ impl Backend {
             let utf16_to_char = |utf16: usize| {
                 let mut cu = 0usize;
                 for (i, c) in chars.iter().enumerate() {
-                    if cu >= utf16 { return i; }
+                    if cu >= utf16 {
+                        return i;
+                    }
                     cu += c.len_utf16();
                 }
                 chars.len()
@@ -168,7 +215,10 @@ impl Backend {
 
             if !expr.trim().is_empty() {
                 let var_name = derive_var_name(&expr);
-                let indent: String = line_text.chars().take_while(|c| c.is_whitespace()).collect();
+                let indent: String = line_text
+                    .chars()
+                    .take_while(|c| c.is_whitespace())
+                    .collect();
 
                 // Single edit: replace entire line with two lines:
                 //   1) val <name> = <expr>
@@ -180,18 +230,30 @@ impl Backend {
                 let new_text = format!("{indent}val {var_name} = {expr}\n{replaced_line}");
 
                 let mut changes = std::collections::HashMap::new();
-                changes.insert(uri.clone(), vec![TextEdit {
-                    range: Range {
-                        start: Position { line: sel_start.line, character: 0 },
-                        end:   Position { line: sel_start.line, character: line_utf16_len },
-                    },
-                    new_text,
-                }]);
+                changes.insert(
+                    uri.clone(),
+                    vec![TextEdit {
+                        range: Range {
+                            start: Position {
+                                line: sel_start.line,
+                                character: 0,
+                            },
+                            end: Position {
+                                line: sel_start.line,
+                                character: line_utf16_len,
+                            },
+                        },
+                        new_text,
+                    }],
+                );
 
                 actions.push(CodeActionOrCommand::CodeAction(CodeAction {
                     title: format!("Introduce local variable `{var_name}`"),
-                    kind:  Some(CodeActionKind::REFACTOR_EXTRACT),
-                    edit:  Some(WorkspaceEdit { changes: Some(changes), ..Default::default() }),
+                    kind: Some(CodeActionKind::REFACTOR_EXTRACT),
+                    edit: Some(WorkspaceEdit {
+                        changes: Some(changes),
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 }));
             }
@@ -218,15 +280,22 @@ impl Backend {
                 let mut cu = 0usize;
                 let mut idx_c = chars.len();
                 for (i, c) in chars.iter().enumerate() {
-                    if cu >= utf16 { idx_c = i; break; }
+                    if cu >= utf16 {
+                        idx_c = i;
+                        break;
+                    }
                     cu += c.len_utf16();
                 }
                 idx_c
             };
             let mut ws = col;
-            while ws > 0 && (chars[ws-1].is_alphanumeric() || chars[ws-1] == '_') { ws -= 1; }
+            while ws > 0 && (chars[ws - 1].is_alphanumeric() || chars[ws - 1] == '_') {
+                ws -= 1;
+            }
             let mut we = col;
-            while we < chars.len() && (chars[we].is_alphanumeric() || chars[we] == '_') { we += 1; }
+            while we < chars.len() && (chars[we].is_alphanumeric() || chars[we] == '_') {
+                we += 1;
+            }
             chars[ws..we].iter().collect()
         };
 
@@ -234,23 +303,38 @@ impl Backend {
         // Only relevant for Kotlin/KTS files (Java/Swift don't use this syntax).
         let is_kotlin = crate::Language::from_path(uri.path()).is_kotlin();
         if is_kotlin && trimmed.starts_with("import ") && !trimmed.contains(" as ") {
-            let path  = trimmed.trim_start_matches("import ").trim().trim_end_matches(".*");
+            let path = trimmed
+                .trim_start_matches("import ")
+                .trim()
+                .trim_end_matches(".*");
             let alias = path.rsplit('.').next().unwrap_or(path);
             if !alias.is_empty() {
-                let ln  = range.start.line;
+                let ln = range.start.line;
                 let col = line_text.chars().map(|c| c.len_utf16() as u32).sum::<u32>();
                 let mut changes = std::collections::HashMap::new();
-                changes.insert(uri.clone(), vec![TextEdit {
-                    range: Range {
-                        start: Position { line: ln, character: col },
-                        end:   Position { line: ln, character: col },
-                    },
-                    new_text: format!(" as {alias}"),
-                }]);
+                changes.insert(
+                    uri.clone(),
+                    vec![TextEdit {
+                        range: Range {
+                            start: Position {
+                                line: ln,
+                                character: col,
+                            },
+                            end: Position {
+                                line: ln,
+                                character: col,
+                            },
+                        },
+                        new_text: format!(" as {alias}"),
+                    }],
+                );
                 actions.push(CodeActionOrCommand::CodeAction(CodeAction {
                     title: format!("Add import alias `as {alias}`"),
-                    kind:  Some(CodeActionKind::QUICKFIX),
-                    edit:  Some(WorkspaceEdit { changes: Some(changes), ..Default::default() }),
+                    kind: Some(CodeActionKind::QUICKFIX),
+                    edit: Some(WorkspaceEdit {
+                        changes: Some(changes),
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 }));
             }
@@ -262,7 +346,9 @@ impl Backend {
         //       as a placeholder (single whole-file TextEdit, no crash risk).
         //       User then does  %s_Word<ret>cNewName<esc>  in Helix.
         // Only for Kotlin/KTS files — Java/Swift use different rename flows.
-        if is_kotlin && !is_import_line && !cursor_word.is_empty()
+        if is_kotlin
+            && !is_import_line
+            && !cursor_word.is_empty()
             && cursor_word.starts_with_uppercase()
         {
             // Combined: add `as _Word` to matching import + rename Word→_Word in body (single action).
@@ -270,22 +356,40 @@ impl Backend {
                 let placeholder = format!("_{cursor_word}");
                 // Rename in non-import lines only (whole-file TextEdit).
                 let new_content = whole_word_replace_file(&all_lines, &cursor_word, &placeholder);
-                let last_line   = (all_lines.len() - 1) as u32;
-                let last_col    = all_lines.last().map(|l| l.chars().map(|c| c.len_utf16() as u32).sum::<u32>()).unwrap_or(0);
+                let last_line = (all_lines.len() - 1) as u32;
+                let last_col = all_lines
+                    .last()
+                    .map(|l| l.chars().map(|c| c.len_utf16() as u32).sum::<u32>())
+                    .unwrap_or(0);
 
                 // Check if there's a matching import to also alias.
-                let import_edit = all_lines.iter().enumerate()
+                let import_edit = all_lines
+                    .iter()
+                    .enumerate()
                     .find(|(_, l)| {
                         let t = l.trim();
-                        t.starts_with("import ") && !t.contains(" as ")
-                        && t.rsplit(['.', ' ']).next().map(|s| s == cursor_word).unwrap_or(false)
+                        t.starts_with("import ")
+                            && !t.contains(" as ")
+                            && t.rsplit(['.', ' '])
+                                .next()
+                                .map(|s| s == cursor_word)
+                                .unwrap_or(false)
                     })
                     .map(|(import_ln, import_line_text)| {
-                        let col = import_line_text.chars().map(|c| c.len_utf16() as u32).sum::<u32>();
+                        let col = import_line_text
+                            .chars()
+                            .map(|c| c.len_utf16() as u32)
+                            .sum::<u32>();
                         TextEdit {
                             range: Range {
-                                start: Position { line: import_ln as u32, character: col },
-                                end:   Position { line: import_ln as u32, character: col },
+                                start: Position {
+                                    line: import_ln as u32,
+                                    character: col,
+                                },
+                                end: Position {
+                                    line: import_ln as u32,
+                                    character: col,
+                                },
                             },
                             new_text: format!(" as {placeholder}"),
                         }
@@ -294,8 +398,14 @@ impl Backend {
                 // Body rename replaces the whole file (skipping import lines).
                 let mut body_edit = TextEdit {
                     range: Range {
-                        start: Position { line: 0,        character: 0 },
-                        end:   Position { line: last_line, character: last_col },
+                        start: Position {
+                            line: 0,
+                            character: 0,
+                        },
+                        end: Position {
+                            line: last_line,
+                            character: last_col,
+                        },
                     },
                     new_text: new_content,
                 };
@@ -306,7 +416,11 @@ impl Backend {
                 // at the import line position directly).
                 if let Some(ie) = import_edit {
                     // Splice the alias into the body content at the right line.
-                    let mut body_lines: Vec<String> = body_edit.new_text.split('\n').map(|s| s.to_owned()).collect();
+                    let mut body_lines: Vec<String> = body_edit
+                        .new_text
+                        .split('\n')
+                        .map(|s| s.to_owned())
+                        .collect();
                     let iln = ie.range.start.line as usize;
                     if iln < body_lines.len() {
                         body_lines[iln].push_str(&ie.new_text);
@@ -324,13 +438,20 @@ impl Backend {
                 changes.insert(uri.clone(), vec![body_edit]);
                 actions.push(CodeActionOrCommand::CodeAction(CodeAction {
                     title,
-                    kind:  Some(CodeActionKind::REFACTOR),
-                    edit:  Some(WorkspaceEdit { changes: Some(changes), ..Default::default() }),
+                    kind: Some(CodeActionKind::REFACTOR),
+                    edit: Some(WorkspaceEdit {
+                        changes: Some(changes),
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 }));
             }
         }
 
-        Ok(if actions.is_empty() { None } else { Some(actions) })
+        Ok(if actions.is_empty() {
+            None
+        } else {
+            Some(actions)
+        })
     }
 }

@@ -58,7 +58,7 @@ impl IgnoreMatcher {
             let glob_pats: Vec<String> = if !normalized.contains('/') {
                 vec![
                     format!("**/{}", normalized),
-                    format!("**/{}/", normalized),   // trailing / for dir match
+                    format!("**/{}/", normalized), // trailing / for dir match
                     format!("**/{normalized}/**"),
                 ]
             } else {
@@ -67,8 +67,12 @@ impl IgnoreMatcher {
 
             for glob_pat in glob_pats {
                 match globset::Glob::new(&glob_pat) {
-                    Ok(g) => { builder.add(g); }
-                    Err(e) => { log::warn!("ignorePatterns: invalid pattern {:?}: {}", pat, e); }
+                    Ok(g) => {
+                        builder.add(g);
+                    }
+                    Err(e) => {
+                        log::warn!("ignorePatterns: invalid pattern {:?}: {}", pat, e);
+                    }
                 }
             }
         }
@@ -76,7 +80,11 @@ impl IgnoreMatcher {
             log::warn!("ignorePatterns: failed to build glob set: {}", e);
             globset::GlobSetBuilder::new().build().unwrap()
         });
-        Self { patterns, glob_set: Arc::new(glob_set), root: root.to_path_buf() }
+        Self {
+            patterns,
+            glob_set: Arc::new(glob_set),
+            root: root.to_path_buf(),
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -148,9 +156,16 @@ pub const SOURCE_EXTENSIONS: &[&str] = &["kt", "java", "swift"];
 /// Java:   `class`, `interface`, `enum` (standalone, no `class` suffix),
 ///         with any leading access/modifier keywords ignored
 pub(crate) fn build_rg_pattern(name: &str) -> String {
-    let safe: String = name.chars().flat_map(|c| {
-        if c.is_alphanumeric() || c == '_' { vec![c] } else { vec!['\\', c] }
-    }).collect();
+    let safe: String = name
+        .chars()
+        .flat_map(|c| {
+            if c.is_alphanumeric() || c == '_' {
+                vec![c]
+            } else {
+                vec!['\\', c]
+            }
+        })
+        .collect();
     // Kotlin: standard keywords + `enum class` + extension function receiver
     // Java:   `enum NAME` (Java enums have no `class` after `enum`)
     // Swift:  struct, protocol, extension, let (in addition to shared keywords)
@@ -182,7 +197,7 @@ fn walk_to_git_root(file: &Path) -> Option<PathBuf> {
 /// so rg searches the *actual* project even when the workspace config is stale.
 pub(crate) fn effective_rg_root(
     workspace_root: Option<&Path>,
-    open_file:      Option<&Path>,
+    open_file: Option<&Path>,
 ) -> Option<PathBuf> {
     match (workspace_root, open_file) {
         (Some(root), Some(fp)) if fp.starts_with(root) => Some(root.to_path_buf()),
@@ -203,14 +218,18 @@ pub(crate) fn effective_rg_root(
 /// from CWD which may not be the project when spawned by the editor.
 ///
 /// Results in directories matched by `matcher` are filtered out.
-pub(crate) fn rg_find_definition(name: &str, root: Option<&Path>, matcher: Option<&IgnoreMatcher>) -> Vec<Location> {
+pub(crate) fn rg_find_definition(
+    name: &str,
+    root: Option<&Path>,
+    matcher: Option<&IgnoreMatcher>,
+) -> Vec<Location> {
     let pattern = build_rg_pattern(name);
 
     // Use the provided root, or fall back to CWD (which editors like Helix
     // set to the workspace root when spawning the LSP server).
     let search_root: std::borrow::Cow<Path> = match root {
         Some(r) => std::borrow::Cow::Borrowed(r),
-        None    => std::borrow::Cow::Owned(std::env::current_dir().unwrap_or_default()),
+        None => std::borrow::Cow::Owned(std::env::current_dir().unwrap_or_default()),
     };
 
     let mut cmd = Command::new("rg");
@@ -238,7 +257,11 @@ pub(crate) fn rg_find_definition(name: &str, root: Option<&Path>, matcher: Optio
         .filter_map(|l| parse_rg_line_with_content_rooted(l, &search_root).map(|(loc, _)| loc))
         .collect();
 
-    if let Some(m) = matcher { m.filter_locs(locs) } else { locs }
+    if let Some(m) = matcher {
+        m.filter_locs(locs)
+    } else {
+        locs
+    }
 }
 
 /// Run `rg` to find all *usages* of `name` in the project.
@@ -252,28 +275,41 @@ pub(crate) fn rg_find_definition(name: &str, root: Option<&Path>, matcher: Optio
 /// Results in directories matched by `matcher` are filtered out.
 #[allow(clippy::too_many_arguments)]
 pub fn rg_find_references(
-    name:         &str,
+    name: &str,
     parent_class: Option<&str>,
     declared_pkg: Option<&str>,
-    root:         Option<&Path>,
+    root: Option<&Path>,
     include_decl: bool,
-    from_uri:     &Url,
+    from_uri: &Url,
     // Absolute file paths where `name` is declared — always included in bare-word
     // search so the declaration site itself is never missed (it uses bare `Name`,
     // not the qualified `Parent.Name` form that Pass A searches for).
-    decl_files:   &[String],
-    matcher:      Option<&IgnoreMatcher>,
+    decl_files: &[String],
+    matcher: Option<&IgnoreMatcher>,
 ) -> Vec<Location> {
     let search_root: std::borrow::Cow<Path> = match root {
         Some(r) => std::borrow::Cow::Borrowed(r),
-        None    => std::borrow::Cow::Owned(std::env::current_dir().unwrap_or_default()),
+        None => std::borrow::Cow::Owned(std::env::current_dir().unwrap_or_default()),
     };
 
     let safe_name: String = regex_escape(name);
-    let decl_kws = ["class ", "interface ", "object ", "fun ", "val ", "var ",
-                    "typealias ", "enum class ", "enum ",
-                    // Swift
-                    "struct ", "protocol ", "func ", "let ", "extension "];
+    let decl_kws = [
+        "class ",
+        "interface ",
+        "object ",
+        "fun ",
+        "val ",
+        "var ",
+        "typealias ",
+        "enum class ",
+        "enum ",
+        // Swift
+        "struct ",
+        "protocol ",
+        "func ",
+        "let ",
+        "extension ",
+    ];
 
     let filter = |(loc, content): (Location, String)| -> Option<Location> {
         let trimmed = content.trim_start();
@@ -284,7 +320,9 @@ pub fn rg_find_references(
         if !include_decl {
             let is_decl = decl_kws.iter().any(|kw| content.contains(kw))
                 && loc.uri.as_str() == from_uri.as_str();
-            if is_decl { return None; }
+            if is_decl {
+                return None;
+            }
         }
         Some(loc)
     };
@@ -314,15 +352,12 @@ pub fn rg_find_references(
         // Pattern must match the parent and name as ADJACENT dot-segments:
         //   import …ParentClass.Name   or   import …ParentClass.*
         // NOT files that merely mention both words (e.g. OtherContract.State).
-        let direct_import_pat = format!(
-            r"import[^\n]*\b{}\.(?:{}\b|\*)",
-            safe_parent, safe_name
-        );
+        let direct_import_pat = format!(r"import[^\n]*\b{}\.(?:{}\b|\*)", safe_parent, safe_name);
         let candidate_files = rg_files_with_matches(&direct_import_pat, &search_root);
         // Filter candidate files against ignore patterns before searching them.
         let candidate_files = match matcher {
             Some(m) => m.filter_file_strings(candidate_files),
-            None    => candidate_files,
+            None => candidate_files,
         };
 
         // Step B2 — files in the same package as the parent class declaration.
@@ -337,20 +372,37 @@ pub fn rg_find_references(
         let mut all_files: Vec<String> = candidate_files;
         // Build new entries first (borrows all_files), then extend after the borrow ends.
         let new_decl: Vec<&String> = {
-            let existing: std::collections::HashSet<&str> = all_files.iter().map(|s| s.as_str()).collect();
-            decl_files.iter().filter(|f| !existing.contains(f.as_str())).collect()
+            let existing: std::collections::HashSet<&str> =
+                all_files.iter().map(|s| s.as_str()).collect();
+            decl_files
+                .iter()
+                .filter(|f| !existing.contains(f.as_str()))
+                .collect()
         };
-        for f in new_decl { all_files.push(f.clone()); }
+        for f in new_decl {
+            all_files.push(f.clone());
+        }
 
         if !all_files.is_empty() {
             let bare_hits = rg_word_in_files(&safe_name, &all_files);
             // Deduplicate against the qualified hits using a HashSet for O(1) lookup.
-            let seen: std::collections::HashSet<(String, u32, u32)> = locs.iter()
-                .map(|l| (l.uri.to_string(), l.range.start.line, l.range.start.character))
+            let seen: std::collections::HashSet<(String, u32, u32)> = locs
+                .iter()
+                .map(|l| {
+                    (
+                        l.uri.to_string(),
+                        l.range.start.line,
+                        l.range.start.character,
+                    )
+                })
                 .collect();
             for (loc, content) in bare_hits {
                 if let Some(loc) = filter((loc, content)) {
-                    let key = (loc.uri.to_string(), loc.range.start.line, loc.range.start.character);
+                    let key = (
+                        loc.uri.to_string(),
+                        loc.range.start.line,
+                        loc.range.start.character,
+                    );
                     if !seen.contains(&key) {
                         locs.push(loc);
                     }
@@ -372,12 +424,14 @@ pub fn rg_find_references(
 
         let mut candidate_files = rg_files_with_matches(&import_pat, &search_root);
         for f in rg_files_with_matches(&pkg_pat, &search_root) {
-            if !candidate_files.contains(&f) { candidate_files.push(f); }
+            if !candidate_files.contains(&f) {
+                candidate_files.push(f);
+            }
         }
         // Filter candidate files against ignore patterns before searching them.
         let candidate_files = match matcher {
             Some(m) => m.filter_file_strings(candidate_files),
-            None    => candidate_files,
+            None => candidate_files,
         };
 
         if candidate_files.is_empty() {
@@ -391,7 +445,10 @@ pub fn rg_find_references(
         // ── Fully unscoped: lowercase / unknown symbol ────────────────────────
         let mut cmd = Command::new("rg");
         cmd.args([
-            "--no-heading", "--with-filename", "--line-number", "--column",
+            "--no-heading",
+            "--with-filename",
+            "--line-number",
+            "--column",
             "--word-regexp",
         ]);
         for ext in SOURCE_EXTENSIONS {
@@ -412,7 +469,11 @@ pub fn rg_find_references(
             .collect()
     };
 
-    if let Some(m) = matcher { m.filter_locs(result) } else { result }
+    if let Some(m) = matcher {
+        m.filter_locs(result)
+    } else {
+        result
+    }
 }
 
 /// Quick heuristic rg-based implementor finder. Scans files that mention `name`
@@ -422,7 +483,11 @@ pub fn rg_find_references(
 /// subtype index is empty during cold indexing.
 ///
 /// Results in directories matched by `matcher` are filtered out.
-pub fn rg_find_implementors(name: &str, root: Option<&Path>, matcher: Option<&IgnoreMatcher>) -> Vec<Location> {
+pub fn rg_find_implementors(
+    name: &str,
+    root: Option<&Path>,
+    matcher: Option<&IgnoreMatcher>,
+) -> Vec<Location> {
     let safe = name.to_string();
     let root = match root {
         Some(r) => r,
@@ -430,8 +495,17 @@ pub fn rg_find_implementors(name: &str, root: Option<&Path>, matcher: Option<&Ig
     };
     // Search for the name in source files.
     let mut cmd = Command::new("rg");
-    cmd.args(["--no-heading", "--with-filename", "--line-number", "--column", "-e", &safe]);
-    for ext in SOURCE_EXTENSIONS { cmd.args(["--glob", &format!("*.{ext}")]); }
+    cmd.args([
+        "--no-heading",
+        "--with-filename",
+        "--line-number",
+        "--column",
+        "-e",
+        &safe,
+    ]);
+    for ext in SOURCE_EXTENSIONS {
+        cmd.args(["--glob", &format!("*.{ext}")]);
+    }
     cmd.arg(root);
     let out = match cmd.output() {
         Ok(o) if !o.stdout.is_empty() => o,
@@ -447,7 +521,12 @@ pub fn rg_find_implementors(name: &str, root: Option<&Path>, matcher: Option<&Ig
             // Java implements: class Foo implements Interface
             // Swift: class Foo: Protocol, struct Foo: Protocol, extension Foo: Protocol
             let lower = line.to_lowercase();
-            if lower.contains("class ") || lower.contains("struct ") || lower.contains("interface") || lower.contains("enum") || lower.contains("extension ") {
+            if lower.contains("class ")
+                || lower.contains("struct ")
+                || lower.contains("interface")
+                || lower.contains("enum")
+                || lower.contains("extension ")
+            {
                 // Check that the name appears as a word and near a declaration keyword
                 if line.contains(name) {
                     return Some(loc);
@@ -458,7 +537,7 @@ pub fn rg_find_implementors(name: &str, root: Option<&Path>, matcher: Option<&Ig
         .collect();
     match matcher {
         Some(m) => m.filter_locs(locs),
-        None    => locs,
+        None => locs,
     }
 }
 
@@ -472,32 +551,48 @@ pub fn rg_find_implementors(name: &str, root: Option<&Path>, matcher: Option<&Ig
 pub(crate) fn parse_rg_line(line: &str) -> Option<Location> {
     // format: /abs/path/to/File.kt:line:col:content
     let mut parts = line.splitn(4, ':');
-    let file     = parts.next()?;
+    let file = parts.next()?;
     let line_num: u32 = parts.next()?.trim().parse().ok()?;
-    let col:      u32 = parts.next()?.trim().parse().ok()?;
+    let col: u32 = parts.next()?.trim().parse().ok()?;
 
     let path = std::path::Path::new(file);
     // Silently skip if rg somehow gave us a relative path.
-    if !path.is_absolute() { return None; }
+    if !path.is_absolute() {
+        return None;
+    }
 
     let uri = Url::from_file_path(path).ok()?;
     let pos = Position::new(line_num.saturating_sub(1), col.saturating_sub(1));
-    Some(Location { uri, range: Range::new(pos, pos) })
+    Some(Location {
+        uri,
+        range: Range::new(pos, pos),
+    })
 }
 
 // ─── Private helpers ─────────────────────────────────────────────────────────
 
 /// Escape a string for use as a regex literal (non-alphanumeric chars → `\c`).
 pub(crate) fn regex_escape(s: &str) -> String {
-    s.chars().flat_map(|c| {
-        if c.is_alphanumeric() || c == '_' { vec![c] } else { vec!['\\', c] }
-    }).collect()
+    s.chars()
+        .flat_map(|c| {
+            if c.is_alphanumeric() || c == '_' {
+                vec![c]
+            } else {
+                vec!['\\', c]
+            }
+        })
+        .collect()
 }
 
 /// Run rg with a regex pattern; return `(Location, line_content)` pairs.
 fn rg_raw(pattern: &str, root: &Path) -> Vec<(Location, String)> {
     let mut cmd = Command::new("rg");
-    cmd.args(["--no-heading", "--with-filename", "--line-number", "--column"]);
+    cmd.args([
+        "--no-heading",
+        "--with-filename",
+        "--line-number",
+        "--column",
+    ]);
     for ext in SOURCE_EXTENSIONS {
         cmd.args(["--glob", &format!("*.{ext}")]);
     }
@@ -539,10 +634,20 @@ fn rg_files_with_matches(pattern: &str, root: &Path) -> Vec<String> {
 
 /// Run `rg --word-regexp NAME` restricted to specific files.
 fn rg_word_in_files(safe_name: &str, files: &[String]) -> Vec<(Location, String)> {
-    if files.is_empty() { return vec![]; }
+    if files.is_empty() {
+        return vec![];
+    }
     let out = match Command::new("rg")
-        .args(["--no-heading", "--with-filename", "--line-number", "--column",
-               "--word-regexp", "-e", safe_name, "--"])
+        .args([
+            "--no-heading",
+            "--with-filename",
+            "--line-number",
+            "--column",
+            "--word-regexp",
+            "-e",
+            safe_name,
+            "--",
+        ])
         .args(files)
         .output()
     {
@@ -558,10 +663,10 @@ fn rg_word_in_files(safe_name: &str, files: &[String]) -> Vec<(Location, String)
 
 fn parse_rg_line_with_content_rooted(line: &str, root: &Path) -> Option<(Location, String)> {
     let mut parts = line.splitn(4, ':');
-    let file     = parts.next()?;
+    let file = parts.next()?;
     let line_num: u32 = parts.next()?.trim().parse().ok()?;
-    let col:      u32 = parts.next()?.trim().parse().ok()?;
-    let content  = parts.next().unwrap_or("").to_string();
+    let col: u32 = parts.next()?.trim().parse().ok()?;
+    let content = parts.next().unwrap_or("").to_string();
 
     let path = std::path::Path::new(file);
     let abs_path = if path.is_absolute() {
@@ -579,7 +684,13 @@ fn parse_rg_line_with_content_rooted(line: &str, root: &Path) -> Option<(Locatio
     };
     let uri = Url::from_file_path(&abs_path).ok()?;
     let pos = Position::new(line_num.saturating_sub(1), col.saturating_sub(1));
-    Some((Location { uri, range: Range::new(pos, pos) }, content))
+    Some((
+        Location {
+            uri,
+            range: Range::new(pos, pos),
+        },
+        content,
+    ))
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

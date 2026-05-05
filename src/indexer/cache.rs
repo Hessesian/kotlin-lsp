@@ -140,14 +140,22 @@ pub(crate) fn cache_entry_to_file_result(uri: &Url, entry: &FileCacheEntry) -> F
     use tower_lsp::lsp_types::{Location, SymbolKind};
     let data = &entry.file_data;
     let class_kinds = [
-        SymbolKind::CLASS, SymbolKind::INTERFACE, SymbolKind::STRUCT,
-        SymbolKind::ENUM, SymbolKind::OBJECT,
+        SymbolKind::CLASS,
+        SymbolKind::INTERFACE,
+        SymbolKind::STRUCT,
+        SymbolKind::ENUM,
+        SymbolKind::OBJECT,
     ];
     let mut supertypes: Vec<(String, Location)> = Vec::new();
     for sym in &data.symbols {
-        if !class_kinds.contains(&sym.kind) { continue; }
+        if !class_kinds.contains(&sym.kind) {
+            continue;
+        }
         let start_line = sym.start_line();
-        let class_loc = Location { uri: uri.clone(), range: sym.selection_range };
+        let class_loc = Location {
+            uri: uri.clone(),
+            range: sym.selection_range,
+        };
         for (_, super_name, _) in data.supers.iter().filter(|(l, _, _)| *l == start_line) {
             supertypes.push((super_name.clone(), class_loc.clone()));
         }
@@ -173,11 +181,11 @@ pub(crate) fn cache_entry_to_file_result(uri: &Url, entry: &FileCacheEntry) -> F
 /// to prevent an editor server (which may load only part of the workspace) from
 /// truncating a cache built by `--index-only`.
 pub(super) fn save_cache(
-    root:           &Path,
-    files:          &DashMap<String, Arc<FileData>>,
+    root: &Path,
+    files: &DashMap<String, Arc<FileData>>,
     content_hashes: &DashMap<String, u64>,
-    library_uris:   &DashSet<String>,
-    complete_scan:  bool,
+    library_uris: &DashSet<String>,
+    complete_scan: bool,
 ) {
     let cache_path = workspace_cache_path(root);
     if let Some(parent) = cache_path.parent() {
@@ -191,13 +199,17 @@ pub(super) fn save_cache(
     for file_ref in files.iter() {
         let uri_str = file_ref.key();
         // Skip library-source files — re-indexed from sourcePaths on each startup.
-        if library_uris.contains(uri_str) { continue; }
+        if library_uris.contains(uri_str) {
+            continue;
+        }
         let data = file_ref.value();
         let hash = content_hashes.get(uri_str).map(|h| *h).unwrap_or(0);
         if let Ok(url) = uri_str.parse::<Url>() {
             if let Ok(path) = url.to_file_path() {
-                let meta      = std::fs::metadata(&path);
-                let mtime     = meta.as_ref().ok()
+                let meta = std::fs::metadata(&path);
+                let mtime = meta
+                    .as_ref()
+                    .ok()
                     .and_then(|m| m.modified().ok())
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                     .map(|d| d.as_secs())
@@ -205,13 +217,22 @@ pub(super) fn save_cache(
                 let file_size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
                 entries.insert(
                     path.to_string_lossy().to_string(),
-                    FileCacheEntry { mtime_secs: mtime, file_size, content_hash: hash, file_data: (**data).clone() },
+                    FileCacheEntry {
+                        mtime_secs: mtime,
+                        file_size,
+                        content_hash: hash,
+                        file_data: (**data).clone(),
+                    },
                 );
             }
         }
     }
 
-    let cache = IndexCache { version: CACHE_VERSION, complete_scan, entries };
+    let cache = IndexCache {
+        version: CACHE_VERSION,
+        complete_scan,
+        entries,
+    };
     match bincode::serialize(&cache) {
         Ok(bytes) => {
             // Don't overwrite a complete cache with an incomplete one.
@@ -221,7 +242,8 @@ pub(super) fn save_cache(
                         log::info!(
                             "Cache save skipped: existing cache ({} KB) is larger than \
                              incomplete new cache ({} KB)",
-                            meta.len() / 1024, bytes.len() / 1024
+                            meta.len() / 1024,
+                            bytes.len() / 1024
                         );
                         return;
                     }
@@ -236,7 +258,9 @@ pub(super) fn save_cache(
             if write_ok {
                 log::info!(
                     "Cache saved ({} files, {} KB) → {}",
-                    cache.entries.len(), bytes.len() / 1024, cache_path.display()
+                    cache.entries.len(),
+                    bytes.len() / 1024,
+                    cache_path.display()
                 );
             } else {
                 let _ = std::fs::remove_file(&tmp_path);

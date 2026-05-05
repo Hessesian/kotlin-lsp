@@ -3,11 +3,15 @@ use crate::indexer::Indexer;
 use tower_lsp::lsp_types::Url;
 
 const KOTLIN_SRC: &str = "package com.example\nfun main() {}";
-const JAVA_SRC:   &str = "package com.example;\npublic class Foo {}";
-const SWIFT_SRC:  &str = "import Foundation\nfunc greet() {}";
+const JAVA_SRC: &str = "package com.example;\npublic class Foo {}";
+const SWIFT_SRC: &str = "import Foundation\nfunc greet() {}";
 
-fn kt_uri() -> Url { Url::parse("file:///tmp/Foo.kt").unwrap() }
-fn txt_uri() -> Url { Url::parse("file:///tmp/README.md").unwrap() }
+fn kt_uri() -> Url {
+    Url::parse("file:///tmp/Foo.kt").unwrap()
+}
+fn txt_uri() -> Url {
+    Url::parse("file:///tmp/README.md").unwrap()
+}
 
 #[test]
 fn lang_for_kotlin() {
@@ -110,8 +114,12 @@ fn unknown_extension_stale_eviction() {
     // Manually insert a stale entry for the txt URI by abusing the DashMap.
     let lang = lang_for_path("Foo.kt").unwrap();
     let doc = parse_live(KOTLIN_SRC, lang).unwrap();
-    idx.live_trees.insert(txt.to_string(), std::sync::Arc::new(doc));
-    assert!(idx.live_doc(&txt).is_some(), "pre-condition: stale entry exists");
+    idx.live_trees
+        .insert(txt.to_string(), std::sync::Arc::new(doc));
+    assert!(
+        idx.live_doc(&txt).is_some(),
+        "pre-condition: stale entry exists"
+    );
 
     // Now call store_live_tree — unsupported extension must evict the stale entry.
     idx.store_live_tree(&txt, "content");

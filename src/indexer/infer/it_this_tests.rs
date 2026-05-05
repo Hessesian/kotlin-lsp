@@ -5,10 +5,10 @@
 //!
 //! Helpers used: `indexed()` / `uri()` mirror the pattern in `indexer.rs` tests.
 
-use super::*;
-use tower_lsp::lsp_types::Url;
 use super::super::super::Indexer;
+use super::*;
 use crate::queries::KIND_LAMBDA_LIT;
+use tower_lsp::lsp_types::Url;
 
 fn uri(path: &str) -> Url {
     Url::parse(&format!("file:///test{path}")).unwrap()
@@ -42,8 +42,11 @@ fn it_element_type_simple_foreach() {
     let (u, idx) = indexed("/t.kt", src);
     let before = "users.forEach { it.";
     let result = find_it_element_type(before, &idx, &u);
-    assert_eq!(result.as_deref(), Some("User"),
-        "forEach on List<User> should yield element type User, got: {result:?}");
+    assert_eq!(
+        result.as_deref(),
+        Some("User"),
+        "forEach on List<User> should yield element type User, got: {result:?}"
+    );
 }
 
 #[test]
@@ -51,13 +54,19 @@ fn it_element_type_flow() {
     let src = "val events: Flow<Event> = emptyFlow()";
     let (u, idx) = indexed("/t.kt", src);
     let before = "events.collect { it.";
-    assert_eq!(find_it_element_type(before, &idx, &u).as_deref(), Some("Event"));
+    assert_eq!(
+        find_it_element_type(before, &idx, &u).as_deref(),
+        Some("Event")
+    );
 }
 
 #[test]
 fn it_element_type_unknown_var_returns_none() {
     let (u, idx) = indexed("/t.kt", "");
-    assert_eq!(find_it_element_type("unknown.forEach { it.", &idx, &u), None);
+    assert_eq!(
+        find_it_element_type("unknown.forEach { it.", &idx, &u),
+        None
+    );
 }
 
 #[test]
@@ -82,10 +91,16 @@ fn it_type_second_of_two_lambdas_same_line() {
     let (u, idx) = indexed("/t.kt", src);
     let before1 = "{ setState { ";
     let before2 = "{ setState { it } }, { setEffect { ";
-    assert_eq!(find_it_element_type(before1, &idx, &u).as_deref(), Some("State"),
-        "first it (inside setState) should resolve to State");
-    assert_eq!(find_it_element_type(before2, &idx, &u).as_deref(), Some("Effect"),
-        "second it (inside setEffect) should resolve to Effect");
+    assert_eq!(
+        find_it_element_type(before1, &idx, &u).as_deref(),
+        Some("State"),
+        "first it (inside setState) should resolve to State"
+    );
+    assert_eq!(
+        find_it_element_type(before2, &idx, &u).as_deref(),
+        Some("Effect"),
+        "second it (inside setEffect) should resolve to Effect"
+    );
 }
 
 // ── two lambdas, multi-line, outer function not indexed ─────────────────────
@@ -103,10 +118,16 @@ fn it_type_second_lambda_multiline_unindexed_inner() {
     //          0123456789012345678901234
     // second `it` is at col 18 on line 2
     let (u, idx, lines) = indexed_with_live("/t.kt", sig_src, code_src);
-    let pos = crate::types::CursorPos { line: 2, utf16_col: 18 };
+    let pos = crate::types::CursorPos {
+        line: 2,
+        utf16_col: 18,
+    };
     let result = find_it_element_type_in_lines(&lines, pos, &idx, &u);
-    assert_eq!(result.as_deref(), Some("Effect"),
-        "second it inside unindexed setEffect should resolve via observe's 2nd param");
+    assert_eq!(
+        result.as_deref(),
+        Some("Effect"),
+        "second it inside unindexed setEffect should resolve via observe's 2nd param"
+    );
 }
 
 /// Same scenario but for the FIRST lambda — must resolve to observe's 1st param.
@@ -118,10 +139,16 @@ fn it_type_first_lambda_multiline_unindexed_inner() {
     //          012345678901234567890123
     // first `it` is at col 17 on line 1
     let (u, idx, lines) = indexed_with_live("/t.kt", sig_src, code_src);
-    let pos = crate::types::CursorPos { line: 1, utf16_col: 17 };
+    let pos = crate::types::CursorPos {
+        line: 1,
+        utf16_col: 17,
+    };
     let result = find_it_element_type_in_lines(&lines, pos, &idx, &u);
-    assert_eq!(result.as_deref(), Some("State"),
-        "first it inside unindexed setState should resolve via observe's 1st param");
+    assert_eq!(
+        result.as_deref(),
+        Some("State"),
+        "first it inside unindexed setState should resolve via observe's 1st param"
+    );
 }
 
 // ── find_this_element_type_in_lines ─────────────────────────────────────────
@@ -139,11 +166,22 @@ fn this_element_type_multiline_scope_fn() {
         "}".to_owned(),
     ];
     // `run` is a stdlib scope function (RECEIVER_THIS_FNS) → `this` refers to List<String> → "List"
-    let result = find_this_element_type_in_lines(&lines, CursorPos { line: 1, utf16_col: 9 }, &idx, &u);
+    let result = find_this_element_type_in_lines(
+        &lines,
+        CursorPos {
+            line: 1,
+            utf16_col: 9,
+        },
+        &idx,
+        &u,
+    );
     // `run` is in RECEIVER_THIS_FNS: passes receiver as `this`;
     // `items` is `List<String>`, so base type should be "List".
-    assert_eq!(result.as_deref(), Some("List"),
-        "`items.run {{ this }}` should yield List, got: {result:?}");
+    assert_eq!(
+        result.as_deref(),
+        Some("List"),
+        "`items.run {{ this }}` should yield List, got: {result:?}"
+    );
 }
 
 #[test]
@@ -156,37 +194,66 @@ fn this_type_with_block() {
         "    this.".to_owned(),
         "}".to_owned(),
     ];
-    let result = find_this_element_type_in_lines(&lines, CursorPos { line: 1, utf16_col: 9 }, &idx, &u);
-    assert_eq!(result.as_deref(), Some("User"),
-        "`with(user) {{ this }}` should yield User, got: {result:?}");
+    let result = find_this_element_type_in_lines(
+        &lines,
+        CursorPos {
+            line: 1,
+            utf16_col: 9,
+        },
+        &idx,
+        &u,
+    );
+    assert_eq!(
+        result.as_deref(),
+        Some("User"),
+        "`with(user) {{ this }}` should yield User, got: {result:?}"
+    );
 }
 
 // ── line_has_lambda_param ────────────────────────────────────────────────────
 
 #[test]
 fn line_has_lambda_param_single() {
-    assert!(line_has_lambda_param("items.forEach { item -> item.name }", "item"));
+    assert!(line_has_lambda_param(
+        "items.forEach { item -> item.name }",
+        "item"
+    ));
     assert!(!line_has_lambda_param("items.forEach { it.name }", "item"));
 }
 
 #[test]
 fn line_has_lambda_param_multi() {
     // multi-param: `{ a, b -> }`
-    assert!(line_has_lambda_param("items.zip(other) { a, b -> a.id }", "a"));
-    assert!(line_has_lambda_param("items.zip(other) { a, b -> a.id }", "b"));
-    assert!(!line_has_lambda_param("items.zip(other) { a, b -> a.id }", "c"));
+    assert!(line_has_lambda_param(
+        "items.zip(other) { a, b -> a.id }",
+        "a"
+    ));
+    assert!(line_has_lambda_param(
+        "items.zip(other) { a, b -> a.id }",
+        "b"
+    ));
+    assert!(!line_has_lambda_param(
+        "items.zip(other) { a, b -> a.id }",
+        "c"
+    ));
 }
 
 #[test]
 fn line_has_lambda_param_multiple_arrows_on_line() {
     // `{ isRefresh -> ... } { resultState ->` — two lambdas on same line
     let line = "reloadableProduct(ProductKey.FAMILY, { isRefresh -> getFamilyAccount(isRefresh) }) { resultState ->";
-    assert!(line_has_lambda_param(line, "resultState"),
-        "should find resultState even when isRefresh arrow comes first");
-    assert!(line_has_lambda_param(line, "isRefresh"),
-        "should still find isRefresh");
-    assert!(!line_has_lambda_param(line, "other"),
-        "should NOT find unknown name");
+    assert!(
+        line_has_lambda_param(line, "resultState"),
+        "should find resultState even when isRefresh arrow comes first"
+    );
+    assert!(
+        line_has_lambda_param(line, "isRefresh"),
+        "should still find isRefresh"
+    );
+    assert!(
+        !line_has_lambda_param(line, "other"),
+        "should NOT find unknown name"
+    );
 }
 
 // ── lambda_brace_pos_for_param ───────────────────────────────────────────────
@@ -204,8 +271,11 @@ fn lambda_brace_pos_second_lambda_on_line() {
     let brace = lambda_brace_pos_for_param(line, "resultState");
     assert!(brace.is_some(), "must find brace for resultState");
     let last_brace = line.rfind('{').unwrap();
-    assert_eq!(brace.unwrap(), last_brace,
-        "brace pos for resultState should be the last {{ on the line");
+    assert_eq!(
+        brace.unwrap(),
+        last_brace,
+        "brace pos for resultState should be the last {{ on the line"
+    );
 }
 
 #[test]
@@ -266,7 +336,9 @@ fn has_named_params_detects_single_named() {
 
 #[test]
 fn has_named_params_detects_multi_named() {
-    assert!(has_named_params_not_it("loanId, isWustenrot -> setEvent(loanId)"));
+    assert!(has_named_params_not_it(
+        "loanId, isWustenrot -> setEvent(loanId)"
+    ));
 }
 
 #[test]
@@ -317,9 +389,22 @@ fn this_type_run_infers_receiver() {
     // }
     let src = "val user: User = User()";
     let (u, idx) = indexed("/t.kt", src);
-    let lines: Vec<String> = vec!["user.run {".to_owned(), "    this.".to_owned(), "}".to_owned()];
+    let lines: Vec<String> = vec![
+        "user.run {".to_owned(),
+        "    this.".to_owned(),
+        "}".to_owned(),
+    ];
     assert_eq!(
-        find_this_element_type_in_lines(&lines, CursorPos { line: 1, utf16_col: 9 }, &idx, &u).as_deref(),
+        find_this_element_type_in_lines(
+            &lines,
+            CursorPos {
+                line: 1,
+                utf16_col: 9
+            },
+            &idx,
+            &u
+        )
+        .as_deref(),
         Some("User"),
         "run: this should resolve to User"
     );
@@ -332,9 +417,22 @@ fn this_type_apply_infers_receiver() {
     // }
     let src = "val user: User = User()";
     let (u, idx) = indexed("/t.kt", src);
-    let lines: Vec<String> = vec!["user.apply {".to_owned(), "    this.".to_owned(), "}".to_owned()];
+    let lines: Vec<String> = vec![
+        "user.apply {".to_owned(),
+        "    this.".to_owned(),
+        "}".to_owned(),
+    ];
     assert_eq!(
-        find_this_element_type_in_lines(&lines, CursorPos { line: 1, utf16_col: 9 }, &idx, &u).as_deref(),
+        find_this_element_type_in_lines(
+            &lines,
+            CursorPos {
+                line: 1,
+                utf16_col: 9
+            },
+            &idx,
+            &u
+        )
+        .as_deref(),
         Some("User"),
         "apply: this should resolve to User"
     );
@@ -346,8 +444,20 @@ fn this_type_let_does_not_infer_receiver() {
     // `this` inside a let{} block should NOT resolve to User via RECEIVER_THIS_FNS.
     let src = "val user: User = User()";
     let (u, idx) = indexed("/t.kt", src);
-    let lines: Vec<String> = vec!["user.let {".to_owned(), "    this.".to_owned(), "}".to_owned()];
-    let result = find_this_element_type_in_lines(&lines, CursorPos { line: 1, utf16_col: 9 }, &idx, &u);
+    let lines: Vec<String> = vec![
+        "user.let {".to_owned(),
+        "    this.".to_owned(),
+        "}".to_owned(),
+    ];
+    let result = find_this_element_type_in_lines(
+        &lines,
+        CursorPos {
+            line: 1,
+            utf16_col: 9,
+        },
+        &idx,
+        &u,
+    );
     assert_eq!(
         result.as_deref(),
         None,
@@ -360,8 +470,20 @@ fn this_type_also_does_not_infer_receiver() {
     // `also` exposes the receiver as `it`, not `this`.
     let src = "val user: User = User()";
     let (u, idx) = indexed("/t.kt", src);
-    let lines: Vec<String> = vec!["user.also {".to_owned(), "    this.".to_owned(), "}".to_owned()];
-    let result = find_this_element_type_in_lines(&lines, CursorPos { line: 1, utf16_col: 9 }, &idx, &u);
+    let lines: Vec<String> = vec![
+        "user.also {".to_owned(),
+        "    this.".to_owned(),
+        "}".to_owned(),
+    ];
+    let result = find_this_element_type_in_lines(
+        &lines,
+        CursorPos {
+            line: 1,
+            utf16_col: 9,
+        },
+        &idx,
+        &u,
+    );
     assert_eq!(
         result.as_deref(),
         None,
@@ -391,22 +513,32 @@ fn it_type_indexed_inner_fn_cst_still_works() {
     let code_src = "setState { it }";
     let (u, idx, lines) = indexed_with_live("/t.kt", sig_src, code_src);
     // "setState { " = 11 chars → `it` at col 11
-    let pos = crate::types::CursorPos { line: 0, utf16_col: 11 };
+    let pos = crate::types::CursorPos {
+        line: 0,
+        utf16_col: 11,
+    };
     let result = find_it_element_type_in_lines(&lines, pos, &idx, &u);
-    assert_eq!(result.as_deref(), Some("State"),
-        "simple trailing-lambda with live tree must still resolve via Case B");
+    assert_eq!(
+        result.as_deref(),
+        Some("State"),
+        "simple trailing-lambda with live tree must still resolve via Case B"
+    );
 }
 
 // ── has_lambda_named_params ──────────────────────────────────────────────────
 
 fn parse_kotlin(src: &str) -> tree_sitter::Tree {
     let mut parser = tree_sitter::Parser::new();
-    parser.set_language(&tree_sitter_kotlin::language()).unwrap();
+    parser
+        .set_language(&tree_sitter_kotlin::language())
+        .unwrap();
     parser.parse(src, None).unwrap()
 }
 
 fn find_node_kind<'a>(node: tree_sitter::Node<'a>, kind: &str) -> Option<tree_sitter::Node<'a>> {
-    if node.kind() == kind { return Some(node); }
+    if node.kind() == kind {
+        return Some(node);
+    }
     for i in 0..node.child_count() {
         if let Some(n) = node.child(i).and_then(|c| find_node_kind(c, kind)) {
             return Some(n);
@@ -422,8 +554,10 @@ fn has_lambda_named_params_false_for_no_params() {
     let bytes = src.as_bytes();
     let tree = parse_kotlin(src);
     let lambda = find_node_kind(tree.root_node(), KIND_LAMBDA_LIT).unwrap();
-    assert!(!super::has_lambda_named_params(lambda, bytes),
-        "no lambda_parameters child should yield false");
+    assert!(
+        !super::has_lambda_named_params(lambda, bytes),
+        "no lambda_parameters child should yield false"
+    );
 }
 
 #[test]
@@ -433,8 +567,10 @@ fn has_lambda_named_params_false_for_it() {
     let bytes = src.as_bytes();
     let tree = parse_kotlin(src);
     let lambda = find_node_kind(tree.root_node(), KIND_LAMBDA_LIT).unwrap();
-    assert!(!super::has_lambda_named_params(lambda, bytes),
-        "param named `it` should yield false");
+    assert!(
+        !super::has_lambda_named_params(lambda, bytes),
+        "param named `it` should yield false"
+    );
 }
 
 #[test]
@@ -444,8 +580,10 @@ fn has_lambda_named_params_true_for_named() {
     let bytes = src.as_bytes();
     let tree = parse_kotlin(src);
     let lambda = find_node_kind(tree.root_node(), KIND_LAMBDA_LIT).unwrap();
-    assert!(super::has_lambda_named_params(lambda, bytes),
-        "param named `item` should yield true");
+    assert!(
+        super::has_lambda_named_params(lambda, bytes),
+        "param named `item` should yield true"
+    );
 }
 
 #[test]
@@ -455,8 +593,10 @@ fn has_lambda_named_params_false_for_underscore() {
     let bytes = src.as_bytes();
     let tree = parse_kotlin(src);
     let lambda = find_node_kind(tree.root_node(), KIND_LAMBDA_LIT).unwrap();
-    assert!(!super::has_lambda_named_params(lambda, bytes),
-        "param named `_` should yield false");
+    assert!(
+        !super::has_lambda_named_params(lambda, bytes),
+        "param named `_` should yield false"
+    );
 }
 
 // ── TestDeps-based leaf-helper tests ─────────────────────────────────────────
@@ -465,39 +605,52 @@ fn has_lambda_named_params_false_for_underscore() {
 // `lambda_receiver_type_from_context`) using `TestDeps` instead of a full
 // `Indexer`, proving the seam works and the helpers are truly I/O-free.
 
-fn test_uri() -> Url { uri("/deps_test.kt") }
+fn test_uri() -> Url {
+    uri("/deps_test.kt")
+}
 
 #[test]
 fn test_deps_case_b_trailing_lambda_it_type() {
     // `loadData { it }` — trailing lambda, function registered in TestDeps.
     let u = test_uri();
-    let deps = super::super::TestDeps::new()
-        .with_fun(u.as_str(), "loadData", "block: (Product) -> Unit");
+    let deps =
+        super::super::TestDeps::new().with_fun(u.as_str(), "loadData", "block: (Product) -> Unit");
     let result = lambda_receiver_type_from_context("loadData", &deps, &u);
-    assert_eq!(result.as_deref(), Some("Product"),
-        "Case B: trailing lambda param type from TestDeps");
+    assert_eq!(
+        result.as_deref(),
+        Some("Product"),
+        "Case B: trailing lambda param type from TestDeps"
+    );
 }
 
 #[test]
 fn test_deps_case_b_with_args() {
     // `loadData(key) { it }` — same, after `strip_trailing_call_args` strips `(key)`.
     let u = test_uri();
-    let deps = super::super::TestDeps::new()
-        .with_fun(u.as_str(), "loadData", "key: String, block: (Product) -> Unit");
+    let deps = super::super::TestDeps::new().with_fun(
+        u.as_str(),
+        "loadData",
+        "key: String, block: (Product) -> Unit",
+    );
     let result = lambda_receiver_type_from_context("loadData(key)", &deps, &u);
-    assert_eq!(result.as_deref(), Some("Product"),
-        "Case B with args stripped: last param lambda type");
+    assert_eq!(
+        result.as_deref(),
+        Some("Product"),
+        "Case B with args stripped: last param lambda type"
+    );
 }
 
 #[test]
 fn test_deps_case_a_receiver_dot_method() {
     // `items.map { it }` — receiver is `items: List<Item>`.
     let u = test_uri();
-    let deps = super::super::TestDeps::new()
-        .with_var(u.as_str(), "items", "List<Item>");
+    let deps = super::super::TestDeps::new().with_var(u.as_str(), "items", "List<Item>");
     let result = lambda_receiver_type_from_context("items.map", &deps, &u);
-    assert_eq!(result.as_deref(), Some("Item"),
-        "Case A: extract element type from List<Item>");
+    assert_eq!(
+        result.as_deref(),
+        Some("Item"),
+        "Case A: extract element type from List<Item>"
+    );
 }
 
 #[test]
@@ -509,8 +662,11 @@ fn test_deps_case_a_var_type_no_collection() {
         .with_fun(u.as_str(), "run", "block: (Repository) -> Unit");
     // `run` is found so the method's lambda-param type wins.
     let result = lambda_receiver_type_from_context("repo.run", &deps, &u);
-    assert_eq!(result.as_deref(), Some("Repository"),
-        "Case A: non-collection receiver, method lambda param type");
+    assert_eq!(
+        result.as_deref(),
+        Some("Repository"),
+        "Case A: non-collection receiver, method lambda param type"
+    );
 }
 
 #[test]
@@ -524,8 +680,11 @@ fn test_deps_case_a_multi_segment_field_collection() {
         .with_var(u.as_str(), "result", "ResponseBody")
         .with_field("ResponseBody", "availableBanks", "MutableList<Bank>");
     let result = lambda_receiver_type_from_context("result.availableBanks.firstOrNull", &deps, &u);
-    assert_eq!(result.as_deref(), Some("Bank"),
-        "multi-segment: element of field collection resolved via find_field_type");
+    assert_eq!(
+        result.as_deref(),
+        Some("Bank"),
+        "multi-segment: element of field collection resolved via find_field_type"
+    );
 }
 
 #[test]
@@ -536,10 +695,17 @@ fn test_deps_case_a_multi_segment_field_collection_map() {
     let u = test_uri();
     let deps = super::super::TestDeps::new()
         .with_var(u.as_str(), "result", "ResponseBody")
-        .with_field("ResponseBody", "connectedAccounts", "MutableList<MbAccount>");
+        .with_field(
+            "ResponseBody",
+            "connectedAccounts",
+            "MutableList<MbAccount>",
+        );
     let result = lambda_receiver_type_from_context("result.connectedAccounts.map", &deps, &u);
-    assert_eq!(result.as_deref(), Some("MbAccount"),
-        "multi-segment: element of connectedAccounts field via map");
+    assert_eq!(
+        result.as_deref(),
+        Some("MbAccount"),
+        "multi-segment: element of connectedAccounts field via map"
+    );
 }
 
 #[test]
@@ -552,9 +718,15 @@ fn test_deps_case_a_multi_segment_with_assignment_prefix() {
         .with_field("ResponseBody", "availableBanks", "MutableList<Bank>");
     // The callee string as extracted from the source line (assignment prefix included).
     let result = lambda_receiver_type_from_context(
-        "account.bankName = result.availableBanks.firstOrNull", &deps, &u);
-    assert_eq!(result.as_deref(), Some("Bank"),
-        "multi-segment with assignment prefix: element resolved correctly");
+        "account.bankName = result.availableBanks.firstOrNull",
+        &deps,
+        &u,
+    );
+    assert_eq!(
+        result.as_deref(),
+        Some("Bank"),
+        "multi-segment with assignment prefix: element resolved correctly"
+    );
 }
 
 #[test]
@@ -567,8 +739,11 @@ fn test_deps_case_a_multi_segment_field_non_collection_method_lambda() {
         .with_field("ResponseBody", "foo", "Repo")
         .with_fun(u.as_str(), "customOp", "block: (Bar) -> Unit");
     let result = lambda_receiver_type_from_context("result.foo.customOp", &deps, &u);
-    assert_eq!(result.as_deref(), Some("Bar"),
-        "multi-segment non-collection: method lambda param type wins over field base type");
+    assert_eq!(
+        result.as_deref(),
+        Some("Bar"),
+        "multi-segment non-collection: method lambda param type wins over field base type"
+    );
 }
 
 #[test]
@@ -577,12 +752,17 @@ fn test_deps_case_a_method_chain_return_type() {
     //   receiver_var = "joinAllAccounts", method = "firstOrNull"
     //   joinAllAccounts() returns List<Account> → element "Account"
     let u = test_uri();
-    let deps = super::super::TestDeps::new()
-        .with_return("joinAllAccounts", "List<Account>");
+    let deps = super::super::TestDeps::new().with_return("joinAllAccounts", "List<Account>");
     let result = lambda_receiver_type_from_context(
-        "getAccountList(isRefresh).joinAllAccounts().firstOrNull", &deps, &u);
-    assert_eq!(result.as_deref(), Some("Account"),
-        "method-chain: element type from joinAllAccounts() return type");
+        "getAccountList(isRefresh).joinAllAccounts().firstOrNull",
+        &deps,
+        &u,
+    );
+    assert_eq!(
+        result.as_deref(),
+        Some("Account"),
+        "method-chain: element type from joinAllAccounts() return type"
+    );
 }
 
 #[test]
@@ -612,8 +792,10 @@ fn apply_this_unresolved_receiver_returns_receiver_ctx() {
     let u = uri("/t.kt");
     let deps = super::super::TestDeps::new();
     let ctx = super::classify_this_lambda_context("unknown.apply ", &deps, &u);
-    assert!(matches!(ctx, super::ThisLambdaCtx::Receiver),
-        "apply with unresolvable receiver should be Receiver, got: {ctx:?}");
+    assert!(
+        matches!(ctx, super::ThisLambdaCtx::Receiver),
+        "apply with unresolvable receiver should be Receiver, got: {ctx:?}"
+    );
 }
 
 #[test]
@@ -622,8 +804,10 @@ fn foreach_lambda_is_not_receiver_ctx() {
     let u = uri("/t.kt");
     let deps = super::super::TestDeps::new();
     let ctx = super::classify_this_lambda_context("list.forEach ", &deps, &u);
-    assert!(matches!(ctx, super::ThisLambdaCtx::NotReceiver),
-        "forEach should yield NotReceiver, got: {ctx:?}");
+    assert!(
+        matches!(ctx, super::ThisLambdaCtx::NotReceiver),
+        "forEach should yield NotReceiver, got: {ctx:?}"
+    );
 }
 
 #[test]
@@ -632,8 +816,10 @@ fn with_this_unresolved_receiver_returns_receiver_ctx() {
     let u = uri("/t.kt");
     let deps = super::super::TestDeps::new();
     let ctx = super::classify_this_lambda_context("with(someExpr) ", &deps, &u);
-    assert!(matches!(ctx, super::ThisLambdaCtx::Receiver),
-        "with() with unresolvable arg should be Receiver, got: {ctx:?}");
+    assert!(
+        matches!(ctx, super::ThisLambdaCtx::Receiver),
+        "with() with unresolvable arg should be Receiver, got: {ctx:?}"
+    );
 }
 
 #[test]
@@ -645,9 +831,15 @@ fn is_inside_receiver_lambda_apply() {
     let idx = Indexer::new();
     idx.index_content(&u, src);
     let lines: Vec<String> = src.lines().map(String::from).collect();
-    let pos = crate::types::CursorPos { line: 1, utf16_col: 8 };
+    let pos = crate::types::CursorPos {
+        line: 1,
+        utf16_col: 8,
+    };
     let result = super::is_inside_receiver_lambda(&lines, pos, &idx, &u);
-    assert!(result, "cursor inside unknown.apply{{}} should be inside receiver lambda");
+    assert!(
+        result,
+        "cursor inside unknown.apply{{}} should be inside receiver lambda"
+    );
 }
 
 #[test]
@@ -658,7 +850,13 @@ fn is_inside_receiver_lambda_foreach_is_false() {
     let idx = Indexer::new();
     idx.index_content(&u, src);
     let lines: Vec<String> = src.lines().map(String::from).collect();
-    let pos = crate::types::CursorPos { line: 2, utf16_col: 8 };
+    let pos = crate::types::CursorPos {
+        line: 2,
+        utf16_col: 8,
+    };
     let result = super::is_inside_receiver_lambda(&lines, pos, &idx, &u);
-    assert!(!result, "cursor inside forEach{{}} should NOT be inside receiver lambda");
+    assert!(
+        !result,
+        "cursor inside forEach{{}} should NOT be inside receiver lambda"
+    );
 }

@@ -8,7 +8,7 @@
 /// A single stdlib entry: name, signature (shown in hover), and kind.
 #[derive(Clone, Copy)]
 pub struct StdlibEntry {
-    pub name:      &'static str,
+    pub name: &'static str,
     pub signature: &'static str,
     /// True = method/extension (dot-completable).  False = top-level.
     #[allow(dead_code)]
@@ -29,15 +29,51 @@ impl StdlibEntry {
 // ─── scope / control-flow functions (available on every type) ─────────────────
 
 pub static SCOPE_FUNS: &[StdlibEntry] = &[
-    StdlibEntry { name: "let",          signature: "inline fun <T, R> T.let(block: (T) -> R): R",                         is_extension: true },
-    StdlibEntry { name: "run",          signature: "inline fun <T, R> T.run(block: T.() -> R): R",                        is_extension: true },
-    StdlibEntry { name: "apply",        signature: "inline fun <T> T.apply(block: T.() -> Unit): T",                      is_extension: true },
-    StdlibEntry { name: "also",         signature: "inline fun <T> T.also(block: (T) -> Unit): T",                        is_extension: true },
-    StdlibEntry { name: "takeIf",       signature: "inline fun <T> T.takeIf(predicate: (T) -> Boolean): T?",              is_extension: true },
-    StdlibEntry { name: "takeUnless",   signature: "inline fun <T> T.takeUnless(predicate: (T) -> Boolean): T?",          is_extension: true },
-    StdlibEntry { name: "hashCode",     signature: "open fun Any.hashCode(): Int",                                        is_extension: true },
-    StdlibEntry { name: "toString",     signature: "open fun Any.toString(): String",                                     is_extension: true },
-    StdlibEntry { name: "equals",       signature: "open fun Any.equals(other: Any?): Boolean",                           is_extension: true },
+    StdlibEntry {
+        name: "let",
+        signature: "inline fun <T, R> T.let(block: (T) -> R): R",
+        is_extension: true,
+    },
+    StdlibEntry {
+        name: "run",
+        signature: "inline fun <T, R> T.run(block: T.() -> R): R",
+        is_extension: true,
+    },
+    StdlibEntry {
+        name: "apply",
+        signature: "inline fun <T> T.apply(block: T.() -> Unit): T",
+        is_extension: true,
+    },
+    StdlibEntry {
+        name: "also",
+        signature: "inline fun <T> T.also(block: (T) -> Unit): T",
+        is_extension: true,
+    },
+    StdlibEntry {
+        name: "takeIf",
+        signature: "inline fun <T> T.takeIf(predicate: (T) -> Boolean): T?",
+        is_extension: true,
+    },
+    StdlibEntry {
+        name: "takeUnless",
+        signature: "inline fun <T> T.takeUnless(predicate: (T) -> Boolean): T?",
+        is_extension: true,
+    },
+    StdlibEntry {
+        name: "hashCode",
+        signature: "open fun Any.hashCode(): Int",
+        is_extension: true,
+    },
+    StdlibEntry {
+        name: "toString",
+        signature: "open fun Any.toString(): String",
+        is_extension: true,
+    },
+    StdlibEntry {
+        name: "equals",
+        signature: "open fun Any.equals(other: Any?): Boolean",
+        is_extension: true,
+    },
 ];
 
 // ─── collection / iterable extension functions ────────────────────────────────
@@ -155,9 +191,21 @@ pub static STRING_FUNS: &[StdlibEntry] = &[
 // ─── Nullable extensions ──────────────────────────────────────────────────────
 
 pub static NULLABLE_FUNS: &[StdlibEntry] = &[
-    StdlibEntry { name: "orEmpty",   signature: "fun <T> List<T>?.orEmpty(): List<T>",      is_extension: true },
-    StdlibEntry { name: "isNullOrEmpty",  signature: "fun CharSequence?.isNullOrEmpty(): Boolean",  is_extension: true },
-    StdlibEntry { name: "isNullOrBlank",  signature: "fun CharSequence?.isNullOrBlank(): Boolean",  is_extension: true },
+    StdlibEntry {
+        name: "orEmpty",
+        signature: "fun <T> List<T>?.orEmpty(): List<T>",
+        is_extension: true,
+    },
+    StdlibEntry {
+        name: "isNullOrEmpty",
+        signature: "fun CharSequence?.isNullOrEmpty(): Boolean",
+        is_extension: true,
+    },
+    StdlibEntry {
+        name: "isNullOrBlank",
+        signature: "fun CharSequence?.isNullOrBlank(): Boolean",
+        is_extension: true,
+    },
 ];
 
 // ─── Top-level functions ──────────────────────────────────────────────────────
@@ -216,7 +264,8 @@ pub static TOP_LEVEL_FUNS: &[StdlibEntry] = &[
 
 /// All stdlib entries merged into one iterator.
 fn all() -> impl Iterator<Item = &'static StdlibEntry> {
-    SCOPE_FUNS.iter()
+    SCOPE_FUNS
+        .iter()
         .chain(COLLECTION_FUNS)
         .chain(STRING_FUNS)
         .chain(NULLABLE_FUNS)
@@ -230,7 +279,9 @@ pub fn hover(name: &str) -> Option<String> {
         .filter(|e| e.name == name)
         .map(|e| e.signature)
         .collect();
-    if sigs.is_empty() { return None; }
+    if sigs.is_empty() {
+        return None;
+    }
     let body = sigs.join("\n");
     Some(format!("```kotlin\n{body}\n```\n*(Kotlin stdlib)*"))
 }
@@ -241,23 +292,34 @@ pub fn hover(name: &str) -> Option<String> {
 // Building the Vec each time (fold + dedup + sort) is measurable CPU on large
 // files. Cache the two variants (snippets=true / snippets=false) statically.
 
-use std::sync::OnceLock;
 use crate::StrExt;
+use std::sync::OnceLock;
 
-static BARE_COMPLETIONS_SNIPPETS:    OnceLock<Vec<tower_lsp::lsp_types::CompletionItem>> = OnceLock::new();
-static BARE_COMPLETIONS_NO_SNIPPETS: OnceLock<Vec<tower_lsp::lsp_types::CompletionItem>> = OnceLock::new();
+static BARE_COMPLETIONS_SNIPPETS: OnceLock<Vec<tower_lsp::lsp_types::CompletionItem>> =
+    OnceLock::new();
+static BARE_COMPLETIONS_NO_SNIPPETS: OnceLock<Vec<tower_lsp::lsp_types::CompletionItem>> =
+    OnceLock::new();
 
 fn build_bare_completions(snippets: bool) -> Vec<tower_lsp::lsp_types::CompletionItem> {
     use tower_lsp::lsp_types::CompletionItemKind;
     let mut items = Vec::new();
     for e in SCOPE_FUNS.iter().chain(TOP_LEVEL_FUNS) {
-        if !items.iter().any(|i: &tower_lsp::lsp_types::CompletionItem| i.label == e.name) {
+        if !items
+            .iter()
+            .any(|i: &tower_lsp::lsp_types::CompletionItem| i.label == e.name)
+        {
             let kind = if e.name.starts_with_uppercase() {
                 CompletionItemKind::CLASS
             } else {
                 CompletionItemKind::FUNCTION
             };
-            items.push(make_item_ex(e.name, kind, e.signature, snippets, e.has_trailing_lambda()));
+            items.push(make_item_ex(
+                e.name,
+                kind,
+                e.signature,
+                snippets,
+                e.has_trailing_lambda(),
+            ));
         }
     }
     if snippets {
@@ -268,27 +330,49 @@ fn build_bare_completions(snippets: bool) -> Vec<tower_lsp::lsp_types::Completio
 
 /// Returns stdlib dot-completions filtered to those applicable for `receiver_type`.
 /// Falls back to scope-functions-only for unknown project types.
-pub fn dot_completions_for(receiver_type: &str, snippets: bool) -> Vec<tower_lsp::lsp_types::CompletionItem> {
+pub fn dot_completions_for(
+    receiver_type: &str,
+    snippets: bool,
+) -> Vec<tower_lsp::lsp_types::CompletionItem> {
     use tower_lsp::lsp_types::CompletionItemKind;
 
     let rt = receiver_type.to_lowercase();
-    let is_string     = rt == "string" || rt == "charsequence" || rt == "stringbuilder";
-    let is_collection = rt.starts_with("list") || rt.starts_with("mutablelist")
-        || rt.starts_with("set") || rt.starts_with("mutableset")
-        || rt.starts_with("collection") || rt.starts_with("iterable")
-        || rt.starts_with("sequence") || rt.starts_with("arraylist")
-        || rt.starts_with("hashset") || rt.starts_with("linkedhashset")
-        || rt.starts_with("array") || rt == "intarray" || rt == "longarray"
-        || rt == "floatarray" || rt == "doublearray" || rt == "booleanarray";
-    let is_map        = rt.starts_with("map") || rt.starts_with("mutablemap")
-        || rt.starts_with("hashmap") || rt.starts_with("linkedhashmap")
+    let is_string = rt == "string" || rt == "charsequence" || rt == "stringbuilder";
+    let is_collection = rt.starts_with("list")
+        || rt.starts_with("mutablelist")
+        || rt.starts_with("set")
+        || rt.starts_with("mutableset")
+        || rt.starts_with("collection")
+        || rt.starts_with("iterable")
+        || rt.starts_with("sequence")
+        || rt.starts_with("arraylist")
+        || rt.starts_with("hashset")
+        || rt.starts_with("linkedhashset")
+        || rt.starts_with("array")
+        || rt == "intarray"
+        || rt == "longarray"
+        || rt == "floatarray"
+        || rt == "doublearray"
+        || rt == "booleanarray";
+    let is_map = rt.starts_with("map")
+        || rt.starts_with("mutablemap")
+        || rt.starts_with("hashmap")
+        || rt.starts_with("linkedhashmap")
         || rt.starts_with("sortedmap");
-    let is_nullable   = receiver_type.ends_with('?');
+    let is_nullable = receiver_type.ends_with('?');
 
     let sources: Vec<&[StdlibEntry]> = if is_string {
-        vec![SCOPE_FUNS, STRING_FUNS, if is_nullable { NULLABLE_FUNS } else { &[] }]
+        vec![
+            SCOPE_FUNS,
+            STRING_FUNS,
+            if is_nullable { NULLABLE_FUNS } else { &[] },
+        ]
     } else if is_collection || is_map {
-        vec![SCOPE_FUNS, COLLECTION_FUNS, if is_nullable { NULLABLE_FUNS } else { &[] }]
+        vec![
+            SCOPE_FUNS,
+            COLLECTION_FUNS,
+            if is_nullable { NULLABLE_FUNS } else { &[] },
+        ]
     } else {
         // Unknown / project type: only universal scope fns (let/run/apply/also/takeIf/toString…)
         vec![SCOPE_FUNS, if is_nullable { NULLABLE_FUNS } else { &[] }]
@@ -298,8 +382,13 @@ pub fn dot_completions_for(receiver_type: &str, snippets: bool) -> Vec<tower_lsp
     let mut items = Vec::new();
     for entry in sources.into_iter().flatten() {
         if seen.insert(entry.name) {
-            items.push(make_item_ex(entry.name, CompletionItemKind::METHOD,
-                entry.signature, snippets, entry.has_trailing_lambda()));
+            items.push(make_item_ex(
+                entry.name,
+                CompletionItemKind::METHOD,
+                entry.signature,
+                snippets,
+                entry.has_trailing_lambda(),
+            ));
         }
     }
     items
@@ -308,9 +397,13 @@ pub fn dot_completions_for(receiver_type: &str, snippets: bool) -> Vec<tower_lsp
 /// Completion items for bare (non-dot) trigger — returns a shared cached slice.
 pub fn bare_completions(snippets: bool) -> Vec<tower_lsp::lsp_types::CompletionItem> {
     if snippets {
-        BARE_COMPLETIONS_SNIPPETS.get_or_init(|| build_bare_completions(true)).clone()
+        BARE_COMPLETIONS_SNIPPETS
+            .get_or_init(|| build_bare_completions(true))
+            .clone()
     } else {
-        BARE_COMPLETIONS_NO_SNIPPETS.get_or_init(|| build_bare_completions(false)).clone()
+        BARE_COMPLETIONS_NO_SNIPPETS
+            .get_or_init(|| build_bare_completions(false))
+            .clone()
     }
 }
 
@@ -320,105 +413,160 @@ pub fn bare_completions(snippets: bool) -> Vec<tower_lsp::lsp_types::CompletionI
 /// Each item has a short trigger label and expands to a multi-line snippet.
 pub fn live_templates() -> Vec<tower_lsp::lsp_types::CompletionItem> {
     use tower_lsp::lsp_types::{
-        CompletionItem, CompletionItemKind, InsertTextFormat, Documentation,
-        MarkupContent, MarkupKind,
+        CompletionItem, CompletionItemKind, Documentation, InsertTextFormat, MarkupContent,
+        MarkupKind,
     };
 
     // (label, description, snippet_body)
     let templates: &[(&str, &str, &str)] = &[
         // ── declarations ────────────────────────────────────────────────────
-        ("fun",     "Function declaration",
-         "fun ${1:name}(${2}): ${3:Unit} {\n\t${0}\n}"),
-        ("pfun",    "Private function declaration",
-         "private fun ${1:name}(${2}): ${3:Unit} {\n\t${0}\n}"),
-        ("class",   "Class declaration",
-         "class ${1:Name}(${2}) {\n\t${0}\n}"),
-        ("dclass",  "Data class declaration",
-         "data class ${1:Name}(\n\tval ${2:field}: ${3:Type}\n)"),
-        ("sclass",  "Sealed class declaration",
-         "sealed class ${1:Name} {\n\t${0}\n}"),
-        ("object",  "Object declaration",
-         "object ${1:Name} {\n\t${0}\n}"),
-        ("iface",   "Interface declaration",
-         "interface ${1:Name} {\n\t${0}\n}"),
-        ("comp",    "Companion object",
-         "companion object {\n\t${0}\n}"),
-        ("enum",    "Enum class",
-         "enum class ${1:Name} {\n\t${0}\n}"),
+        (
+            "fun",
+            "Function declaration",
+            "fun ${1:name}(${2}): ${3:Unit} {\n\t${0}\n}",
+        ),
+        (
+            "pfun",
+            "Private function declaration",
+            "private fun ${1:name}(${2}): ${3:Unit} {\n\t${0}\n}",
+        ),
+        (
+            "class",
+            "Class declaration",
+            "class ${1:Name}(${2}) {\n\t${0}\n}",
+        ),
+        (
+            "dclass",
+            "Data class declaration",
+            "data class ${1:Name}(\n\tval ${2:field}: ${3:Type}\n)",
+        ),
+        (
+            "sclass",
+            "Sealed class declaration",
+            "sealed class ${1:Name} {\n\t${0}\n}",
+        ),
+        (
+            "object",
+            "Object declaration",
+            "object ${1:Name} {\n\t${0}\n}",
+        ),
+        (
+            "iface",
+            "Interface declaration",
+            "interface ${1:Name} {\n\t${0}\n}",
+        ),
+        ("comp", "Companion object", "companion object {\n\t${0}\n}"),
+        ("enum", "Enum class", "enum class ${1:Name} {\n\t${0}\n}"),
         // ── properties ──────────────────────────────────────────────────────
-        ("val",     "Immutable property",
-         "val ${1:name}: ${2:Type} = ${0}"),
-        ("var",     "Mutable property",
-         "var ${1:name}: ${2:Type} = ${0}"),
-        ("lazy",    "Lazy property",
-         "val ${1:name}: ${2:Type} by lazy {\n\t${0}\n}"),
-        ("lateinit","Late-init property",
-         "lateinit var ${1:name}: ${2:Type}"),
+        (
+            "val",
+            "Immutable property",
+            "val ${1:name}: ${2:Type} = ${0}",
+        ),
+        ("var", "Mutable property", "var ${1:name}: ${2:Type} = ${0}"),
+        (
+            "lazy",
+            "Lazy property",
+            "val ${1:name}: ${2:Type} by lazy {\n\t${0}\n}",
+        ),
+        (
+            "lateinit",
+            "Late-init property",
+            "lateinit var ${1:name}: ${2:Type}",
+        ),
         // ── control flow ────────────────────────────────────────────────────
-        ("if",      "If expression",
-         "if (${1:condition}) {\n\t${0}\n}"),
-        ("ife",     "If-else expression",
-         "if (${1:condition}) {\n\t${2}\n} else {\n\t${0}\n}"),
-        ("when",    "When expression",
-         "when (${1:value}) {\n\t${2} -> ${3}\n\telse -> ${0}\n}"),
-        ("for",     "For loop",
-         "for (${1:item} in ${2:collection}) {\n\t${0}\n}"),
-        ("fori",    "For loop with index",
-         "for ((${1:index}, ${2:item}) in ${3:collection}.withIndex()) {\n\t${0}\n}"),
-        ("while",   "While loop",
-         "while (${1:condition}) {\n\t${0}\n}"),
-        ("try",     "Try-catch",
-         "try {\n\t${1}\n} catch (${2:e}: ${3:Exception}) {\n\t${0}\n}"),
-        ("trycf",   "Try-catch-finally",
-         "try {\n\t${1}\n} catch (${2:e}: ${3:Exception}) {\n\t${4}\n} finally {\n\t${0}\n}"),
+        ("if", "If expression", "if (${1:condition}) {\n\t${0}\n}"),
+        (
+            "ife",
+            "If-else expression",
+            "if (${1:condition}) {\n\t${2}\n} else {\n\t${0}\n}",
+        ),
+        (
+            "when",
+            "When expression",
+            "when (${1:value}) {\n\t${2} -> ${3}\n\telse -> ${0}\n}",
+        ),
+        (
+            "for",
+            "For loop",
+            "for (${1:item} in ${2:collection}) {\n\t${0}\n}",
+        ),
+        (
+            "fori",
+            "For loop with index",
+            "for ((${1:index}, ${2:item}) in ${3:collection}.withIndex()) {\n\t${0}\n}",
+        ),
+        ("while", "While loop", "while (${1:condition}) {\n\t${0}\n}"),
+        (
+            "try",
+            "Try-catch",
+            "try {\n\t${1}\n} catch (${2:e}: ${3:Exception}) {\n\t${0}\n}",
+        ),
+        (
+            "trycf",
+            "Try-catch-finally",
+            "try {\n\t${1}\n} catch (${2:e}: ${3:Exception}) {\n\t${4}\n} finally {\n\t${0}\n}",
+        ),
         // ── lambdas / higher-order ───────────────────────────────────────────
-        ("lam",     "Lambda expression",
-         "{ ${1:it} ->\n\t${0}\n}"),
-        ("main",    "Main function",
-         "fun main(args: Array<String>) {\n\t${0}\n}"),
+        ("lam", "Lambda expression", "{ ${1:it} ->\n\t${0}\n}"),
+        (
+            "main",
+            "Main function",
+            "fun main(args: Array<String>) {\n\t${0}\n}",
+        ),
         // ── coroutines ───────────────────────────────────────────────────────
-        ("launch",  "Coroutine launch",
-         "viewModelScope.launch {\n\t${0}\n}"),
-        ("async",   "Coroutine async",
-         "viewModelScope.async {\n\t${0}\n}"),
-        ("flow",    "Flow builder",
-         "flow {\n\temit(${1})\n\t${0}\n}"),
+        (
+            "launch",
+            "Coroutine launch",
+            "viewModelScope.launch {\n\t${0}\n}",
+        ),
+        (
+            "async",
+            "Coroutine async",
+            "viewModelScope.async {\n\t${0}\n}",
+        ),
+        ("flow", "Flow builder", "flow {\n\temit(${1})\n\t${0}\n}"),
         // ── Android / common ─────────────────────────────────────────────────
-        ("logd",    "Log.d",
-         "Log.d(TAG, \"${0}\")"),
-        ("loge",    "Log.e",
-         "Log.e(TAG, \"${1}\", ${0})"),
-        ("tag",     "TAG constant",
-         "private const val TAG = \"${1:${TM_FILENAME_BASE}}\""),
-        ("todo",    "TODO stub",
-         "TODO(\"${0:Not yet implemented}\")"),
-        ("sout",    "println",
-         "println(\"${0}\")"),
+        ("logd", "Log.d", "Log.d(TAG, \"${0}\")"),
+        ("loge", "Log.e", "Log.e(TAG, \"${1}\", ${0})"),
+        (
+            "tag",
+            "TAG constant",
+            "private const val TAG = \"${1:${TM_FILENAME_BASE}}\"",
+        ),
+        ("todo", "TODO stub", "TODO(\"${0:Not yet implemented}\")"),
+        ("sout", "println", "println(\"${0}\")"),
     ];
 
-    templates.iter().map(|(label, desc, body)| {
-        CompletionItem {
-            label:              label.to_string(),
-            kind:               Some(CompletionItemKind::SNIPPET),
-            detail:             Some(desc.to_string()),
-            documentation:      Some(Documentation::MarkupContent(MarkupContent {
-                kind:  MarkupKind::Markdown,
-                value: format!("```kotlin\n{}\n```", body.replace("${0}", "").replace(['$', '{', '}'], "")),
-            })),
-            insert_text:        Some(body.to_string()),
-            insert_text_format: Some(InsertTextFormat::SNIPPET),
-            // Templates sort just before stdlib (prefix "y:") but after project symbols.
-            sort_text:          Some(format!("y:{label}")),
-            ..Default::default()
-        }
-    }).collect()
+    templates
+        .iter()
+        .map(|(label, desc, body)| {
+            CompletionItem {
+                label: label.to_string(),
+                kind: Some(CompletionItemKind::SNIPPET),
+                detail: Some(desc.to_string()),
+                documentation: Some(Documentation::MarkupContent(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: format!(
+                        "```kotlin\n{}\n```",
+                        body.replace("${0}", "").replace(['$', '{', '}'], "")
+                    ),
+                })),
+                insert_text: Some(body.to_string()),
+                insert_text_format: Some(InsertTextFormat::SNIPPET),
+                // Templates sort just before stdlib (prefix "y:") but after project symbols.
+                sort_text: Some(format!("y:{label}")),
+                ..Default::default()
+            }
+        })
+        .collect()
 }
 
 fn make_item_ex(
-    name:            &'static str,
-    kind:            tower_lsp::lsp_types::CompletionItemKind,
-    signature:       &'static str,
-    snippets:        bool,
+    name: &'static str,
+    kind: tower_lsp::lsp_types::CompletionItemKind,
+    signature: &'static str,
+    snippets: bool,
     trailing_lambda: bool,
 ) -> tower_lsp::lsp_types::CompletionItem {
     use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, InsertTextFormat};
@@ -436,12 +584,16 @@ fn make_item_ex(
         None
     };
     CompletionItem {
-        label:              name.to_string(),
-        kind:               Some(kind),
-        detail:             Some(signature.to_string()),
-        sort_text:          Some(format!("z:{name}")),
-        insert_text:        insert,
-        insert_text_format: if is_fn && snippets { Some(InsertTextFormat::SNIPPET) } else { None },
+        label: name.to_string(),
+        kind: Some(kind),
+        detail: Some(signature.to_string()),
+        sort_text: Some(format!("z:{name}")),
+        insert_text: insert,
+        insert_text_format: if is_fn && snippets {
+            Some(InsertTextFormat::SNIPPET)
+        } else {
+            None
+        },
         ..Default::default()
     }
 }

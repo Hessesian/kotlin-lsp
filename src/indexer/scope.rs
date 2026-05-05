@@ -6,14 +6,9 @@ use tower_lsp::lsp_types::*;
 use tree_sitter::Point;
 
 use super::{
-    Indexer,
-    find_it_element_type_in_lines,
-    find_this_element_type_in_lines,
-    find_as_call_arg_type,
-    find_named_lambda_param_type_in_lines,
-    line_has_lambda_param,
-    lambda_brace_pos_for_param,
-    is_inside_receiver_lambda,
+    find_as_call_arg_type, find_it_element_type_in_lines, find_named_lambda_param_type_in_lines,
+    find_this_element_type_in_lines, is_inside_receiver_lambda, lambda_brace_pos_for_param,
+    line_has_lambda_param, Indexer,
 };
 use crate::indexer::NodeExt;
 use crate::queries::KIND_LAMBDA_LIT;
@@ -42,11 +37,13 @@ impl Indexer {
         let line_text = lines.get(position.line as usize)?;
         let target_utf16 = position.character as usize;
         let mut utf16_acc = 0usize;
-        let mut char_idx  = 0usize;
+        let mut char_idx = 0usize;
         for ch in line_text.chars() {
-            if utf16_acc >= target_utf16 { break; }
+            if utf16_acc >= target_utf16 {
+                break;
+            }
             utf16_acc += ch.len_utf16();
-            char_idx  += 1;
+            char_idx += 1;
         }
         let chars: Vec<char> = line_text.chars().collect();
         let effective = if char_idx < chars.len() && is_id_char(chars[char_idx]) {
@@ -56,19 +53,34 @@ impl Indexer {
         } else {
             return None;
         };
-        let start_char = (0..=effective).rev()
-            .find(|&i| !is_id_char(chars[i])).map(|i| i + 1).unwrap_or(0);
+        let start_char = (0..=effective)
+            .rev()
+            .find(|&i| !is_id_char(chars[i]))
+            .map(|i| i + 1)
+            .unwrap_or(0);
         let end_char = (effective..chars.len())
-            .find(|&i| !is_id_char(chars[i])).unwrap_or(chars.len());
-        if start_char >= end_char { return None; }
+            .find(|&i| !is_id_char(chars[i]))
+            .unwrap_or(chars.len());
+        if start_char >= end_char {
+            return None;
+        }
         let word: String = chars[start_char..end_char].iter().collect();
-        if word == "_" { return None; }
+        if word == "_" {
+            return None;
+        }
         // Compute UTF-16 columns for start and end.
-        let start_utf16 = chars[..start_char].iter().map(|c| c.len_utf16() as u32).sum::<u32>();
-        let end_utf16   = start_utf16 + chars[start_char..end_char].iter().map(|c| c.len_utf16() as u32).sum::<u32>();
+        let start_utf16 = chars[..start_char]
+            .iter()
+            .map(|c| c.len_utf16() as u32)
+            .sum::<u32>();
+        let end_utf16 = start_utf16
+            + chars[start_char..end_char]
+                .iter()
+                .map(|c| c.len_utf16() as u32)
+                .sum::<u32>();
         let range = Range {
             start: Position::new(position.line, start_utf16),
-            end:   Position::new(position.line, end_utf16),
+            end: Position::new(position.line, end_utf16),
         };
         Some((word, range))
     }
@@ -112,11 +124,13 @@ impl Indexer {
         // UTF-16 → char index
         let target_utf16 = position.character as usize;
         let mut utf16_acc = 0usize;
-        let mut char_idx  = 0usize;
+        let mut char_idx = 0usize;
         for ch in line.chars() {
-            if utf16_acc >= target_utf16 { break; }
+            if utf16_acc >= target_utf16 {
+                break;
+            }
             utf16_acc += ch.len_utf16();
-            char_idx  += 1;
+            char_idx += 1;
         }
 
         let chars: Vec<char> = line.chars().collect();
@@ -138,9 +152,13 @@ impl Indexer {
             .find(|&i| !is_id_char(chars[i]))
             .unwrap_or(chars.len());
 
-        if start >= end { return None; }
+        if start >= end {
+            return None;
+        }
         let word: String = chars[start..end].iter().collect();
-        if word == "_" { return None; }
+        if word == "_" {
+            return None;
+        }
 
         // Scan back over the full dot-chain preceding the word.
         // `A.B.C.D` cursor on `D` → qualifier `"A.B.C"`, not just `"C"`.
@@ -153,15 +171,18 @@ impl Indexer {
             }
             let q: String = chars[scan..start - 1].iter().collect();
             let q = q.trim_start_matches('.').to_string();
-            if !q.is_empty() && q != "_" { Some(q) } else { None }
+            if !q.is_empty() && q != "_" {
+                Some(q)
+            } else {
+                None
+            }
         } else {
             // No dot-qualifier. Check if this looks like a named argument: `word = value`
             // (but NOT `word ==`). If so, scan backward for the enclosing call's name
             // and use that as the qualifier so we search the constructor/function's params.
             let after: String = chars[end..].iter().collect();
             let after_trimmed = after.trim_start();
-            let is_named_arg = after_trimmed.starts_with('=')
-                && !after_trimmed.starts_with("==");
+            let is_named_arg = after_trimmed.starts_with('=') && !after_trimmed.starts_with("==");
             if is_named_arg {
                 find_enclosing_call_name(&lines, position.line as usize, start)
                     .and_then(|callee| callee_to_qualifier(&callee))
@@ -181,8 +202,8 @@ impl Indexer {
     /// backward through file lines (not just the text before the cursor).
     pub fn infer_lambda_param_type_at(
         &self,
-        name:     &str,
-        uri:      &Url,
+        name: &str,
+        uri: &Url,
         position: Position,
     ) -> Option<String> {
         let line_no = position.line as usize;
@@ -194,13 +215,18 @@ impl Indexer {
         let lines: Arc<Vec<String>> = self.mem_lines_for(uri.as_str())?;
 
         if name == "it" || name == "this" {
-            let pos = CursorPos { line: line_no, utf16_col: position.character as usize };
+            let pos = CursorPos {
+                line: line_no,
+                utf16_col: position.character as usize,
+            };
             let lambda_type = if name == "this" {
                 find_this_element_type_in_lines(&lines, pos, self, uri)
             } else {
                 find_it_element_type_in_lines(&lines, pos, self, uri)
             };
-            if lambda_type.is_some() { return lambda_type; }
+            if lambda_type.is_some() {
+                return lambda_type;
+            }
             // Type-directed fallback: if `it`/`this` is a call argument (named or
             // positional), look up the expected parameter type from the function signature.
             // Mimics Kotlin's type-directed implicit-receiver / lambda-param resolution.
@@ -214,7 +240,10 @@ impl Indexer {
             // receiver — not the enclosing class.  Returning enclosing_class_at here
             // would silently return the wrong type.
             if name == "this" {
-                let pos2 = CursorPos { line: line_no, utf16_col: position.character as usize };
+                let pos2 = CursorPos {
+                    line: line_no,
+                    utf16_col: position.character as usize,
+                };
                 if is_inside_receiver_lambda(&lines, pos2, self, uri) {
                     return None;
                 }
@@ -254,15 +283,29 @@ impl Indexer {
     ///                                                  ^ cursor here
     /// Without the limit, the scan hits `}` first (depth→1), then `{` resets to 0
     /// (not <0), so the lambda params are never collected.
-    pub fn lambda_params_at_col(&self, uri: &Url, cursor_line: usize, cursor_col: usize) -> Vec<String> {
+    pub fn lambda_params_at_col(
+        &self,
+        uri: &Url,
+        cursor_line: usize,
+        cursor_col: usize,
+    ) -> Vec<String> {
         // ── CST fast path ────────────────────────────────────────────────────
         if let Some(doc) = self.live_doc(uri) {
-            let line_text = self.live_lines.get(uri.as_str())
+            let line_text = self
+                .live_lines
+                .get(uri.as_str())
                 .and_then(|ll| ll.get(cursor_line).cloned())
                 .unwrap_or_default();
-            let byte_col   = crate::indexer::live_tree::utf16_col_to_byte(&line_text, cursor_col);
-            let point      = Point { row: cursor_line, column: byte_col };
-            if let Some(node) = doc.tree.root_node().descendant_for_point_range(point, point) {
+            let byte_col = crate::indexer::live_tree::utf16_col_to_byte(&line_text, cursor_col);
+            let point = Point {
+                row: cursor_line,
+                column: byte_col,
+            };
+            if let Some(node) = doc
+                .tree
+                .root_node()
+                .descendant_for_point_range(point, point)
+            {
                 let mut params: Vec<String> = Vec::new();
                 let mut cur = node;
                 loop {
@@ -270,7 +313,9 @@ impl Indexer {
                         let new_names = cur.collect_lambda_param_names(&doc.bytes, &params);
                         params.extend(new_names);
                     }
-                    let Some(p) = cur.parent() else { break; };
+                    let Some(p) = cur.parent() else {
+                        break;
+                    };
                     cur = p;
                 }
                 return params;
@@ -278,7 +323,9 @@ impl Indexer {
         }
 
         // ── Text fallback ────────────────────────────────────────────────────
-        let lines = self.live_lines.get(uri.as_str())
+        let lines = self
+            .live_lines
+            .get(uri.as_str())
             .map(|ll| ll.clone())
             .or_else(|| self.files.get(uri.as_str()).map(|f| f.lines.clone()))
             .unwrap_or_default();
@@ -288,12 +335,18 @@ impl Indexer {
         let scan_start = cursor_line.saturating_sub(SCOPE_SCAN_BACK_LINES);
 
         for ln in (scan_start..=cursor_line).rev() {
-            let line = match lines.get(ln) { Some(l) => l, None => continue };
+            let line = match lines.get(ln) {
+                Some(l) => l,
+                None => continue,
+            };
             let scan_line: &str = if ln == cursor_line && cursor_col < line.len() {
                 let mut utf16 = 0usize;
                 let mut byte_end = line.len();
                 for (bi, ch) in line.char_indices() {
-                    if utf16 >= cursor_col { byte_end = bi; break; }
+                    if utf16 >= cursor_col {
+                        byte_end = bi;
+                        break;
+                    }
                     utf16 += ch.len_utf16();
                 }
                 &line[..byte_end]
@@ -306,15 +359,23 @@ impl Indexer {
                     '{' => {
                         depth -= 1;
                         if depth < 0 {
-                            if line[..bi].ends_with('$') { depth = 0; continue; }
+                            if line[..bi].ends_with('$') {
+                                depth = 0;
+                                continue;
+                            }
                             let after = line[bi + 1..].trim_start();
                             if let Some(arrow_pos) = after.find("->") {
                                 let names_str = &after[..arrow_pos];
                                 for tok in names_str.split(',') {
                                     let name = tok.trim().ident_prefix();
-                                    if !name.is_empty() && name != "it" && name != "_"
+                                    if !name.is_empty()
+                                        && name != "it"
+                                        && name != "_"
                                         && name.starts_with_lowercase()
-                                        && !params.contains(&name) { params.push(name.clone()); }
+                                        && !params.contains(&name)
+                                    {
+                                        params.push(name.clone());
+                                    }
                                 }
                             }
                             depth = 0;
@@ -330,22 +391,40 @@ impl Indexer {
     /// Find the `{ name ->` declaration line for a lambda parameter in scope at
     /// `cursor_line`.  Returns a `Location` pointing to the opening `{` of the
     /// enclosing lambda (the parameter's declaration site).
-    pub fn find_lambda_param_decl(&self, uri: &Url, param_name: &str, cursor_line: usize) -> Option<Location> {
-        let lines = self.live_lines.get(uri.as_str())
+    pub fn find_lambda_param_decl(
+        &self,
+        uri: &Url,
+        param_name: &str,
+        cursor_line: usize,
+    ) -> Option<Location> {
+        let lines = self
+            .live_lines
+            .get(uri.as_str())
             .map(|ll| ll.clone())
             .or_else(|| self.files.get(uri.as_str()).map(|f| f.lines.clone()))?;
 
         let scan_start = cursor_line.saturating_sub(SCOPE_SCAN_BACK_LINES);
         for ln in (scan_start..=cursor_line).rev() {
-            let line = match lines.get(ln) { Some(l) => l, None => continue };
-            if !line_has_lambda_param(line, param_name) { continue; }
+            let line = match lines.get(ln) {
+                Some(l) => l,
+                None => continue,
+            };
+            if !line_has_lambda_param(line, param_name) {
+                continue;
+            }
             if let Some(brace_pos) = lambda_brace_pos_for_param(line, param_name) {
                 let char_col = line[..brace_pos].chars().count() as u32;
                 return Some(Location {
                     uri: uri.clone(),
                     range: tower_lsp::lsp_types::Range {
-                        start: tower_lsp::lsp_types::Position { line: ln as u32, character: char_col },
-                        end:   tower_lsp::lsp_types::Position { line: ln as u32, character: char_col + 1 },
+                        start: tower_lsp::lsp_types::Position {
+                            line: ln as u32,
+                            character: char_col,
+                        },
+                        end: tower_lsp::lsp_types::Position {
+                            line: ln as u32,
+                            character: char_col + 1,
+                        },
                     },
                 });
             }
@@ -365,17 +444,28 @@ impl Indexer {
         // ── CST fast path ────────────────────────────────────────────────────
         if let Some(doc) = self.live_doc(uri) {
             // Use the first non-whitespace byte on the row as the probe column.
-            let probe_col = self.live_lines.get(uri.as_str())
+            let probe_col = self
+                .live_lines
+                .get(uri.as_str())
                 .and_then(|ll| ll.get(row).cloned())
                 .map(|l| l.len() - l.trim_start().len())
                 .unwrap_or(0);
-            let point = Point { row, column: probe_col };
-            if let Some(node) = doc.tree.root_node().descendant_for_point_range(point, point) {
+            let point = Point {
+                row,
+                column: probe_col,
+            };
+            if let Some(node) = doc
+                .tree
+                .root_node()
+                .descendant_for_point_range(point, point)
+            {
                 let mut cur = node;
                 loop {
                     match cur.kind() {
-                        "class_declaration" | "interface_declaration"
-                        | "object_declaration" | "companion_object" => {
+                        "class_declaration"
+                        | "interface_declaration"
+                        | "object_declaration"
+                        | "companion_object" => {
                             // Preserve existing semantics: exclude the node if its
                             // declaration starts on the query row (cursor is on the
                             // class's own declaration line).
@@ -389,7 +479,7 @@ impl Indexer {
                     }
                     match cur.parent() {
                         Some(p) => cur = p,
-                        None    => break,
+                        None => break,
                     }
                 }
             }
@@ -400,19 +490,32 @@ impl Indexer {
         let mut depth = 0i32;
         let end = row.min(file.lines.len().saturating_sub(1));
         for i in (0..=end).rev() {
-            let line = match file.lines.get(i) { Some(l) => l, None => continue };
+            let line = match file.lines.get(i) {
+                Some(l) => l,
+                None => continue,
+            };
             for ch in line.chars().rev() {
-                match ch { '}' => depth += 1, '{' => depth -= 1, _ => {} }
+                match ch {
+                    '}' => depth += 1,
+                    '{' => depth -= 1,
+                    _ => {}
+                }
             }
             if depth < 0 && i < row {
                 let t = line.trim();
-                if let Some(name) = extract_class_decl_name(t) { return Some(name); }
+                if let Some(name) = extract_class_decl_name(t) {
+                    return Some(name);
+                }
                 let scan_up = i.saturating_sub(DECL_SCAN_UP_LINES);
                 for j in (scan_up..i).rev() {
                     if let Some(prev) = file.lines.get(j) {
-                        if let Some(name) = extract_class_decl_name(prev.trim()) { return Some(name); }
+                        if let Some(name) = extract_class_decl_name(prev.trim()) {
+                            return Some(name);
+                        }
                         let pt = prev.trim();
-                        if pt.starts_with('}') || pt.ends_with('}') { break; }
+                        if pt.starts_with('}') || pt.ends_with('}') {
+                            break;
+                        }
                     }
                 }
                 depth = 0;
@@ -427,8 +530,8 @@ impl Indexer {
 #[cfg(test)]
 fn collect_lambda_param_names(
     lambda_node: tree_sitter::Node<'_>,
-    bytes:       &[u8],
-    existing:    &[String],
+    bytes: &[u8],
+    existing: &[String],
 ) -> Vec<String> {
     lambda_node.collect_lambda_param_names(bytes, existing)
 }
@@ -438,30 +541,55 @@ pub(super) fn extract_class_decl_name(line: &str) -> Option<String> {
     // Strip common modifiers: Kotlin + Java + Swift
     let mut rest = line;
     let modifiers = [
-        "abstract ", "sealed ", "data ", "open ", "inner ", "private ",
-        "protected ", "public ", "internal ", "inline ", "value ", "enum ",
-        "companion ", "override ", "final ",
+        "abstract ",
+        "sealed ",
+        "data ",
+        "open ",
+        "inner ",
+        "private ",
+        "protected ",
+        "public ",
+        "internal ",
+        "inline ",
+        "value ",
+        "enum ",
+        "companion ",
+        "override ",
+        "final ",
         // Swift-specific
-        "fileprivate ", "@objc ", "static ", "final ",
+        "fileprivate ",
+        "@objc ",
+        "static ",
+        "final ",
     ];
     loop {
         let before = rest;
-        for m in &modifiers { rest = rest.strip_prefix(m).unwrap_or(rest).trim_start(); }
+        for m in &modifiers {
+            rest = rest.strip_prefix(m).unwrap_or(rest).trim_start();
+        }
         // Skip @Annotations (Kotlin) and @attributes (Swift)
         if rest.starts_with('@') {
-            if let Some(after) = rest.find(' ') { rest = rest[after..].trim_start(); }
+            if let Some(after) = rest.find(' ') {
+                rest = rest[after..].trim_start();
+            }
         }
-        if rest == before { break; }
+        if rest == before {
+            break;
+        }
     }
     // Now rest should start with a type keyword
-    let rest = rest.strip_prefix("class ")
+    let rest = rest
+        .strip_prefix("class ")
         .or_else(|| rest.strip_prefix("interface "))
         .or_else(|| rest.strip_prefix("object "))
         .or_else(|| rest.strip_prefix("struct "))
         .or_else(|| rest.strip_prefix("protocol "))
         .or_else(|| rest.strip_prefix("extension "))?;
     // Extract the identifier
-    let name: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+    let name: String = rest
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
     if name.is_empty() || !name.starts_with_uppercase() {
         return None;
     }
@@ -477,7 +605,9 @@ pub(crate) fn is_id_char(c: char) -> bool {
 ///
 /// Example: `last_ident_in("foo.barBaz")` → `"barBaz"`
 pub(crate) fn last_ident_in(s: &str) -> &str {
-    let ident_bytes: usize = s.chars().rev()
+    let ident_bytes: usize = s
+        .chars()
+        .rev()
         .take_while(|&c| is_id_char(c))
         .map(|c| c.len_utf8())
         .sum();
@@ -496,7 +626,11 @@ pub(crate) fn last_ident_in(s: &str) -> &str {
 /// Scans at most 20 lines backward to avoid runaway on deeply nested expressions.
 /// Tracks `()` and `[]` depth; lambda `{}` bodies are transparent (their inner
 /// `()` still balance) so we don't need special-case brace handling.
-pub(crate) fn find_enclosing_call_name(lines: &[String], line_no: usize, col: usize) -> Option<String> {
+pub(crate) fn find_enclosing_call_name(
+    lines: &[String],
+    line_no: usize,
+    col: usize,
+) -> Option<String> {
     let mut depth: i32 = 0;
     let scan_range_start = line_no.saturating_sub(ENCLOSING_CALL_SCAN_BACK);
 
@@ -511,13 +645,19 @@ pub(crate) fn find_enclosing_call_name(lines: &[String], line_no: usize, col: us
                     depth -= 1;
                     if depth < 0 {
                         // This `(` opened the call we're inside.
-                        if i == 0 { return None; }
+                        if i == 0 {
+                            return None;
+                        }
                         // Extract the identifier (possibly dotted) just before `(`.
                         let mut end = i;
-                        while end > 0 && (is_id_char(line_chars[end - 1]) || line_chars[end - 1] == '.') {
+                        while end > 0
+                            && (is_id_char(line_chars[end - 1]) || line_chars[end - 1] == '.')
+                        {
                             end -= 1;
                         }
-                        if end >= i { return None; }
+                        if end >= i {
+                            return None;
+                        }
                         let name: String = line_chars[end..i].iter().collect();
                         let name = name.trim_matches('.').to_string();
                         return if name.is_empty() { None } else { Some(name) };
@@ -554,7 +694,9 @@ fn callee_to_qualifier(full_callee: &str) -> Option<String> {
     // `BottomSheetState.empty` → segments[..-1] = ["BottomSheetState"] → "BottomSheetState"
     // `viewModel.state.copy`   → no uppercase in receiver → None
     let receiver = &segments[..segments.len() - 1];
-    receiver.iter().rev()
+    receiver
+        .iter()
+        .rev()
         .find(|s| s.starts_with_uppercase())
         .map(|s| s.to_string())
 }

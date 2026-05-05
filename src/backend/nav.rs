@@ -1,8 +1,8 @@
+use super::cursor::CursorContext;
+use super::Backend;
+use crate::parser::parse_by_extension;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
-use super::Backend;
-use super::cursor::CursorContext;
-use crate::parser::parse_by_extension;
 
 fn locs_to_response(locs: Vec<Location>) -> GotoDefinitionResponse {
     match locs.len() {
@@ -16,8 +16,8 @@ impl Backend {
         &self,
         params: GotoDefinitionParams,
     ) -> Result<Option<GotoDefinitionResponse>> {
-        let pp       = params.text_document_position_params;
-        let uri      = &pp.text_document.uri;
+        let pp = params.text_document_position_params;
+        let uri = &pp.text_document.uri;
         let position = pp.position;
 
         let Some(ctx) = CursorContext::build(&self.indexer, uri, position) else {
@@ -27,7 +27,9 @@ impl Backend {
         // Special case: `this` keyword — navigate to the enclosing class definition.
         if ctx.qualifier.is_none() && ctx.word == "this" {
             if let Some(class_name) = self.indexer.enclosing_class_at(uri, position.line) {
-                let locs = self.indexer.find_definition_qualified(&class_name, None, uri);
+                let locs = self
+                    .indexer
+                    .find_definition_qualified(&class_name, None, uri);
                 if !locs.is_empty() {
                     return Ok(Some(locs_to_response(locs)));
                 }
@@ -77,10 +79,14 @@ impl Backend {
             }
         }
 
-        let locs = self.indexer.find_definition_qualified(&ctx.word, ctx.qualifier.as_deref(), uri);
+        let locs = self
+            .indexer
+            .find_definition_qualified(&ctx.word, ctx.qualifier.as_deref(), uri);
         if !locs.is_empty() {
             return Ok(match locs.len() {
-                1 => Some(GotoDefinitionResponse::Scalar(locs.into_iter().next().unwrap())),
+                1 => Some(GotoDefinitionResponse::Scalar(
+                    locs.into_iter().next().unwrap(),
+                )),
                 _ => Some(GotoDefinitionResponse::Array(locs)),
             });
         }
@@ -92,15 +98,22 @@ impl Backend {
         let (root_opt, matcher) = {
             let wr = self.indexer.workspace_root.read().unwrap().clone();
             let m = self.indexer.ignore_matcher.read().unwrap().clone();
-            (crate::rg::effective_rg_root(wr.as_deref(), file_path.as_deref()), m)
+            (
+                crate::rg::effective_rg_root(wr.as_deref(), file_path.as_deref()),
+                m,
+            )
         };
         let name_clone = ctx.word.clone();
         let rg_locs = tokio::task::spawn_blocking(move || {
             crate::rg::rg_find_definition(&name_clone, root_opt.as_deref(), matcher.as_deref())
-        }).await.unwrap_or_default();
+        })
+        .await
+        .unwrap_or_default();
         Ok(match rg_locs.len() {
             0 => None,
-            1 => Some(GotoDefinitionResponse::Scalar(rg_locs.into_iter().next().unwrap())),
+            1 => Some(GotoDefinitionResponse::Scalar(
+                rg_locs.into_iter().next().unwrap(),
+            )),
             _ => Some(GotoDefinitionResponse::Array(rg_locs)),
         })
     }
@@ -109,8 +122,8 @@ impl Backend {
         &self,
         params: GotoDefinitionParams,
     ) -> Result<Option<GotoDefinitionResponse>> {
-        let pp       = params.text_document_position_params;
-        let uri      = &pp.text_document.uri;
+        let pp = params.text_document_position_params;
+        let uri = &pp.text_document.uri;
         let position = pp.position;
 
         let Some((word, _qualifier)) = self.indexer.word_and_qualifier_at(uri, position) else {
@@ -118,7 +131,9 @@ impl Backend {
         };
 
         // Direct subtypes from the index.
-        let mut locs: Vec<Location> = self.indexer.subtypes
+        let mut locs: Vec<Location> = self
+            .indexer
+            .subtypes
             .get(&word)
             .map(|v| v.clone())
             .unwrap_or_default();
@@ -130,40 +145,60 @@ impl Backend {
             let (root_opt, matcher) = {
                 let wr = self.indexer.workspace_root.read().unwrap().clone();
                 let m = self.indexer.ignore_matcher.read().unwrap().clone();
-                (crate::rg::effective_rg_root(wr.as_deref(), file_path.as_deref()), m)
+                (
+                    crate::rg::effective_rg_root(wr.as_deref(), file_path.as_deref()),
+                    m,
+                )
             };
             let word_clone = word.clone();
             let rg_impls = tokio::task::spawn_blocking(move || {
-                crate::rg::rg_find_implementors(&word_clone, root_opt.as_deref(), matcher.as_deref())
-            }).await.unwrap_or_default();
+                crate::rg::rg_find_implementors(
+                    &word_clone,
+                    root_opt.as_deref(),
+                    matcher.as_deref(),
+                )
+            })
+            .await
+            .unwrap_or_default();
             if !rg_impls.is_empty() {
                 // Return early with rg results.
                 return Ok(match rg_impls.len() {
-                    1 => Some(GotoDefinitionResponse::Scalar(rg_impls.into_iter().next().unwrap())),
+                    1 => Some(GotoDefinitionResponse::Scalar(
+                        rg_impls.into_iter().next().unwrap(),
+                    )),
                     _ => Some(GotoDefinitionResponse::Array(rg_impls)),
                 });
             }
         }
 
         // Also collect transitive subtypes (BFS, depth-limited).
-        let mut queue: Vec<String> = locs.iter()
+        let mut queue: Vec<String> = locs
+            .iter()
             .filter_map(|loc| {
                 let data = self.indexer.files.get(loc.uri.as_str())?;
-                data.symbols.iter()
+                data.symbols
+                    .iter()
                     .find(|s| s.selection_range == loc.range)
                     .map(|s| s.name.clone())
             })
             .collect();
         let mut visited = vec![word.clone()];
         while let Some(name) = queue.pop() {
-            if visited.contains(&name) { continue; }
+            if visited.contains(&name) {
+                continue;
+            }
             visited.push(name.clone());
             if let Some(sub_locs) = self.indexer.subtypes.get(&name) {
                 for loc in sub_locs.iter() {
-                    if !locs.iter().any(|l| l.uri == loc.uri && l.range == loc.range) {
+                    if !locs
+                        .iter()
+                        .any(|l| l.uri == loc.uri && l.range == loc.range)
+                    {
                         locs.push(loc.clone());
                         if let Some(data) = self.indexer.files.get(loc.uri.as_str()) {
-                            if let Some(sym) = data.symbols.iter().find(|s| s.selection_range == loc.range) {
+                            if let Some(sym) =
+                                data.symbols.iter().find(|s| s.selection_range == loc.range)
+                            {
                                 queue.push(sym.name.clone());
                             }
                         }
@@ -174,7 +209,9 @@ impl Backend {
 
         Ok(match locs.len() {
             0 => None,
-            1 => Some(GotoDefinitionResponse::Scalar(locs.into_iter().next().unwrap())),
+            1 => Some(GotoDefinitionResponse::Scalar(
+                locs.into_iter().next().unwrap(),
+            )),
             _ => Some(GotoDefinitionResponse::Array(locs)),
         })
     }
@@ -185,25 +222,36 @@ impl Backend {
             Some(n) => n,
             None => return vec![],
         };
-        let locs = self.indexer.definitions
+        let locs = self
+            .indexer
+            .definitions
             .get(&class_name)
             .map(|v| v.clone())
             .unwrap_or_default();
         for loc in &locs {
             if let Some(file) = self.indexer.files.get(loc.uri.as_str()) {
-                let names: Vec<String> = file.supers.iter()
+                let names: Vec<String> = file
+                    .supers
+                    .iter()
                     .filter(|(l, _, _)| *l == loc.range.start.line)
                     .map(|(_, n, _)| n.clone())
                     .collect();
-                if !names.is_empty() { return names; }
+                if !names.is_empty() {
+                    return names;
+                }
             }
         }
         // Fallback: parse live_lines for the open file itself.
         if let Some(lines) = self.indexer.live_lines.get(uri.as_str()) {
             let content = lines.join("\n");
             let names: Vec<String> = parse_by_extension(uri.path(), &content)
-                .supers.into_iter().map(|(_, n, _)| n).collect();
-            if !names.is_empty() { return names; }
+                .supers
+                .into_iter()
+                .map(|(_, n, _)| n)
+                .collect();
+            if !names.is_empty() {
+                return names;
+            }
         }
         vec![]
     }
@@ -214,16 +262,27 @@ impl Backend {
         let (root_opt, matcher) = {
             let wr = self.indexer.workspace_root.read().unwrap().clone();
             let m = self.indexer.ignore_matcher.read().unwrap().clone();
-            (crate::rg::effective_rg_root(wr.as_deref(), file_path.as_deref()), m)
+            (
+                crate::rg::effective_rg_root(wr.as_deref(), file_path.as_deref()),
+                m,
+            )
         };
         tokio::task::spawn_blocking(move || {
             crate::rg::rg_find_definition(&name_clone, root_opt.as_deref(), matcher.as_deref())
-        }).await.unwrap_or_default()
+        })
+        .await
+        .unwrap_or_default()
     }
 
-    pub(super) async fn goto_super_class(&self, uri: &Url, row: u32) -> Option<GotoDefinitionResponse> {
+    pub(super) async fn goto_super_class(
+        &self,
+        uri: &Url,
+        row: u32,
+    ) -> Option<GotoDefinitionResponse> {
         for super_name in &self.super_names_at(uri, row) {
-            let locs = self.indexer.find_definition_qualified(super_name, None, uri);
+            let locs = self
+                .indexer
+                .find_definition_qualified(super_name, None, uri);
             if !locs.is_empty() {
                 return Some(locs_to_response(locs));
             }
@@ -235,9 +294,16 @@ impl Backend {
         None
     }
 
-    pub(super) async fn goto_super_method(&self, uri: &Url, row: u32, method: &str) -> Option<GotoDefinitionResponse> {
+    pub(super) async fn goto_super_method(
+        &self,
+        uri: &Url,
+        row: u32,
+        method: &str,
+    ) -> Option<GotoDefinitionResponse> {
         // resolve_qualified already handles root=="super" via resolve_from_class_hierarchy.
-        let locs = self.indexer.find_definition_qualified(method, Some("super"), uri);
+        let locs = self
+            .indexer
+            .find_definition_qualified(method, Some("super"), uri);
         if !locs.is_empty() {
             return Some(locs_to_response(locs));
         }

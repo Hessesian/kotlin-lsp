@@ -35,8 +35,8 @@ fn collect_signature_multiline_constructor() {
     ];
     let sig = collect_signature(&lines, 0);
     assert!(sig.contains("DetailViewModel"), "should contain class name");
-    assert!(sig.contains("MviViewModel"),    "should contain superclass");
-    assert!(!sig.contains('{'),              "should not include body brace");
+    assert!(sig.contains("MviViewModel"), "should contain superclass");
+    assert!(!sig.contains('{'), "should not include body brace");
 }
 
 #[test]
@@ -53,10 +53,7 @@ fn collect_signature_brace_on_own_line() {
 
 #[test]
 fn collect_signature_starts_at_offset() {
-    let lines = vec![
-        "// comment".to_owned(),
-        "fun hello(): String".to_owned(),
-    ];
+    let lines = vec!["// comment".to_owned(), "fun hello(): String".to_owned()];
     assert_eq!(collect_signature(&lines, 1), "fun hello(): String");
 }
 
@@ -98,8 +95,14 @@ fn nth_param_type_lambda_type_arg() {
     // `->` must not upset `<>` depth counter.
     let params = "key: ProductKey, flow: (Boolean) -> Flow<ResultState<T>>, map: (ResultState<T>) -> StatefulModel";
     assert_eq!(nth_fun_param_type_str(params, 0), Some("ProductKey".into()));
-    assert_eq!(nth_fun_param_type_str(params, 1), Some("(Boolean) -> Flow<ResultState<T>>".into()));
-    assert_eq!(nth_fun_param_type_str(params, 2), Some("(ResultState<T>) -> StatefulModel".into()));
+    assert_eq!(
+        nth_fun_param_type_str(params, 1),
+        Some("(Boolean) -> Flow<ResultState<T>>".into())
+    );
+    assert_eq!(
+        nth_fun_param_type_str(params, 2),
+        Some("(ResultState<T>) -> StatefulModel".into())
+    );
 }
 
 #[test]
@@ -125,7 +128,10 @@ fn nth_param_type_val_var_prefix_stripped() {
 
 #[test]
 fn last_param_type_single_param() {
-    assert_eq!(last_fun_param_type_str("block: () -> Unit"), Some("() -> Unit".into()));
+    assert_eq!(
+        last_fun_param_type_str("block: () -> Unit"),
+        Some("() -> Unit".into())
+    );
 }
 
 #[test]
@@ -167,20 +173,28 @@ use super::split_params_at_depth_zero;
 
 #[test]
 fn split_simple() {
-    assert_eq!(split_params_at_depth_zero("a: A, b: B"), vec!["a: A", " b: B"]);
+    assert_eq!(
+        split_params_at_depth_zero("a: A, b: B"),
+        vec!["a: A", " b: B"]
+    );
 }
 
 #[test]
 fn split_nested_generics() {
     // comma inside <> must not split
-    assert_eq!(split_params_at_depth_zero("a: Map<K, V>, b: B"), vec!["a: Map<K, V>", " b: B"]);
+    assert_eq!(
+        split_params_at_depth_zero("a: Map<K, V>, b: B"),
+        vec!["a: Map<K, V>", " b: B"]
+    );
 }
 
 #[test]
 fn split_function_type_arrow() {
     // `->` must not cause `>` to consume generic depth
-    assert_eq!(split_params_at_depth_zero("block: (T) -> Unit, n: Int"),
-               vec!["block: (T) -> Unit", " n: Int"]);
+    assert_eq!(
+        split_params_at_depth_zero("block: (T) -> Unit, n: Int"),
+        vec!["block: (T) -> Unit", " n: Int"]
+    );
 }
 
 #[test]
@@ -204,12 +218,18 @@ fn split_trailing_comma() {
 
 #[test]
 fn strip_args_with_trailing_parens() {
-    assert_eq!(strip_trailing_call_args("collection.method(arg1, arg2)"), "collection.method");
+    assert_eq!(
+        strip_trailing_call_args("collection.method(arg1, arg2)"),
+        "collection.method"
+    );
 }
 
 #[test]
 fn strip_args_no_trailing_parens() {
-    assert_eq!(strip_trailing_call_args("collection.forEach"), "collection.forEach");
+    assert_eq!(
+        strip_trailing_call_args("collection.forEach"),
+        "collection.forEach"
+    );
 }
 
 #[test]

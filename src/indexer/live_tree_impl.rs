@@ -12,8 +12,12 @@ impl Indexer {
     pub fn store_live_tree(&self, uri: &Url, content: &str) {
         let path = uri.path();
         match lang_for_path(path).and_then(|lang| parse_live(content, lang)) {
-            Some(doc) => { self.live_trees.insert(uri.to_string(), Arc::new(doc)); }
-            None      => { self.live_trees.remove(uri.as_str()); }
+            Some(doc) => {
+                self.live_trees.insert(uri.to_string(), Arc::new(doc));
+            }
+            None => {
+                self.live_trees.remove(uri.as_str());
+            }
         }
     }
 

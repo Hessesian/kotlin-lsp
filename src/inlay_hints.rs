@@ -13,12 +13,12 @@
 use std::sync::Arc;
 use tower_lsp::lsp_types::{InlayHint, InlayHintKind, InlayHintLabel, Position, Range, Url};
 
-use crate::indexer::Indexer;
-use crate::indexer::NodeExt;
 use crate::indexer::apply_type_subst;
 use crate::indexer::live_tree::{lang_for_path, parse_live};
-use crate::queries::{KIND_LAMBDA_PARAMS, KIND_CALL_EXPR};
-use crate::resolver::{ReceiverKind, infer_receiver_type};
+use crate::indexer::Indexer;
+use crate::indexer::NodeExt;
+use crate::queries::{KIND_CALL_EXPR, KIND_LAMBDA_PARAMS};
+use crate::resolver::{infer_receiver_type, ReceiverKind};
 use crate::StrExt;
 
 pub fn compute_inlay_hints(idx: &Arc<Indexer>, uri: &Url, range: Range) -> Vec<InlayHint> {
@@ -30,12 +30,20 @@ pub fn compute_inlay_hints(idx: &Arc<Indexer>, uri: &Url, range: Range) -> Vec<I
     // Fallback: reconstruct content from live_lines or indexed file data, then
     // re-parse. tree-sitter parses 5000 lines in ~3ms so this is not a regression.
     let lines_arc = idx.mem_lines_for(uri.as_str());
-    let Some(lines) = lines_arc else { return vec![]; };
-    if lines.is_empty() { return vec![]; }
+    let Some(lines) = lines_arc else {
+        return vec![];
+    };
+    if lines.is_empty() {
+        return vec![];
+    }
 
     let content = lines.join("\n");
-    let Some(lang) = lang_for_path(uri.path()) else { return vec![]; };
-    let Some(doc)  = parse_live(&content, lang)  else { return vec![]; };
+    let Some(lang) = lang_for_path(uri.path()) else {
+        return vec![];
+    };
+    let Some(doc) = parse_live(&content, lang) else {
+        return vec![];
+    };
     cst_hints(idx, uri, &doc.tree, &doc.bytes, range)
 }
 
@@ -47,27 +55,30 @@ pub fn compute_inlay_hints(idx: &Arc<Indexer>, uri: &Url, range: Range) -> Vec<I
 fn line_starts(bytes: &[u8]) -> Vec<usize> {
     let mut starts = vec![0usize];
     for (i, &b) in bytes.iter().enumerate() {
-        if b == b'\n' { starts.push(i + 1); }
+        if b == b'\n' {
+            starts.push(i + 1);
+        }
     }
     starts
 }
 
 /// Preorder-walk the tree and emit inlay hints for nodes within `range`.
 fn cst_hints(
-    idx:   &Arc<Indexer>,
-    uri:   &Url,
-    tree:  &tree_sitter::Tree,
+    idx: &Arc<Indexer>,
+    uri: &Url,
+    tree: &tree_sitter::Tree,
     bytes: &[u8],
     range: Range,
 ) -> Vec<InlayHint> {
     let starts = line_starts(bytes);
-    let mut hints  = Vec::new();
+    let mut hints = Vec::new();
     let mut cursor = tree.walk();
 
     // Build a generic type-param substitution map for the enclosing class context.
     // This lets inlay hints show concrete types (e.g. `Effect`) instead of raw
     // type params (e.g. `EffectType`) when inside a class that specialises a generic base.
-    let subst = crate::indexer::resolution::build_subst_map(idx.as_ref(), uri.as_str(), range.start.line);
+    let subst =
+        crate::indexer::resolution::build_subst_map(idx.as_ref(), uri.as_str(), range.start.line);
 
     'walk: loop {
         let node = cursor.node();
@@ -75,13 +86,19 @@ fn cst_hints(
         let ne = node.end_position().row as u32;
 
         // Node starts after the requested range → done.
-        if ns > range.end.line { break; }
+        if ns > range.end.line {
+            break;
+        }
 
         // Entire subtree precedes the requested range → skip it.
         if ne < range.start.line {
             loop {
-                if cursor.goto_next_sibling() { continue 'walk; }
-                if !cursor.goto_parent()      { break 'walk; }
+                if cursor.goto_next_sibling() {
+                    continue 'walk;
+                }
+                if !cursor.goto_parent() {
+                    break 'walk;
+                }
             }
         }
 
@@ -93,10 +110,16 @@ fn cst_hints(
                 if node.utf8_text(bytes) == Ok("it") {
                     let pos = ts_pos_to_lsp(node.start_position(), &starts, bytes);
                     if in_range(pos.line, range) {
-                        let kind = ReceiverKind::Contextual { name: "it", position: pos };
+                        let kind = ReceiverKind::Contextual {
+                            name: "it",
+                            position: pos,
+                        };
                         if let Some(rt) = infer_receiver_type(idx, kind, uri) {
                             let ty = subst_type(&rt.raw, &subst);
-                            hints.push(type_hint(ts_pos_to_lsp(node.end_position(), &starts, bytes), &ty));
+                            hints.push(type_hint(
+                                ts_pos_to_lsp(node.end_position(), &starts, bytes),
+                                &ty,
+                            ));
                         }
                     }
                 }
@@ -104,10 +127,16 @@ fn cst_hints(
             "this_expression" => {
                 let pos = ts_pos_to_lsp(node.start_position(), &starts, bytes);
                 if in_range(pos.line, range) {
-                    let kind = ReceiverKind::Contextual { name: "this", position: pos };
+                    let kind = ReceiverKind::Contextual {
+                        name: "this",
+                        position: pos,
+                    };
                     if let Some(rt) = infer_receiver_type(idx, kind, uri) {
                         let ty = subst_type(&rt.raw, &subst);
-                        hints.push(type_hint(ts_pos_to_lsp(node.end_position(), &starts, bytes), &ty));
+                        hints.push(type_hint(
+                            ts_pos_to_lsp(node.end_position(), &starts, bytes),
+                            &ty,
+                        ));
                     }
                 }
             }
@@ -118,10 +147,16 @@ fn cst_hints(
         }
 
         // Descend to first child, or advance to next sibling / ancestor sibling.
-        if cursor.goto_first_child() { continue; }
+        if cursor.goto_first_child() {
+            continue;
+        }
         loop {
-            if cursor.goto_next_sibling() { break; }
-            if !cursor.goto_parent() { break 'walk; }
+            if cursor.goto_next_sibling() {
+                break;
+            }
+            if !cursor.goto_parent() {
+                break 'walk;
+            }
         }
     }
 
@@ -133,47 +168,73 @@ fn cst_hints(
 /// Structure confirmed from tree-sitter-kotlin probe:
 /// `lambda_literal { lambda_parameters { variable_declaration { simple_identifier } } -> statements }`
 fn hint_lambda(
-    idx:    &Arc<Indexer>,
-    uri:    &Url,
-    node:   &tree_sitter::Node<'_>,
-    bytes:  &[u8],
+    idx: &Arc<Indexer>,
+    uri: &Url,
+    node: &tree_sitter::Node<'_>,
+    bytes: &[u8],
     starts: &[usize],
-    range:  Range,
-    subst:  &std::collections::HashMap<String, String>,
-    hints:  &mut Vec<InlayHint>,
+    range: Range,
+    subst: &std::collections::HashMap<String, String>,
+    hints: &mut Vec<InlayHint>,
 ) {
     let mut nc = node.walk();
     for child in node.children(&mut nc) {
-        if child.kind() != KIND_LAMBDA_PARAMS { continue; }
+        if child.kind() != KIND_LAMBDA_PARAMS {
+            continue;
+        }
 
         let mut pc = child.walk();
         for param in child.children(&mut pc) {
-            if param.kind() != "variable_declaration" { continue; }
+            if param.kind() != "variable_declaration" {
+                continue;
+            }
 
             // Skip params that already carry a type annotation (`: Type` child).
             let mut vc = param.walk();
-            let mut has_type  = false;
+            let mut has_type = false;
             let mut name_node = None;
             for pchild in param.children(&mut vc) {
                 match pchild.kind() {
-                    "simple_identifier" if name_node.is_none() => { name_node = Some(pchild); }
-                    ":"                                        => { has_type = true; break; }
+                    "simple_identifier" if name_node.is_none() => {
+                        name_node = Some(pchild);
+                    }
+                    ":" => {
+                        has_type = true;
+                        break;
+                    }
                     _ => {}
                 }
             }
-            if has_type { continue; }
+            if has_type {
+                continue;
+            }
 
-            let Some(name_n) = name_node                    else { continue };
-            let Ok(name)     = name_n.utf8_text(bytes)      else { continue };
+            let Some(name_n) = name_node else { continue };
+            let Ok(name) = name_n.utf8_text(bytes) else {
+                continue;
+            };
             let name = name.trim();
-            if name.is_empty() || name == "_" { continue; }
-            if !name.starts_with_lowercase() { continue; }
+            if name.is_empty() || name == "_" {
+                continue;
+            }
+            if !name.starts_with_lowercase() {
+                continue;
+            }
 
             let start_pos = ts_pos_to_lsp(name_n.start_position(), starts, bytes);
-            let end_pos   = ts_pos_to_lsp(name_n.end_position(),   starts, bytes);
-            if !in_range(start_pos.line, range) { continue; }
+            let end_pos = ts_pos_to_lsp(name_n.end_position(), starts, bytes);
+            if !in_range(start_pos.line, range) {
+                continue;
+            }
 
-            if let Some(rt) = infer_receiver_type(idx, ReceiverKind::Contextual { name, position: start_pos }, uri) {
+            if let Some(rt) = infer_receiver_type(
+                idx,
+                ReceiverKind::Contextual {
+                    name,
+                    position: start_pos,
+                },
+                uri,
+            ) {
                 let ty = subst_type(&rt.raw, subst);
                 hints.push(type_hint(end_pos, &ty));
             }
@@ -184,53 +245,75 @@ fn hint_lambda(
 
 /// Emit `: Type` hint for `val name = expr` / `var name = expr` without explicit type.
 fn hint_property(
-    idx:    &Arc<Indexer>,
-    uri:    &Url,
-    node:   &tree_sitter::Node<'_>,
-    bytes:  &[u8],
+    idx: &Arc<Indexer>,
+    uri: &Url,
+    node: &tree_sitter::Node<'_>,
+    bytes: &[u8],
     starts: &[usize],
-    range:  Range,
-    subst:  &std::collections::HashMap<String, String>,
-    hints:  &mut Vec<InlayHint>,
+    range: Range,
+    subst: &std::collections::HashMap<String, String>,
+    hints: &mut Vec<InlayHint>,
 ) {
     // Find the variable_declaration child.
-    let mut nc  = node.walk();
+    let mut nc = node.walk();
     let mut var_decl = None;
     for child in node.children(&mut nc) {
-        if child.kind() == "variable_declaration" { var_decl = Some(child); break; }
+        if child.kind() == "variable_declaration" {
+            var_decl = Some(child);
+            break;
+        }
     }
     let Some(vd) = var_decl else { return };
 
     // Check for existing type annotation.
-    let mut vc        = vd.walk();
-    let mut has_type  = false;
+    let mut vc = vd.walk();
+    let mut has_type = false;
     let mut name_node = None;
     for child in vd.children(&mut vc) {
         match child.kind() {
-            "simple_identifier" if name_node.is_none() => { name_node = Some(child); }
-            ":"                                        => { has_type = true; break; }
+            "simple_identifier" if name_node.is_none() => {
+                name_node = Some(child);
+            }
+            ":" => {
+                has_type = true;
+                break;
+            }
             _ => {}
         }
     }
-    if has_type { return; }
+    if has_type {
+        return;
+    }
 
     // Must have `=` (skip abstract / delegate declarations without an initializer).
-    let mut nc2      = node.walk();
+    let mut nc2 = node.walk();
     let mut init_node = None;
-    let mut past_eq   = false;
+    let mut past_eq = false;
     for child in node.children(&mut nc2) {
-        if child.kind() == "=" { past_eq = true; continue; }
-        if past_eq { init_node = Some(child); break; }
+        if child.kind() == "=" {
+            past_eq = true;
+            continue;
+        }
+        if past_eq {
+            init_node = Some(child);
+            break;
+        }
     }
     let Some(init) = init_node else { return };
 
-    let Some(name_n) = name_node               else { return };
-    let Ok(name)     = name_n.utf8_text(bytes) else { return };
+    let Some(name_n) = name_node else { return };
+    let Ok(name) = name_n.utf8_text(bytes) else {
+        return;
+    };
     let name = name.trim();
-    if name.is_empty() { return; }
+    if name.is_empty() {
+        return;
+    }
 
     let end_pos = ts_pos_to_lsp(name_n.end_position(), starts, bytes);
-    if !in_range(end_pos.line, range) { return; }
+    if !in_range(end_pos.line, range) {
+        return;
+    }
 
     // Derive the type name from the initializer expression.
     if let Some(ty) = infer_type_from_init(init, bytes) {
@@ -241,7 +324,9 @@ fn hint_property(
 
     // Fallback: text-based inference (handles `val x: Type` pattern aliases etc.)
     if let Some(rt) = infer_receiver_type(idx, ReceiverKind::Variable(name), uri) {
-        let base: String = rt.raw.chars()
+        let base: String = rt
+            .raw
+            .chars()
             .take_while(|&c| c.is_alphanumeric() || c == '_' || c == '<' || c == '>')
             .collect();
         if !base.is_empty() {
@@ -272,20 +357,22 @@ fn infer_type_from_init(init: tree_sitter::Node<'_>, bytes: &[u8]) -> Option<Str
 fn type_hint(position: Position, type_name: &str) -> InlayHint {
     InlayHint {
         position,
-        label:        InlayHintLabel::String(format!(": {type_name}")),
-        kind:         Some(InlayHintKind::TYPE),
-        text_edits:   None,
-        tooltip:      None,
+        label: InlayHintLabel::String(format!(": {type_name}")),
+        kind: Some(InlayHintKind::TYPE),
+        text_edits: None,
+        tooltip: None,
         padding_left: Some(false),
         padding_right: Some(true),
-        data:         None,
+        data: None,
     }
 }
 
 /// Apply type-param substitution to an inferred type string.
 /// Returns the original string unchanged if the map is empty or no match.
 fn subst_type(ty: &str, subst: &std::collections::HashMap<String, String>) -> String {
-    if subst.is_empty() { return ty.to_owned(); }
+    if subst.is_empty() {
+        return ty.to_owned();
+    }
     apply_type_subst(ty, subst)
 }
 
@@ -297,7 +384,10 @@ fn in_range(line: u32, range: Range) -> bool {
 /// Convert a tree-sitter `Point` (row, byte-column) to an LSP `Position`
 /// (0-based line, UTF-16 code-unit column).
 fn ts_pos_to_lsp(pos: tree_sitter::Point, starts: &[usize], bytes: &[u8]) -> Position {
-    Position::new(pos.row as u32, ts_byte_col_to_utf16(bytes, starts, pos.row, pos.column) as u32)
+    Position::new(
+        pos.row as u32,
+        ts_byte_col_to_utf16(bytes, starts, pos.row, pos.column) as u32,
+    )
 }
 
 /// Count the UTF-16 code units from the start of `row` up to `byte_col`.
@@ -307,7 +397,11 @@ fn ts_pos_to_lsp(pos: tree_sitter::Point, starts: &[usize], bytes: &[u8]) -> Pos
 /// instead of O(file_size)).
 fn ts_byte_col_to_utf16(bytes: &[u8], starts: &[usize], row: usize, byte_col: usize) -> usize {
     let line_start = starts.get(row).copied().unwrap_or_else(|| {
-        bytes.split(|&b| b == b'\n').take(row).map(|l| l.len() + 1).sum()
+        bytes
+            .split(|&b| b == b'\n')
+            .take(row)
+            .map(|l| l.len() + 1)
+            .sum()
     });
     let end = (line_start + byte_col).min(bytes.len());
     std::str::from_utf8(&bytes[line_start..end])
@@ -322,10 +416,12 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    fn uri(path: &str) -> Url { Url::parse(&format!("file:///test{path}")).unwrap() }
+    fn uri(path: &str) -> Url {
+        Url::parse(&format!("file:///test{path}")).unwrap()
+    }
 
     fn indexed(path: &str, src: &str) -> (Url, Arc<Indexer>) {
-        let u   = uri(path);
+        let u = uri(path);
         let idx = Arc::new(Indexer::new());
         idx.index_content(&u, src);
         (u, idx)
@@ -334,10 +430,14 @@ mod tests {
     fn hints_for(src: &str) -> Vec<InlayHint> {
         let (u, idx) = indexed("/t.kt", src);
         let lines = src.lines().count() as u32;
-        compute_inlay_hints(&idx, &u, Range {
-            start: Position::new(0, 0),
-            end:   Position::new(lines, 0),
-        })
+        compute_inlay_hints(
+            &idx,
+            &u,
+            Range {
+                start: Position::new(0, 0),
+                end: Position::new(lines, 0),
+            },
+        )
     }
 
     #[test]
@@ -345,7 +445,9 @@ mod tests {
         let src = "val items: List<Product> = emptyList()\nitems.forEach { it.name }";
         let hints = hints_for(src);
         assert!(
-            hints.iter().any(|h| matches!(&h.label, InlayHintLabel::String(s) if s == ": Product")),
+            hints
+                .iter()
+                .any(|h| matches!(&h.label, InlayHintLabel::String(s) if s == ": Product")),
             "expected ': Product' hint for it, got: {hints:?}",
         );
     }
@@ -355,7 +457,9 @@ mod tests {
         let src = "val items: List<Order> = emptyList()\nitems.forEach { order ->\n    order.id\n}";
         let hints = hints_for(src);
         assert!(
-            hints.iter().any(|h| matches!(&h.label, InlayHintLabel::String(s) if s == ": Order")),
+            hints
+                .iter()
+                .any(|h| matches!(&h.label, InlayHintLabel::String(s) if s == ": Order")),
             "expected ': Order' hint for named param, got: {hints:?}",
         );
     }
@@ -365,7 +469,9 @@ mod tests {
         let src = "val items: List<Product> = emptyList()";
         let hints = hints_for(src);
         assert!(
-            !hints.iter().any(|h| matches!(&h.label, InlayHintLabel::String(s) if s.contains("items"))),
+            !hints
+                .iter()
+                .any(|h| matches!(&h.label, InlayHintLabel::String(s) if s.contains("items"))),
             "should not hint explicitly typed val",
         );
     }
@@ -394,7 +500,9 @@ class DashboardProductsViewModel @javax.inject.Inject constructor(
         let hints = hints_for(src);
         eprintln!("inject_constructor hints: {hints:?}");
         assert!(
-            hints.iter().any(|h| matches!(&h.label, InlayHintLabel::String(s) if s == ": String")),
+            hints
+                .iter()
+                .any(|h| matches!(&h.label, InlayHintLabel::String(s) if s == ": String")),
             "expected ': String' hint for it/item in @Inject constructor class, got: {hints:?}",
         );
     }
@@ -404,7 +512,9 @@ class DashboardProductsViewModel @javax.inject.Inject constructor(
         let src = "val items: List<Product> = emptyList()\nitems.forEach { it.name\n";
         let hints = hints_for(src);
         assert!(
-            hints.iter().any(|h| matches!(&h.label, InlayHintLabel::String(s) if s == ": Product")),
+            hints
+                .iter()
+                .any(|h| matches!(&h.label, InlayHintLabel::String(s) if s == ": Product")),
             "hints should still work despite syntax error, got: {hints:?}",
         );
     }
@@ -429,19 +539,23 @@ class Vm {
 "#;
         let hints = hints_for(src);
         eprintln!("nested_named_arg hints: {hints:?}");
-        let has_string = hints.iter().any(|h| {
-            matches!(&h.label, InlayHintLabel::String(s) if s == ": String")
-        });
+        let has_string = hints
+            .iter()
+            .any(|h| matches!(&h.label, InlayHintLabel::String(s) if s == ": String"));
         eprintln!("has_string={has_string}");
-        assert!(has_string,
-            "expected ': String' hint for it/loanId in nested named-arg lambda, got: {hints:?}");
+        assert!(
+            has_string,
+            "expected ': String' hint for it/loanId in nested named-arg lambda, got: {hints:?}"
+        );
     }
 
     #[test]
     fn hints_nested_named_arg_cross_file() {
         let idx = Arc::new(Indexer::new());
         let u1 = uri("/DashboardProductsReducer.kt");
-        idx.index_content(&u1, r#"package test
+        idx.index_content(
+            &u1,
+            r#"package test
 
 class DashboardProductsReducer {
     data class SheetReloadActions(
@@ -452,7 +566,8 @@ class DashboardProductsReducer {
 }
 
 class CardProduct
-"#);
+"#,
+        );
         let u2 = uri("/Vm.kt");
         let vm_src = r#"package test
 
@@ -470,22 +585,30 @@ class Vm {
 "#;
         idx.index_content(&u2, vm_src);
         let lines = vm_src.lines().count() as u32;
-        let hints = compute_inlay_hints(&idx, &u2, Range {
-            start: Position::new(0, 0),
-            end: Position::new(lines, 0),
-        });
+        let hints = compute_inlay_hints(
+            &idx,
+            &u2,
+            Range {
+                start: Position::new(0, 0),
+                end: Position::new(lines, 0),
+            },
+        );
         eprintln!("cross_file hints: {hints:?}");
-        let has_string = hints.iter().any(|h| {
-            matches!(&h.label, InlayHintLabel::String(s) if s == ": String")
-        });
-        let has_card = hints.iter().any(|h| {
-            matches!(&h.label, InlayHintLabel::String(s) if s == ": CardProduct")
-        });
+        let has_string = hints
+            .iter()
+            .any(|h| matches!(&h.label, InlayHintLabel::String(s) if s == ": String"));
+        let has_card = hints
+            .iter()
+            .any(|h| matches!(&h.label, InlayHintLabel::String(s) if s == ": CardProduct"));
         eprintln!("has_string={has_string} has_card={has_card}");
-        assert!(has_string,
-            "expected ': String' hint for it in cross-file named-arg lambda, got: {hints:?}");
-        assert!(has_card,
-            "expected ': CardProduct' hint for it in cards lambda, got: {hints:?}");
+        assert!(
+            has_string,
+            "expected ': String' hint for it in cross-file named-arg lambda, got: {hints:?}"
+        );
+        assert!(
+            has_card,
+            "expected ': CardProduct' hint for it in cards lambda, got: {hints:?}"
+        );
     }
 
     #[test]
@@ -522,7 +645,9 @@ fun make() {
 "#;
         let hints = hints_for(src);
         assert!(
-            hints.iter().any(|h| matches!(&h.label, InlayHintLabel::String(s) if s == ": User")),
+            hints
+                .iter()
+                .any(|h| matches!(&h.label, InlayHintLabel::String(s) if s == ": User")),
             "expected ': User' hint for untyped val with constructor call, got: {hints:?}",
         );
     }
@@ -551,7 +676,12 @@ class Vm {
 }
 "#;
         let hints = hints_for(src);
-        let bad = hints.iter().any(|h| matches!(&h.label, InlayHintLabel::String(s) if s == ": suspend"));
-        assert!(!bad, "must not emit ': suspend' hint for it inside nested lambda, got: {hints:?}");
+        let bad = hints
+            .iter()
+            .any(|h| matches!(&h.label, InlayHintLabel::String(s) if s == ": suspend"));
+        assert!(
+            !bad,
+            "must not emit ': suspend' hint for it inside nested lambda, got: {hints:?}"
+        );
     }
 }

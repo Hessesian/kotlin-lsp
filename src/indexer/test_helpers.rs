@@ -16,9 +16,11 @@ pub(crate) fn with_xdg_cache<F: FnOnce()>(dir: &std::path::Path, f: F) {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
     match prev {
         Some(v) => std::env::set_var("XDG_CACHE_HOME", v),
-        None    => std::env::remove_var("XDG_CACHE_HOME"),
+        None => std::env::remove_var("XDG_CACHE_HOME"),
     }
-    if let Err(e) = result { std::panic::resume_unwind(e); }
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
 }
 
 /// Global mutex serialising tests that mutate arbitrary env vars.
@@ -34,9 +36,11 @@ pub(crate) fn with_env_var_unset<F: FnOnce()>(var: &str, lock: &std::sync::Mutex
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
     match prev {
         Some(v) => std::env::set_var(var, v),
-        None    => std::env::remove_var(var),
+        None => std::env::remove_var(var),
     }
-    if let Err(e) = result { std::panic::resume_unwind(e); }
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
 }
 
 /// RAII guard that restores an environment variable to its original value on drop.
@@ -61,7 +65,7 @@ impl Drop for EnvVarGuard {
     fn drop(&mut self) {
         match &self.prev {
             Some(v) => std::env::set_var(self.key, v),
-            None    => std::env::remove_var(self.key),
+            None => std::env::remove_var(self.key),
         }
     }
 }
@@ -75,7 +79,9 @@ pub(crate) fn with_env_var<F: FnOnce()>(var: &str, value: &str, lock: &std::sync
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
     match prev {
         Some(v) => std::env::set_var(var, v),
-        None    => std::env::remove_var(var),
+        None => std::env::remove_var(var),
     }
-    if let Err(e) = result { std::panic::resume_unwind(e); }
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
 }

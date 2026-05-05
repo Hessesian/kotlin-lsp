@@ -1,6 +1,6 @@
 mod backend;
-mod inlay_hints;
 mod indexer;
+mod inlay_hints;
 mod lines_ext;
 mod parser;
 mod queries;
@@ -51,25 +51,39 @@ async fn async_main() {
         let idx = std::sync::Arc::new(indexer::Indexer::new());
         let root = pb.canonicalize().unwrap_or(pb);
         println!("Indexing workspace: {}", root.display());
-        std::sync::Arc::clone(&idx).index_workspace_full(&root, None).await;
-        println!("Indexing complete: {} files, {} symbols",
-            idx.files.len(), idx.definitions.len());
+        std::sync::Arc::clone(&idx)
+            .index_workspace_full(&root, None)
+            .await;
+        println!(
+            "Indexing complete: {} files, {} symbols",
+            idx.files.len(),
+            idx.definitions.len()
+        );
         std::process::exit(0);
     }
 
     // --port <N>  — serve a single LSP client over TCP (useful for Android / Sora Editor)
     if args.peek().map(|s| s == "--port").unwrap_or(false) {
         args.next();
-        let port: u16 = args.next()
-            .unwrap_or_else(|| { eprintln!("Usage: kotlin-lsp --port <port>"); std::process::exit(1); })
+        let port: u16 = args
+            .next()
+            .unwrap_or_else(|| {
+                eprintln!("Usage: kotlin-lsp --port <port>");
+                std::process::exit(1);
+            })
             .parse()
-            .unwrap_or_else(|_| { eprintln!("Invalid port number"); std::process::exit(1); });
+            .unwrap_or_else(|_| {
+                eprintln!("Invalid port number");
+                std::process::exit(1);
+            });
 
         let addr = format!("127.0.0.1:{port}");
-        let listener = tokio::net::TcpListener::bind(&addr).await.unwrap_or_else(|e| {
-            eprintln!("Failed to bind {addr}: {e}");
-            std::process::exit(1);
-        });
+        let listener = tokio::net::TcpListener::bind(&addr)
+            .await
+            .unwrap_or_else(|e| {
+                eprintln!("Failed to bind {addr}: {e}");
+                std::process::exit(1);
+            });
         eprintln!("kotlin-lsp listening on {addr} (TCP, loopback only)");
 
         // Serve one client at a time; restart the loop for subsequent connections.
@@ -87,7 +101,7 @@ async fn async_main() {
     }
 
     // Default: stdio transport
-    let stdin  = tokio::io::stdin();
+    let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
     let (service, socket) = LspService::new(backend::Backend::new);
     Server::new(stdin, stdout, socket).serve(service).await;

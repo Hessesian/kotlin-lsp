@@ -24,7 +24,9 @@ pub(crate) fn lambda_type_nth_input(ty: &str, n: usize) -> Option<String> {
     let ty = ty.trim();
     // Strip `suspend` keyword — Kotlin allows `suspend (T) -> Unit` as a type.
     let ty = strip_suspend(ty);
-    if !ty.starts_with('(') { return None; }
+    if !ty.starts_with('(') {
+        return None;
+    }
     // Find matching `)` using separate paren/angle depth so `>` in `->` is
     // never mistaken for a closing angle bracket.
     let mut paren_depth: i32 = 0;
@@ -33,7 +35,13 @@ pub(crate) fn lambda_type_nth_input(ty: &str, n: usize) -> Option<String> {
     for (i, ch) in ty.char_indices() {
         match ch {
             '(' => paren_depth += 1,
-            ')' => { paren_depth -= 1; if paren_depth == 0 { close = Some(i); break; } }
+            ')' => {
+                paren_depth -= 1;
+                if paren_depth == 0 {
+                    close = Some(i);
+                    break;
+                }
+            }
             '<' => _angle_depth += 1,
             '>' => _angle_depth -= 1,
             _ => {}
@@ -41,7 +49,9 @@ pub(crate) fn lambda_type_nth_input(ty: &str, n: usize) -> Option<String> {
     }
     let close = close?;
     let inner = ty[1..close].trim();
-    if inner.is_empty() { return None; }
+    if inner.is_empty() {
+        return None;
+    }
 
     // If `inner` is itself a function type (outer parens were just wrapping:
     // `((T) -> R)` → inner = `(T) -> R`), recurse into it.
@@ -59,7 +69,10 @@ pub(crate) fn lambda_type_nth_input(ty: &str, n: usize) -> Option<String> {
         match ch {
             '(' | '<' | '[' => d += 1,
             ')' | '>' | ']' => d -= 1,
-            ',' if d == 0 => { args.push(&inner[start..i]); start = i + 1; }
+            ',' if d == 0 => {
+                args.push(&inner[start..i]);
+                start = i + 1;
+            }
             _ => {}
         }
     }
@@ -67,7 +80,11 @@ pub(crate) fn lambda_type_nth_input(ty: &str, n: usize) -> Option<String> {
 
     let arg = args.get(n).map(|s| s.trim())?;
     // Strip named-param prefix `name:`.
-    let arg = if let Some(c) = arg.find(':') { arg[c + 1..].trim() } else { arg };
+    let arg = if let Some(c) = arg.find(':') {
+        arg[c + 1..].trim()
+    } else {
+        arg
+    };
     // Strip `suspend` keyword from function-type args like `suspend (T) -> Unit`.
     let arg = strip_suspend(arg);
     // Allow dots for qualified types like `CreditCardDashboardInteractor.CardProduct`.
@@ -119,7 +136,9 @@ pub(crate) fn lambda_type_first_input(ty: &str) -> Option<String> {
         }
     }
     // Must start with `(` to be a function type.
-    if !ty.starts_with('(') { return None; }
+    if !ty.starts_with('(') {
+        return None;
+    }
     // Find matching `)` using separate paren/angle depth counters so `>` in `->`
     // is never mistaken for a closing angle bracket.
     let mut paren_depth: i32 = 0;
@@ -128,7 +147,13 @@ pub(crate) fn lambda_type_first_input(ty: &str) -> Option<String> {
     for (i, ch) in ty.char_indices() {
         match ch {
             '(' => paren_depth += 1,
-            ')' => { paren_depth -= 1; if paren_depth == 0 { close = Some(i); break; } }
+            ')' => {
+                paren_depth -= 1;
+                if paren_depth == 0 {
+                    close = Some(i);
+                    break;
+                }
+            }
             '<' => _angle_depth += 1,
             '>' => _angle_depth -= 1,
             _ => {}
@@ -136,7 +161,9 @@ pub(crate) fn lambda_type_first_input(ty: &str) -> Option<String> {
     }
     let close = close?;
     let inner = ty[1..close].trim();
-    if inner.is_empty() { return None; }
+    if inner.is_empty() {
+        return None;
+    }
 
     // If `inner` is itself a function type (outer parens were just wrapping:
     // `((T) -> R)` → inner = `(T) -> R`), recurse into it.
@@ -153,7 +180,10 @@ pub(crate) fn lambda_type_first_input(ty: &str) -> Option<String> {
         match ch {
             '(' | '<' | '[' => d += 1,
             ')' | '>' | ']' => d -= 1,
-            ',' if d == 0 => { first = &inner[..i]; break; }
+            ',' if d == 0 => {
+                first = &inner[..i];
+                break;
+            }
             _ => {}
         }
     }
@@ -180,8 +210,13 @@ pub(crate) fn lambda_type_first_input(ty: &str) -> Option<String> {
 #[inline]
 fn strip_suspend(ty: &str) -> &str {
     let rest = ty.strip_prefix("suspend").unwrap_or(ty);
-    if rest.len() == ty.len() { return ty; } // no prefix stripped
+    if rest.len() == ty.len() {
+        return ty;
+    } // no prefix stripped
     let rest = rest.trim_start();
-    if rest.starts_with('(') || rest.starts_with('.') { rest } else { ty }
+    if rest.starts_with('(') || rest.starts_with('.') {
+        rest
+    } else {
+        ty
+    }
 }
-

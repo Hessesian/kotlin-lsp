@@ -132,15 +132,31 @@ fn save_and_load_cache_roundtrip() {
     idx.index_content(&u, src);
 
     with_xdg_cache(tmp.path(), || {
-        save_cache(&root, &idx.files, &idx.content_hashes, &idx.library_uris, true);
+        save_cache(
+            &root,
+            &idx.files,
+            &idx.content_hashes,
+            &idx.library_uris,
+            true,
+        );
 
         let loaded = try_load_cache(&root).expect("cache should exist after save");
         assert_eq!(loaded.version, CACHE_VERSION);
         assert!(loaded.complete_scan);
 
         let file_path = kt_file.to_string_lossy().to_string();
-        let entry = loaded.entries.get(&file_path).expect("entry should be present");
-        let has_class = entry.file_data.symbols.iter().any(|s| s.name == "RoundtripClass");
-        assert!(has_class, "RoundtripClass symbol missing from cache roundtrip");
+        let entry = loaded
+            .entries
+            .get(&file_path)
+            .expect("entry should be present");
+        let has_class = entry
+            .file_data
+            .symbols
+            .iter()
+            .any(|s| s.name == "RoundtripClass");
+        assert!(
+            has_class,
+            "RoundtripClass symbol missing from cache roundtrip"
+        );
     });
 }

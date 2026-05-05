@@ -1,6 +1,6 @@
-use tower_lsp::lsp_types::*;
 use crate::types::SyntaxError;
 use crate::StrExt;
+use tower_lsp::lsp_types::*;
 
 /// Determine the `(parent_class, declared_pkg)` scope for a `findReferences` request.
 ///
@@ -14,8 +14,8 @@ use crate::StrExt;
 /// patterns which almost never appear in real Kotlin code, leaving only in-memory
 /// hits in the current file.
 pub(super) fn resolve_references_scope(
-    idx:  &crate::indexer::Indexer,
-    uri:  &Url,
+    idx: &crate::indexer::Indexer,
+    uri: &Url,
     line: u32,
     name: &str,
 ) -> (Option<String>, Option<String>) {
@@ -23,12 +23,17 @@ pub(super) fn resolve_references_scope(
         return (None, None);
     }
     let on_decl = idx.is_declared_in(uri, name)
-        && idx.definitions.get(name)
-            .map(|locs| locs.iter().any(|l| l.uri == *uri && l.range.start.line == line))
+        && idx
+            .definitions
+            .get(name)
+            .map(|locs| {
+                locs.iter()
+                    .any(|l| l.uri == *uri && l.range.start.line == line)
+            })
             .unwrap_or(false);
     if on_decl {
         let parent = idx.enclosing_class_at(uri, line);
-        let pkg    = idx.package_of(uri);
+        let pkg = idx.package_of(uri);
         return (parent, pkg);
     }
     let (parent, pkg) = idx.resolve_symbol_via_import(uri, name);
@@ -36,24 +41,27 @@ pub(super) fn resolve_references_scope(
         return (parent, pkg);
     }
     let parent = idx.declared_parent_class_of(name, uri);
-    let pkg    = idx.declared_package_of(name);
+    let pkg = idx.declared_package_of(name);
     (parent, pkg)
 }
 
 pub(super) fn syntax_diagnostics(errors: &[SyntaxError]) -> Vec<Diagnostic> {
-    errors.iter().map(|e| Diagnostic {
-        range:    e.range,
-        severity: Some(DiagnosticSeverity::ERROR),
-        source:   Some("kotlin-lsp".into()),
-        message:  e.message.clone(),
-        ..Default::default()
-    }).collect()
+    errors
+        .iter()
+        .map(|e| Diagnostic {
+            range: e.range,
+            severity: Some(DiagnosticSeverity::ERROR),
+            source: Some("kotlin-lsp".into()),
+            message: e.message.clone(),
+            ..Default::default()
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::rename::{enclosing_scope, rename_in_scope};
     use super::resolve_references_scope;
-    use super::super::rename::{rename_in_scope, enclosing_scope};
     use tower_lsp::lsp_types::TextEdit;
 
     fn lines(src: &str) -> Vec<String> {
@@ -73,8 +81,10 @@ mod tests {
         let edits = rename_in_scope(&ls, "foo", "bar", (0, 0));
         assert_eq!(edits.len(), 2, "expected 2 edits, got: {edits:?}");
         // Sorted descending: second occurrence first
-        assert!(edits[0].range.start.character > edits[1].range.start.character,
-            "edits not in descending order: {edits:?}");
+        assert!(
+            edits[0].range.start.character > edits[1].range.start.character,
+            "edits not in descending order: {edits:?}"
+        );
         assert_eq!(edits[0].new_text, "bar");
         assert_eq!(edits[1].new_text, "bar");
     }
@@ -88,7 +98,9 @@ mod tests {
         // Strictly descending columns
         assert!(col(&edits, 0).0 > col(&edits, 1).0);
         assert!(col(&edits, 1).0 > col(&edits, 2).0);
-        for e in &edits { assert_eq!(e.new_text, "baz"); }
+        for e in &edits {
+            assert_eq!(e.new_text, "baz");
+        }
     }
 
     #[test]
@@ -112,7 +124,9 @@ mod tests {
         let edits = rename_in_scope(&ls, "foo", "replaced", scope);
         assert_eq!(edits.len(), 4, "expected 4 edits, got: {edits:?}");
         // All replaced correctly
-        for e in &edits { assert_eq!(e.new_text, "replaced"); }
+        for e in &edits {
+            assert_eq!(e.new_text, "replaced");
+        }
         // All edits are within the original positions (no position drift)
         // Line 3: y(foo) — foo starts at col 6
         assert_eq!(edits[0].range.start.line, 3);
@@ -125,7 +139,11 @@ mod tests {
         let src = "val fooBar = foo\n";
         let ls = lines(src);
         let edits = rename_in_scope(&ls, "foo", "bar", (0, 0));
-        assert_eq!(edits.len(), 1, "substring match must not be renamed: {edits:?}");
+        assert_eq!(
+            edits.len(),
+            1,
+            "substring match must not be renamed: {edits:?}"
+        );
         assert_eq!(edits[0].range.start.character, 13); // only trailing `foo`
     }
 
@@ -147,9 +165,12 @@ mod tests {
         let ls = lines(src);
         let edits = rename_in_scope(&ls, "foo", "renamed", (0, 0));
         // `val foo` at col 4..7; trailing `foo` at col 10..13
-        let cols: Vec<(u32,u32)> = edits.iter().map(|e| (e.range.start.character, e.range.end.character)).collect();
+        let cols: Vec<(u32, u32)> = edits
+            .iter()
+            .map(|e| (e.range.start.character, e.range.end.character))
+            .collect();
         assert!(cols.contains(&(10, 13)), "trailing foo not found: {cols:?}");
-        assert!(cols.contains(&(4,  7)),  "leading foo not found: {cols:?}");
+        assert!(cols.contains(&(4, 7)), "leading foo not found: {cols:?}");
     }
 
     // ── enclosing_scope ───────────────────────────────────────────────────────
@@ -170,7 +191,7 @@ mod tests {
         // cursor inside inner block
         let (start, end) = enclosing_scope(&ls, 2);
         assert_eq!(start, 1, "should find the inner {{ at line 1");
-        assert_eq!(end, 3,   "inner block closes at line 3");
+        assert_eq!(end, 3, "inner block closes at line 3");
     }
 
     // ── resolve_references_scope ──────────────────────────────────────────────
@@ -192,7 +213,7 @@ mod tests {
         let idx = make_indexer_with(src, &uri);
         let (parent, pkg) = resolve_references_scope(&idx, &uri, 1, "descriptiveNumber");
         assert_eq!(parent, None, "lowercase member must not get a parent_class");
-        assert_eq!(pkg,    None, "lowercase member must not get a declared_pkg");
+        assert_eq!(pkg, None, "lowercase member must not get a declared_pkg");
     }
 
     /// Uppercase names on the declaration line should use enclosing class + package.
@@ -203,7 +224,11 @@ mod tests {
         let idx = make_indexer_with(src, &uri);
         // `Inner` is declared on line 2 inside `Outer`
         let (parent, pkg) = resolve_references_scope(&idx, &uri, 2, "Inner");
-        assert_eq!(parent.as_deref(), Some("Outer"), "declaration site: parent should be enclosing class");
+        assert_eq!(
+            parent.as_deref(),
+            Some("Outer"),
+            "declaration site: parent should be enclosing class"
+        );
         assert_eq!(pkg.as_deref(), Some("demo"));
     }
 }

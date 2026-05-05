@@ -2,7 +2,7 @@ use tree_sitter::{Language, Parser, Tree};
 
 pub struct LiveDoc {
     pub bytes: Vec<u8>,
-    pub tree:  Tree,
+    pub tree: Tree,
 }
 
 /// Return the tree-sitter `Language` for the given file path, or `None` for
@@ -28,7 +28,9 @@ pub fn lang_for_path(path: &str) -> Option<Language> {
 pub fn utf16_col_to_byte(line_text: &str, utf16_col: usize) -> usize {
     let mut utf16 = 0usize;
     for (bi, ch) in line_text.char_indices() {
-        if utf16 >= utf16_col { return bi; }
+        if utf16 >= utf16_col {
+            return bi;
+        }
         utf16 += ch.len_utf16();
     }
     line_text.len()
@@ -40,7 +42,10 @@ pub fn parse_live(content: &str, lang: Language) -> Option<LiveDoc> {
     let mut parser = Parser::new();
     parser.set_language(&lang).ok()?;
     let tree = parser.parse(content, None)?;
-    Some(LiveDoc { bytes: content.as_bytes().to_vec(), tree })
+    Some(LiveDoc {
+        bytes: content.as_bytes().to_vec(),
+        tree,
+    })
 }
 
 #[cfg(test)]
