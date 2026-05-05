@@ -202,7 +202,8 @@ pub(crate) fn cross_file_type_subst<I: IndexRead>(
     caller_cursor_line: Option<u32>,
     sig: &str,
 ) -> String {
-    let subst = build_type_param_subst_impl(index, sym_uri, sym_line, calling_uri, caller_cursor_line);
+    let subst =
+        build_type_param_subst_impl(index, sym_uri, sym_line, calling_uri, caller_cursor_line);
     if subst.is_empty() {
         sig.to_owned()
     } else {
@@ -627,6 +628,10 @@ impl IndexRead for super::Indexer {
     }
 
     fn ensure_indexed_on_demand(&self, uri: &str) {
+        // Fast path: if the file is already in the in-memory index, skip URI parsing.
+        if self.files.contains_key(uri) {
+            return;
+        }
         // Convert string URI to Url and trigger on-demand indexing if needed.
         // Silently ignores invalid URIs; ensure_indexed() handles them gracefully.
         if let Ok(parsed_uri) = Url::parse(uri) {

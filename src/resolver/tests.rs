@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::indexer::Indexer;
 use crate::parser::{parse_java, parse_kotlin};
@@ -1660,7 +1659,10 @@ fn cross_file_type_subst_multi_class_same_file() {
     let mut idx = Indexer::new();
 
     let base_uri = Url::parse("file:///a/Base.kt").unwrap();
-    idx.index_content(&base_uri, "package a\nclass Base<T> {\n  fun get(): T = TODO()\n}");
+    idx.index_content(
+        &base_uri,
+        "package a\nclass Base<T> {\n  fun get(): T = TODO()\n}",
+    );
 
     let caller_uri = Url::parse("file:///a/Caller.kt").unwrap();
     // Two classes in same file, each extends Base with different type arg
@@ -1687,12 +1689,15 @@ fn cross_file_type_subst_multi_class_same_file() {
         get_item_a.is_some(),
         "get method should be in completion items for CallerA"
     );
-    // detail should reflect String substitution (if generic inference is working)
     let detail_a = get_item_a.unwrap().detail.as_deref().unwrap_or("");
-    // The detail may be "fun get(): String" or just "fun get(): T" depending on
-    // whether cross_file_type_subst is wired correctly. For now, just verify
-    // that the method appears with a detail.
-    assert!(!detail_a.is_empty(), "get method should have detail for CallerA");
+    assert!(
+        detail_a.contains("String"),
+        "CallerA (Base<String>) should substitute T→String in detail, got: {detail_a}"
+    );
+    assert!(
+        !detail_a.contains(": T"),
+        "CallerA detail should not contain unresolved T, got: {detail_a}"
+    );
 
     // For CallerB (around line 6-7), Base members should show Int substitution
     let items_b = complete_dot(&idx, "Base", &caller_uri, false, Some(6));
@@ -1703,8 +1708,18 @@ fn cross_file_type_subst_multi_class_same_file() {
     );
     let detail_b = get_item_b.unwrap().detail.as_deref().unwrap_or("");
     assert!(
-        !detail_b.is_empty(),
-        "get method should have detail for CallerB"
+        detail_b.contains("Int"),
+        "CallerB (Base<Int>) should substitute T→Int in detail, got: {detail_b}"
+    );
+    assert!(
+        !detail_b.contains(": T"),
+        "CallerB detail should not contain unresolved T, got: {detail_b}"
+    );
+
+    // Cursor line threading must produce different substitutions for each class.
+    assert_ne!(
+        detail_a, detail_b,
+        "CallerA and CallerB completions should differ (String vs Int substitution)"
     );
 
     // Both should have the method, but with potentially different type substitutions
