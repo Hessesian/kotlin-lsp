@@ -246,6 +246,40 @@ pub(crate) fn infer_field_type(idx: &Indexer, file_uri: &str, field_name: &str) 
     lines.infer_type(field_name)
 }
 
+/// Like `infer_field_type` but preserves generic parameters in the result.
+///
+/// Returns `"MutableList<MbAccount>"` rather than `"MutableList"`, which is
+/// needed for collection element type extraction via `extract_collection_element_type`.
+/// Checks live editor lines first (most up-to-date), then falls back to indexed
+/// lines and finally to a disk read for un-indexed files.
+pub(crate) fn infer_field_type_raw(idx: &Indexer, file_uri: &str, field_name: &str) -> Option<String> {
+    if let Some(live) = idx.live_lines.get(file_uri) {
+        return live.infer_type_raw(field_name);
+    }
+    if let Some(data) = idx.files.get(file_uri) {
+        return data.lines.infer_type_raw(field_name);
+    }
+    let path = tower_lsp::lsp_types::Url::parse(file_uri).ok()?.to_file_path().ok()?;
+    let content = std::fs::read_to_string(&path).ok()?;
+    let lines: Vec<String> = content.lines().map(String::from).collect();
+    lines.infer_type_raw(field_name)
+}
+
+/// Look up the raw type of `field_name` declared inside class `class_name`,
+/// resolving across files via the definitions index.
+///
+/// Used for multi-segment receiver chains like `result.availableBanks.map { it }`:
+/// resolves `result` → `ResponseBody`, then looks up `availableBanks` in `ResponseBody`.
+pub(crate) fn find_field_type_in_class(idx: &Indexer, class_name: &str, field_name: &str) -> Option<String> {
+    let locs = idx.definitions.get(class_name)?;
+    for loc in locs.iter() {
+        if let Some(ty) = infer_field_type_raw(idx, loc.uri.as_str(), field_name) {
+            return Some(ty);
+        }
+    }
+    None
+}
+
 // ─── impl Indexer wrappers ────────────────────────────────────────────────────
 
 #[allow(dead_code)]

@@ -38,6 +38,19 @@ pub trait InferDeps {
     ///
     /// Returns `None` when the variable has no detectable declaration.
     fn find_var_type(&self, var_name: &str, uri: &Url) -> Option<String>;
+
+    /// Look up the raw declared type of `field_name` inside class `class_name`,
+    /// searching across indexed files.  Preserves generic parameters so that
+    /// `extract_collection_element_type` can extract the element type.
+    ///
+    /// Example: `class_name = "ResponseBody"`, `field_name = "availableBanks"` →
+    /// `Some("MutableList<MultibankingBank>")`.
+    ///
+    /// Returns `None` when the class or field is not found.
+    /// Default implementation returns `None`; overridden by `Indexer`.
+    fn find_field_type(&self, _class_name: &str, _field_name: &str) -> Option<String> {
+        None
+    }
 }
 
 // ─── Test stub ───────────────────────────────────────────────────────────────
@@ -49,17 +62,20 @@ pub trait InferDeps {
 #[cfg(test)]
 pub(crate) struct TestDeps {
     /// `(uri_str, fn_name)` → raw params text
-    pub fun_sigs:  std::collections::HashMap<(String, String), String>,
+    pub fun_sigs:    std::collections::HashMap<(String, String), String>,
     /// `(uri_str, var_name)` → type name
-    pub var_types: std::collections::HashMap<(String, String), String>,
+    pub var_types:   std::collections::HashMap<(String, String), String>,
+    /// `(class_name, field_name)` → raw type (with generics)
+    pub field_types: std::collections::HashMap<(String, String), String>,
 }
 
 #[cfg(test)]
 impl TestDeps {
     pub fn new() -> Self {
         TestDeps {
-            fun_sigs:  std::collections::HashMap::new(),
-            var_types: std::collections::HashMap::new(),
+            fun_sigs:    std::collections::HashMap::new(),
+            var_types:   std::collections::HashMap::new(),
+            field_types: std::collections::HashMap::new(),
         }
     }
 
@@ -74,6 +90,12 @@ impl TestDeps {
         self.var_types.insert((uri.to_string(), var_name.to_string()), ty.to_string());
         self
     }
+
+    /// Register `field_name` in `class_name` → raw type (with generics).
+    pub fn with_field(mut self, class_name: &str, field_name: &str, ty: &str) -> Self {
+        self.field_types.insert((class_name.to_string(), field_name.to_string()), ty.to_string());
+        self
+    }
 }
 
 #[cfg(test)]
@@ -83,5 +105,8 @@ impl InferDeps for TestDeps {
     }
     fn find_var_type(&self, var_name: &str, uri: &Url) -> Option<String> {
         self.var_types.get(&(uri.to_string(), var_name.to_string())).cloned()
+    }
+    fn find_field_type(&self, class_name: &str, field_name: &str) -> Option<String> {
+        self.field_types.get(&(class_name.to_string(), field_name.to_string())).cloned()
     }
 }

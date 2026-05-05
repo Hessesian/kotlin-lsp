@@ -252,6 +252,39 @@ pub(crate) fn lambda_receiver_type_from_context(
                     return Some(base);
                 }
             }
+
+            // Multi-segment receiver: `outer.field.method { it }` where `field`
+            // is not a local variable but a property of `outer`.
+            // Example: `result.availableBanks.firstOrNull { it }` →
+            //   outer_var = "result", field = "availableBanks"
+            //   → infer result's type → look up availableBanks in that class.
+            if let Some(rdot) = receiver_expr.rfind('.') {
+                let outer_var = last_ident_in(&receiver_expr[..rdot]);
+                let field = &receiver_expr[rdot + 1..];
+                if !outer_var.is_empty() && !field.is_empty() {
+                    if let Some(outer_type) = deps.find_var_type(outer_var, uri) {
+                        let outer_base = outer_type.ident_prefix();
+                        if !outer_base.is_empty() {
+                            if let Some(field_raw) = deps.find_field_type(&outer_base, field) {
+                                if let Some(elem) = extract_collection_element_type(&field_raw) {
+                                    return Some(elem);
+                                }
+                                // Mirror single-segment: try method's lambda param type first.
+                                if !method.is_empty() {
+                                    if let Some(ty) = fun_trailing_lambda_it_type(&method, deps, uri) {
+                                        return Some(ty);
+                                    }
+                                }
+                                let base = field_raw.ident_prefix();
+                                if !base.is_empty() && base.starts_with_uppercase() {
+                                    return Some(base);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             if receiver_var.starts_with_uppercase() {
                 return Some(receiver_var.to_owned());
             }
