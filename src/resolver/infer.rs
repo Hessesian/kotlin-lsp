@@ -412,12 +412,15 @@ fn find_rhs_str<'a>(line: &'a str, var_name: &str) -> Option<&'a str> {
 }
 
 /// Attempt to infer the type of `var_name` from the right-hand side of an assignment.
+/// Infer a Kotlin type from a single RHS assignment line without an explicit type annotation.
 ///
 /// Called as a secondary/tertiary scan when no explicit type annotation (`var_name:`)
 /// is found.  Handles the most common Android/Kotlin patterns:
 ///
 /// 1. Constructor call:  `val x = SomeType(args)` → `"SomeType"`
 /// 2. DI generic:        `val x = inject<SomeType>()` → `"SomeType"`
+/// 3. Class literal arg: `val x = recv.create(SomeType::class.java)` → `"SomeType"`
+///    Only matches when `::class` is *inside* argument parens (not `val k = T::class`).
 ///
 /// Returns `None` when none of the patterns match.
 fn infer_from_rhs_assignment(line: &str, var_name: &str) -> Option<String> {
@@ -443,6 +446,22 @@ fn infer_from_rhs_assignment(line: &str, var_name: &str) -> Option<String> {
             let after_ident = rhs[dotted.len()..].trim_start();
             if after_ident.starts_with('(') || after_ident.starts_with('{') {
                 return Some(base.to_owned());
+            }
+        }
+    }
+
+    // Pattern 3: class literal argument — `recv.method(TypeName::class` where
+    // `::class` appears after `(` in the RHS.  This is the Retrofit pattern:
+    //   val api = retrofit.create(DashboardApi::class.java)
+    // Deliberately narrow: only matches when the `::class` is inside parens, so
+    // `val key = SomeType::class` (bare class ref, key is KClass<T>) is NOT matched.
+    if let Some(paren_pos) = rhs.find('(') {
+        let inside = &rhs[paren_pos + 1..];
+        if let Some(class_pos) = inside.find("::class") {
+            let before_class = inside[..class_pos].trim_end();
+            let type_name = before_class.split(|c: char| !c.is_alphanumeric() && c != '_').last().unwrap_or("");
+            if !type_name.is_empty() && type_name.starts_with_uppercase() {
+                return Some(type_name.to_owned());
             }
         }
     }
