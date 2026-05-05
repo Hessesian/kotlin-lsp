@@ -22,10 +22,10 @@ use crate::indexer::resolution::ResolvedSymbol;
 pub(super) fn format_symbol_hover(info: &ResolvedSymbol, uri_path: &str) -> String {
     let lang = lang_str(uri_path);
     let sig  = info.signature.as_str();
-    let name = symbol_name_from_sig(sig);
 
     let code_block = if sig.is_empty() {
-        format!("```{lang}\n{} {name}\n```", symbol_kw_for_lang(info.kind, lang))
+        // Signature unavailable — fall back to keyword + known symbol name.
+        format!("```{lang}\n{} {}\n```", symbol_kw_for_lang(info.kind, lang), info.name)
     } else {
         format!("```{lang}\n{sig}\n```")
     };
@@ -62,17 +62,6 @@ pub(super) fn format_contextual_hover(
         Some(td) if !td.is_empty() => format!("{sig_block}\n\n---\n\n{td}"),
         _ => sig_block,
     }
-}
-
-/// Infer a display name from a signature string (last identifier before `(`/`:`/space).
-fn symbol_name_from_sig(sig: &str) -> &str {
-    // e.g. "fun foo(" → "foo", "class Bar" → "Bar"
-    // Walk backwards to find the name token.
-    let trimmed = sig.trim_end_matches(|c: char| !c.is_alphanumeric() && c != '_');
-    trimmed
-        .rsplit(|c: char| !c.is_alphanumeric() && c != '_')
-        .next()
-        .unwrap_or(trimmed)
 }
 
 /// Return the language keyword for a symbol kind (Swift-aware).

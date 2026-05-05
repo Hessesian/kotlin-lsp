@@ -14,6 +14,8 @@ use crate::indexer::doc::extract_doc_comment;
 /// Domain-level resolution result. Small, owned data suitable for LSP adapters.
 pub struct ResolvedSymbol {
     pub location: Location,
+    /// The original symbol name (from the index), independent of signature parsing.
+    pub name: String,
     pub kind: SymbolKind,
     pub raw_signature: String,
     pub signature: String,
@@ -217,6 +219,7 @@ fn enrich_symbol<I: IndexRead>(
 
     Some(ResolvedSymbol {
         location: location.clone(),
+        name: sym.name.clone(),
         kind: sym.kind,
         raw_signature,
         signature,
