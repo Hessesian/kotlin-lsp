@@ -95,6 +95,17 @@ pub struct FileData {
     /// - `type_args` are the concrete type arguments (e.g. `["Event", "Effect", "State"]`)
     #[serde(default)]
     pub supers: Vec<(u32, String, Vec<String>)>,
+    /// RHS-inferred types for unannotated properties, extracted from the CST at parse time.
+    /// Each entry is `(declaration_line, var_name, inferred_type)`.
+    /// Used as the primary type inference path for indexed files, avoiding fragile string
+    /// scanning for patterns like `inject<T>()`, `by lazy { T() }`, and `T(args)`.
+    #[serde(default)]
+    pub rhs_types: Vec<(u32, String, String)>,
+    /// Method-call RHS patterns for unannotated properties: `val x = receiver.method(args)`.
+    /// Each entry is `(declaration_line, var_name, receiver_name, method_name)`.
+    /// Used by method-return-type inference for indexed files.
+    #[serde(default)]
+    pub method_call_rhs: Vec<(u32, String, String, String)>,
     /// Structural syntax errors from tree-sitter (ERROR / MISSING nodes).
     /// Transient — not serialized to disk cache.
     #[serde(skip)]

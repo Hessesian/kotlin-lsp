@@ -173,15 +173,15 @@ fn extension_fn_completions(
     for file_entry in idx.files.iter() {
         let file_uri_str = file_entry.key().clone();
         let file = file_entry.value();
-        // Skip the current file — its top-level extensions are already in scope.
-        if file_uri_str == from_uri.as_str() { continue; }
+        let is_same_file = file_uri_str == from_uri.as_str();
         // Only look at Kotlin files.
         if !file_uri_str.ends_with(".kt") && !file_uri_str.ends_with(".kts") { continue; }
 
         for sym in &file.symbols {
             if sym.extension_receiver != receiver_type { continue; }
-            // Skip private/protected — not accessible from other files.
-            if matches!(sym.visibility, Visibility::Private | Visibility::Protected) { continue; }
+            // Skip private/protected from other files — inaccessible across file boundaries.
+            // Same-file private/protected are fine.
+            if !is_same_file && matches!(sym.visibility, Visibility::Private | Visibility::Protected) { continue; }
 
             let dedup_key = format!("{}:{}", sym.name, file_uri_str);
             if !seen.insert(dedup_key) { continue; }
@@ -191,7 +191,8 @@ fn extension_fn_completions(
             let fqn = if pkg.is_empty() { sym.name.clone() } else { format!("{pkg}.{}", sym.name) };
 
             let pkg_of_fqn = match fqn.rfind('.') { Some(i) => &fqn[..i], None => "" };
-            let needs_import = !already_imported(&fqn, &cur_imports)
+            let needs_import = !is_same_file
+                && !already_imported(&fqn, &cur_imports)
                 && !cur_imports.iter().any(|imp| imp.is_star && imp.full_path == pkg_of_fqn)
                 && pkg_of_fqn != cur_pkg;
 
@@ -228,8 +229,8 @@ fn complete_super(idx: &Indexer, from_uri: &Url, snippets: bool) -> Vec<Completi
     let mut items: Vec<CompletionItem> = Vec::new();
     let mut visited: Vec<String> = vec![from_uri.as_str().to_owned()];
     collect_hierarchy_completions(idx, from_uri, &mut visited, 0, &mut items, snippets);
-    // Filter out private members — inaccessible even via super.
-    items.retain(|i| i.sort_text.as_deref().map(|s| !s.starts_with("prv:")).unwrap_or(true));
+    // Filter out private/protected members — inaccessible even via super.
+    items.retain(|i| i.sort_text.as_deref().map(|s| !s.starts_with("prv:") && !s.starts_with("prt:")).unwrap_or(true));
     items.sort_by_key(|i| (kind_sort_rank(i.kind), i.label.clone()));
     items.dedup_by_key(|i| i.label.clone());
     items
@@ -298,8 +299,17 @@ pub(crate) fn complete_dot(idx: &Indexer, receiver: &str, from_uri: &Url, snippe
     // `rt.leaf` is the last segment, so it works for both plain and dotted types.
     let mut items = symbols_from_nested_type(idx, &file_uri, &rt.leaf, Some(from_uri.as_str()));
 
-    // Filter out private members — they are inaccessible from outside the class.
-    items.retain(|i| i.sort_text.as_deref().map(|s| !s.starts_with("prv:")).unwrap_or(true));
+    // Filter out private/protected members — they are inaccessible from outside the class.
+    items.retain(|i| i.sort_text.as_deref().map(|s| !s.starts_with("prv:") && !s.starts_with("prt:")).unwrap_or(true));
+
+    // Walk the inheritance hierarchy to include members from parent classes/interfaces.
+    // Tracks "file_uri#TypeName" to prevent cycles; seed with the direct type.
+    let mut visited = vec![format!("{}#{}", file_uri, rt.leaf)];
+    collect_inherited_members(idx, &file_uri, &rt.leaf, from_uri, &mut visited, 0, &mut items, snippets);
+
+    // Deduplicate by label: direct members win over inherited ones (they come first).
+    let mut seen_labels = std::collections::HashSet::new();
+    items.retain(|i| seen_labels.insert(i.label.clone()));
 
     // Strip snippet fields if client doesn't support them.
     if !snippets {
@@ -324,6 +334,66 @@ pub(crate) fn complete_dot(idx: &Indexer, receiver: &str, from_uri: &Url, snippe
     }
 
     items
+}
+
+/// Recursively collect members from parent classes/interfaces of `type_name`
+/// (defined in `file_uri`) and append them to `out`.
+///
+/// `visited` tracks `"file_uri#TypeName"` pairs to prevent infinite cycles.
+/// Only non-private members are added (matching `complete_dot` behaviour).
+fn collect_inherited_members(
+    idx:         &Indexer,
+    file_uri:    &str,
+    type_name:   &str,
+    calling_uri: &Url,
+    visited:     &mut Vec<String>,
+    depth:       u8,
+    out:         &mut Vec<CompletionItem>,
+    snippets:    bool,
+) {
+    const MAX_DEPTH: u8 = 4;
+    if depth >= MAX_DEPTH { return; }
+
+    // Find the class's declaration line, then fetch its supertype names.
+    let supers: Vec<String> = {
+        let data = match idx.files.get(file_uri) {
+            Some(d) => d,
+            None    => return,
+        };
+        let class_line = data.symbols.iter()
+            .find(|s| s.name == type_name)
+            .map(|s| s.selection_range.start.line);
+        match class_line {
+            Some(line) => data.supers.iter()
+                .filter(|(l, _, _)| *l == line)
+                .map(|(_, n, _)| n.clone())
+                .collect(),
+            // Fallback if type not found: walk all supers in file.
+            None => data.supers.iter().map(|(_, n, _)| n.clone()).collect(),
+        }
+    };
+
+    let type_url = match Url::parse(file_uri) { Ok(u) => u, Err(_) => return };
+
+    for super_name in supers {
+        let super_locs = resolve_symbol_inner(idx, &super_name, &type_url, false);
+        for loc in &super_locs {
+            let key = format!("{}#{}", loc.uri.as_str(), super_name);
+            if visited.contains(&key) { continue; }
+            visited.push(key);
+
+            let mut inherited = symbols_from_nested_type(
+                idx, loc.uri.as_str(), &super_name, Some(calling_uri.as_str()),
+            );
+            inherited.retain(|i| i.sort_text.as_deref().map(|s| !s.starts_with("prv:") && !s.starts_with("prt:")).unwrap_or(true));
+            if !snippets {
+                for item in &mut inherited { item.insert_text = None; item.insert_text_format = None; }
+            }
+            out.extend(inherited);
+
+            collect_inherited_members(idx, loc.uri.as_str(), &super_name, calling_uri, visited, depth + 1, out, snippets);
+        }
+    }
 }
 
 /// Build a `CompletionItem` for a symbol found inside a nested type body.

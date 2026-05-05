@@ -890,3 +890,59 @@ class LoanReducer {
             .expect("greet should be indexed");
         assert_eq!(sym.extension_receiver, "");
     }
+
+    // ── rhs_types CST extraction ─────────────────────────────────────────────
+
+    #[test]
+    fn rhs_types_class_literal_java_suffix() {
+        // `val api = retrofit.create(DashboardApi::class.java)` — the type should
+        // be extracted directly from the callable_reference argument, not stored
+        // in method_call_rhs (Retrofit is a library class, not indexed).
+        let src = "val api = retrofit.create(DashboardApi::class.java)";
+        let data = super::parse_kotlin(src);
+        let entry = data.rhs_types.iter().find(|(_, n, _)| n == "api");
+        assert!(entry.is_some(), "expected rhs_types entry for `api`");
+        assert_eq!(entry.unwrap().2, "DashboardApi");
+    }
+
+    #[test]
+    fn rhs_types_class_literal_kotlin_suffix() {
+        // `val api = retrofit.create(DashboardApi::class)` (no .java suffix)
+        let src = "val api = retrofit.create(DashboardApi::class)";
+        let data = super::parse_kotlin(src);
+        let entry = data.rhs_types.iter().find(|(_, n, _)| n == "api");
+        assert!(entry.is_some(), "expected rhs_types entry for `api`");
+        assert_eq!(entry.unwrap().2, "DashboardApi");
+    }
+
+    #[test]
+    fn rhs_types_constructor_call() {
+        // `val repo = UserRepository(db)` → `UserRepository`
+        let src = "val repo = UserRepository(db)";
+        let data = super::parse_kotlin(src);
+        let entry = data.rhs_types.iter().find(|(_, n, _)| n == "repo");
+        assert!(entry.is_some(), "expected rhs_types entry for `repo`");
+        assert_eq!(entry.unwrap().2, "UserRepository");
+    }
+
+    #[test]
+    fn rhs_types_di_inject() {
+        // `val repo: by inject<UserRepository>()` → type arg
+        let src = "val repo = inject<UserRepository>()";
+        let data = super::parse_kotlin(src);
+        let entry = data.rhs_types.iter().find(|(_, n, _)| n == "repo");
+        assert!(entry.is_some(), "expected rhs_types entry for `repo`");
+        assert_eq!(entry.unwrap().2, "UserRepository");
+    }
+
+    #[test]
+    fn method_call_rhs_regular_method() {
+        // `val response = service.getDetail(req)` → stored in method_call_rhs
+        let src = "val response = service.getDetail(req)";
+        let data = super::parse_kotlin(src);
+        let entry = data.method_call_rhs.iter().find(|(_, n, _, _)| n == "response");
+        assert!(entry.is_some(), "expected method_call_rhs entry for `response`");
+        assert_eq!(entry.unwrap().2, "service");
+        assert_eq!(entry.unwrap().3, "getDetail");
+    }
+

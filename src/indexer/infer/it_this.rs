@@ -229,7 +229,9 @@ pub(crate) fn lambda_receiver_type_from_context(
     // (e.g., `fn(Enum.VALUE, {` must not match the dot inside `Enum.VALUE`).
     if let Some(dot_pos) = find_last_dot_at_depth_zero(callee) {
         let receiver_expr = callee[..dot_pos].trim_end();
-        let receiver_var = last_ident_in(receiver_expr);
+        // Strip a trailing `(args)` so method chains like `getList().joinAll().map { it }`
+        // yield `receiver_var = "joinAll"` rather than `""`.
+        let receiver_var = last_ident_in(strip_trailing_call_args(receiver_expr));
         // Extract method name (everything after the dot up to the first non-id char).
         let method = callee[dot_pos + 1..].trim_start().ident_prefix();
 
@@ -252,6 +254,57 @@ pub(crate) fn lambda_receiver_type_from_context(
                     return Some(base);
                 }
             }
+
+            // Multi-segment receiver: `outer.field.method { it }` where `field`
+            // is not a local variable but a property of `outer`.
+            // Example: `result.availableBanks.firstOrNull { it }` →
+            //   outer_var = "result", field = "availableBanks"
+            //   → infer result's type → look up availableBanks in that class.
+            if let Some(rdot) = receiver_expr.rfind('.') {
+                let outer_var = last_ident_in(&receiver_expr[..rdot]);
+                let field = &receiver_expr[rdot + 1..];
+                if !outer_var.is_empty() && !field.is_empty() {
+                    if let Some(outer_type) = deps.find_var_type(outer_var, uri) {
+                        let outer_base = outer_type.ident_prefix();
+                        if !outer_base.is_empty() {
+                            if let Some(field_raw) = deps.find_field_type(&outer_base, field) {
+                                if let Some(elem) = extract_collection_element_type(&field_raw) {
+                                    return Some(elem);
+                                }
+                                // Mirror single-segment: try method's lambda param type first.
+                                if !method.is_empty() {
+                                    if let Some(ty) = fun_trailing_lambda_it_type(&method, deps, uri) {
+                                        return Some(ty);
+                                    }
+                                }
+                                let base = field_raw.ident_prefix();
+                                if !base.is_empty() && base.starts_with_uppercase() {
+                                    return Some(base);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Method-chain receiver: `getList().joinAll().firstOrNull { it }` —
+            // receiver_var is a method name (e.g. "joinAll"), not a local variable.
+            // Look up its return type directly and extract the element type.
+            if let Some(ret_raw) = deps.find_fun_return_type(receiver_var) {
+                if let Some(elem) = extract_collection_element_type(&ret_raw) {
+                    return Some(elem);
+                }
+                if !method.is_empty() {
+                    if let Some(ty) = fun_trailing_lambda_it_type(&method, deps, uri) {
+                        return Some(ty);
+                    }
+                }
+                let base = ret_raw.ident_prefix();
+                if !base.is_empty() && base.starts_with_uppercase() {
+                    return Some(base);
+                }
+            }
+
             if receiver_var.starts_with_uppercase() {
                 return Some(receiver_var.to_owned());
             }

@@ -13,8 +13,11 @@ use crate::queries::{self, KOTLIN_DEFINITIONS, SWIFT_DEFINITIONS,
     KIND_OBJECT_DECL, KIND_DELEGATION_SPEC,
     KIND_RECORD_DECL, KIND_METHOD_DECL, KIND_CTOR_DECL, KIND_FIELD_DECL,
     KIND_IMPORT_DECL, KIND_PACKAGE_DECL,
-    KIND_SUPERCLASS, KIND_SUPER_INTERFACES, KIND_EXTENDS_INTERFACES, KIND_TYPE_LIST,
-    KIND_PROTOCOL_DECL, KIND_INHERITANCE_SPEC};
+    KIND_SUPERCLASS, KIND_SUPER_INTERFACES, KIND_EXTENDS_INTERFACES,
+    KIND_PROTOCOL_DECL, KIND_INHERITANCE_SPEC,
+    KIND_PROP_DECL, KIND_PROP_DELEGATE, KIND_VAR_DECL, KIND_NAV_EXPR,
+    KIND_CALL_EXPR, KIND_CALL_SUFFIX,
+    KIND_LAMBDA_LIT};
 use crate::types::{FileData, ImportEntry, SymbolEntry, SyntaxError, Visibility};
 
 type MatchEntry = (usize, [Option<(String, Range, Range, Vec<String>)>; 2]);
@@ -118,6 +121,9 @@ pub fn parse_kotlin(content: &str) -> FileData {
 
     // ── supertype relationships (delegation specifiers) ──────────────────────
     data.extract_supers_kotlin(root, bytes);
+
+    // ── rhs-type and method-call-rhs inference (unannotated properties) ──────
+    data.extract_rhs_types_kotlin(root, bytes);
 
     // ── declared_names: scan lines once for `ident:` patterns ───────────────
     data.declared_names = extract_declared_names(&data.lines);
@@ -899,6 +905,152 @@ pub(crate) fn extract_declared_names(lines: &[String]) -> Vec<String> {
 
 // ─── supertype CST extraction ────────────────────────────────────────────────
 
+// ─── RHS type CST extraction helpers ────────────────────────────────────────
+
+/// Return the first named node that follows the `=` token in a `property_declaration`.
+fn find_rhs_node(prop: Node) -> Option<Node> {
+    let mut saw_eq = false;
+    let mut cur = prop.walk();
+    for child in prop.children(&mut cur) {
+        if saw_eq && child.is_named() { return Some(child); }
+        if !child.is_named() && child.kind() == "=" { saw_eq = true; }
+    }
+    None
+}
+
+/// For a `call_expression` with a `navigation_expression` callee, return
+/// `(receiver_name, method_name)`.  Returns `None` for chained / `this` / `super`
+/// receivers and for uppercase method names (those are constructor-like, not methods).
+fn call_expr_receiver_method(call: Node, bytes: &[u8]) -> Option<(String, String)> {
+    let callee = call.child(0)?;
+    if callee.kind() != KIND_NAV_EXPR { return None; }
+
+    // navigation_expression named children: receiver_expr, navigation_suffix(es)
+    let named_count = callee.named_child_count();
+    if named_count < 2 { return None; }
+    let receiver_node = callee.named_child(0)?;
+    let suffix_node   = callee.named_child(named_count - 1)?;
+
+    // Reject multi-level chaining (e.g. `a.b.method()`)
+    if receiver_node.kind() == KIND_NAV_EXPR { return None; }
+
+    let recv = receiver_node.utf8_text_owned(bytes)?;
+    let method = suffix_node
+        .first_child_of_kind(KIND_SIMPLE_IDENT)
+        .and_then(|n| n.utf8_text_owned(bytes))?;
+
+    if recv == "this" || recv == "super" { return None; }
+    if !method.starts_with_lowercase() { return None; }
+    Some((recv, method))
+}
+
+/// For a `call_expression` with a plain `simple_identifier` callee, return the
+/// inferred type:
+/// - DI generic call (`inject<T>()` etc.) → first type argument
+/// - Constructor call (`SomeType(args)`) → callee name
+fn call_expr_direct_type(call: Node, bytes: &[u8]) -> Option<String> {
+    let callee = call.child(0)?;
+    if callee.kind() != KIND_SIMPLE_IDENT { return None; }
+    let name = callee.utf8_text_owned(bytes)?;
+
+    // DI generic: allowlisted callee + type arguments present in call_suffix
+    const DI_NAMES: &[&str] = &["inject", "get", "viewModel", "activityViewModel"];
+    if DI_NAMES.contains(&name.as_str()) {
+        if let Some(ty) = extract_type_arg_from_call_suffix(call, bytes) {
+            return Some(ty);
+        }
+    }
+
+    // Constructor call: callee starts uppercase
+    if name.starts_with_uppercase() {
+        return Some(name);
+    }
+    None
+}
+
+/// Extract the first type argument from `call_expression > call_suffix > type_arguments`.
+fn extract_type_arg_from_call_suffix(call: Node, bytes: &[u8]) -> Option<String> {
+    let call_suffix = call.first_child_of_kind(KIND_CALL_SUFFIX)?;
+    // type_arg_strings looks for KIND_TYPE_ARGS as a direct child of call_suffix
+    let args = call_suffix.type_arg_strings(bytes);
+    let first = args.into_iter().next()?;
+    // Strip nullability marker and whitespace
+    let clean = first.trim().trim_end_matches('?');
+    if clean.is_empty() || !clean.starts_with_uppercase() { return None; }
+    // Take only the base name (no generic parameters inside the type arg itself)
+    Some(clean.ident_prefix())
+}
+
+/// If the first value argument of `call` is a class literal (`X::class` or
+/// `X::class.java`), return the type name `X`.
+///
+/// Handles Retrofit-style `create(DashboardApi::class.java)` where the callee
+/// is a library method that is not indexed, so the two-step receiver→method
+/// lookup cannot resolve the return type.
+fn extract_class_literal_arg_type(call: Node, bytes: &[u8]) -> Option<String> {
+    let call_suffix = call.first_child_of_kind(KIND_CALL_SUFFIX)?;
+    let value_args  = call_suffix.first_child_of_kind("value_arguments")?;
+    let first_arg   = value_args.first_child_of_kind("value_argument")?;
+    let arg_expr    = first_arg.named_child(0)?;
+
+    // Argument may be: `callable_reference` (X::class) or
+    // `navigation_expression` (X::class.java)
+    let callable_ref = if arg_expr.kind() == "callable_reference" {
+        arg_expr
+    } else if arg_expr.kind() == KIND_NAV_EXPR {
+        // X::class.java — first named child should be the callable_reference
+        let inner = arg_expr.named_child(0)?;
+        if inner.kind() != "callable_reference" { return None; }
+        inner
+    } else {
+        return None;
+    };
+
+    // callable_reference children: type_identifier "::" "class"
+    let type_node = callable_ref.named_child(0)?;
+    if type_node.kind() != "type_identifier" { return None; }
+    let name = type_node.utf8_text_owned(bytes)?;
+    if name.starts_with_uppercase() { Some(name) } else { None }
+}
+
+/// If `delegate` is `by lazy { SingleConstructorCall() }`, return the constructor
+/// name.  Only handles single-statement lambdas to avoid false positives.
+fn extract_lazy_type(delegate: Node, bytes: &[u8]) -> Option<String> {
+    let call = delegate.first_child_of_kind(KIND_CALL_EXPR)?;
+    let callee = call.child(0)?;
+    if callee.kind() != KIND_SIMPLE_IDENT { return None; }
+    if callee.utf8_text_owned(bytes)?.as_str() != "lazy" { return None; }
+
+    let call_suffix = call.first_child_of_kind(KIND_CALL_SUFFIX)?;
+    let lambda_lit  = find_lambda_literal(call_suffix)?;
+    let statements  = lambda_lit.first_child_of_kind("statements")?;
+
+    // Only handle the single-statement form to avoid false positives.
+    if statements.named_child_count() != 1 { return None; }
+
+    let expr = statements.named_child(0)?;
+    if expr.kind() == KIND_CALL_EXPR {
+        if let Some(inner_callee) = expr.child(0) {
+            if inner_callee.kind() == KIND_SIMPLE_IDENT {
+                if let Some(n) = inner_callee.utf8_text_owned(bytes) {
+                    if n.starts_with_uppercase() { return Some(n); }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Depth-first search for the first `lambda_literal` descendant.
+fn find_lambda_literal(start: Node) -> Option<Node> {
+    if start.kind() == KIND_LAMBDA_LIT { return Some(start); }
+    let mut cur = start.walk();
+    for child in start.children(&mut cur) {
+        if let Some(lit) = find_lambda_literal(child) { return Some(lit); }
+    }
+    None
+}
+
 // ─── FileData methods ────────────────────────────────────────────────────────
 
 impl crate::types::FileData {
@@ -964,6 +1116,60 @@ impl crate::types::FileData {
                         if let Some(name) = ut.user_type_name(bytes) {
                             let type_args = ut.type_arg_strings(bytes);
                             self.supers.push((name_line, name, type_args));
+                        }
+                    }
+                }
+            }
+            let mut cur = node.walk();
+            for child in node.children(&mut cur) { stack.push(child); }
+        }
+    }
+
+    /// Walk all Kotlin `property_declaration` nodes and populate `rhs_types` and
+    /// `method_call_rhs` for unannotated properties (those without an explicit `: Type`).
+    ///
+    /// Extracts three patterns at index time so hover/completion never need fragile
+    /// string scanning:
+    /// 1. DI generic call: `inject<T>()`, `viewModel<T>()` etc. → type arg `T`
+    /// 2. Constructor call: `SomeType(args)` → `SomeType`
+    /// 3. `by lazy { SomeType() }` (single-statement lambda) → `SomeType`
+    /// 4. Method call: `receiver.method(args)` → stored in `method_call_rhs` for
+    ///    two-step inference (resolve receiver type, then look up method return type)
+    fn extract_rhs_types_kotlin(&mut self, root: Node, bytes: &[u8]) {
+        let mut stack = vec![root];
+        while let Some(node) = stack.pop() {
+            if node.kind() == KIND_PROP_DECL {
+                if let Some(var_decl) = node.first_child_of_kind(KIND_VAR_DECL) {
+                    // Only infer for unannotated properties: variable_declaration has
+                    // just the identifier (named_child_count == 1 means no `: Type` child).
+                    if var_decl.named_child_count() == 1 {
+                        if let Some(name) = var_decl
+                            .first_child_of_kind(KIND_SIMPLE_IDENT)
+                            .and_then(|n| n.utf8_text_owned(bytes))
+                        {
+                            let line = var_decl.start_position().row as u32;
+                            if let Some(delegate) = node.first_child_of_kind(KIND_PROP_DELEGATE) {
+                                if let Some(ty) = extract_lazy_type(delegate, bytes) {
+                                    self.rhs_types.push((line, name, ty));
+                                }
+                            } else if let Some(rhs) = find_rhs_node(node) {
+                                if rhs.kind() == KIND_CALL_EXPR {
+                                    if let Some((recv, method)) =
+                                        call_expr_receiver_method(rhs, bytes)
+                                    {
+                                        // If the single argument is a class literal (X::class or
+                                        // X::class.java), extract the type directly — the callee
+                                        // (e.g. Retrofit.create) may not be indexed.
+                                        if let Some(ty) = extract_class_literal_arg_type(rhs, bytes) {
+                                            self.rhs_types.push((line, name, ty));
+                                        } else {
+                                            self.method_call_rhs.push((line, name, recv, method));
+                                        }
+                                    } else if let Some(ty) = call_expr_direct_type(rhs, bytes) {
+                                        self.rhs_types.push((line, name, ty));
+                                    }
+                                }
+                            }
                         }
                     }
                 }

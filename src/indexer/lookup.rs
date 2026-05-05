@@ -75,34 +75,74 @@ impl Indexer {
                 }
             }
         }
-        let data = self.files.get(loc.uri.as_str())?;
-        // Prefer exact match by resolved location range; fall back to name match
-        // for symbols found via rg where the range may not align exactly.
-        let sym = data.symbols.iter().find(|s| s.selection_range == loc.range)
-            .or_else(|| data.symbols.iter().find(|s| s.name == name))?;
+        // Extract needed fields and drop the DashMap guard before any inference
+        // call (which may reacquire the same shard and deadlock otherwise).
+        let (sym_kind, sym_sel_range, sym_detail, lines) = {
+            let data = self.files.get(loc.uri.as_str())?;
+            let sym = data.symbols.iter().find(|s| s.selection_range == loc.range)
+                .or_else(|| data.symbols.iter().find(|s| s.name == name))?;
+            (sym.kind, sym.selection_range, sym.detail.clone(), data.lines.clone())
+        };
 
-        let start_line = sym.selection_range.start.line as usize;
-        let raw_sig = data.lines.collect_signature(start_line);
+        let start_line = sym_sel_range.start.line as usize;
+
+        // For property/variable symbols use the pre-indexed detail (a single declaration
+        // line) rather than collect_signature, which would keep reading until it finds a
+        // closing ')' and accidentally include sibling constructor parameters.
+        let raw_sig = if matches!(sym_kind, SymbolKind::PROPERTY | SymbolKind::VARIABLE)
+            && !sym_detail.is_empty()
+        {
+            sym_detail
+        } else {
+            lines.collect_signature(start_line)
+        };
+
+        // For unannotated val/var, try to show an inferred type instead of the
+        // raw RHS expression (e.g. `val response: AccountDetailResponseBody`
+        // instead of `val response = service.getDetail(...)`).
+        let sig = if matches!(sym_kind, SymbolKind::PROPERTY | SymbolKind::VARIABLE)
+            && !raw_sig.contains(&format!("{name}:"))
+        {
+            if let Some(inferred) = self.infer_variable_type(name, &loc.uri) {
+                // Keep modifiers from the original signature (e.g. `private`, `override`).
+                // Find the name in the raw_sig and replace everything from `name` onward
+                // with `name: InferredType`, discarding the `= rhs` initializer.
+                let needle = format!(" {name}");
+                let name_pos = raw_sig.find(&needle)
+                    .map(|p| p + 1)
+                    .or_else(|| if raw_sig.starts_with(name) { Some(0) } else { None });
+                if let Some(pos) = name_pos {
+                    format!("{}: {inferred}", &raw_sig[..pos + name.len()])
+                } else {
+                    let kw = if sym_kind == SymbolKind::VARIABLE { "var" } else { "val" };
+                    format!("{kw} {name}: {inferred}")
+                }
+            } else {
+                raw_sig
+            }
+        } else {
+            raw_sig
+        };
 
         // Apply generic type parameter substitution when the cursor is in a different
         // file (subtype) than where the symbol is defined.
         let sig = if let Some(cu) = calling_uri {
-            let subst = build_type_param_subst(self, loc.uri.as_str(), sym.selection_range.start.line, cu, cursor_line);
-            if subst.is_empty() { raw_sig } else { apply_subst(&raw_sig, &subst) }
+            let subst = build_type_param_subst(self, loc.uri.as_str(), sym_sel_range.start.line, cu, cursor_line);
+            if subst.is_empty() { sig } else { apply_subst(&sig, &subst) }
         } else {
-            raw_sig
+            sig
         };
 
         let lang = lang_str(loc.uri.path());
 
         let code_block = if sig.is_empty() {
-            format!("```{}\n{} {}\n```", lang, symbol_kw_for_lang(sym.kind, lang), name)
+            format!("```{}\n{} {}\n```", lang, symbol_kw_for_lang(sym_kind, lang), name)
         } else {
             format!("```{}\n{}\n```", lang, sig)
         };
 
         // Prepend KDoc / Javadoc comment if one immediately precedes the declaration.
-        if let Some(doc) = extract_doc_comment(&data.lines, start_line) {
+        if let Some(doc) = extract_doc_comment(&lines, start_line) {
             Some(format!("{doc}\n\n---\n\n{code_block}"))
         } else {
             Some(code_block)
@@ -378,7 +418,7 @@ fn build_type_param_subst(
     let type_args = calling_data.supers.iter()
         .find(|(line, base, _)| {
             base == &container_name
-                && calling_class_line.map_or(true, |class_line| *line == class_line)
+                && calling_class_line.is_none_or(|class_line| *line == class_line)
         })
         .map(|(_, _, args)| args.clone())
         .unwrap_or_default();

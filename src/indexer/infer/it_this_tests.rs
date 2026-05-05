@@ -514,6 +514,78 @@ fn test_deps_case_a_var_type_no_collection() {
 }
 
 #[test]
+fn test_deps_case_a_multi_segment_field_collection() {
+    // `result.availableBanks.firstOrNull { it }` →
+    //   receiver_expr = "result.availableBanks", method = "firstOrNull"
+    //   outer_var = "result" (type "ResponseBody"), field = "availableBanks"
+    //   field type = "MutableList<Bank>" → element "Bank"
+    let u = test_uri();
+    let deps = super::super::TestDeps::new()
+        .with_var(u.as_str(), "result", "ResponseBody")
+        .with_field("ResponseBody", "availableBanks", "MutableList<Bank>");
+    let result = lambda_receiver_type_from_context("result.availableBanks.firstOrNull", &deps, &u);
+    assert_eq!(result.as_deref(), Some("Bank"),
+        "multi-segment: element of field collection resolved via find_field_type");
+}
+
+#[test]
+fn test_deps_case_a_multi_segment_field_collection_map() {
+    // `result.connectedAccounts.map { account -> }` →
+    //   outer_var = "result" (type "ResponseBody"), field = "connectedAccounts"
+    //   field type = "MutableList<MbAccount>" → element "MbAccount"
+    let u = test_uri();
+    let deps = super::super::TestDeps::new()
+        .with_var(u.as_str(), "result", "ResponseBody")
+        .with_field("ResponseBody", "connectedAccounts", "MutableList<MbAccount>");
+    let result = lambda_receiver_type_from_context("result.connectedAccounts.map", &deps, &u);
+    assert_eq!(result.as_deref(), Some("MbAccount"),
+        "multi-segment: element of connectedAccounts field via map");
+}
+
+#[test]
+fn test_deps_case_a_multi_segment_with_assignment_prefix() {
+    // `account.bankName = result.availableBanks.firstOrNull { it }` →
+    //   callee contains assignment prefix; last_ident_in correctly finds "result"
+    let u = test_uri();
+    let deps = super::super::TestDeps::new()
+        .with_var(u.as_str(), "result", "ResponseBody")
+        .with_field("ResponseBody", "availableBanks", "MutableList<Bank>");
+    // The callee string as extracted from the source line (assignment prefix included).
+    let result = lambda_receiver_type_from_context(
+        "account.bankName = result.availableBanks.firstOrNull", &deps, &u);
+    assert_eq!(result.as_deref(), Some("Bank"),
+        "multi-segment with assignment prefix: element resolved correctly");
+}
+
+#[test]
+fn test_deps_case_a_multi_segment_field_non_collection_method_lambda() {
+    // `result.foo.customOp { it }` where field `foo: Repo` and `customOp(block: (Bar) -> Unit)`.
+    // The method's lambda param type wins over the field base type.
+    let u = test_uri();
+    let deps = super::super::TestDeps::new()
+        .with_var(u.as_str(), "result", "ResponseBody")
+        .with_field("ResponseBody", "foo", "Repo")
+        .with_fun(u.as_str(), "customOp", "block: (Bar) -> Unit");
+    let result = lambda_receiver_type_from_context("result.foo.customOp", &deps, &u);
+    assert_eq!(result.as_deref(), Some("Bar"),
+        "multi-segment non-collection: method lambda param type wins over field base type");
+}
+
+#[test]
+fn test_deps_case_a_method_chain_return_type() {
+    // `getAccountList(isRefresh).joinAllAccounts().firstOrNull { it }` →
+    //   receiver_var = "joinAllAccounts", method = "firstOrNull"
+    //   joinAllAccounts() returns List<Account> → element "Account"
+    let u = test_uri();
+    let deps = super::super::TestDeps::new()
+        .with_return("joinAllAccounts", "List<Account>");
+    let result = lambda_receiver_type_from_context(
+        "getAccountList(isRefresh).joinAllAccounts().firstOrNull", &deps, &u);
+    assert_eq!(result.as_deref(), Some("Account"),
+        "method-chain: element type from joinAllAccounts() return type");
+}
+
+#[test]
 fn test_deps_unknown_fn_returns_none() {
     // Function not registered → None.
     let u = test_uri();
