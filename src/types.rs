@@ -16,6 +16,10 @@ pub enum Language {
 
 impl Language {
     /// Infer the language from a file path or URI string.
+    ///
+    /// Explicit matches: `.java` → Java, `.swift` → Swift.
+    /// Everything else (`.kt`, `.kts`, unknown extensions) → Kotlin, since this
+    /// server is Kotlin-primary and `.kts` files use the same language features.
     pub fn from_path(path: &str) -> Self {
         if path.ends_with(".swift")                        { Language::Swift }
         else if path.ends_with(".java")                    { Language::Java  }

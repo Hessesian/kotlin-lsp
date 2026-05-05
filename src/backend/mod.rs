@@ -16,6 +16,7 @@ pub mod rename;
 pub mod actions;
 pub mod helpers;
 pub mod cursor;
+pub mod format;
 
 pub struct Backend {
     pub(super) client:  Client,
