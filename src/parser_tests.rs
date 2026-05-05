@@ -602,10 +602,347 @@ class LoanReducer {
         let sel   = Range::new(Position::new(1, 0), Position::new(1, 3));
         let range = sel;
         let matches: Vec<MatchEntry> = vec![
-            (2, [Some(("Foo".into(), range, sel)), None]),
-            (0, [Some(("Foo".into(), range, sel)), None]),
+            (2, [Some(("Foo".into(), range, sel, vec![])), None]),
+            (0, [Some(("Foo".into(), range, sel, vec![])), None]),
         ];
         let best = dedup_matches(&matches);
         assert_eq!(best.len(), 1);
         assert_eq!(best.values().next().unwrap().0, 0, "pidx 0 should win over pidx 2");
     }
+
+    // ── Swift supers extraction ──────────────────────────────────────────────
+
+    fn supers_names(data: &FileData) -> Vec<String> {
+        data.supers.iter().map(|(_, name, _)| name.clone()).collect()
+    }
+
+    #[test]
+    fn swift_supers_class() {
+        let data = parse_swift("class Foo: UIViewController, Sendable {}");
+        let names = supers_names(&data);
+        assert!(names.contains(&"UIViewController".to_owned()), "missing UIViewController; got: {names:?}");
+        assert!(names.contains(&"Sendable".to_owned()), "missing Sendable; got: {names:?}");
+    }
+
+    #[test]
+    fn swift_supers_protocol() {
+        let data = parse_swift("protocol P: Q, R {}");
+        let names = supers_names(&data);
+        assert!(names.contains(&"Q".to_owned()), "missing Q; got: {names:?}");
+        assert!(names.contains(&"R".to_owned()), "missing R; got: {names:?}");
+    }
+
+    #[test]
+    fn swift_supers_struct() {
+        let data = parse_swift("struct Point: Drawable {}");
+        let names = supers_names(&data);
+        assert!(names.contains(&"Drawable".to_owned()), "missing Drawable; got: {names:?}");
+    }
+
+    #[test]
+    fn swift_supers_extension() {
+        let data = parse_swift("extension Point: Hashable, Equatable {}");
+        let names = supers_names(&data);
+        assert!(names.contains(&"Hashable".to_owned()), "missing Hashable; got: {names:?}");
+        assert!(names.contains(&"Equatable".to_owned()), "missing Equatable; got: {names:?}");
+    }
+
+    #[test]
+    fn swift_supers_with_generic_base() {
+        let data = parse_swift("class Foo: Bar<Baz> {}");
+        let entry = data.supers.iter().find(|(_, name, _)| name == "Bar")
+            .expect("missing Bar super");
+        assert_eq!(entry.2, vec!["Baz"], "type_args for Bar<Baz> should be [Baz]");
+    }
+
+    #[test]
+    fn swift_supers_multi_generic_args() {
+        let data = parse_swift("class Foo: Base<Int, String> {}");
+        let entry = data.supers.iter().find(|(_, name, _)| name == "Base")
+            .expect("missing Base super");
+        assert_eq!(entry.2, vec!["Int", "String"], "type_args for Base<Int, String> should be [Int, String]");
+    }
+
+    // ── visibility ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn visibility_kotlin_defaults_public() {
+        let lines: Vec<String> = vec!["fun foo() {}".into()];
+        assert_eq!(visibility_at_line(&lines, 0), crate::types::Visibility::Public);
+    }
+
+    #[test]
+    fn visibility_kotlin_private() {
+        let lines: Vec<String> = vec!["private fun foo() {}".into()];
+        assert_eq!(visibility_at_line(&lines, 0), crate::types::Visibility::Private);
+    }
+
+    #[test]
+    fn visibility_swift_defaults_internal() {
+        let lines: Vec<String> = vec!["func foo() {}".into()];
+        assert_eq!(swift_visibility_at_line(&lines, 0), crate::types::Visibility::Internal);
+    }
+
+    #[test]
+    fn visibility_swift_open_is_public() {
+        let lines: Vec<String> = vec!["open class Foo {}".into()];
+        assert_eq!(swift_visibility_at_line(&lines, 0), crate::types::Visibility::Public);
+    }
+
+    // ── type_params extraction ──────────────────────────────────────────────
+
+    #[test]
+    fn kotlin_generic_class_has_type_params() {
+        let src = "class Box<T, U>(val value: T) {}";
+        let data = parse_kotlin(src);
+        let s = sym(&data, "Box").expect("Box not found");
+        assert_eq!(s.type_params, vec!["T", "U"]);
+    }
+
+    #[test]
+    fn kotlin_generic_interface_has_type_params() {
+        let src = "interface FlowReducer<in Event, out Effect, State> {}";
+        let data = parse_kotlin(src);
+        let s = sym(&data, "FlowReducer").expect("FlowReducer not found");
+        assert_eq!(s.type_params, vec!["Event", "Effect", "State"]);
+    }
+
+    #[test]
+    fn kotlin_non_generic_class_has_empty_type_params() {
+        let src = "class Plain {}";
+        let data = parse_kotlin(src);
+        let s = sym(&data, "Plain").expect("Plain not found");
+        assert!(s.type_params.is_empty(), "expected empty type_params, got {:?}", s.type_params);
+    }
+
+    #[test]
+    fn java_generic_class_has_type_params() {
+        let src = "public class Pair<A, B> { public A first; public B second; }";
+        let data = parse_java(src);
+        let s = sym(&data, "Pair").expect("Pair not found");
+        assert_eq!(s.type_params, vec!["A", "B"]);
+    }
+
+    // ── fun interface type_params ──────────────────────────────────────────────
+
+    #[test]
+    fn fun_interface_no_modifier_is_indexed() {
+        let src = "fun interface Action {}";
+        let data = parse_kotlin(src);
+        let s = sym(&data, "Action").expect("Action not found");
+        assert_eq!(s.kind, tower_lsp::lsp_types::SymbolKind::INTERFACE);
+        assert!(s.type_params.is_empty());
+    }
+
+    #[test]
+    fn fun_interface_with_modifier_is_indexed() {
+        let src = "public fun interface Runnable {}";
+        let data = parse_kotlin(src);
+        let s = sym(&data, "Runnable").expect("Runnable not found");
+        assert_eq!(s.kind, tower_lsp::lsp_types::SymbolKind::INTERFACE);
+        assert!(s.type_params.is_empty());
+    }
+
+    #[test]
+    fn fun_interface_body_generic_method_not_harvested() {
+        // Non-generic fun interface whose body has a generic method must not
+        // pick up the method's type param as the interface's own type param.
+        let src = "fun interface Transformer { fun <T> transform(x: Any): T }";
+        let data = parse_kotlin(src);
+        let s = sym(&data, "Transformer").expect("Transformer not found");
+        assert_eq!(s.kind, tower_lsp::lsp_types::SymbolKind::INTERFACE);
+        assert!(s.type_params.is_empty(),
+            "body method type param leaked: {:?}", s.type_params);
+    }
+
+    #[test]
+    fn fun_interface_generic_type_params() {
+        let src = "fun interface Router<Effect> { fun route(effect: Effect) }";
+        let data = parse_kotlin(src);
+        let s = sym(&data, "Router").expect("Router not found");
+        assert_eq!(s.kind, tower_lsp::lsp_types::SymbolKind::INTERFACE);
+        // Text fallback extracts type params from the declaration line when CST
+        // error recovery doesn't produce a type_parameters node.
+        assert_eq!(s.type_params, vec!["Effect".to_string()],
+            "type_params should be extracted via text fallback: {:?}", s.type_params);
+        assert!(!s.type_params.contains(&"effect".to_string()),
+            "method param leaked into interface type_params: {:?}", s.type_params);
+    }
+
+    /// Multi-type-param `fun interface` declarations (e.g. `<A, B>`) are now indexed
+    /// via the nested-ERROR detection path added for variance support.
+    #[test]
+    fn fun_interface_multi_type_params_indexed() {
+        let src = "fun interface Pair<A, B> { fun get(): A }";
+        let data = parse_kotlin(src);
+        let s = sym(&data, "Pair").expect("Pair should now be indexed");
+        assert_eq!(s.type_params, vec!["A", "B"]);
+    }
+
+    /// type_params_from_angle_brackets must not produce entries containing `:` or spaces.
+    /// For `fun interface Sortable<T: Comparable>`, like multi-param, the whole
+    /// declaration is not indexed (same tree-sitter-kotlin 0.3 limitation).
+    #[test]
+    fn angle_brackets_strips_variance_and_bounds() {
+        // When a fun interface with variance/bounds IS indexed, type_params must strip them.
+        // Not all forms are detectable by is_fun_interface_error (tree-sitter may wrap the
+        // name in user_type when generics follow), so we use `if let Some`.
+        let cases: &[(&str, &[&str])] = &[
+            ("fun interface Producer<out T>",  &["T"]),
+            ("fun interface Consumer<in T>",   &["T"]),
+            ("fun interface Box<T : Any>",     &["T"]),
+            ("fun interface Pair<out A, in B>", &["A", "B"]),
+        ];
+        for (src, expected) in cases {
+            let data = parse_kotlin(src);
+            if let Some(sym) = data.symbols.iter().find(|s| s.kind == SymbolKind::INTERFACE) {
+                assert_eq!(&sym.type_params.iter().map(String::as_str).collect::<Vec<_>>(),
+                    expected, "type_params wrong for: {src}");
+            }
+            // If not indexed: known limitation — tree-sitter-kotlin 0.3 wraps the
+            // name in user_type when variance appears, hiding the simple_identifier.
+        }
+    }
+
+    #[test]
+    fn angle_brackets_ignores_complex_declarations() {
+        let src = "fun interface Sortable<T: Comparable> { fun sort() }";
+        let data = parse_kotlin(src);
+        // `T: Comparable` bound stripped → no `:` in type_params
+        for s in &data.symbols {
+            assert!(!s.type_params.iter().any(|p| p.contains(':')),
+                "bound leaked into type_params for {}: {:?}", s.name, s.type_params);
+        }
+    }
+
+    // ── fun interface CST fixture tests ──────────────────────────────────────
+    // Fixture files live in tests/fixtures/kotlin/ — they replicate the package
+    // structure of the original production sources so the package declaration
+    // and naming context are preserved.
+
+    #[test]
+    fn fun_interface_single_type_param_indexed() {
+        let src = std::fs::read_to_string(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/kotlin/mvi/Router.kt")
+        ).expect("fixture Router.kt missing");
+        let data = parse_kotlin(&src);
+        let sym = data.symbols.iter().find(|s| s.name == "Router" && s.kind == SymbolKind::INTERFACE)
+            .expect("Router interface not indexed");
+        assert_eq!(sym.type_params, vec!["Effect"], "Router<Effect> type_params wrong");
+    }
+
+    #[test]
+    fn fun_interface_variance_stripped() {
+        let src = std::fs::read_to_string(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/kotlin/input/validator/IInputValidator.kt")
+        ).expect("fixture IInputValidator.kt missing");
+        let data = parse_kotlin(&src);
+        let sym = data.symbols.iter().find(|s| s.name == "IInputValidator" && s.kind == SymbolKind::INTERFACE)
+            .expect("IInputValidator should be indexed");
+        assert_eq!(sym.type_params, vec!["In", "Out"],
+            "variance 'in'/'out' must be stripped from type_params");
+    }
+
+    // ── extract_extension_receiver ────────────────────────────────────────────
+
+    #[test]
+    fn extension_receiver_simple() {
+        assert_eq!(super::extract_extension_receiver("fun Foo.bar()"), "Foo");
+    }
+
+    #[test]
+    fn extension_receiver_with_type_params() {
+        assert_eq!(super::extract_extension_receiver("fun <T> List<T>.bar()"), "List");
+    }
+
+    #[test]
+    fn extension_receiver_qualified() {
+        // `fun Outer.Inner.baz()` — last segment is Inner
+        assert_eq!(super::extract_extension_receiver("fun Outer.Inner.baz()"), "Inner");
+    }
+
+    #[test]
+    fn extension_receiver_no_receiver() {
+        assert_eq!(super::extract_extension_receiver("fun bar()"), "");
+    }
+
+    #[test]
+    fn extension_receiver_non_fun() {
+        assert_eq!(super::extract_extension_receiver("val x: Int"), "");
+        assert_eq!(super::extract_extension_receiver("class Foo"), "");
+    }
+
+    #[test]
+    fn extension_receiver_indexed_in_symbol_entry() {
+        // A top-level extension function should have extension_receiver populated.
+        let src = "fun String.shout(): String = this.uppercase()";
+        let data = super::parse_kotlin(src);
+        let sym = data.symbols.iter().find(|s| s.name == "shout")
+            .expect("shout should be indexed");
+        assert_eq!(sym.extension_receiver, "String");
+    }
+
+    #[test]
+    fn non_extension_fun_has_empty_receiver() {
+        let src = "fun greet(name: String): String = \"Hello $name\"";
+        let data = super::parse_kotlin(src);
+        let sym = data.symbols.iter().find(|s| s.name == "greet")
+            .expect("greet should be indexed");
+        assert_eq!(sym.extension_receiver, "");
+    }
+
+    // ── rhs_types CST extraction ─────────────────────────────────────────────
+
+    #[test]
+    fn rhs_types_class_literal_java_suffix() {
+        // `val api = retrofit.create(DashboardApi::class.java)` — the type should
+        // be extracted directly from the callable_reference argument, not stored
+        // in method_call_rhs (Retrofit is a library class, not indexed).
+        let src = "val api = retrofit.create(DashboardApi::class.java)";
+        let data = super::parse_kotlin(src);
+        let entry = data.rhs_types.iter().find(|(_, n, _)| n == "api");
+        assert!(entry.is_some(), "expected rhs_types entry for `api`");
+        assert_eq!(entry.unwrap().2, "DashboardApi");
+    }
+
+    #[test]
+    fn rhs_types_class_literal_kotlin_suffix() {
+        // `val api = retrofit.create(DashboardApi::class)` (no .java suffix)
+        let src = "val api = retrofit.create(DashboardApi::class)";
+        let data = super::parse_kotlin(src);
+        let entry = data.rhs_types.iter().find(|(_, n, _)| n == "api");
+        assert!(entry.is_some(), "expected rhs_types entry for `api`");
+        assert_eq!(entry.unwrap().2, "DashboardApi");
+    }
+
+    #[test]
+    fn rhs_types_constructor_call() {
+        // `val repo = UserRepository(db)` → `UserRepository`
+        let src = "val repo = UserRepository(db)";
+        let data = super::parse_kotlin(src);
+        let entry = data.rhs_types.iter().find(|(_, n, _)| n == "repo");
+        assert!(entry.is_some(), "expected rhs_types entry for `repo`");
+        assert_eq!(entry.unwrap().2, "UserRepository");
+    }
+
+    #[test]
+    fn rhs_types_di_inject() {
+        // `val repo: by inject<UserRepository>()` → type arg
+        let src = "val repo = inject<UserRepository>()";
+        let data = super::parse_kotlin(src);
+        let entry = data.rhs_types.iter().find(|(_, n, _)| n == "repo");
+        assert!(entry.is_some(), "expected rhs_types entry for `repo`");
+        assert_eq!(entry.unwrap().2, "UserRepository");
+    }
+
+    #[test]
+    fn method_call_rhs_regular_method() {
+        // `val response = service.getDetail(req)` → stored in method_call_rhs
+        let src = "val response = service.getDetail(req)";
+        let data = super::parse_kotlin(src);
+        let entry = data.method_call_rhs.iter().find(|(_, n, _, _)| n == "response");
+        assert!(entry.is_some(), "expected method_call_rhs entry for `response`");
+        assert_eq!(entry.unwrap().2, "service");
+        assert_eq!(entry.unwrap().3, "getDetail");
+    }
+

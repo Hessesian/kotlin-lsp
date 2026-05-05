@@ -1304,6 +1304,8 @@ fn stale_keys_includes_both_qualified_aliases() {
         range: Default::default(),
         selection_range: Default::default(),
         detail: String::new(),
+        type_params: Vec::new(),
+        extension_receiver: String::new(),
     };
     data.symbols.push(sym);
     let stale = super::stale_keys_for(&uri, &data);
@@ -1324,6 +1326,8 @@ fn stale_keys_stem_equals_sym_no_alias() {
         range: Default::default(),
         selection_range: Default::default(),
         detail: String::new(),
+        type_params: Vec::new(),
+        extension_receiver: String::new(),
     };
     data.symbols.push(sym);
     let stale = super::stale_keys_for(&uri, &data);
@@ -1607,4 +1611,96 @@ fn dot_receiver_qualified() {
 #[test]
 fn dot_receiver_none() {
     assert_eq!(dot_receiver("foo"), None);
+}
+
+// ── Lambda `it` inference: method chain + plain-fn RHS ───────────────────
+//
+// These tests mirror the real-world patterns that triggered regression fixes:
+//   1. `result.availableBanks.firstOrNull { it }` where `result` comes from
+//      a plain function call (`val result = getConnectedAccounts(isRefresh)`)
+//   2. `getAccountList(isRefresh).joinAllAccounts().firstOrNull { it }` —
+//      method chain; guard must NOT infer from the first segment's return type
+
+#[test]
+fn it_infer_result_field_firstornull() {
+    // Models:
+    //   data class MultibankingBank(val code: String, val name: String)
+    //   data class ConnectedAccountsResponse(val availableBanks: MutableList<MultibankingBank>)
+    //   fun getConnectedAccounts(isRefresh: Boolean): ConnectedAccountsResponse
+    //
+    // Usage:
+    //   val result = getConnectedAccounts(isRefresh)
+    //   result.availableBanks.firstOrNull { it.code == "X" }
+    //                                       ^^ should resolve to MultibankingBank
+    let src = concat!(
+        "data class MultibankingBank(val code: String, val name: String)\n",  // 0
+        "data class ConnectedAccountsResponse(\n",                             // 1
+        "  val availableBanks: MutableList<MultibankingBank> = mutableListOf(),\n", // 2
+        ")\n",                                                                  // 3
+        "fun getConnectedAccounts(isRefresh: Boolean): ConnectedAccountsResponse {}\n", // 4
+        "fun use(isRefresh: Boolean) {\n",                                      // 5
+        "  val result = getConnectedAccounts(isRefresh)\n",                     // 6
+        "  result.availableBanks.firstOrNull { it.code == \"X\" }\n",          // 7
+        "}\n",                                                                  // 8
+    );
+    let (u, idx) = indexed("/ConnectedAccounts.kt", src);
+    // `it` is on line 7, inside the firstOrNull lambda body
+    let result = idx.infer_lambda_param_type_at("it", &u, Position::new(7, 38));
+    assert_eq!(result.as_deref(), Some("MultibankingBank"),
+        "it inside firstOrNull on a field of plain-fn result should be MultibankingBank, got: {result:?}");
+}
+
+#[test]
+fn it_infer_method_chain_firstornull() {
+    // Models:
+    //   data class Account(val accountId: String)
+    //   class AccountList
+    //   fun getAccountList(isRefresh: Boolean): AccountList
+    //   fun AccountList.joinAllAccounts(): List<Account>
+    //
+    // Usage:
+    //   var account = getAccountList(isRefresh).joinAllAccounts().firstOrNull { it.accountId == id }
+    //                                                                           ^^ should resolve to Account
+    let src = concat!(
+        "data class Account(val accountId: String)\n",                               // 0
+        "class AccountList\n",                                                        // 1
+        "fun getAccountList(isRefresh: Boolean): AccountList {}\n",                   // 2
+        "fun AccountList.joinAllAccounts(): List<Account> {}\n",                      // 3
+        "fun use(isRefresh: Boolean, id: String) {\n",                               // 4
+        "  var account = getAccountList(isRefresh).joinAllAccounts().firstOrNull { it.accountId == id }\n", // 5
+        "}\n",                                                                        // 6
+    );
+    let (u, idx) = indexed("/AccountChain.kt", src);
+    // `it` is on line 5 at col 74 (0-indexed), inside the firstOrNull lambda
+    let result = idx.infer_lambda_param_type_at("it", &u, Position::new(5, 74));
+    assert_eq!(result.as_deref(), Some("Account"),
+        "it inside method-chain firstOrNull should be Account, got: {result:?}");
+}
+
+#[test]
+fn account_var_type_not_inferred_from_wrong_chain_segment() {
+    // Regression guard: `var account = getAccountList(...).joinAllAccounts().firstOrNull { }`
+    // The plain-fn fallback must NOT pick getAccountList's return type (AccountList) for `account`.
+    // infer_variable_type_raw for `account` should return None (can't trace the full chain)
+    // rather than AccountList or some wrong type.
+    let src = concat!(
+        "data class Account(val accountId: String)\n",                               // 0
+        "class AccountList\n",                                                        // 1
+        "fun getAccountList(isRefresh: Boolean): AccountList {}\n",                   // 2
+        "fun AccountList.joinAllAccounts(): List<Account> {}\n",                      // 3
+        "fun use(isRefresh: Boolean, id: String) {\n",                               // 4
+        "  var account = getAccountList(isRefresh).joinAllAccounts().firstOrNull { it.accountId == id }\n", // 5
+        "  account\n",                                                                // 6
+        "}\n",                                                                        // 7
+    );
+    let (u, idx) = indexed("/AccountChain.kt", src);
+    // Hover on `account` (line 6). The variable's inferred type must not be "AccountList"
+    // (regression: plain-fn fallback was picking the first segment).
+    let inferred = crate::resolver::infer::infer_variable_type_raw(&idx, "account", &u);
+    // We accept None (couldn't trace chain) OR the correct type.
+    // We reject "AccountList" — that was the regression.
+    if let Some(ref t) = inferred {
+        assert!(!t.contains("AccountList"),
+            "inferred type for `account` must not be AccountList (regression), got: {t}");
+    }
 }

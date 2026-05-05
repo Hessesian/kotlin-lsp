@@ -140,13 +140,97 @@ pub(crate) fn is_annotation_context(line: &str, prefix: &str) -> bool {
 }
 
 /// Completion for `super.` — gather all members from the parent hierarchy.
+/// Scan the index for extension functions whose `extension_receiver` matches `receiver_type`
+/// and return them as `CompletionItem`s with auto-import `additionalTextEdits` when needed.
+///
+/// Only called for Kotlin files; Java files don't consume Kotlin extension functions.
+fn extension_fn_completions(
+    idx:           &Indexer,
+    receiver_type: &str,
+    from_uri:      &Url,
+    snippets:      bool,
+) -> Vec<CompletionItem> {
+    if receiver_type.is_empty() { return vec![]; }
+
+    // Gather current imports + package once (to avoid repeating per symbol).
+    let is_java = false;
+    let live = idx.live_lines.get(from_uri.as_str()).map(|ll| ll.clone());
+    let (cur_imports, cur_pkg, cur_lines) = idx.files.get(from_uri.as_str())
+        .map(|f| {
+            let lines = live.clone().unwrap_or_else(|| f.lines.clone());
+            let imports = if live.is_some() { lines.parse_imports() } else { f.imports.clone() };
+            (imports, f.package.clone().unwrap_or_default(), lines)
+        })
+        .unwrap_or_else(|| {
+            let lines = live.clone().unwrap_or_default();
+            let imports = lines.parse_imports();
+            (imports, String::new(), lines)
+        });
+
+    let mut items = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for file_entry in idx.files.iter() {
+        let file_uri_str = file_entry.key().clone();
+        let file = file_entry.value();
+        let is_same_file = file_uri_str == from_uri.as_str();
+        // Only look at Kotlin files.
+        if !file_uri_str.ends_with(".kt") && !file_uri_str.ends_with(".kts") { continue; }
+
+        for sym in &file.symbols {
+            if sym.extension_receiver != receiver_type { continue; }
+            // Skip private/protected from other files — inaccessible across file boundaries.
+            // Same-file private/protected are fine.
+            if !is_same_file && matches!(sym.visibility, Visibility::Private | Visibility::Protected) { continue; }
+
+            let dedup_key = format!("{}:{}", sym.name, file_uri_str);
+            if !seen.insert(dedup_key) { continue; }
+
+            // Build FQN for auto-import: package.funcName
+            let pkg = file.package.as_deref().unwrap_or("");
+            let fqn = if pkg.is_empty() { sym.name.clone() } else { format!("{pkg}.{}", sym.name) };
+
+            let pkg_of_fqn = match fqn.rfind('.') { Some(i) => &fqn[..i], None => "" };
+            let needs_import = !is_same_file
+                && !already_imported(&fqn, &cur_imports)
+                && !cur_imports.iter().any(|imp| imp.is_star && imp.full_path == pkg_of_fqn)
+                && pkg_of_fqn != cur_pkg;
+
+            let import_edit = if needs_import {
+                Some(vec![cur_lines.make_import_edit(&fqn, is_java)])
+            } else {
+                None
+            };
+
+            let insert_text = if snippets { Some(format!("{}($1)", sym.name)) } else { None };
+            let detail = if !sym.detail.is_empty() { Some(sym.detail.clone()) }
+                         else if needs_import { Some(pkg_of_fqn.to_string()) }
+                         else { None };
+
+            items.push(CompletionItem {
+                label:                sym.name.clone(),
+                kind:                 Some(CompletionItemKind::FUNCTION),
+                insert_text,
+                insert_text_format:   if snippets { Some(InsertTextFormat::SNIPPET) } else { None },
+                sort_text:            Some(format!("01:ext:{}", sym.name)),
+                detail,
+                command:              if snippets { Some(trigger_parameter_hints()) } else { None },
+                additional_text_edits: import_edit,
+                ..Default::default()
+            });
+        }
+    }
+
+    items
+}
+
 fn complete_super(idx: &Indexer, from_uri: &Url, snippets: bool) -> Vec<CompletionItem> {
     if idx.files.get(from_uri.as_str()).is_none() { return vec![]; }
     let mut items: Vec<CompletionItem> = Vec::new();
     let mut visited: Vec<String> = vec![from_uri.as_str().to_owned()];
     collect_hierarchy_completions(idx, from_uri, &mut visited, 0, &mut items, snippets);
-    // Filter out private members — inaccessible even via super.
-    items.retain(|i| i.sort_text.as_deref().map(|s| !s.starts_with("prv:")).unwrap_or(true));
+    // Filter out private/protected members — inaccessible even via super.
+    items.retain(|i| i.sort_text.as_deref().map(|s| !s.starts_with("prv:") && !s.starts_with("prt:")).unwrap_or(true));
     items.sort_by_key(|i| (kind_sort_rank(i.kind), i.label.clone()));
     items.dedup_by_key(|i| i.label.clone());
     items
@@ -215,8 +299,17 @@ pub(crate) fn complete_dot(idx: &Indexer, receiver: &str, from_uri: &Url, snippe
     // `rt.leaf` is the last segment, so it works for both plain and dotted types.
     let mut items = symbols_from_nested_type(idx, &file_uri, &rt.leaf, Some(from_uri.as_str()));
 
-    // Filter out private members — they are inaccessible from outside the class.
-    items.retain(|i| i.sort_text.as_deref().map(|s| !s.starts_with("prv:")).unwrap_or(true));
+    // Filter out private/protected members — they are inaccessible from outside the class.
+    items.retain(|i| i.sort_text.as_deref().map(|s| !s.starts_with("prv:") && !s.starts_with("prt:")).unwrap_or(true));
+
+    // Walk the inheritance hierarchy to include members from parent classes/interfaces.
+    // Tracks "file_uri#TypeName" to prevent cycles; seed with the direct type.
+    let mut visited = vec![format!("{}#{}", file_uri, rt.leaf)];
+    collect_inherited_members(idx, &file_uri, &rt.leaf, from_uri, &mut visited, 0, &mut items, snippets);
+
+    // Deduplicate by label: direct members win over inherited ones (they come first).
+    let mut seen_labels = std::collections::HashSet::new();
+    items.retain(|i| seen_labels.insert(i.label.clone()));
 
     // Strip snippet fields if client doesn't support them.
     if !snippets {
@@ -233,7 +326,74 @@ pub(crate) fn complete_dot(idx: &Indexer, receiver: &str, from_uri: &Url, snippe
     // when the current file is a Kotlin file; add Swift-specific snippets for Swift.
     let from_path = from_uri.path();
     items.extend(dot_completions_for_lang(from_path, &rt.qualified, snippets));
+
+    // Append indexed extension functions whose receiver matches `rt.outer`.
+    // These may be defined in other files and need an auto-import.
+    if from_path.ends_with(".kt") || from_path.ends_with(".kts") {
+        items.extend(extension_fn_completions(idx, &rt.outer, from_uri, snippets));
+    }
+
     items
+}
+
+/// Recursively collect members from parent classes/interfaces of `type_name`
+/// (defined in `file_uri`) and append them to `out`.
+///
+/// `visited` tracks `"file_uri#TypeName"` pairs to prevent infinite cycles.
+/// Only non-private members are added (matching `complete_dot` behaviour).
+fn collect_inherited_members(
+    idx:         &Indexer,
+    file_uri:    &str,
+    type_name:   &str,
+    calling_uri: &Url,
+    visited:     &mut Vec<String>,
+    depth:       u8,
+    out:         &mut Vec<CompletionItem>,
+    snippets:    bool,
+) {
+    const MAX_DEPTH: u8 = 4;
+    if depth >= MAX_DEPTH { return; }
+
+    // Find the class's declaration line, then fetch its supertype names.
+    let supers: Vec<String> = {
+        let data = match idx.files.get(file_uri) {
+            Some(d) => d,
+            None    => return,
+        };
+        let class_line = data.symbols.iter()
+            .find(|s| s.name == type_name)
+            .map(|s| s.selection_range.start.line);
+        match class_line {
+            Some(line) => data.supers.iter()
+                .filter(|(l, _, _)| *l == line)
+                .map(|(_, n, _)| n.clone())
+                .collect(),
+            // Fallback if type not found: walk all supers in file.
+            None => data.supers.iter().map(|(_, n, _)| n.clone()).collect(),
+        }
+    };
+
+    let type_url = match Url::parse(file_uri) { Ok(u) => u, Err(_) => return };
+
+    for super_name in supers {
+        let super_locs = resolve_symbol_inner(idx, &super_name, &type_url, false);
+        for loc in &super_locs {
+            let key = format!("{}#{}", loc.uri.as_str(), super_name);
+            if visited.contains(&key) { continue; }
+            visited.push(key);
+
+            let mut inherited = symbols_from_nested_type(
+                idx, loc.uri.as_str(), &super_name, Some(calling_uri.as_str()),
+            );
+            inherited.retain(|i| i.sort_text.as_deref().map(|s| !s.starts_with("prv:") && !s.starts_with("prt:")).unwrap_or(true));
+            if !snippets {
+                for item in &mut inherited { item.insert_text = None; item.insert_text_format = None; }
+            }
+            out.extend(inherited);
+
+            collect_inherited_members(idx, loc.uri.as_str(), &super_name, calling_uri, visited, depth + 1, out, snippets);
+        }
+    }
 }
 
 /// Build a `CompletionItem` for a symbol found inside a nested type body.

@@ -5,8 +5,9 @@
 use tree_sitter::Node;
 use crate::StrExt;
 use crate::queries::{
-    KIND_SIMPLE_IDENT, KIND_TYPE_IDENT, KIND_VALUE_ARG, KIND_VALUE_ARGS,
-    KIND_LAMBDA_PARAMS,
+    KIND_SIMPLE_IDENT, KIND_TYPE_IDENT, KIND_IDENTIFIER, KIND_VALUE_ARG, KIND_VALUE_ARGS,
+    KIND_LAMBDA_PARAMS, KIND_TYPE_PARAMS, KIND_TYPE_PARAM, KIND_TYPE_ARGS,
+    KIND_USER_TYPE, KIND_TYPE_LIST,
 };
 
 pub(crate) trait NodeExt<'a>: Sized + Copy {
@@ -61,10 +62,42 @@ pub(crate) trait NodeExt<'a>: Sized + Copy {
     /// Extract the first type name from a Java type node.
     fn java_first_type_name(self, bytes: &[u8]) -> Option<String>;
 
-    /// Extract the type argument strings from a `type_arguments` child of this node.
-    /// Splits `<Event, Effect, State>` at depth-0 commas.
-    /// Returns an empty vec when no `type_arguments` child exists.
+    /// Extract the type argument strings from the `type_arguments` child of this node.
+    ///
+    /// Uses CST children (named children of `type_arguments` are the type nodes;
+    /// `,`/`<`/`>` are anonymous).  Returns an empty vec when no `type_arguments`
+    /// child exists.
     fn type_arg_strings(self, bytes: &[u8]) -> Vec<String>;
+
+    /// Extract type parameter *names* from the `type_parameters` child of a class,
+    /// interface, function, or protocol declaration node.
+    ///
+    /// Works identically for Kotlin, Java, and Swift:
+    ///   `type_parameters → type_parameter → type_identifier`
+    ///
+    /// Variance annotations (`in`/`out` in Kotlin) and bounds (`: Bound`) are
+    /// sibling nodes, not part of the `type_identifier`, so they are naturally
+    /// skipped.  Returns an empty vec for non-generic nodes.
+    fn extract_type_params(self, bytes: &[u8]) -> Vec<String>;
+
+    /// Like `extract_type_params`, but also searches direct ERROR children of the node.
+    ///
+    /// Used for `fun interface` recovery: tree-sitter may wrap the `<T>` in an ERROR
+    /// child.  Search is depth-limited to one ERROR level to avoid entering class bodies.
+    fn extract_type_params_or_error_child(self, bytes: &[u8]) -> Vec<String>;
+
+    /// Extract the supertype name from a Kotlin `delegation_specifier` node.
+    ///
+    /// Handles `constructor_invocation`, `explicit_delegation`, and bare `user_type`
+    /// forms.  Returns `(name, type_args)` or `None` if no supertype is found.
+    fn super_from_delegation(self, bytes: &[u8]) -> Option<(String, Vec<String>)>;
+
+    /// Collect all type names from the `type_list` child of a Java
+    /// `super_interfaces` or `extends_interfaces` node.
+    ///
+    /// Returns `(name, type_args)` pairs; the caller is responsible for supplying
+    /// the `name_line` and appending to `FileData.supers`.
+    fn java_type_list(self, bytes: &[u8]) -> Vec<(String, Vec<String>)>;
 
     /// Returns the line number (0-based) of the first named identifier child,
     /// or the node's own start line if no named child is found.
@@ -249,15 +282,18 @@ impl<'a> NodeExt<'a> for Node<'a> {
         let mut stack = vec![self];
         while let Some(n) = stack.pop() {
             match n.kind() {
-                "type_identifier" => {
+                KIND_TYPE_IDENT => {
                     return n.utf8_text_owned(bytes);
                 }
                 "scoped_type_identifier" => {
-                    let text = n.utf8_text(bytes).ok()?;
-                    let name = text.split('<').next().unwrap_or(text).trim();
-                    return if name.is_empty() { None } else { Some(name.to_owned()) };
+                    // Collect all identifier/type_identifier segments while skipping
+                    // type_arguments children (handles `Outer<String>.Inner` correctly).
+                    let mut segments = Vec::new();
+                    collect_user_type_segments(n, bytes, &mut segments);
+                    let name = segments.join(".");
+                    return if name.is_empty() { None } else { Some(name) };
                 }
-                "type_arguments" => continue,
+                KIND_TYPE_ARGS => continue,
                 _ => {}
             }
             let mut cur = n.walk();
@@ -269,16 +305,89 @@ impl<'a> NodeExt<'a> for Node<'a> {
     }
 
     fn type_arg_strings(self, bytes: &[u8]) -> Vec<String> {
-        let Some(args_node) = self.first_child_of_kind("type_arguments") else {
+        let Some(args_node) = self.first_child_of_kind(KIND_TYPE_ARGS) else {
             return Vec::new();
         };
-        let text = match args_node.utf8_text(bytes) {
-            Ok(t) => t.trim(),
-            Err(_) => return Vec::new(),
-        };
-        // text is like "<Event, Effect, State>" or "<Map<K,V>, String>"
-        let inner = text.trim_start_matches('<').trim_end_matches('>');
-        split_depth0_commas(inner)
+        let mut cur = args_node.walk();
+        args_node.children(&mut cur)
+            .filter(|c| c.is_named())
+            .filter_map(|c| c.utf8_text(bytes).ok())
+            .map(|t| t.trim().to_owned())
+            .filter(|t| !t.is_empty())
+            .collect()
+    }
+
+    fn extract_type_params(self, bytes: &[u8]) -> Vec<String> {
+        let Some(tp) = self.first_child_of_kind(KIND_TYPE_PARAMS) else { return Vec::new() };
+        let mut result = Vec::new();
+        for param in tp.children_of_kind(KIND_TYPE_PARAM) {
+            if let Some(id) = param.first_child_of_kind(KIND_TYPE_IDENT) {
+                if let Some(name) = id.utf8_text_owned(bytes) {
+                    result.push(name);
+                }
+            }
+        }
+        result
+    }
+
+    fn extract_type_params_or_error_child(self, bytes: &[u8]) -> Vec<String> {
+        let direct = self.extract_type_params(bytes);
+        if !direct.is_empty() { return direct; }
+        // For `fun interface Foo<T>` misparsing, tree-sitter may wrap `<T>` in an
+        // ERROR child.  Search only ERROR children — not the full subtree — to
+        // avoid picking up type params from methods inside the interface body.
+        let mut cur = self.walk();
+        for child in self.children(&mut cur) {
+            if child.is_error() {
+                let params = child.extract_type_params(bytes);
+                if !params.is_empty() { return params; }
+                // `<T>` may land as raw tokens (no type_parameters node) — scan bytes directly.
+                if let Ok(text) = child.utf8_text(bytes) {
+                    let params = type_params_from_angle_brackets(text);
+                    if !params.is_empty() { return params; }
+                }
+            }
+        }
+        // No-modifiers case: the whole `fun interface Foo<T>` is an ERROR node itself,
+        // so `<T>` is a direct child token rather than nested in an ERROR child.
+        if self.is_error() {
+            if let Ok(text) = self.utf8_text(bytes) {
+                return type_params_from_angle_brackets(text);
+            }
+        }
+        Vec::new()
+    }
+
+    fn super_from_delegation(self, bytes: &[u8]) -> Option<(String, Vec<String>)> {
+        let mut cur = self.walk();
+        for child in self.children(&mut cur) {
+            let kind = child.kind();
+            if kind == "constructor_invocation" || kind == "explicit_delegation" {
+                if let Some(ut) = child.first_child_of_kind(KIND_USER_TYPE) {
+                    return ut.user_type_name(bytes).map(|n| (n, ut.type_arg_strings(bytes)));
+                }
+            } else if kind == KIND_USER_TYPE {
+                return child.user_type_name(bytes).map(|n| (n, child.type_arg_strings(bytes)));
+            }
+        }
+        None
+    }
+
+    fn java_type_list(self, bytes: &[u8]) -> Vec<(String, Vec<String>)> {
+        let Some(type_list) = self.first_child_of_kind(KIND_TYPE_LIST) else { return Vec::new() };
+        let mut result = Vec::new();
+        let mut cc = type_list.walk();
+        for type_node in type_list.children(&mut cc) {
+            // type_list children may be leaf type_identifier nodes directly,
+            // or wrapper nodes (generic_type, scoped_type_identifier) containing one.
+            let (name, type_args) = if type_node.kind() == KIND_TYPE_IDENT {
+                (type_node.utf8_text_owned(bytes), Vec::new())
+            } else {
+                (type_node.java_first_type_name(bytes), type_node.type_arg_strings(bytes))
+            };
+            if let Some(n) = name { result.push((n, type_args)); }
+        }
+        result
     }
 
     fn name_line(self) -> u32 {
@@ -288,7 +397,10 @@ impl<'a> NodeExt<'a> for Node<'a> {
         }
         let mut cur = self.walk();
         for child in self.children(&mut cur) {
-            if matches!(child.kind(), "type_identifier" | "simple_identifier" | "identifier") {
+            if child.kind() == KIND_TYPE_IDENT
+                || child.kind() == KIND_SIMPLE_IDENT
+                || child.kind() == KIND_IDENTIFIER
+            {
                 return child.start_position().row as u32;
             }
         }
@@ -296,44 +408,65 @@ impl<'a> NodeExt<'a> for Node<'a> {
     }
 }
 
-// ─── Private helpers ──────────────────────────────────────────────────────────
 
-/// Split `s` at depth-0 commas (ignoring commas inside nested `<...>`).
-/// Returns trimmed, non-empty segments.
-pub(super) fn split_depth0_commas(s: &str) -> Vec<String> {
-    let mut args = Vec::new();
-    let mut depth = 0usize;
-    let mut start = 0usize;
-    for (i, ch) in s.char_indices() {
-        match ch {
+/// Scan `text` for the first `<…>` block and return simple identifier names inside.
+/// Used as a last-resort fallback when tree-sitter ERROR nodes don't produce a
+/// `type_parameters` child (e.g. `fun interface Foo<T>` in tree-sitter-kotlin 0.3).
+fn type_params_from_angle_brackets(text: &str) -> Vec<String> {
+    let open = match text.find('<') {
+        Some(i) => i,
+        None => return Vec::new(),
+    };
+    let rest = &text[open + 1..];
+    let mut depth: usize = 1;
+    let mut close = None;
+    for (i, c) in rest.char_indices() {
+        match c {
             '<' => depth += 1,
-            '>' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => {
-                let seg = s[start..i].trim();
-                if !seg.is_empty() { args.push(seg.to_owned()); }
-                start = i + 1;
+            '>' => {
+                depth -= 1;
+                if depth == 0 { close = Some(i); break; }
             }
             _ => {}
         }
     }
-    let seg = s[start..].trim();
-    if !seg.is_empty() { args.push(seg.to_owned()); }
-    args
+    let close = match close {
+        Some(i) => i,
+        None => return Vec::new(),
+    };
+    // Strip variance prefix (Kotlin `out`/`in`) and upper bounds (`T : Any`) so that
+    // `out T`, `in T`, and `T : Comparable` all reduce to the simple name `T`.
+    rest[..close]
+        .split(',')
+        .filter_map(|s| {
+            let s = s.trim();
+            // Strip variance annotation prefix
+            let s = s.strip_prefix("out ").or_else(|| s.strip_prefix("in "))
+                .unwrap_or(s).trim();
+            // Strip upper bound suffix (e.g. `T : Any`, `T: Comparable`)
+            let s = s.split(':').next().unwrap_or(s).trim();
+            if !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                Some(s.to_owned())
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 fn collect_user_type_segments(node: Node<'_>, bytes: &[u8], segments: &mut Vec<String>) {
     let mut cur = node.walk();
     for child in node.children(&mut cur) {
-        match child.kind() {
-            "type_arguments" => {}  // skip generic parameters entirely
-            "simple_identifier" | "type_identifier" | "identifier" => {
-                if let Ok(text) = child.utf8_text(bytes) {
-                    let text = text.trim();
-                    if !text.is_empty() { segments.push(text.to_owned()); }
-                }
+        let kind = child.kind();
+        if kind == KIND_TYPE_ARGS {
+            // skip generic parameters entirely
+        } else if kind == KIND_SIMPLE_IDENT || kind == KIND_TYPE_IDENT || kind == KIND_IDENTIFIER {
+            if let Ok(text) = child.utf8_text(bytes) {
+                let text = text.trim();
+                if !text.is_empty() { segments.push(text.to_owned()); }
             }
-            _ if child.is_named() => collect_user_type_segments(child, bytes, segments),
-            _ => {}
+        } else if child.is_named() {
+            collect_user_type_segments(child, bytes, segments);
         }
     }
 }

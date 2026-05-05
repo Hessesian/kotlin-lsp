@@ -56,7 +56,7 @@ impl Indexer {
             let r = self.definitions.get(name)?;
             r.first()?.clone()
         };
-        self.hover_info_at_location(&loc, name, calling_uri)
+        self.hover_info_at_location(&loc, name, calling_uri, None)
     }
 
     /// Build hover markdown for `name` at a specific resolved `Location`.
@@ -64,7 +64,9 @@ impl Indexer {
     ///
     /// `calling_uri` — the file where the cursor is (used to substitute generic type
     /// parameters with concrete types when the symbol is from a base class).
-    pub fn hover_info_at_location(&self, loc: &Location, name: &str, calling_uri: Option<&str>) -> Option<String> {
+    /// `cursor_line` — the line of the cursor in `calling_uri`; used to disambiguate
+    /// when multiple classes in the same file extend the same generic base.
+    pub fn hover_info_at_location(&self, loc: &Location, name: &str, calling_uri: Option<&str>, cursor_line: Option<u32>) -> Option<String> {
         // On-demand index: the file may have been found by rg but not yet indexed.
         if !self.files.contains_key(loc.uri.as_str()) {
             if let Ok(path) = loc.uri.to_file_path() {
@@ -73,34 +75,74 @@ impl Indexer {
                 }
             }
         }
-        let data = self.files.get(loc.uri.as_str())?;
-        // Prefer exact match by resolved location range; fall back to name match
-        // for symbols found via rg where the range may not align exactly.
-        let sym = data.symbols.iter().find(|s| s.selection_range == loc.range)
-            .or_else(|| data.symbols.iter().find(|s| s.name == name))?;
+        // Extract needed fields and drop the DashMap guard before any inference
+        // call (which may reacquire the same shard and deadlock otherwise).
+        let (sym_kind, sym_sel_range, sym_detail, lines) = {
+            let data = self.files.get(loc.uri.as_str())?;
+            let sym = data.symbols.iter().find(|s| s.selection_range == loc.range)
+                .or_else(|| data.symbols.iter().find(|s| s.name == name))?;
+            (sym.kind, sym.selection_range, sym.detail.clone(), data.lines.clone())
+        };
 
-        let start_line = sym.selection_range.start.line as usize;
-        let raw_sig = data.lines.collect_signature(start_line);
+        let start_line = sym_sel_range.start.line as usize;
+
+        // For property/variable symbols use the pre-indexed detail (a single declaration
+        // line) rather than collect_signature, which would keep reading until it finds a
+        // closing ')' and accidentally include sibling constructor parameters.
+        let raw_sig = if matches!(sym_kind, SymbolKind::PROPERTY | SymbolKind::VARIABLE)
+            && !sym_detail.is_empty()
+        {
+            sym_detail
+        } else {
+            lines.collect_signature(start_line)
+        };
+
+        // For unannotated val/var, try to show an inferred type instead of the
+        // raw RHS expression (e.g. `val response: AccountDetailResponseBody`
+        // instead of `val response = service.getDetail(...)`).
+        let sig = if matches!(sym_kind, SymbolKind::PROPERTY | SymbolKind::VARIABLE)
+            && !raw_sig.contains(&format!("{name}:"))
+        {
+            if let Some(inferred) = self.infer_variable_type(name, &loc.uri) {
+                // Keep modifiers from the original signature (e.g. `private`, `override`).
+                // Find the name in the raw_sig and replace everything from `name` onward
+                // with `name: InferredType`, discarding the `= rhs` initializer.
+                let needle = format!(" {name}");
+                let name_pos = raw_sig.find(&needle)
+                    .map(|p| p + 1)
+                    .or_else(|| if raw_sig.starts_with(name) { Some(0) } else { None });
+                if let Some(pos) = name_pos {
+                    format!("{}: {inferred}", &raw_sig[..pos + name.len()])
+                } else {
+                    let kw = if sym_kind == SymbolKind::VARIABLE { "var" } else { "val" };
+                    format!("{kw} {name}: {inferred}")
+                }
+            } else {
+                raw_sig
+            }
+        } else {
+            raw_sig
+        };
 
         // Apply generic type parameter substitution when the cursor is in a different
         // file (subtype) than where the symbol is defined.
         let sig = if let Some(cu) = calling_uri {
-            let subst = build_type_param_subst(self, loc.uri.as_str(), sym.selection_range.start.line, cu);
-            if subst.is_empty() { raw_sig } else { apply_subst(&raw_sig, &subst) }
+            let subst = build_type_param_subst(self, loc.uri.as_str(), sym_sel_range.start.line, cu, cursor_line);
+            if subst.is_empty() { sig } else { apply_subst(&sig, &subst) }
         } else {
-            raw_sig
+            sig
         };
 
         let lang = lang_str(loc.uri.path());
 
         let code_block = if sig.is_empty() {
-            format!("```{}\n{} {}\n```", lang, symbol_kw_for_lang(sym.kind, lang), name)
+            format!("```{}\n{} {}\n```", lang, symbol_kw_for_lang(sym_kind, lang), name)
         } else {
             format!("```{}\n{}\n```", lang, sig)
         };
 
         // Prepend KDoc / Javadoc comment if one immediately precedes the declaration.
-        if let Some(doc) = extract_doc_comment(&data.lines, start_line) {
+        if let Some(doc) = extract_doc_comment(&lines, start_line) {
             Some(format!("{doc}\n\n---\n\n{code_block}"))
         } else {
             Some(code_block)
@@ -125,7 +167,7 @@ impl Indexer {
             sym.detail.clone()
         };
         if let Some(cu) = calling_uri {
-            let subst = build_type_param_subst(self, uri_str, sym.selection_range.start.line, cu);
+            let subst = build_type_param_subst(self, uri_str, sym.selection_range.start.line, cu, None);
             if !subst.is_empty() { return Some(apply_subst(&raw, &subst)); }
         }
         Some(raw)
@@ -163,7 +205,7 @@ impl Indexer {
 
         // Apply generic type parameter substitution when requested.
         let detail = if let Some(cu) = calling_uri {
-            let subst = build_type_param_subst(self, uri_str, sym.selection_range.start.line, cu);
+            let subst = build_type_param_subst(self, uri_str, sym.selection_range.start.line, cu, None);
             if subst.is_empty() { raw_detail } else { apply_subst(&raw_detail, &subst) }
         } else {
             raw_detail
@@ -262,7 +304,7 @@ impl Indexer {
     /// when viewed from `calling_uri`.  Returns the substituted string, or the original if
     /// no substitution is applicable.
     pub(crate) fn type_subst_sig(&self, sym_uri: &str, sym_line: u32, calling_uri: &str, sig: &str) -> String {
-        let subst = build_type_param_subst(self, sym_uri, sym_line, calling_uri);
+        let subst = build_type_param_subst(self, sym_uri, sym_line, calling_uri, None);
         if subst.is_empty() { sig.to_owned() } else { apply_subst(sig, &subst) }
     }
 
@@ -323,53 +365,6 @@ fn find_containing_class_name(data: &crate::types::FileData, sym_line: u32) -> O
         .map(|s| s.name.clone())
 }
 
-/// Parse type parameter names from a class/interface declaration line or detail string.
-///
-/// e.g. `"interface FlowReducer<EventType, out EffectType, StateType>"` → `["EventType", "EffectType", "StateType"]`
-///
-/// Handles variance annotations (`in`, `out`) and type constraints (`T : Bound`).
-fn parse_type_params(decl: &str) -> Vec<String> {
-    // Type params always appear before the first '(' (constructor/function params).
-    // Limit search to avoid picking up angle brackets from constructor parameter types.
-    let search_region = match decl.find('(') {
-        Some(paren) => &decl[..paren],
-        None => decl,
-    };
-    let start = match search_region.find('<') { Some(i) => i + 1, None => return Vec::new() };
-    let end   = match search_region.rfind('>') { Some(i) => i, None => return Vec::new() };
-    if end <= start { return Vec::new(); }
-    let inner = &decl[start..end];
-
-    // Re-implement depth-0 comma split here to avoid depending on node_ext internals.
-    let mut raw_params = Vec::new();
-    let mut depth = 0usize;
-    let mut seg_start = 0;
-    for (i, ch) in inner.char_indices() {
-        match ch {
-            '<' => depth += 1,
-            '>' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => {
-                let seg = inner[seg_start..i].trim();
-                if !seg.is_empty() { raw_params.push(seg); }
-                seg_start = i + 1;
-            }
-            _ => {}
-        }
-    }
-    let last = inner[seg_start..].trim();
-    if !last.is_empty() { raw_params.push(last); }
-
-    raw_params.into_iter().map(|s| {
-        // Strip variance keywords
-        let s = s.strip_prefix("in ").unwrap_or(s);
-        let s = s.strip_prefix("out ").unwrap_or(s);
-        let s = s.trim();
-        // Strip type constraint (everything from ":" onward) and whitespace
-        let end_pos = s.find(|c: char| c == ':' || c.is_whitespace()).unwrap_or(s.len());
-        s[..end_pos].trim().to_owned()
-    }).filter(|s| !s.is_empty()).collect()
-}
-
 /// Build a type-parameter → concrete-type substitution map for a symbol declared
 /// inside a generic class/interface when viewed from a specialised subtype.
 ///
@@ -384,6 +379,7 @@ fn build_type_param_subst(
     sym_uri:     &str,
     sym_line:    u32,
     calling_uri: &str,
+    cursor_line: Option<u32>,
 ) -> std::collections::HashMap<String, String> {
     if sym_uri == calling_uri {
         return Default::default();
@@ -391,63 +387,47 @@ fn build_type_param_subst(
 
     let sym_data = match idx.files.get(sym_uri) {
         Some(d) => d,
-        None => {
-            return Default::default();
-        }
+        None => return Default::default(),
     };
 
     let container_name = match find_containing_class_name(&sym_data, sym_line) {
         Some(n) => n,
-        None => {
-            return Default::default();
-        }
+        None    => return Default::default(),
     };
 
     let container_sym = match sym_data.symbols.iter().find(|s| s.name == container_name) {
         Some(s) => s,
-        None => {
-            return Default::default();
-        }
+        None    => return Default::default(),
     };
-    let decl_text = if !container_sym.detail.is_empty() {
-        container_sym.detail.clone()
-    } else {
-        let line_idx = container_sym.selection_range.start.line as usize;
-        sym_data.lines.get(line_idx).cloned().unwrap_or_default()
-    };
-    let mut type_params = parse_type_params(&decl_text);
-    // If detail is truncated (e.g. annotation only), scan source lines for type params
-    if type_params.is_empty() {
-        let start_line = container_sym.selection_range.start.line as usize;
-        for offset in 0..5 {
-            if let Some(line) = sym_data.lines.get(start_line + offset) {
-                let params = parse_type_params(line);
-                if !params.is_empty() {
-                    type_params = params;
-                    break;
-                }
-            }
-        }
-    }
+
+    let type_params = &container_sym.type_params;
     if type_params.is_empty() { return Default::default(); }
 
     let calling_data = match idx.files.get(calling_uri) {
         Some(d) => d,
-        None => {
-            return Default::default();
-        }
+        None    => return Default::default(),
     };
+
+    // When multiple classes in the same file extend the same base, use cursor_line
+    // to identify the specific calling class and scope the supers lookup.
+    let calling_class_line = cursor_line
+        .and_then(|line| find_containing_class_name(&calling_data, line))
+        .and_then(|name| calling_data.symbols.iter().find(|s| s.name == name))
+        .map(|s| s.selection_range.start.line);
+
     let type_args = calling_data.supers.iter()
-        .find(|(_, base, _)| base == &container_name)
+        .find(|(line, base, _)| {
+            base == &container_name
+                && calling_class_line.is_none_or(|class_line| *line == class_line)
+        })
         .map(|(_, _, args)| args.clone())
         .unwrap_or_default();
 
     if type_args.is_empty() { return Default::default(); }
 
-    let result: std::collections::HashMap<String, String> = type_params.iter().zip(type_args.iter())
+    type_params.iter().zip(type_args.iter())
         .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
-    result
+        .collect()
 }
 
 /// Build a substitution map from ALL supertypes of the enclosing class at `cursor_line`.
@@ -478,8 +458,7 @@ fn build_enclosing_class_subst(
         None => return Default::default(),
     };
     let class_line = class_sym.selection_range.start.line;
-
-    // Gather all supers with type args for this class
+    let class_end_line = class_sym.range.end.line;
     let mut result = std::collections::HashMap::new();
 
     for (line, base_name, type_args) in data.supers.iter() {
@@ -499,28 +478,7 @@ fn build_enclosing_class_subst(
             continue;
         };
 
-        let decl_text = if !sym.detail.is_empty() {
-            &sym.detail
-        } else {
-            continue;
-        };
-
-        // Try detail first; if it doesn't have type params (e.g. truncated at annotation),
-        // scan subsequent source lines for the actual class/interface declaration.
-        let mut type_params = parse_type_params(decl_text);
-        if type_params.is_empty() {
-            let start_line = sym.selection_range.start.line as usize;
-            // Look at up to 5 lines starting from the symbol's line
-            for offset in 0..5 {
-                if let Some(line) = super_data.lines.get(start_line + offset) {
-                    let params = parse_type_params(line);
-                    if !params.is_empty() {
-                        type_params = params;
-                        break;
-                    }
-                }
-            }
-        }
+        let type_params = &sym.type_params;
         // Zip params → args
         for (param, arg) in type_params.iter().zip(type_args.iter()) {
             result.insert(param.clone(), arg.clone());
@@ -533,6 +491,7 @@ fn build_enclosing_class_subst(
     // type param → concrete arg mappings.
     for sym in data.symbols.iter() {
         if sym.selection_range.start.line <= class_line { continue; }
+        if sym.selection_range.start.line > class_end_line { continue; }
         if !matches!(sym.kind, SymbolKind::FIELD | SymbolKind::PROPERTY) { continue; }
         // Extract type name from detail (e.g., "private val foo: SomeType by lazy")
         let type_name = extract_property_type_name(&sym.detail);
@@ -554,16 +513,7 @@ fn build_enclosing_class_subst(
             let Some(super_loc) = super_locs.first() else { continue };
             let Some(super_file) = idx.files.get(super_loc.uri.as_str()) else { continue };
             let Some(super_sym) = super_file.symbols.iter().find(|s| s.name == *base_name) else { continue };
-            let mut type_params = parse_type_params(&super_sym.detail);
-            if type_params.is_empty() {
-                let start = super_sym.selection_range.start.line as usize;
-                for offset in 0..5 {
-                    if let Some(line) = super_file.lines.get(start + offset) {
-                        let params = parse_type_params(line);
-                        if !params.is_empty() { type_params = params; break; }
-                    }
-                }
-            }
+            let type_params = &super_sym.type_params;
             for (param, arg) in type_params.iter().zip(type_args.iter()) {
                 result.entry(param.clone()).or_insert_with(|| arg.clone());
             }
@@ -576,7 +526,7 @@ fn build_enclosing_class_subst(
 /// Extract the simple type name from a property detail string.
 /// E.g. "private val foo: DashboardProductsReducer by lazy" → "DashboardProductsReducer"
 /// E.g. "val x: List<String>" → "List"
-fn extract_property_type_name(detail: &str) -> &str {
+pub(crate) fn extract_property_type_name(detail: &str) -> &str {
     // Find ": Type" pattern
     let colon_pos = match detail.find(':') {
         Some(p) => p,

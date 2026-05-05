@@ -13,6 +13,7 @@ use super::{
     find_named_lambda_param_type_in_lines,
     line_has_lambda_param,
     lambda_brace_pos_for_param,
+    is_inside_receiver_lambda,
 };
 use crate::indexer::NodeExt;
 use crate::queries::KIND_LAMBDA_LIT;
@@ -208,7 +209,15 @@ impl Indexer {
             }
             // Fallback for `this` in a regular class method body (not a lambda):
             // scan backward for the enclosing class/object declaration.
+            // Guard: if cursor is inside a receiver-lambda (apply/run/with) that just
+            // failed to resolve its receiver type, `this` refers to that lambda's
+            // receiver — not the enclosing class.  Returning enclosing_class_at here
+            // would silently return the wrong type.
             if name == "this" {
+                let pos2 = CursorPos { line: line_no, utf16_col: position.character as usize };
+                if is_inside_receiver_lambda(&lines, pos2, self, uri) {
+                    return None;
+                }
                 return self.enclosing_class_at(uri, position.line);
             }
             None
