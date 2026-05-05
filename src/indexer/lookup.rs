@@ -77,15 +77,25 @@ impl Indexer {
         }
         // Extract needed fields and drop the DashMap guard before any inference
         // call (which may reacquire the same shard and deadlock otherwise).
-        let (sym_kind, sym_sel_range, lines) = {
+        let (sym_kind, sym_sel_range, sym_detail, lines) = {
             let data = self.files.get(loc.uri.as_str())?;
             let sym = data.symbols.iter().find(|s| s.selection_range == loc.range)
                 .or_else(|| data.symbols.iter().find(|s| s.name == name))?;
-            (sym.kind, sym.selection_range, data.lines.clone())
+            (sym.kind, sym.selection_range, sym.detail.clone(), data.lines.clone())
         };
 
         let start_line = sym_sel_range.start.line as usize;
-        let raw_sig = lines.collect_signature(start_line);
+
+        // For property/variable symbols use the pre-indexed detail (a single declaration
+        // line) rather than collect_signature, which would keep reading until it finds a
+        // closing ')' and accidentally include sibling constructor parameters.
+        let raw_sig = if matches!(sym_kind, SymbolKind::PROPERTY | SymbolKind::VARIABLE)
+            && !sym_detail.is_empty()
+        {
+            sym_detail
+        } else {
+            lines.collect_signature(start_line)
+        };
 
         // For unannotated val/var, try to show an inferred type instead of the
         // raw RHS expression (e.g. `val response: AccountDetailResponseBody`
