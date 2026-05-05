@@ -1,9 +1,10 @@
 
 use crate::stdlib::dot_completions_for;
 
-/// Language-aware dot completions: only return Kotlin stdlib for .kt files,
-/// add Swift-specific templates for .swift files. `from_path` should be the
-/// file path portion of the request URI (e.g., "/home/user/project/src/Foo.kt").
+/// Language-aware dot completions. Returns Kotlin stdlib completions for Kotlin
+/// and `.kts` files, Swift-specific templates for `.swift` files, and nothing
+/// for Java (handled by JVM tooling). `from_path` should be the file path
+/// portion of the request URI (e.g., "/home/user/project/src/Foo.kt").
 pub fn dot_completions_for_lang(from_path: &str, receiver_type: &str, snippets: bool) -> Vec<tower_lsp::lsp_types::CompletionItem> {
     match crate::Language::from_path(from_path) {
         crate::Language::Kotlin => dot_completions_for(receiver_type, snippets),
