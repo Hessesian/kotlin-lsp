@@ -342,28 +342,14 @@ fn symbol_kw_for_lang(kind: SymbolKind, lang: &str) -> &'static str {
 }
 
 fn lang_str(path: &str) -> &'static str {
-    if path.ends_with(".kt") || path.ends_with(".kts") { "kotlin" }
-    else if path.ends_with(".swift")                   { "swift" }
-    else                                               { "java" }
+    match crate::Language::from_path(path) {
+        crate::Language::Kotlin => "kotlin",
+        crate::Language::Swift  => "swift",
+        crate::Language::Java   => "java",
+    }
 }
 
 // ─── Generic type parameter substitution ─────────────────────────────────────
-
-/// Find the name of the innermost class/interface/object that contains `sym_line`
-/// in the given file's symbol list. Returns `None` if the symbol is top-level.
-fn find_containing_class_name(data: &crate::types::FileData, sym_line: u32) -> Option<String> {
-    use tower_lsp::lsp_types::SymbolKind;
-    const CLASS_KINDS: &[SymbolKind] = &[
-        SymbolKind::CLASS, SymbolKind::INTERFACE, SymbolKind::STRUCT,
-        SymbolKind::ENUM, SymbolKind::OBJECT,
-    ];
-    data.symbols.iter()
-        .filter(|s| CLASS_KINDS.contains(&s.kind))
-        .filter(|s| s.range.start.line <= sym_line && sym_line <= s.range.end.line)
-        // innermost = smallest range span
-        .min_by_key(|s| s.range.end.line.saturating_sub(s.range.start.line))
-        .map(|s| s.name.clone())
-}
 
 /// Build a type-parameter → concrete-type substitution map for a symbol declared
 /// inside a generic class/interface when viewed from a specialised subtype.
@@ -390,7 +376,7 @@ fn build_type_param_subst(
         None => return Default::default(),
     };
 
-    let container_name = match find_containing_class_name(&sym_data, sym_line) {
+    let container_name = match sym_data.containing_class_at(sym_line) {
         Some(n) => n,
         None    => return Default::default(),
     };
@@ -411,7 +397,7 @@ fn build_type_param_subst(
     // When multiple classes in the same file extend the same base, use cursor_line
     // to identify the specific calling class and scope the supers lookup.
     let calling_class_line = cursor_line
-        .and_then(|line| find_containing_class_name(&calling_data, line))
+        .and_then(|line| calling_data.containing_class_at(line))
         .and_then(|name| calling_data.symbols.iter().find(|s| s.name == name))
         .map(|s| s.selection_range.start.line);
 
@@ -445,7 +431,7 @@ fn build_enclosing_class_subst(
     }};
 
     // Find the enclosing class
-    let class_name = match find_containing_class_name(&data, cursor_line) {
+    let class_name = match data.containing_class_at(cursor_line) {
         Some(n) => n,
         None => {
             return Default::default();

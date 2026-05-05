@@ -209,12 +209,10 @@ pub fn parse_swift(content: &str) -> FileData {
 
 /// Dispatch to the correct parser based on file extension.
 pub fn parse_by_extension(path: &str, content: &str) -> FileData {
-    if path.ends_with(".swift") {
-        parse_swift(content)
-    } else if path.ends_with(".java") {
-        parse_java(content)
-    } else {
-        parse_kotlin(content)
+    match crate::Language::from_path(path) {
+        crate::Language::Swift  => parse_swift(content),
+        crate::Language::Java   => parse_java(content),
+        crate::Language::Kotlin => parse_kotlin(content),
     }
 }
 

@@ -33,10 +33,12 @@ impl Backend {
                 } else {
                     crate::indexer::apply_type_subst(&rt.raw, &subst)
                 };
-                let lang = if uri.path().ends_with(".kt") { "kotlin" }
-                           else if uri.path().ends_with(".swift") { "swift" }
-                           else { "java" };
-                let kw = if uri.path().ends_with(".swift") { "let" } else { "val" };
+                let lang = match crate::Language::from_path(uri.path()) {
+                    crate::Language::Kotlin => "kotlin",
+                    crate::Language::Swift  => "swift",
+                    crate::Language::Java   => "java",
+                };
+                let kw = if crate::Language::from_path(uri.path()).is_swift() { "let" } else { "val" };
                 let sig_md = format!("```{lang}\n{kw} {}: {type_name}\n```", ctx.word);
                 // Resolve the type using the same path as go-to-definition (import-aware)
                 let leaf = type_name.rsplit('.').next().unwrap_or(type_name.as_str());

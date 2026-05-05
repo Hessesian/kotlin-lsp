@@ -5,13 +5,10 @@ use crate::stdlib::dot_completions_for;
 /// add Swift-specific templates for .swift files. `from_path` should be the
 /// file path portion of the request URI (e.g., "/home/user/project/src/Foo.kt").
 pub fn dot_completions_for_lang(from_path: &str, receiver_type: &str, snippets: bool) -> Vec<tower_lsp::lsp_types::CompletionItem> {
-    if from_path.ends_with(".kt") {
-        dot_completions_for(receiver_type, snippets)
-    } else if from_path.ends_with(".swift") {
-        // Very small Swift snippet set: common patterns
-        swift_dot_completions(snippets)
-    } else {
-        Vec::new()
+    match crate::Language::from_path(from_path) {
+        crate::Language::Kotlin => dot_completions_for(receiver_type, snippets),
+        crate::Language::Swift  => swift_dot_completions(snippets),
+        crate::Language::Java   => Vec::new(),
     }
 }
 
