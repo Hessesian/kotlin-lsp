@@ -385,16 +385,12 @@ pub(crate) fn complete_dot(
     // Walk the inheritance hierarchy to include members from parent classes/interfaces.
     // Tracks "file_uri#TypeName" to prevent cycles; seed with the direct type.
     let mut visited = vec![format!("{}#{}", file_uri, rt.leaf)];
-    collect_inherited_members(
+    InheritanceWalker {
         idx,
-        &file_uri,
-        &rt.leaf,
-        from_uri,
-        &mut visited,
-        0,
-        &mut items,
+        calling_uri: from_uri,
         snippets,
-    );
+    }
+    .collect(&file_uri, &rt.leaf, &mut visited, 0, &mut items);
 
     // Deduplicate by label: direct members win over inherited ones (they come first).
     let mut seen_labels = std::collections::HashSet::new();
@@ -430,88 +426,83 @@ pub(crate) fn complete_dot(
 ///
 /// `visited` tracks `"file_uri#TypeName"` pairs to prevent infinite cycles.
 /// Only non-private members are added (matching `complete_dot` behaviour).
-fn collect_inherited_members(
-    idx: &Indexer,
-    file_uri: &str,
-    type_name: &str,
-    calling_uri: &Url,
-    visited: &mut Vec<String>,
-    depth: u8,
-    out: &mut Vec<CompletionItem>,
+struct InheritanceWalker<'a> {
+    idx: &'a Indexer,
+    calling_uri: &'a Url,
     snippets: bool,
-) {
-    const MAX_DEPTH: u8 = 4;
-    if depth >= MAX_DEPTH {
-        return;
-    }
+}
 
-    // Find the class's declaration line, then fetch its supertype names.
-    let supers: Vec<String> = {
-        let data = match idx.files.get(file_uri) {
-            Some(d) => d,
-            None => return,
-        };
-        let class_line = data
-            .symbols
-            .iter()
-            .find(|s| s.name == type_name)
-            .map(|s| s.start_line());
-        match class_line {
-            Some(line) => data
-                .supers
-                .iter()
-                .filter(|(l, _, _)| *l == line)
-                .map(|(_, n, _)| n.clone())
-                .collect(),
-            // Fallback if type not found: walk all supers in file.
-            None => data.supers.iter().map(|(_, n, _)| n.clone()).collect(),
+impl<'a> InheritanceWalker<'a> {
+    fn collect(
+        &self,
+        file_uri: &str,
+        type_name: &str,
+        visited: &mut Vec<String>,
+        depth: u8,
+        out: &mut Vec<CompletionItem>,
+    ) {
+        const MAX_DEPTH: u8 = 4;
+        if depth >= MAX_DEPTH {
+            return;
         }
-    };
 
-    let type_url = match Url::parse(file_uri) {
-        Ok(u) => u,
-        Err(_) => return,
-    };
-
-    for super_name in supers {
-        let super_locs = resolve_symbol_inner(idx, &super_name, &type_url, false);
-        for loc in &super_locs {
-            let key = format!("{}#{}", loc.uri.as_str(), super_name);
-            if visited.contains(&key) {
-                continue;
+        let supers: Vec<String> = {
+            let data = match self.idx.files.get(file_uri) {
+                Some(d) => d,
+                None => return,
+            };
+            let class_line = data
+                .symbols
+                .iter()
+                .find(|s| s.name == type_name)
+                .map(|s| s.selection_start());
+            match class_line {
+                Some(line) => data
+                    .supers
+                    .iter()
+                    .filter(|(l, _, _)| *l == line)
+                    .map(|(_, n, _)| n.clone())
+                    .collect(),
+                None => data.supers.iter().map(|(_, n, _)| n.clone()).collect(),
             }
-            visited.push(key);
+        };
 
-            let mut inherited = symbols_from_nested_type(
-                idx,
-                loc.uri.as_str(),
-                &super_name,
-                Some(calling_uri.as_str()),
-            );
-            inherited.retain(|i| {
-                i.sort_text
-                    .as_deref()
-                    .map(|s| !s.starts_with("prv:") && !s.starts_with("prt:"))
-                    .unwrap_or(true)
-            });
-            if !snippets {
-                for item in &mut inherited {
-                    item.insert_text = None;
-                    item.insert_text_format = None;
+        let type_url = match Url::parse(file_uri) {
+            Ok(u) => u,
+            Err(_) => return,
+        };
+
+        for super_name in supers {
+            let super_locs = resolve_symbol_inner(self.idx, &super_name, &type_url, false);
+            for loc in &super_locs {
+                let key = format!("{}#{}", loc.uri.as_str(), super_name);
+                if visited.contains(&key) {
+                    continue;
                 }
-            }
-            out.extend(inherited);
+                visited.push(key);
 
-            collect_inherited_members(
-                idx,
-                loc.uri.as_str(),
-                &super_name,
-                calling_uri,
-                visited,
-                depth + 1,
-                out,
-                snippets,
-            );
+                let mut inherited = symbols_from_nested_type(
+                    self.idx,
+                    loc.uri.as_str(),
+                    &super_name,
+                    Some(self.calling_uri.as_str()),
+                );
+                inherited.retain(|i| {
+                    i.sort_text
+                        .as_deref()
+                        .map(|s| !s.starts_with("prv:") && !s.starts_with("prt:"))
+                        .unwrap_or(true)
+                });
+                if !self.snippets {
+                    for item in &mut inherited {
+                        item.insert_text = None;
+                        item.insert_text_format = None;
+                    }
+                }
+                out.extend(inherited);
+
+                self.collect(loc.uri.as_str(), &super_name, visited, depth + 1, out);
+            }
         }
     }
 }
@@ -540,12 +531,12 @@ fn completion_item_for_nested_symbol(
     };
     let detail = detail_raw.map(|d| {
         if let Some(cu) = calling_uri {
-            crate::indexer::resolution::cross_file_type_subst(idx, uri_str, s.start_line(), cu, &d)
+            crate::indexer::resolution::cross_file_type_subst(idx, uri_str, s.selection_start(), cu, &d)
         } else {
             d
         }
     });
-    let mut data = serde_json::json!({"u": uri_str, "l": s.start_line(), "c": s.selection_range.start.character});
+    let mut data = serde_json::json!({"u": uri_str, "l": s.selection_start(), "c": s.selection_range.start.character});
     if let Some(cu) = calling_uri {
         data["cu"] = serde_json::Value::String(cu.to_owned());
     }
@@ -667,6 +658,90 @@ fn vis_tag(vis: Visibility) -> &'static str {
     }
 }
 
+/// Accumulates completion items across tiers, enforcing case-mode and dedup.
+///
+/// Tier-0 (same file), tier-1 (same pkg), and tier-3 (stdlib) all use the
+/// symbol name as the dedup key. Tier-2 (cross-package) uses a `"name:fqn"`
+/// key and is handled manually by `complete_bare` so per-FQN import edits
+/// are preserved correctly.
+struct BareCompleter {
+    pub items:          Vec<CompletionItem>,
+    pub seen:           std::collections::HashSet<String>,
+    lowercase_mode:     bool,
+    uppercase_mode:     bool,
+    camel_mode:         bool,
+    local_max_score:    u8,
+    snippets:           bool,
+    annotation_only:    bool,
+}
+
+impl BareCompleter {
+    fn new(prefix: &str, snippets: bool, annotation_only: bool) -> Self {
+        let first_char = prefix.chars().next();
+        let lowercase_mode = first_char.map(|c| c.is_lowercase()).unwrap_or(false);
+        let uppercase_mode = first_char.map(|c| c.is_uppercase()).unwrap_or(false);
+        let camel_mode = uppercase_mode && prefix.chars().any(|c| c.is_lowercase());
+        let local_max_score: u8 = if prefix.len() >= MIN_PREFIX_SCORE_REDUCTION { 1 } else { 2 };
+        Self {
+            items: Vec::new(),
+            seen: std::collections::HashSet::new(),
+            lowercase_mode,
+            uppercase_mode,
+            camel_mode,
+            local_max_score,
+            snippets,
+            annotation_only,
+        }
+    }
+
+    /// Add a symbol for tier 0 (same file) or tier 1 (same pkg).
+    /// Dedup key is `name`. Respects case-mode, annotation-mode, and score gates.
+    fn add(
+        &mut self,
+        name: &str,
+        kind: CompletionItemKind,
+        src_tier: u8,
+        prefix: &str,
+        detail: &str,
+        item_data: Option<serde_json::Value>,
+    ) {
+        if self.annotation_only
+            && matches!(
+                kind,
+                CompletionItemKind::FUNCTION
+                    | CompletionItemKind::METHOD
+                    | CompletionItemKind::VARIABLE
+                    | CompletionItemKind::FIELD
+                    | CompletionItemKind::PROPERTY
+            )
+        {
+            return;
+        }
+        if self.lowercase_mode && name.starts_with_uppercase() { return; }
+        if self.uppercase_mode && name.starts_with_lowercase() { return; }
+        if self.camel_mode && is_screaming_snake(name) { return; }
+        let score = match match_score(name, prefix) {
+            Some(s) if s <= self.local_max_score => s,
+            _ => return,
+        };
+        if !self.seen.insert(name.to_string()) { return; }
+        let is_fn = self.snippets
+            && matches!(kind, CompletionItemKind::FUNCTION | CompletionItemKind::METHOD);
+        self.items.push(CompletionItem {
+            label: name.to_string(),
+            kind: Some(kind),
+            filter_text: Some(name.to_string()),
+            sort_text: Some(format!("{}{}{}", src_tier, score, name.to_lowercase())),
+            insert_text: if is_fn { Some(format!("{}($1)", name)) } else { None },
+            insert_text_format: if is_fn { Some(InsertTextFormat::SNIPPET) } else { None },
+            detail: if detail.is_empty() { None } else { Some(detail.to_string()) },
+            command: if is_fn { Some(trigger_parameter_hints()) } else { None },
+            data: item_data,
+            ..Default::default()
+        });
+    }
+}
+
 /// Bare-word completion: match-scored across local file + same-package + index.
 ///
 /// Case heuristic:
@@ -684,127 +759,27 @@ pub(crate) fn complete_bare(
     snippets: bool,
     annotation_only: bool,
 ) -> (Vec<CompletionItem>, bool) {
-    let first_char = prefix.chars().next();
-    let lowercase_mode = first_char.map(|c| c.is_lowercase()).unwrap_or(false);
-    // Symmetric to lowercase_mode: user is deliberately typing a CamelCase name.
-    let uppercase_mode = first_char.map(|c| c.is_uppercase()).unwrap_or(false);
-    // True when the prefix is clearly CamelCase (uppercase first char + at least one
-    // lowercase letter), meaning the user cannot be typing a SCREAMING_SNAKE constant.
-    let camel_mode = uppercase_mode && prefix.chars().any(|c| c.is_lowercase());
-    // For longer prefixes the user knows what they want: restrict tier-0/1 to
-    // prefix/acronym matches only (no substring).  This prevents noisy substring
-    // hits from filling the cap and crowding out precise tier-2 cross-package matches
-    // (e.g. typing "ChildDash" must surface ChildDashboardViewModel even if the same
-    // package has many classes that contain "child" as a substring).
-    let local_max_score: u8 = if prefix.len() >= MIN_PREFIX_SCORE_REDUCTION {
-        1
-    } else {
-        2
-    };
-    let mut seen = std::collections::HashSet::new();
-    let mut items: Vec<CompletionItem> = Vec::new();
-
+    let mut bc = BareCompleter::new(prefix, snippets, annotation_only);
     // `src_tier` encodes symbol origin (0=same file, 1=same pkg, 2=cross-pkg, 3=stdlib).
     // Full sort_text: "{src_tier}{match_score}:{name_lower}" so that
     //   same-file exact match ("000:column") beats same-file acronym ("001:columnbutton")
     //   which beats same-pkg exact ("010:column"), etc.
-    let mut add = |name: &str,
-                   kind: CompletionItemKind,
-                   src_tier: u8,
-                   max_score: u8,
-                   detail: &str,
-                   item_data: Option<serde_json::Value>| {
-        // In annotation context (@Foo), only emit class/interface/type items.
-        if annotation_only
-            && matches!(
-                kind,
-                CompletionItemKind::FUNCTION
-                    | CompletionItemKind::METHOD
-                    | CompletionItemKind::VARIABLE
-                    | CompletionItemKind::FIELD
-                    | CompletionItemKind::PROPERTY
-            )
-        {
-            return;
-        }
-        // Case gates: match user intent by the capitalisation of what they typed.
-        if lowercase_mode && name.starts_with_uppercase() {
-            return;
-        }
-        if uppercase_mode && name.starts_with_lowercase() {
-            return;
-        }
-        // CamelCase prefix → hide SCREAMING_SNAKE_CASE names (constants, enum variants).
-        if camel_mode && is_screaming_snake(name) {
-            return;
-        }
-        let score = match match_score(name, prefix) {
-            Some(s) if s <= max_score => s,
-            _ => return,
-        };
-        if !seen.insert(name.to_string()) {
-            return;
-        }
-        let is_fn = snippets
-            && matches!(
-                kind,
-                CompletionItemKind::FUNCTION | CompletionItemKind::METHOD
-            );
-        items.push(CompletionItem {
-            label: name.to_string(),
-            kind: Some(kind),
-            filter_text: Some(name.to_string()),
-            sort_text: Some(format!("{}{}{}", src_tier, score, name.to_lowercase())),
-            insert_text: if is_fn {
-                Some(format!("{}($1)", name))
-            } else {
-                None
-            },
-            insert_text_format: if is_fn {
-                Some(InsertTextFormat::SNIPPET)
-            } else {
-                None
-            },
-            detail: if detail.is_empty() {
-                None
-            } else {
-                Some(detail.to_string())
-            },
-            command: if is_fn {
-                Some(trigger_parameter_hints())
-            } else {
-                None
-            },
-            data: item_data,
-            ..Default::default()
-        });
-    };
 
     // 1. Local file symbols — src_tier 0, substring fallback only for short prefixes.
     if let Some(f) = idx.files.get(from_uri.as_str()) {
         for sym in &f.symbols {
-            add(
+            bc.add(
                 &sym.name,
                 symbol_kind_to_completion(sym.kind),
                 0,
-                local_max_score,
+                prefix,
                 &sym.detail,
-                Some(
-                    serde_json::json!({"u": from_uri.as_str(), "l": sym.start_line(), "c": sym.selection_range.start.character}),
-                ),
+                Some(serde_json::json!({"u": from_uri.as_str(), "l": sym.selection_start(), "c": sym.selection_range.start.character})),
             );
         }
-        // Constructor params / local vars from declared_names (lowercase only).
-        if lowercase_mode {
+        if bc.lowercase_mode {
             for name in &f.declared_names {
-                add(
-                    name,
-                    CompletionItemKind::VARIABLE,
-                    0,
-                    local_max_score,
-                    "",
-                    None,
-                );
+                bc.add(name, CompletionItemKind::VARIABLE, 0, prefix, "", None);
             }
         }
     }
@@ -818,20 +793,16 @@ pub(crate) fn complete_bare(
     if !pkg.is_empty() {
         if let Some(uris) = idx.packages.get(&pkg) {
             for uri_str in uris.iter() {
-                if uri_str == from_uri.as_str() {
-                    continue;
-                }
+                if uri_str == from_uri.as_str() { continue; }
                 if let Some(f) = idx.files.get(uri_str.as_str()) {
                     for sym in &f.symbols {
-                        add(
+                        bc.add(
                             &sym.name,
                             symbol_kind_to_completion(sym.kind),
                             1,
-                            local_max_score,
+                            prefix,
                             &sym.detail,
-                            Some(
-                                serde_json::json!({"u": uri_str.as_str(), "l": sym.start_line(), "c": sym.selection_range.start.character}),
-                            ),
+                            Some(serde_json::json!({"u": uri_str.as_str(), "l": sym.selection_start(), "c": sym.selection_range.start.character})),
                         );
                     }
                 }
@@ -842,7 +813,9 @@ pub(crate) fn complete_bare(
     // 3. Cross-package symbols — src_tier 2, uppercase mode only, prefix ≥ 2 chars,
     //    prefix/acronym matches only (max_score=1) — no substring flood.
     // Emits one CompletionItem per distinct FQN, with additionalTextEdits for auto-import.
-    if !lowercase_mode && prefix.len() >= MIN_CASE_INSENSITIVE_PREFIX {
+    // NOTE: tier-2 uses "name:fqn" as dedup key (not just name) so each FQN gets its
+    // own import edit. bc.seen is accessed directly to preserve that invariant.
+    if !bc.lowercase_mode && prefix.len() >= MIN_CASE_INSENSITIVE_PREFIX {
         let is_java = crate::Language::from_path(from_uri.as_str()).is_java();
         // Prefer live_lines (updated on every keystroke) over the indexed snapshot so that
         // import deduplication and insertion position are based on the current buffer state.
@@ -872,7 +845,7 @@ pub(crate) fn complete_bare(
                 if name.starts_with_lowercase() {
                     continue;
                 }
-                if camel_mode && is_screaming_snake(name) {
+                if bc.camel_mode && is_screaming_snake(name) {
                     continue;
                 }
                 let score = match match_score(name, prefix) {
@@ -881,15 +854,15 @@ pub(crate) fn complete_bare(
                 };
 
                 // Already visible via tier-0 or tier-1 — skip, no import needed.
-                if seen.contains(name.as_str()) {
+                if bc.seen.contains(name.as_str()) {
                     continue;
                 }
 
                 let fqns = fqns_for_name(idx, name);
 
                 if fqns.is_empty() {
-                    if seen.insert(name.clone()) {
-                        items.push(CompletionItem {
+                    if bc.seen.insert(name.clone()) {
+                        bc.items.push(CompletionItem {
                             label: name.clone(),
                             kind: Some(CompletionItemKind::CLASS),
                             filter_text: Some(name.clone()),
@@ -913,7 +886,7 @@ pub(crate) fn complete_bare(
                         && pkg_of_fqn != cur_pkg;
 
                     let item_key = format!("{}:{}", name, fqn);
-                    if !seen.insert(item_key) {
+                    if !bc.seen.insert(item_key) {
                         continue;
                     }
 
@@ -928,7 +901,7 @@ pub(crate) fn complete_bare(
                         None
                     };
 
-                    items.push(CompletionItem {
+                    bc.items.push(CompletionItem {
                         label: name.clone(),
                         kind: Some(CompletionItemKind::CLASS),
                         filter_text: Some(name.clone()),
@@ -945,29 +918,25 @@ pub(crate) fn complete_bare(
     // 4. Stdlib top-level / scope functions — src_tier 3.
     for mut item in bare_completions(snippets) {
         let label = item.label.clone();
-        if lowercase_mode && label.starts_with_uppercase() {
-            continue;
-        }
-        if camel_mode && is_screaming_snake(&label) {
-            continue;
-        }
+        if bc.lowercase_mode && label.starts_with_uppercase() { continue; }
+        if bc.camel_mode && is_screaming_snake(&label) { continue; }
         let score = match match_score(&label, prefix) {
             Some(s) if s <= 2 => s,
             _ => continue,
         };
-        if seen.insert(label.clone()) {
+        if bc.seen.insert(label.clone()) {
             item.filter_text = Some(label.clone());
             item.sort_text = Some(format!("3{}:{}", score, label.to_lowercase()));
-            items.push(item);
+            bc.items.push(item);
         }
     }
 
     // Sort by computed sort_text so the best matches are first even before capping.
-    items.sort_by(|a, b| a.sort_text.cmp(&b.sort_text));
+    bc.items.sort_by(|a, b| a.sort_text.cmp(&b.sort_text));
 
-    let hit_cap = items.len() > COMPLETION_CAP;
-    items.truncate(COMPLETION_CAP);
-    (items, hit_cap)
+    let hit_cap = bc.items.len() > COMPLETION_CAP;
+    bc.items.truncate(COMPLETION_CAP);
+    (bc.items, hit_cap)
 }
 
 /// Collect all symbols from a file URI as completion items.

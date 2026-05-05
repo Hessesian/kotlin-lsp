@@ -13,8 +13,11 @@ const README_PATH = ".github/extensions/kotlin-lsp/README.md";
 const GREP_TOOLS = new Set(["grep", "kotlin_rg", "kotlin_find_subtypes"]);
 
 // bash commands that are grep-type code navigation
-// Matches: rg/grep/find with *.kt/*.java, OR fd with -e kt/-e java extension flags
-const GREP_BASH_RE = /\b(rg|grep|fd|find)\b.*(-e\s+(?:kt|java)|\.(kt|java))/;
+// Matches: rg/grep/find with *.kt/*.kts/*.java, OR fd with -e kt/-e kts/-e java extension flags
+const GREP_BASH_RE = /\b(rg|grep|fd|find)\b.*(-e\s+(?:kt|kts|java)|\.(kt|kts|java))/;
+
+// glob patterns targeting Kotlin/Java files count as grep-type navigation
+const GLOB_KT_RE = /\.(kt|java|kts)\b/;
 
 // Tools that count as proper LSP usage (reset the streak)
 const LSP_TOOLS = new Set(["lsp"]);
@@ -24,14 +27,14 @@ const STREAK_THRESHOLD = 3;  // consecutive grep calls before reinforcing
 let grepStreak = 0;
 
 const LSP_REMINDER = [
-  "⚠️  LSP REMINDER — too many grep calls for Kotlin/Java navigation.",
-  "STOP using grep/rg for symbol lookup. Use LSP tools instead:",
+  "⚠️  LSP REMINDER — too many grep/glob calls for Kotlin/Java navigation.",
+  "STOP using grep/rg/glob for symbol lookup. Use LSP tools instead:",
   "  • lsp workspaceSymbol   — find any class/function/property by name",
   "  • lsp goToDefinition    — jump to where a symbol is defined",
   "  • lsp findReferences    — find all usages of a symbol",
   "  • lsp goToImplementation — find interface implementors (transitive)",
   "  • lsp incomingCalls / outgoingCalls — call graph",
-  "grep/rg is ONLY valid for: free-text/comment search, extension functions,",
+  "grep/rg/glob is ONLY valid for: free-text/comment search, extension functions,",
   "generated code, Java interop, or when LSP returned empty for a known-good symbol.",
   `Full guide: \`${README_PATH}\`.`,
 ].join("\n");
@@ -140,7 +143,7 @@ const session = await joinSession({
         properties: {
           pattern: { type: "string", description: "Regex pattern to search for" },
           path: { type: "string", description: "File or directory to search. Defaults to cwd." },
-          glob: { type: "string", description: "Glob filter (e.g. '*.kt'). Defaults to '*.{kt,java}'." },
+          glob: { type: "string", description: "Glob filter (e.g. '*.kt'). Defaults to '*.{kt,kts,java}'." },
           reason: {
             type: "string",
             description: "Why LSP can't help (e.g. 'extension function', 'LSP returned empty', 'free-text search', 'generated code')",
@@ -151,7 +154,7 @@ const session = await joinSession({
       handler: async (args) => {
         const pattern = asString(args.pattern);
         const cwd = args.path || process.cwd();
-        const glob = args.glob || "*.{kt,java}";
+        const glob = args.glob || "*.{kt,kts,java}";
         const rgArgs = [
           "--line-number", "--no-heading", "--color", "never",
           "--glob", glob,
@@ -290,6 +293,13 @@ const session = await joinSession({
       if (toolName === "bash") {
         const cmd = asString(normalizeToolArgs(toolArgs).command);
         if (GREP_BASH_RE.test(cmd)) {
+          grepStreak++;
+        }
+      }
+
+      if (toolName === "glob") {
+        const pattern = asString(normalizeToolArgs(toolArgs).pattern);
+        if (GLOB_KT_RE.test(pattern)) {
           grepStreak++;
         }
       }

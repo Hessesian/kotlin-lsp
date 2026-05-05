@@ -167,7 +167,6 @@ impl Backend {
         let uri = &params.text_document.uri;
         let range = params.range;
 
-        // Read the current line from live_lines (most up-to-date).
         let line_text: String = {
             let ln = range.start.line as usize;
             if let Some(ll) = self.indexer.live_lines.get(uri.as_str()) {
@@ -179,89 +178,20 @@ impl Backend {
             }
         };
 
-        let mut actions: Vec<CodeActionOrCommand> = Vec::new();
-
-        let trimmed = line_text.trim();
-        let is_import_line = trimmed.starts_with("import ") || trimmed.starts_with("package ");
-
-        // ── 1. Introduce local variable ──────────────────────────────────────
-        // Available when there is a non-empty selection on a single line,
-        // but NOT on import/package lines.
+        let trimmed = line_text.trim().to_owned();
+        let is_import_ln = trimmed.starts_with("import ") || trimmed.starts_with("package ");
         let sel_start = range.start;
         let sel_end = range.end;
         let has_selection = sel_start != sel_end && sel_start.line == sel_end.line;
 
-        if has_selection && !is_import_line {
-            let chars: Vec<char> = line_text.chars().collect();
-            // Convert UTF-16 code-unit offsets (LSP protocol) to char indices.
-            let utf16_to_char = |utf16: usize| {
-                let mut cu = 0usize;
-                for (i, c) in chars.iter().enumerate() {
-                    if cu >= utf16 {
-                        return i;
-                    }
-                    cu += c.len_utf16();
-                }
-                chars.len()
-            };
-            let raw_s = utf16_to_char(sel_start.character as usize);
-            let raw_e = utf16_to_char(sel_end.character as usize);
+        let mut actions: Vec<CodeActionOrCommand> = Vec::new();
 
-            // Expand the selection to capture the full dotted-call expression.
-            // Helix often sends only the word under the cursor (e.g. `isRefreshing`)
-            // even when the user wants the whole `receiver.isRefreshing()`.
-            let (s, e) = expand_call_expr(&chars, raw_s, raw_e);
-            let expr: String = chars[s..e].iter().collect();
-
-            if !expr.trim().is_empty() {
-                let var_name = derive_var_name(&expr);
-                let indent: String = line_text
-                    .chars()
-                    .take_while(|c| c.is_whitespace())
-                    .collect();
-
-                // Single edit: replace entire line with two lines:
-                //   1) val <name> = <expr>
-                //   2) original line with <expr> substituted by <name>
-                let prefix: String = chars[..s].iter().collect();
-                let suffix: String = chars[e..].iter().collect();
-                let replaced_line = format!("{prefix}{var_name}{suffix}");
-                let line_utf16_len: u32 = line_text.chars().map(|c| c.len_utf16() as u32).sum();
-                let new_text = format!("{indent}val {var_name} = {expr}\n{replaced_line}");
-
-                let mut changes = std::collections::HashMap::new();
-                changes.insert(
-                    uri.clone(),
-                    vec![TextEdit {
-                        range: Range {
-                            start: Position {
-                                line: sel_start.line,
-                                character: 0,
-                            },
-                            end: Position {
-                                line: sel_start.line,
-                                character: line_utf16_len,
-                            },
-                        },
-                        new_text,
-                    }],
-                );
-
-                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
-                    title: format!("Introduce local variable `{var_name}`"),
-                    kind: Some(CodeActionKind::REFACTOR_EXTRACT),
-                    edit: Some(WorkspaceEdit {
-                        changes: Some(changes),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                }));
+        if has_selection && !is_import_ln {
+            if let Some(a) = build_introduce_variable(&line_text, uri, range) {
+                actions.push(a);
             }
         }
 
-        // ── 2. Add import alias / rename in file ────────────────────────────
-
-        // Read all lines once.
         let all_lines: Vec<String> = {
             if let Some(ll) = self.indexer.live_lines.get(uri.as_str()) {
                 ll.clone().to_vec()
@@ -272,179 +202,20 @@ impl Backend {
             }
         };
 
-        // Word under cursor.
-        let cursor_word: String = {
-            let chars: Vec<char> = line_text.chars().collect();
-            let col = {
-                let utf16 = range.start.character as usize;
-                let mut cu = 0usize;
-                let mut idx_c = chars.len();
-                for (i, c) in chars.iter().enumerate() {
-                    if cu >= utf16 {
-                        idx_c = i;
-                        break;
-                    }
-                    cu += c.len_utf16();
-                }
-                idx_c
-            };
-            let mut ws = col;
-            while ws > 0 && (chars[ws - 1].is_alphanumeric() || chars[ws - 1] == '_') {
-                ws -= 1;
-            }
-            let mut we = col;
-            while we < chars.len() && (chars[we].is_alphanumeric() || chars[we] == '_') {
-                we += 1;
-            }
-            chars[ws..we].iter().collect()
-        };
-
-        // Case A: cursor on import line — append ` as <last_segment>`.
-        // Only relevant for Kotlin/KTS files (Java/Swift don't use this syntax).
+        let cursor_word = line_text.word_at_utf16_col(range.start.character as usize);
         let is_kotlin = crate::Language::from_path(uri.path()).is_kotlin();
-        if is_kotlin && trimmed.starts_with("import ") && !trimmed.contains(" as ") {
-            let path = trimmed
-                .trim_start_matches("import ")
-                .trim()
-                .trim_end_matches(".*");
-            let alias = path.rsplit('.').next().unwrap_or(path);
-            if !alias.is_empty() {
-                let ln = range.start.line;
-                let col = line_text.chars().map(|c| c.len_utf16() as u32).sum::<u32>();
-                let mut changes = std::collections::HashMap::new();
-                changes.insert(
-                    uri.clone(),
-                    vec![TextEdit {
-                        range: Range {
-                            start: Position {
-                                line: ln,
-                                character: col,
-                            },
-                            end: Position {
-                                line: ln,
-                                character: col,
-                            },
-                        },
-                        new_text: format!(" as {alias}"),
-                    }],
-                );
-                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
-                    title: format!("Add import alias `as {alias}`"),
-                    kind: Some(CodeActionKind::QUICKFIX),
-                    edit: Some(WorkspaceEdit {
-                        changes: Some(changes),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                }));
-            }
+
+        if let Some(a) = build_import_alias_action(&line_text, &trimmed, uri, range, is_kotlin) {
+            actions.push(a);
         }
 
-        // Case B: cursor on a type name in code — offer two actions:
-        //   B1. Add ` as <word>` to matching import (import line only, safe).
-        //   B2. Replace all whole-word occurrences in this file with `_<word>`
-        //       as a placeholder (single whole-file TextEdit, no crash risk).
-        //       User then does  %s_Word<ret>cNewName<esc>  in Helix.
-        // Only for Kotlin/KTS files — Java/Swift use different rename flows.
         if is_kotlin
-            && !is_import_line
+            && !is_import_ln
             && !cursor_word.is_empty()
             && cursor_word.starts_with_uppercase()
         {
-            // Combined: add `as _Word` to matching import + rename Word→_Word in body (single action).
-            if !all_lines.is_empty() {
-                let placeholder = format!("_{cursor_word}");
-                // Rename in non-import lines only (whole-file TextEdit).
-                let new_content = whole_word_replace_file(&all_lines, &cursor_word, &placeholder);
-                let last_line = (all_lines.len() - 1) as u32;
-                let last_col = all_lines
-                    .last()
-                    .map(|l| l.chars().map(|c| c.len_utf16() as u32).sum::<u32>())
-                    .unwrap_or(0);
-
-                // Check if there's a matching import to also alias.
-                let import_edit = all_lines
-                    .iter()
-                    .enumerate()
-                    .find(|(_, l)| {
-                        let t = l.trim();
-                        t.starts_with("import ")
-                            && !t.contains(" as ")
-                            && t.rsplit(['.', ' '])
-                                .next()
-                                .map(|s| s == cursor_word)
-                                .unwrap_or(false)
-                    })
-                    .map(|(import_ln, import_line_text)| {
-                        let col = import_line_text
-                            .chars()
-                            .map(|c| c.len_utf16() as u32)
-                            .sum::<u32>();
-                        TextEdit {
-                            range: Range {
-                                start: Position {
-                                    line: import_ln as u32,
-                                    character: col,
-                                },
-                                end: Position {
-                                    line: import_ln as u32,
-                                    character: col,
-                                },
-                            },
-                            new_text: format!(" as {placeholder}"),
-                        }
-                    });
-
-                // Body rename replaces the whole file (skipping import lines).
-                let mut body_edit = TextEdit {
-                    range: Range {
-                        start: Position {
-                            line: 0,
-                            character: 0,
-                        },
-                        end: Position {
-                            line: last_line,
-                            character: last_col,
-                        },
-                    },
-                    new_text: new_content,
-                };
-
-                // If we also have an import alias edit, we must embed it inside the body
-                // content (since both edits touch the same file and LSP applies them
-                // sequentially — easiest is to patch the already-replaced body content
-                // at the import line position directly).
-                if let Some(ie) = import_edit {
-                    // Splice the alias into the body content at the right line.
-                    let mut body_lines: Vec<String> = body_edit
-                        .new_text
-                        .split('\n')
-                        .map(|s| s.to_owned())
-                        .collect();
-                    let iln = ie.range.start.line as usize;
-                    if iln < body_lines.len() {
-                        body_lines[iln].push_str(&ie.new_text);
-                    }
-                    body_edit.new_text = body_lines.join("\n");
-                }
-
-                let title = if body_edit.new_text.contains(&placeholder) {
-                    format!("Alias `{cursor_word}` as `{placeholder}` in file (then :%s/{placeholder}/NewName)")
-                } else {
-                    format!("Rename `{cursor_word}` → `{placeholder}` in file")
-                };
-
-                let mut changes = std::collections::HashMap::new();
-                changes.insert(uri.clone(), vec![body_edit]);
-                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
-                    title,
-                    kind: Some(CodeActionKind::REFACTOR),
-                    edit: Some(WorkspaceEdit {
-                        changes: Some(changes),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                }));
+            if let Some(a) = build_rename_placeholder_action(&cursor_word, &all_lines, uri) {
+                actions.push(a);
             }
         }
 
@@ -454,4 +225,218 @@ impl Backend {
             Some(actions)
         })
     }
+}
+
+/// Builds the "Introduce local variable" code action for the selected expression.
+fn build_introduce_variable(
+    line_text: &str,
+    uri: &Url,
+    range: Range,
+) -> Option<CodeActionOrCommand> {
+    let chars: Vec<char> = line_text.chars().collect();
+    let utf16_to_char = |utf16: usize| {
+        let mut cu = 0usize;
+        for (i, c) in chars.iter().enumerate() {
+            if cu >= utf16 {
+                return i;
+            }
+            cu += c.len_utf16();
+        }
+        chars.len()
+    };
+    let raw_s = utf16_to_char(range.start.character as usize);
+    let raw_e = utf16_to_char(range.end.character as usize);
+    let (s, e) = expand_call_expr(&chars, raw_s, raw_e);
+    let expr: String = chars[s..e].iter().collect();
+    if expr.trim().is_empty() {
+        return None;
+    }
+
+    let var_name = derive_var_name(&expr);
+    let indent: String = line_text
+        .chars()
+        .take_while(|c| c.is_whitespace())
+        .collect();
+    let prefix: String = chars[..s].iter().collect();
+    let suffix: String = chars[e..].iter().collect();
+    let replaced_line = format!("{prefix}{var_name}{suffix}");
+    let line_utf16_len: u32 = line_text.chars().map(|c| c.len_utf16() as u32).sum();
+    let new_text = format!("{indent}val {var_name} = {expr}\n{replaced_line}");
+
+    let mut changes = std::collections::HashMap::new();
+    changes.insert(
+        uri.clone(),
+        vec![TextEdit {
+            range: Range {
+                start: Position {
+                    line: range.start.line,
+                    character: 0,
+                },
+                end: Position {
+                    line: range.start.line,
+                    character: line_utf16_len,
+                },
+            },
+            new_text,
+        }],
+    );
+    Some(CodeActionOrCommand::CodeAction(CodeAction {
+        title: format!("Introduce local variable `{var_name}`"),
+        kind: Some(CodeActionKind::REFACTOR_EXTRACT),
+        edit: Some(WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }))
+}
+
+/// Builds the "Add import alias" action for an import line (Kotlin only).
+fn build_import_alias_action(
+    line_text: &str,
+    trimmed: &str,
+    uri: &Url,
+    range: Range,
+    is_kotlin: bool,
+) -> Option<CodeActionOrCommand> {
+    if !is_kotlin || !trimmed.starts_with("import ") || trimmed.contains(" as ") {
+        return None;
+    }
+    let path = trimmed
+        .trim_start_matches("import ")
+        .trim()
+        .trim_end_matches(".*");
+    let alias = path.rsplit('.').next().unwrap_or(path);
+    if alias.is_empty() {
+        return None;
+    }
+
+    let ln = range.start.line;
+    // Use the full (unstripped) line for the column so that indented import lines
+    // (uncommon but valid) get the alias appended at the correct position.
+    let col: u32 = line_text.chars().map(|c| c.len_utf16() as u32).sum();
+    let mut changes = std::collections::HashMap::new();
+    changes.insert(
+        uri.clone(),
+        vec![TextEdit {
+            range: Range {
+                start: Position {
+                    line: ln,
+                    character: col,
+                },
+                end: Position {
+                    line: ln,
+                    character: col,
+                },
+            },
+            new_text: format!(" as {alias}"),
+        }],
+    );
+    Some(CodeActionOrCommand::CodeAction(CodeAction {
+        title: format!("Add import alias `as {alias}`"),
+        kind: Some(CodeActionKind::QUICKFIX),
+        edit: Some(WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }))
+}
+
+/// Builds the "Alias/rename in file" action for an uppercase type name (Kotlin only).
+fn build_rename_placeholder_action(
+    cursor_word: &str,
+    all_lines: &[String],
+    uri: &Url,
+) -> Option<CodeActionOrCommand> {
+    if all_lines.is_empty() {
+        return None;
+    }
+    let placeholder = format!("_{cursor_word}");
+    let new_content = whole_word_replace_file(all_lines, cursor_word, &placeholder);
+    let last_line = (all_lines.len() - 1) as u32;
+    let last_col = all_lines
+        .last()
+        .map(|l| l.chars().map(|c| c.len_utf16() as u32).sum::<u32>())
+        .unwrap_or(0);
+
+    // Check if there's a matching import to also alias.
+    let import_edit = all_lines
+        .iter()
+        .enumerate()
+        .find(|(_, l)| {
+            let t = l.trim();
+            t.starts_with("import ")
+                && !t.contains(" as ")
+                && t.rsplit(['.', ' '])
+                    .next()
+                    .map(|s| s == cursor_word)
+                    .unwrap_or(false)
+        })
+        .map(|(import_ln, import_line_text)| {
+            let col = import_line_text
+                .chars()
+                .map(|c| c.len_utf16() as u32)
+                .sum::<u32>();
+            TextEdit {
+                range: Range {
+                    start: Position {
+                        line: import_ln as u32,
+                        character: col,
+                    },
+                    end: Position {
+                        line: import_ln as u32,
+                        character: col,
+                    },
+                },
+                new_text: format!(" as {placeholder}"),
+            }
+        });
+
+    let mut body_edit = TextEdit {
+        range: Range {
+            start: Position {
+                line: 0,
+                character: 0,
+            },
+            end: Position {
+                line: last_line,
+                character: last_col,
+            },
+        },
+        new_text: new_content,
+    };
+
+    // Splice the import alias into the already-replaced body content so we
+    // emit a single TextEdit (LSP doesn't guarantee ordering for overlapping edits).
+    if let Some(ie) = import_edit {
+        let mut body_lines: Vec<String> = body_edit
+            .new_text
+            .split('\n')
+            .map(|s| s.to_owned())
+            .collect();
+        let iln = ie.range.start.line as usize;
+        if iln < body_lines.len() {
+            body_lines[iln].push_str(&ie.new_text);
+        }
+        body_edit.new_text = body_lines.join("\n");
+    }
+
+    let title = if body_edit.new_text.contains(&placeholder) {
+        format!("Alias `{cursor_word}` as `{placeholder}` in file (then :%s/{placeholder}/NewName)")
+    } else {
+        format!("Rename `{cursor_word}` → `{placeholder}` in file")
+    };
+
+    let mut changes = std::collections::HashMap::new();
+    changes.insert(uri.clone(), vec![body_edit]);
+    Some(CodeActionOrCommand::CodeAction(CodeAction {
+        title,
+        kind: Some(CodeActionKind::REFACTOR),
+        edit: Some(WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }))
 }

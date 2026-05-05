@@ -162,7 +162,7 @@ impl Indexer {
             if !class_kinds.contains(&sym.kind) {
                 continue;
             }
-            let start_line = sym.start_line();
+            let start_line = sym.selection_start();
             let class_loc = Location {
                 uri: uri.clone(),
                 range: sym.selection_range,

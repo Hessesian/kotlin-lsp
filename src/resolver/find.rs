@@ -75,8 +75,8 @@ pub(crate) fn find_name_in_uri_after_line(
         let best = f
             .symbols
             .iter()
-            .filter(|s| s.name == name && s.start_line() >= after_line)
-            .min_by_key(|s| s.start_line());
+            .filter(|s| s.name == name && s.selection_start() >= after_line)
+            .min_by_key(|s| s.selection_start());
 
         if let Some(sym) = best {
             return vec![Location {

@@ -483,7 +483,17 @@ fn is_chained_call_assignment_error(node: &Node, bytes: &[u8]) -> bool {
         return false;
     }
     let text = node.utf8_text(bytes).unwrap_or("").trim_start();
+    // Must start with `=` but NOT `==` or `=>` (those are real syntax errors)
     if !text.starts_with('=') {
+        return false;
+    }
+    // Exclude `==` (equality) and `=>` (arrow) — genuine syntax errors
+    let second = text.chars().nth(1);
+    if matches!(second, Some('=') | Some('>')) {
+        return false;
+    }
+    // Must have non-whitespace content after `=` (bare `=` with nothing is incomplete)
+    if text[1..].trim().is_empty() {
         return false;
     }
     // Previous sibling must be the parsed LHS
@@ -620,7 +630,7 @@ fn extract_fun_interfaces(root: Node, bytes: &[u8], data: &mut FileData) {
                 // Remove the incorrectly-added function/method symbol (same name, same line).
                 data.symbols.retain(|s| {
                     !(s.name == name
-                        && s.start_line() == sel.start.line
+                        && s.selection_start() == sel.start.line
                         && matches!(s.kind, SymbolKind::FUNCTION | SymbolKind::METHOD))
                 });
                 push_interface_symbol(name, &node, name_ts_range, bytes, data);

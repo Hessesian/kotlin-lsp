@@ -282,7 +282,7 @@ fn method_in_class_indexed() {
 fn class_name_position() {
     let data = parse_kotlin("class Foo");
     let s = sym(&data, "Foo").unwrap();
-    assert_eq!(s.start_line(), 0);
+    assert_eq!(s.selection_start(), 0);
     assert_eq!(s.selection_range.start.character, 6);
     assert_eq!(s.selection_range.end.character, 9);
 }
@@ -292,6 +292,21 @@ fn fun_name_position() {
     let data = parse_kotlin("fun myFun() {}");
     let s = sym(&data, "myFun").unwrap();
     assert_eq!(s.selection_range.start.character, 4);
+}
+
+/// Multiline constructor: `range.start.line` is the `class` keyword line but
+/// `selection_start()` (i.e. `selection_range.start.line`) is the identifier line.
+#[test]
+fn multiline_class_selection_vs_range() {
+    // @annotation spans line 0; `class` keyword and name on line 1
+    let src = "@SomeAnnotation\nclass MyClass(val x: Int)";
+    let data = parse_kotlin(src);
+    let s = sym(&data, "MyClass").unwrap();
+    // identifier is on line 1
+    assert_eq!(s.selection_start(), 1, "selection_start() should be the identifier line");
+    assert_eq!(s.selection_range.start.character, 6);
+    // declaration starts on line 0 (annotation)
+    assert_eq!(s.range.start.line, 0, "range should cover the annotation line");
 }
 
 // ── deduplication ────────────────────────────────────────────────────────
@@ -1350,4 +1365,21 @@ fn method_call_rhs_regular_method() {
     );
     assert_eq!(entry.unwrap().2, "service");
     assert_eq!(entry.unwrap().3, "getDetail");
+}
+
+// ── lambda-after-closing-paren regression ────────────────────────────────────
+
+/// Regression: tree-sitter-kotlin must parse a trailing lambda after a
+/// multi-line argument list without ERROR / MISSING nodes.
+/// Pattern: `foo(\n  a = 1,\n) { value -> value }`
+#[test]
+fn lambda_after_multiline_args_no_parse_error() {
+    let data = parse_kotlin(
+        "fun test() {\n    val x = foo(\n        a = 1,\n        b = 2,\n    ) { value -> value }\n}",
+    );
+    assert!(
+        data.syntax_errors.is_empty(),
+        "trailing lambda after multi-line args must not produce parse errors, got: {:?}",
+        data.syntax_errors
+    );
 }

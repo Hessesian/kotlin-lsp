@@ -62,6 +62,16 @@ fn line_starts(bytes: &[u8]) -> Vec<usize> {
     starts
 }
 
+/// Shared read-only context passed to per-node hint helpers.
+struct HintCtx<'a> {
+    idx: &'a Arc<Indexer>,
+    uri: &'a Url,
+    bytes: &'a [u8],
+    starts: &'a [usize],
+    range: Range,
+    subst: &'a std::collections::HashMap<String, String>,
+}
+
 /// Preorder-walk the tree and emit inlay hints for nodes within `range`.
 fn cst_hints(
     idx: &Arc<Indexer>,
@@ -79,6 +89,14 @@ fn cst_hints(
     // type params (e.g. `EffectType`) when inside a class that specialises a generic base.
     let subst =
         crate::indexer::resolution::build_subst_map(idx.as_ref(), uri.as_str(), range.start.line);
+    let ctx = HintCtx {
+        idx,
+        uri,
+        bytes,
+        starts: &starts,
+        range,
+        subst: &subst,
+    };
 
     'walk: loop {
         let node = cursor.node();
@@ -104,7 +122,7 @@ fn cst_hints(
 
         match node.kind() {
             "lambda_literal" => {
-                hint_lambda(idx, uri, &node, bytes, &starts, range, &subst, &mut hints);
+                hint_lambda(&ctx, &node, &mut hints);
             }
             "simple_identifier" => {
                 if node.utf8_text(bytes) == Ok("it") {
@@ -141,7 +159,7 @@ fn cst_hints(
                 }
             }
             "property_declaration" => {
-                hint_property(idx, uri, &node, bytes, &starts, range, &subst, &mut hints);
+                hint_property(&ctx, &node, &mut hints);
             }
             _ => {}
         }
@@ -167,16 +185,15 @@ fn cst_hints(
 ///
 /// Structure confirmed from tree-sitter-kotlin probe:
 /// `lambda_literal { lambda_parameters { variable_declaration { simple_identifier } } -> statements }`
-fn hint_lambda(
-    idx: &Arc<Indexer>,
-    uri: &Url,
-    node: &tree_sitter::Node<'_>,
-    bytes: &[u8],
-    starts: &[usize],
-    range: Range,
-    subst: &std::collections::HashMap<String, String>,
-    hints: &mut Vec<InlayHint>,
-) {
+fn hint_lambda(ctx: &HintCtx<'_>, node: &tree_sitter::Node<'_>, hints: &mut Vec<InlayHint>) {
+    let HintCtx {
+        idx,
+        uri,
+        bytes,
+        starts,
+        range,
+        subst,
+    } = ctx;
     let mut nc = node.walk();
     for child in node.children(&mut nc) {
         if child.kind() != KIND_LAMBDA_PARAMS {
@@ -223,7 +240,7 @@ fn hint_lambda(
 
             let start_pos = ts_pos_to_lsp(name_n.start_position(), starts, bytes);
             let end_pos = ts_pos_to_lsp(name_n.end_position(), starts, bytes);
-            if !in_range(start_pos.line, range) {
+            if !in_range(start_pos.line, *range) {
                 continue;
             }
 
@@ -244,16 +261,15 @@ fn hint_lambda(
 }
 
 /// Emit `: Type` hint for `val name = expr` / `var name = expr` without explicit type.
-fn hint_property(
-    idx: &Arc<Indexer>,
-    uri: &Url,
-    node: &tree_sitter::Node<'_>,
-    bytes: &[u8],
-    starts: &[usize],
-    range: Range,
-    subst: &std::collections::HashMap<String, String>,
-    hints: &mut Vec<InlayHint>,
-) {
+fn hint_property(ctx: &HintCtx<'_>, node: &tree_sitter::Node<'_>, hints: &mut Vec<InlayHint>) {
+    let HintCtx {
+        idx,
+        uri,
+        bytes,
+        starts,
+        range,
+        subst,
+    } = ctx;
     // Find the variable_declaration child.
     let mut nc = node.walk();
     let mut var_decl = None;
@@ -311,7 +327,7 @@ fn hint_property(
     }
 
     let end_pos = ts_pos_to_lsp(name_n.end_position(), starts, bytes);
-    if !in_range(end_pos.line, range) {
+    if !in_range(end_pos.line, *range) {
         return;
     }
 
