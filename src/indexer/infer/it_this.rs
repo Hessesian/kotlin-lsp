@@ -229,7 +229,9 @@ pub(crate) fn lambda_receiver_type_from_context(
     // (e.g., `fn(Enum.VALUE, {` must not match the dot inside `Enum.VALUE`).
     if let Some(dot_pos) = find_last_dot_at_depth_zero(callee) {
         let receiver_expr = callee[..dot_pos].trim_end();
-        let receiver_var = last_ident_in(receiver_expr);
+        // Strip a trailing `(args)` so method chains like `getList().joinAll().map { it }`
+        // yield `receiver_var = "joinAll"` rather than `""`.
+        let receiver_var = last_ident_in(strip_trailing_call_args(receiver_expr));
         // Extract method name (everything after the dot up to the first non-id char).
         let method = callee[dot_pos + 1..].trim_start().ident_prefix();
 
@@ -282,6 +284,24 @@ pub(crate) fn lambda_receiver_type_from_context(
                             }
                         }
                     }
+                }
+            }
+
+            // Method-chain receiver: `getList().joinAll().firstOrNull { it }` —
+            // receiver_var is a method name (e.g. "joinAll"), not a local variable.
+            // Look up its return type directly and extract the element type.
+            if let Some(ret_raw) = deps.find_fun_return_type(receiver_var) {
+                if let Some(elem) = extract_collection_element_type(&ret_raw) {
+                    return Some(elem);
+                }
+                if !method.is_empty() {
+                    if let Some(ty) = fun_trailing_lambda_it_type(&method, deps, uri) {
+                        return Some(ty);
+                    }
+                }
+                let base = ret_raw.ident_prefix();
+                if !base.is_empty() && base.starts_with_uppercase() {
+                    return Some(base);
                 }
             }
 

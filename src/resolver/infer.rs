@@ -549,8 +549,36 @@ fn infer_method_return_type(
 
 /// Look up `method_name` in the symbol index for `type_name` and return its
 /// return type, extracted from `SymbolEntry.detail`.
+/// Look up the return type of a function by name, searching across all indexed files.
+///
+/// Unlike `find_method_return_type` this requires no receiver type — useful when
+/// the caller is a method chain expression and the receiver type is unknown.
+/// Returns the raw return type string (with generics preserved), e.g. `"List<Account>"`.
+pub(crate) fn find_fun_return_type_by_name(idx: &Indexer, fn_name: &str) -> Option<String> {
+    let locations = idx.definitions.get(fn_name)?;
+    for loc in locations.iter() {
+        if let Some(file_data) = idx.files.get(loc.uri.as_str()) {
+            for sym in &file_data.symbols {
+                if sym.name != fn_name { continue; }
+                if !matches!(sym.kind, SymbolKind::FUNCTION | SymbolKind::METHOD | SymbolKind::OPERATOR) {
+                    continue;
+                }
+                if let Some(ret) = extract_return_type_from_detail(&sym.detail) {
+                    return Some(ret);
+                }
+                let start_line = sym.selection_range.start.line as usize;
+                let full_sig = file_data.lines.collect_signature(start_line);
+                if let Some(ret) = extract_return_type_from_detail(&full_sig) {
+                    return Some(ret);
+                }
+            }
+        }
+    }
+    None
+}
+
+
 fn find_method_return_type(idx: &Indexer, type_name: &str, method_name: &str) -> Option<String> {
-    // `definitions` is keyed by simple (unqualified) name; strip any qualifying prefix.
     let type_base = type_name.split('.').next_back().unwrap_or(type_name);
     let locations = idx.definitions.get(type_base)?;
     for loc in locations.iter() {

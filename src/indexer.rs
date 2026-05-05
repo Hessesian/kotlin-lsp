@@ -211,6 +211,9 @@ impl crate::indexer::infer::InferDeps for Indexer {
     fn find_field_type(&self, class_name: &str, field_name: &str) -> Option<String> {
         crate::resolver::infer::find_field_type_in_class(self, class_name, field_name)
     }
+    fn find_fun_return_type(&self, fn_name: &str) -> Option<String> {
+        crate::resolver::infer::find_fun_return_type_by_name(self, fn_name)
+    }
 }
 
 impl Indexer {

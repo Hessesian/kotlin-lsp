@@ -572,6 +572,20 @@ fn test_deps_case_a_multi_segment_field_non_collection_method_lambda() {
 }
 
 #[test]
+fn test_deps_case_a_method_chain_return_type() {
+    // `getAccountList(isRefresh).joinAllAccounts().firstOrNull { it }` →
+    //   receiver_var = "joinAllAccounts", method = "firstOrNull"
+    //   joinAllAccounts() returns List<Account> → element "Account"
+    let u = test_uri();
+    let deps = super::super::TestDeps::new()
+        .with_return("joinAllAccounts", "List<Account>");
+    let result = lambda_receiver_type_from_context(
+        "getAccountList(isRefresh).joinAllAccounts().firstOrNull", &deps, &u);
+    assert_eq!(result.as_deref(), Some("Account"),
+        "method-chain: element type from joinAllAccounts() return type");
+}
+
+#[test]
 fn test_deps_unknown_fn_returns_none() {
     // Function not registered → None.
     let u = test_uri();
