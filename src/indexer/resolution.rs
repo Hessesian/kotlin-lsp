@@ -28,19 +28,28 @@ pub struct ResolveOptions {
     pub allow_rg: bool,
     pub include_doc: bool,
     pub apply_subst: bool,
+    /// When true, prefer `SymbolEntry.detail` (cached, short) over the full
+    /// `collect_signature` source read.  Use for completion detail strings.
+    pub prefer_cached_detail: bool,
 }
 
 impl ResolveOptions {
-    pub fn hover() -> Self { Self { allow_rg: true, include_doc: true, apply_subst: true } }
-    pub fn inlay() -> Self { Self { allow_rg: false, include_doc: false, apply_subst: true } }
-    pub fn completion() -> Self { Self { allow_rg: false, include_doc: true, apply_subst: true } }
-    pub fn goto_def() -> Self { Self { allow_rg: true, include_doc: false, apply_subst: false } }
+    pub fn hover()      -> Self { Self { allow_rg: true,  include_doc: true,  apply_subst: true,  prefer_cached_detail: false } }
+    pub fn inlay()      -> Self { Self { allow_rg: false, include_doc: false, apply_subst: true,  prefer_cached_detail: false } }
+    pub fn completion() -> Self { Self { allow_rg: false, include_doc: true,  apply_subst: true,  prefer_cached_detail: true  } }
+    pub fn goto_def()   -> Self { Self { allow_rg: true,  include_doc: false, apply_subst: false, prefer_cached_detail: false } }
 }
 
 /// Substitution context used by the pipeline.
 pub enum SubstitutionContext<'a> {
     None,
-    CrossFile { calling_uri: &'a str, cursor_line: u32 },
+    /// Cross-file substitution: the symbol is from another file and we need to
+    /// substitute generic type params with the concrete args used by the caller.
+    ///
+    /// `cursor_line`: the cursor's line in `calling_uri`, used to identify which
+    /// class is calling (when a file has multiple classes extending the same base).
+    /// `None` = unknown / don't disambiguate → picks the first matching class.
+    CrossFile { calling_uri: &'a str, cursor_line: Option<u32> },
     EnclosingClass { uri: &'a str, cursor_line: u32 },
     Precomputed(&'a HashMap<String, String>),
 }
@@ -108,6 +117,33 @@ pub fn enrich_at_location<I: IndexRead>(
     enrich_symbol(index, &data, location, name, subst_ctx, options)
 }
 
+/// Find the symbol at `(line, col)` in `uri_str`, then enrich it.
+///
+/// Used by `completion_resolve` which stores line/col in the completion item
+/// data rather than a full `Location`.  If no symbol is at the exact position,
+/// falls back to first symbol whose selection range starts on `line`.
+pub fn enrich_at_line<I: IndexRead>(
+    index: &I,
+    uri_str: &str,
+    line: u32,
+    col: u32,
+    subst_ctx: SubstitutionContext<'_>,
+    options: &ResolveOptions,
+) -> Option<ResolvedSymbol> {
+    let data = index.get_file_data(uri_str)?;
+    let sym = data.symbols.iter()
+        .find(|s| {
+            s.selection_range.start.line == line
+                && s.selection_range.start.character <= col
+                && col <= s.selection_range.end.character
+        })
+        .or_else(|| data.symbols.iter().find(|s| s.selection_range.start.line == line))?;
+
+    let uri = Url::parse(uri_str).ok()?;
+    let location = Location { uri, range: sym.range };
+    enrich_symbol(index, &data, &location, &sym.name.clone(), subst_ctx, options)
+}
+
 /// Resolve contextual receiver information (it/this).
 pub fn resolve_contextual_info<I: IndexRead>(
     index: &I,
@@ -139,18 +175,19 @@ pub fn build_subst_map<I: IndexRead>(index: &I, uri: &str, cursor_line: u32) -> 
 
 // ─── Pure Data Transformation Functions ──────────────────────────────────
 
-/// Extract canonical signature (prefer full source, fall back to cached detail).
+/// Extract canonical signature respecting caller intent.
 ///
-/// For properties/variables: use the pre-indexed `detail` string directly —
-/// `collect_signature` on a property line reads forward until it finds `{` or `=`
-/// and can accidentally collect sibling constructor parameters.
-/// For functions/classes: prefer `collect_signature` (full untruncated source),
-/// falling back to `detail` (truncated at ~120 chars at index time).
-fn extract_canonical_signature(sym: &SymbolEntry, data: &FileData) -> String {
-    if matches!(sym.kind, SymbolKind::PROPERTY | SymbolKind::VARIABLE)
-        && !sym.detail.is_empty()
-    {
-        return sym.detail.clone();
+/// - `prefer_cached_detail = true` (completion): use `detail`-first — it's
+///   pre-computed, concise (~120 chars), and safe for single-line UI slots.
+/// - `prefer_cached_detail = false` (hover): prefer `collect_signature` for
+///   the full untruncated declaration; fall back to `detail`.
+///
+/// For properties/variables `collect_signature` reads forward until `{`/`=`
+/// and can accidentally collect sibling constructor params, so `detail` is
+/// always used for those kinds regardless of the `prefer_cached_detail` flag.
+fn extract_canonical_signature(sym: &SymbolEntry, data: &FileData, prefer_cached: bool) -> String {
+    if prefer_cached || matches!(sym.kind, SymbolKind::PROPERTY | SymbolKind::VARIABLE) {
+        if !sym.detail.is_empty() { return sym.detail.clone(); }
     }
     let full = data.lines.collect_signature(sym.selection_range.start.line as usize);
     if !full.is_empty() { full } else { sym.detail.clone() }
@@ -193,7 +230,7 @@ fn enrich_symbol<I: IndexRead>(
 ) -> Option<ResolvedSymbol> {
     let sym = find_symbol_entry(data, location, name)?;
 
-    let raw_signature = extract_canonical_signature(sym, data);
+    let raw_signature = extract_canonical_signature(sym, data, options.prefer_cached_detail);
 
     // For unannotated val/var (no `: Type` in the signature), try to infer the
     // concrete type so callers see `val foo: ReturnType` instead of `val foo = expr`.
@@ -278,7 +315,7 @@ fn build_type_param_subst_impl<I: IndexRead>(
     sym_uri: &str,
     sym_line: u32,
     calling_uri: &str,
-    caller_cursor_line: u32,
+    caller_cursor_line: Option<u32>,
 ) -> HashMap<String, String> {
     if sym_uri == calling_uri {
         return HashMap::new();
@@ -310,7 +347,9 @@ fn build_type_param_subst_impl<I: IndexRead>(
     // Use `caller_cursor_line` to identify the specific calling class — when multiple
     // classes in the same file extend the same base with different type args,
     // this ensures we pick the correct substitution for the caller.
-    let calling_class_line = calling_data.containing_class_at(caller_cursor_line)
+    // When `None`, the first class extending the base is used (e.g. for completion).
+    let calling_class_line = caller_cursor_line
+        .and_then(|line| calling_data.containing_class_at(line))
         .and_then(|name| calling_data.symbols.iter().find(|s| s.name == name))
         .map(|s| s.selection_range.start.line);
 
@@ -834,7 +873,7 @@ mod tests {
         let result_dash = resolve_symbol_info(
             &idx, "reduce", None,
             &Url::parse(caller_uri).unwrap(),
-            SubstitutionContext::CrossFile { calling_uri: caller_uri, cursor_line: 4 },
+            SubstitutionContext::CrossFile { calling_uri: caller_uri, cursor_line: Some(4) },
             &ResolveOptions::hover(),
         );
         let dash = result_dash.expect("should resolve reduce");
@@ -845,7 +884,7 @@ mod tests {
         let result_sett = resolve_symbol_info(
             &idx, "reduce", None,
             &Url::parse(caller_uri).unwrap(),
-            SubstitutionContext::CrossFile { calling_uri: caller_uri, cursor_line: 14 },
+            SubstitutionContext::CrossFile { calling_uri: caller_uri, cursor_line: Some(14) },
             &ResolveOptions::hover(),
         );
         let sett = result_sett.expect("should resolve reduce");

@@ -660,6 +660,8 @@ impl LanguageServer for Backend {
     // ── completionItem/resolve ────────────────────────────────────────────────
 
     async fn completion_resolve(&self, mut item: CompletionItem) -> Result<CompletionItem> {
+        use crate::indexer::resolution::{enrich_at_line, SubstitutionContext, ResolveOptions};
+
         if let Some(ref data) = item.data {
             if let (Some(uri), Some(line)) = (
                 data.get("u").and_then(|v| v.as_str()),
@@ -667,20 +669,32 @@ impl LanguageServer for Backend {
             ) {
                 let col         = data.get("c").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
                 let calling_uri = data.get("cu").and_then(|v| v.as_str());
-                // Always fill (or override) detail so type param substitution takes effect.
-                if let Some(d) = self.indexer.symbol_detail_at(uri, line as u32, col, calling_uri) {
-                    if !d.is_empty() {
-                        item.detail = Some(d);
+
+                let subst_ctx = match calling_uri {
+                    Some(cu) if cu != uri => SubstitutionContext::CrossFile {
+                        calling_uri: cu,
+                        cursor_line: None,
+                    },
+                    _ => SubstitutionContext::None,
+                };
+
+                if let Some(info) = enrich_at_line(
+                    self.indexer.as_ref(),
+                    uri,
+                    line as u32,
+                    col,
+                    subst_ctx,
+                    &ResolveOptions::completion(),
+                ) {
+                    if !info.signature.is_empty() {
+                        item.detail = Some(info.signature);
                     }
-                }
-                // Populate documentation only when KDoc/Javadoc is present.
-                if let Some((doc_md, _)) =
-                    self.indexer.completion_docs_for(uri, line as u32, col, calling_uri)
-                {
-                    item.documentation = Some(Documentation::MarkupContent(MarkupContent {
-                        kind:  MarkupKind::Markdown,
-                        value: doc_md,
-                    }));
+                    if !info.doc.is_empty() {
+                        item.documentation = Some(Documentation::MarkupContent(MarkupContent {
+                            kind:  MarkupKind::Markdown,
+                            value: info.doc,
+                        }));
+                    }
                 }
             }
         }

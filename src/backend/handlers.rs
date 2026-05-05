@@ -52,7 +52,7 @@ impl Backend {
                 // Resolve the type's own hover: import-aware, rg fallback, then stdlib.
                 let type_detail = resolve_symbol_info(
                         self.indexer.as_ref(), leaf, None, uri,
-                        SubstitutionContext::CrossFile { calling_uri: uri.as_str(), cursor_line: position.line },
+                        SubstitutionContext::CrossFile { calling_uri: uri.as_str(), cursor_line: Some(position.line) },
                         &ResolveOptions::hover())
                     .map(|i| format_symbol_hover(&i, uri.path()))
                     .or_else(|| crate::stdlib::hover(leaf));
@@ -74,7 +74,7 @@ impl Backend {
                 if let Some(loc) = locs.first() {
                     let subst_ctx = SubstitutionContext::CrossFile {
                         calling_uri: uri.as_str(),
-                        cursor_line: position.line,
+                        cursor_line: Some(position.line),
                     };
                     if let Some(info) = enrich_at_location(self.indexer.as_ref(), loc, &ctx.word, subst_ctx, &ResolveOptions::hover()) {
                         return Ok(Some(make_hover(format_symbol_hover(&info, uri.path()))));
@@ -86,7 +86,7 @@ impl Backend {
         // Path 3: regular symbol — import-aware resolution, rg fallback, then stdlib.
         let subst_ctx = SubstitutionContext::CrossFile {
             calling_uri: uri.as_str(),
-            cursor_line: position.line,
+            cursor_line: Some(position.line),
         };
         let hover_md = resolve_symbol_info(
                 self.indexer.as_ref(), &ctx.word, ctx.qualifier.as_deref(), uri,
