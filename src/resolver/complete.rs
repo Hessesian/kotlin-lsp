@@ -455,7 +455,7 @@ impl<'a> InheritanceWalker<'a> {
                 .symbols
                 .iter()
                 .find(|s| s.name == type_name)
-                .map(|s| s.start_line());
+                .map(|s| s.selection_start());
             match class_line {
                 Some(line) => data
                     .supers
@@ -531,12 +531,12 @@ fn completion_item_for_nested_symbol(
     };
     let detail = detail_raw.map(|d| {
         if let Some(cu) = calling_uri {
-            crate::indexer::resolution::cross_file_type_subst(idx, uri_str, s.start_line(), cu, &d)
+            crate::indexer::resolution::cross_file_type_subst(idx, uri_str, s.selection_start(), cu, &d)
         } else {
             d
         }
     });
-    let mut data = serde_json::json!({"u": uri_str, "l": s.start_line(), "c": s.selection_range.start.character});
+    let mut data = serde_json::json!({"u": uri_str, "l": s.selection_start(), "c": s.selection_range.start.character});
     if let Some(cu) = calling_uri {
         data["cu"] = serde_json::Value::String(cu.to_owned());
     }
@@ -774,7 +774,7 @@ pub(crate) fn complete_bare(
                 0,
                 prefix,
                 &sym.detail,
-                Some(serde_json::json!({"u": from_uri.as_str(), "l": sym.start_line(), "c": sym.selection_range.start.character})),
+                Some(serde_json::json!({"u": from_uri.as_str(), "l": sym.selection_start(), "c": sym.selection_range.start.character})),
             );
         }
         if bc.lowercase_mode {
@@ -802,7 +802,7 @@ pub(crate) fn complete_bare(
                             1,
                             prefix,
                             &sym.detail,
-                            Some(serde_json::json!({"u": uri_str.as_str(), "l": sym.start_line(), "c": sym.selection_range.start.character})),
+                            Some(serde_json::json!({"u": uri_str.as_str(), "l": sym.selection_start(), "c": sym.selection_range.start.character})),
                         );
                     }
                 }

@@ -230,3 +230,45 @@ class DashViewModel {
         );
     }
 }
+
+// ── completionItem/resolve: enrich_at_line populates documentation ─────────────
+
+/// Regression: removing the old completion-doc tests would leave the
+/// `completionItem/resolve` path (enrich_at_line → ResolvedSymbol.doc) uncovered.
+/// This test ensures that `enrich_at_line` finds the right symbol and that
+/// `resolve_symbol_info` with `include_doc: true` populates a documentation string.
+#[test]
+fn completion_resolve_populates_documentation() {
+    use crate::indexer::resolution::{enrich_at_line, ResolveOptions, SubstitutionContext};
+
+    let (u, idx) = indexed(
+        "/Documented.kt",
+        "\
+/** The answer to everything. */
+fun theAnswer(): Int = 42
+",
+    );
+
+    // `enrich_at_line` is called by completion_resolve with line/col stored in
+    // the completion item data.  Line 1 = `fun theAnswer()…`; col 4 = 't' in theAnswer.
+    let result = enrich_at_line(
+        &idx,
+        u.as_str(),
+        1,  // identifier line
+        4,  // col within "theAnswer"
+        SubstitutionContext::None,
+        &ResolveOptions {
+            allow_rg: false,
+            include_doc: true,
+            apply_subst: false,
+            prefer_cached_detail: false,
+        },
+    );
+
+    let resolved = result.expect("enrich_at_line should find theAnswer");
+    assert!(
+        resolved.doc.contains("answer"),
+        "documentation should contain KDoc text, got: {:?}",
+        resolved.doc
+    );
+}

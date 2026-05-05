@@ -96,7 +96,7 @@ impl SymbolEntry {
     /// This is a convenience accessor for `.selection_range.start.line` (the identifier line),
     /// distinguishing it from `.range.start.line` (the full declaration start, which may differ on
     /// multiline declarations). Reduces coupling and avoids repeated deep field access.
-    pub fn start_line(&self) -> u32 {
+    pub fn selection_start(&self) -> u32 {
         self.selection_range.start.line
     }
 }

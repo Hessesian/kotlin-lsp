@@ -620,7 +620,7 @@ fn extract_fun_interfaces(root: Node, bytes: &[u8], data: &mut FileData) {
                 // Remove the incorrectly-added function/method symbol (same name, same line).
                 data.symbols.retain(|s| {
                     !(s.name == name
-                        && s.start_line() == sel.start.line
+                        && s.selection_start() == sel.start.line
                         && matches!(s.kind, SymbolKind::FUNCTION | SymbolKind::METHOD))
                 });
                 push_interface_symbol(name, &node, name_ts_range, bytes, data);
