@@ -46,6 +46,10 @@ impl Indexer {
     }
 
     /// Build a Markdown hover snippet for a symbol name.
+    ///
+    /// **Note:** Production code uses `resolution::resolve_symbol_info` +
+    /// `backend::format::format_symbol_hover` instead. This method is retained
+    /// for lookup unit tests (Phase 10 will migrate tests and delete it).
     pub fn hover_info(&self, name: &str, calling_uri: Option<&str>) -> Option<String> {
         // Check stdlib first so well-known symbols (run, apply, map, …) get
         // proper signatures even when no project source contains them.
@@ -60,7 +64,10 @@ impl Indexer {
     }
 
     /// Build hover markdown for `name` at a specific resolved `Location`.
-    /// Used by the hover handler so it shows the same symbol as go-to-definition.
+    ///
+    /// **Note:** Production code uses `resolution::enrich_at_location` +
+    /// `backend::format::format_symbol_hover` instead. This method is retained
+    /// for lookup unit tests (Phase 10 will migrate tests and delete it).
     ///
     /// `calling_uri` — the file where the cursor is (used to substitute generic type
     /// parameters with concrete types when the symbol is from a base class).
@@ -315,11 +322,11 @@ impl Indexer {
     /// Used by inlay hints to convert inferred types like `EffectType` → `Effect`
     /// when the cursor is inside a class that specialises a generic base.
     pub(crate) fn type_subst_for_enclosing_class(&self, uri: &str, cursor_line: u32) -> std::collections::HashMap<String, String> {
-        build_enclosing_class_subst(self, uri, cursor_line)
+        super::resolution::build_subst_map(self, uri, cursor_line)
     }
 }
 
-fn symbol_kw(kind: SymbolKind) -> &'static str {
+pub(crate) fn symbol_kw(kind: SymbolKind) -> &'static str {
     match kind {
         SymbolKind::CLASS          => "class",
         SymbolKind::INTERFACE      => "interface",
@@ -335,13 +342,13 @@ fn symbol_kw(kind: SymbolKind) -> &'static str {
     }
 }
 
-fn symbol_kw_for_lang(kind: SymbolKind, lang: &str) -> &'static str {
+pub(crate) fn symbol_kw_for_lang(kind: SymbolKind, lang: &str) -> &'static str {
     let kw = symbol_kw(kind);
     // Swift uses `func`, not `fun`.
     if lang == "swift" && kw == "fun" { "func" } else { kw }
 }
 
-fn lang_str(path: &str) -> &'static str {
+pub(crate) fn lang_str(path: &str) -> &'static str {
     match crate::Language::from_path(path) {
         crate::Language::Kotlin => "kotlin",
         crate::Language::Swift  => "swift",
@@ -414,99 +421,6 @@ fn build_type_param_subst(
     type_params.iter().zip(type_args.iter())
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect()
-}
-
-/// Build a substitution map from ALL supertypes of the enclosing class at `cursor_line`.
-///
-/// For each super with type args (e.g., `FlowReducer<Event, Effect, State>`), looks up
-/// the super's type params (`EventType`, `EffectType`, `StateType`) and builds the mapping.
-/// This allows inlay hints to show concrete types instead of generic param names.
-fn build_enclosing_class_subst(
-    idx:         &Indexer,
-    uri:         &str,
-    cursor_line: u32,
-) -> std::collections::HashMap<String, String> {
-    let data = match idx.files.get(uri) { Some(d) => d, None => {
-        return Default::default();
-    }};
-
-    // Find the enclosing class
-    let class_name = match data.containing_class_at(cursor_line) {
-        Some(n) => n,
-        None => {
-            return Default::default();
-        }
-    };
-
-    // Get the class symbol's line to find its supers
-    let class_sym = match data.symbols.iter().find(|s| s.name == class_name) {
-        Some(s) => s,
-        None => return Default::default(),
-    };
-    let class_line = class_sym.selection_range.start.line;
-    let class_end_line = class_sym.range.end.line;
-    let mut result = std::collections::HashMap::new();
-
-    for (line, base_name, type_args) in data.supers.iter() {
-        if *line != class_line || type_args.is_empty() { continue; }
-
-        // Look up the super class's type parameters from its symbol detail
-        let super_sym = idx.definitions.get(base_name.as_str())
-            .and_then(|locs| locs.first().cloned());
-        if super_sym.is_none() {
-            continue;
-        }
-        let Some(super_loc) = super_sym else { continue };
-        let Some(super_data) = idx.files.get(super_loc.uri.as_str()) else {
-            continue;
-        };
-        let Some(sym) = super_data.symbols.iter().find(|s| s.name == *base_name) else {
-            continue;
-        };
-
-        let type_params = &sym.type_params;
-        // Zip params → args
-        for (param, arg) in type_params.iter().zip(type_args.iter()) {
-            result.insert(param.clone(), arg.clone());
-        }
-    }
-
-    // Also collect substitutions from member property types.
-    // If the enclosing class has a property like `val reducer: DashboardProductsReducer`
-    // and that type extends `FlowReducer<Event, Effect, State>`, include FlowReducer's
-    // type param → concrete arg mappings.
-    for sym in data.symbols.iter() {
-        if sym.selection_range.start.line <= class_line { continue; }
-        if sym.selection_range.start.line > class_end_line { continue; }
-        if !matches!(sym.kind, SymbolKind::FIELD | SymbolKind::PROPERTY) { continue; }
-        // Extract type name from detail (e.g., "private val foo: SomeType by lazy")
-        let type_name = extract_property_type_name(&sym.detail);
-        if type_name.is_empty() { continue; }
-        // Look up the property type's class definition
-        let Some(locs) = idx.definitions.get(type_name) else { continue };
-        let Some(loc) = locs.first() else { continue };
-        let Some(prop_type_data) = idx.files.get(loc.uri.as_str()) else { continue };
-        // Find this type's supers and resolve their type params
-        let prop_sym = match prop_type_data.symbols.iter().find(|s| s.name == type_name) {
-            Some(s) => s,
-            None => continue,
-        };
-        let prop_class_line = prop_sym.selection_range.start.line;
-        for (line, base_name, type_args) in prop_type_data.supers.iter() {
-            if *line != prop_class_line || type_args.is_empty() { continue; }
-            // Already have these params mapped? Skip.
-            let Some(super_locs) = idx.definitions.get(base_name.as_str()) else { continue };
-            let Some(super_loc) = super_locs.first() else { continue };
-            let Some(super_file) = idx.files.get(super_loc.uri.as_str()) else { continue };
-            let Some(super_sym) = super_file.symbols.iter().find(|s| s.name == *base_name) else { continue };
-            let type_params = &super_sym.type_params;
-            for (param, arg) in type_params.iter().zip(type_args.iter()) {
-                result.entry(param.clone()).or_insert_with(|| arg.clone());
-            }
-        }
-    }
-
-    result
 }
 
 /// Extract the simple type name from a property detail string.

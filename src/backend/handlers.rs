@@ -2,6 +2,11 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use crate::indexer::find_fun_signature_with_receiver;
 use crate::indexer::NodeExt;
+use crate::indexer::resolution::{
+    resolve_symbol_info, enrich_at_location, build_subst_map,
+    SubstitutionContext, ResolveOptions,
+};
+use crate::indexer::apply_type_subst;
 use crate::StrExt;
 use crate::queries::KIND_VALUE_ARG;
 use crate::inlay_hints::compute_inlay_hints;
@@ -9,6 +14,7 @@ use super::Backend;
 use super::cursor::CursorContext;
 use super::helpers::resolve_references_scope;
 use super::actions::is_non_call_keyword;
+use super::format::{format_symbol_hover, format_contextual_hover};
 
 /// Maximum number of workspace symbol results to return.
 const WORKSPACE_SYMBOL_CAP: usize = 512;
@@ -23,43 +29,35 @@ impl Backend {
             return Ok(None);
         };
 
-        // For `it` or a named lambda param, generate hover showing the inferred type.
+        let make_hover = |md: String| Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: md,
+            }),
+            range: None,
+        };
+
+        // Path 1: `it` / named lambda param — show inferred type + optional type detail.
         if ctx.qualifier.is_none() {
             if let Some(ref rt) = ctx.contextual {
-                // Apply type parameter substitution (same as inlay hints)
-                let subst = self.indexer.type_subst_for_enclosing_class(uri.as_str(), position.line);
+                let kw = if crate::Language::from_path(uri.path()).is_swift() { "let" } else { "val" };
+                let subst = build_subst_map(self.indexer.as_ref(), uri.as_str(), position.line);
                 let type_name = if subst.is_empty() {
                     rt.raw.clone()
                 } else {
-                    crate::indexer::apply_type_subst(&rt.raw, &subst)
+                    apply_type_subst(&rt.raw, &subst)
                 };
-                let lang = match crate::Language::from_path(uri.path()) {
-                    crate::Language::Kotlin => "kotlin",
-                    crate::Language::Swift  => "swift",
-                    crate::Language::Java   => "java",
-                };
-                let kw = if crate::Language::from_path(uri.path()).is_swift() { "let" } else { "val" };
-                let sig_md = format!("```{lang}\n{kw} {}: {type_name}\n```", ctx.word);
-                // Resolve the type using the same path as go-to-definition (import-aware)
                 let leaf = type_name.rsplit('.').next().unwrap_or(type_name.as_str());
-                let locs = self.indexer.find_definition_qualified(leaf, None, uri);
-                let type_hover = if let Some(loc) = locs.first() {
-                    self.indexer.hover_info_at_location(loc, leaf, Some(uri.as_str()), Some(position.line))
-                } else {
-                    self.indexer.hover_info(leaf, Some(uri.as_str()))
-                };
-                let full = if let Some(th) = type_hover {
-                    format!("{sig_md}\n\n---\n\n{th}")
-                } else {
-                    sig_md
-                };
-                return Ok(Some(Hover {
-                    contents: HoverContents::Markup(MarkupContent {
-                        kind:  MarkupKind::Markdown,
-                        value: full,
-                    }),
-                    range: None,
-                }));
+                let type_sig_md = format!("{kw} {}: {type_name}", ctx.word);
+                // Resolve the type's own hover: import-aware, rg fallback, then stdlib.
+                let type_detail = resolve_symbol_info(
+                        self.indexer.as_ref(), leaf, None, uri,
+                        SubstitutionContext::CrossFile { calling_uri: uri.as_str(), cursor_line: position.line },
+                        &ResolveOptions::hover())
+                    .map(|i| format_symbol_hover(&i, uri.path()))
+                    .or_else(|| crate::stdlib::hover(leaf));
+                let md = format_contextual_hover(&type_sig_md, uri.path(), type_detail.as_deref());
+                return Ok(Some(make_hover(md)));
             }
             // Lambda parameter with failed type inference — don't fall through to rg
             // lookup (would show confusing hover for unrelated symbols).
@@ -68,56 +66,35 @@ impl Backend {
             }
         }
 
-        // Use the same resolution chain as go-to-definition so hover always
-        // points at the same symbol (import-aware, not just first index match).
-
-        // `this.field` / `it.field` — use the already-resolved contextual receiver
+        // Path 2: `this.field` / `it.field` — use the already-resolved contextual receiver
         // so hover shows the member from the correct class.
         if ctx.qualifier.is_some() {
             if let Some(ref rt) = ctx.contextual {
                 let locs = self.resolve_with_receiver_fallback(&ctx.word, rt, uri);
                 if let Some(loc) = locs.first() {
-                    if let Some(md) = self.indexer.hover_info_at_location(loc, &ctx.word, Some(uri.as_str()), Some(position.line)) {
-                        return Ok(Some(Hover {
-                            contents: HoverContents::Markup(MarkupContent {
-                                kind:  MarkupKind::Markdown,
-                                value: md,
-                            }),
-                            range: None,
-                        }));
+                    let subst_ctx = SubstitutionContext::CrossFile {
+                        calling_uri: uri.as_str(),
+                        cursor_line: position.line,
+                    };
+                    if let Some(info) = enrich_at_location(self.indexer.as_ref(), loc, &ctx.word, subst_ctx, &ResolveOptions::hover()) {
+                        return Ok(Some(make_hover(format_symbol_hover(&info, uri.path()))));
                     }
                 }
             }
         }
 
-        let locs = self.indexer.find_definition_qualified(&ctx.word, ctx.qualifier.as_deref(), uri);
-        let hover_md = if let Some(loc) = locs.first() {
-            self.indexer.hover_info_at_location(loc, &ctx.word, Some(uri.as_str()), Some(position.line))
-        } else {
-            // Index lookup — works for already-indexed symbols + stdlib.
-            let from_index = self.indexer.hover_info(&ctx.word, Some(uri.as_str()));
-            if from_index.is_some() {
-                from_index
-            } else {
-                // rg fallback: find the declaration even when the index is empty.
-                let file_path = uri.to_file_path().ok();
-                let (rg_root, matcher) = {
-                    let wr = self.indexer.workspace_root.read().unwrap().clone();
-                    let m = self.indexer.ignore_matcher.read().unwrap().clone();
-                    (crate::rg::effective_rg_root(wr.as_deref(), file_path.as_deref()), m)
-                };
-                let rg_locs = crate::rg::rg_find_definition(&ctx.word, rg_root.as_deref(), matcher.as_deref());
-                rg_locs.first().and_then(|loc| self.indexer.hover_info_at_location(loc, &ctx.word, Some(uri.as_str()), Some(position.line)))
-            }
+        // Path 3: regular symbol — import-aware resolution, rg fallback, then stdlib.
+        let subst_ctx = SubstitutionContext::CrossFile {
+            calling_uri: uri.as_str(),
+            cursor_line: position.line,
         };
+        let hover_md = resolve_symbol_info(
+                self.indexer.as_ref(), &ctx.word, ctx.qualifier.as_deref(), uri,
+                subst_ctx, &ResolveOptions::hover())
+            .map(|i| format_symbol_hover(&i, uri.path()))
+            .or_else(|| crate::stdlib::hover(&ctx.word));
 
-        Ok(hover_md.map(|md| Hover {
-            contents: HoverContents::Markup(MarkupContent {
-                kind:  MarkupKind::Markdown,
-                value: md,
-            }),
-            range: None,
-        }))
+        Ok(hover_md.map(make_hover))
     }
 
     pub(super) async fn references_impl(

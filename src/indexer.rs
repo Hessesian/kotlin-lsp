@@ -16,7 +16,7 @@ pub use crate::rg::SOURCE_EXTENSIONS;
 mod doc;
 
 mod infer;
-mod resolution;
+pub(crate) mod resolution;
 // Re-export pure helpers from submodules so existing callers within this file
 // and the inline test module (`use super::*`) continue to resolve them by name.
 #[allow(unused_imports)]
@@ -63,7 +63,7 @@ mod apply;
 #[allow(unused_imports)]
 pub(crate) use self::apply::{file_contributions, stale_keys_for, build_bare_names};
 
-mod lookup;
+pub(crate) mod lookup;
 pub(crate) use lookup::apply_type_subst;
 
 mod node_ext;

@@ -63,6 +63,15 @@ pub trait IndexRead {
         self.get_definitions(name)
             .unwrap_or_default()
     }
+
+    /// Infer the concrete type of an unannotated variable/property.
+    ///
+    /// Used to augment hover for `val foo = someCall()` with `val foo: ReturnType`
+    /// when no explicit `: Type` annotation is present.
+    /// Default impl returns `None`; production Indexer delegates to full type inference.
+    fn infer_variable_type_for(&self, _name: &str, _uri: &Url) -> Option<String> {
+        None
+    }
 }
 
 // ─── Pipeline Entry Point (thin coordinator) ───────────────────────────────
@@ -80,6 +89,21 @@ pub fn resolve_symbol_info<I: IndexRead>(
     let location = locate_symbol(index, name, qualifier, from_uri, options.allow_rg)?;
     let data = index.get_file_data(location.uri.as_str())?;
     enrich_symbol(index, &data, &location, name, subst_ctx, options)
+}
+
+/// Enrich a pre-resolved location without a locate step.
+///
+/// Used when the caller already holds a `Location` (e.g., from
+/// `resolve_with_receiver_fallback`) and only needs enrichment.
+pub fn enrich_at_location<I: IndexRead>(
+    index: &I,
+    location: &Location,
+    name: &str,
+    subst_ctx: SubstitutionContext<'_>,
+    options: &ResolveOptions,
+) -> Option<ResolvedSymbol> {
+    let data = index.get_file_data(location.uri.as_str())?;
+    enrich_symbol(index, &data, location, name, subst_ctx, options)
 }
 
 /// Resolve contextual receiver information (it/this).
@@ -115,10 +139,17 @@ pub fn build_subst_map<I: IndexRead>(index: &I, uri: &str, cursor_line: u32) -> 
 
 /// Extract canonical signature (prefer full source, fall back to cached detail).
 ///
-/// `detail` is truncated to ~120 chars at index time; `collect_signature` reads
-/// the original source lines and returns the complete declaration up to `{`/`=`.
-/// We prefer the full source version so callers see untruncated signatures.
+/// For properties/variables: use the pre-indexed `detail` string directly —
+/// `collect_signature` on a property line reads forward until it finds `{` or `=`
+/// and can accidentally collect sibling constructor parameters.
+/// For functions/classes: prefer `collect_signature` (full untruncated source),
+/// falling back to `detail` (truncated at ~120 chars at index time).
 fn extract_canonical_signature(sym: &SymbolEntry, data: &FileData) -> String {
+    if matches!(sym.kind, SymbolKind::PROPERTY | SymbolKind::VARIABLE)
+        && !sym.detail.is_empty()
+    {
+        return sym.detail.clone();
+    }
     let full = data.lines.collect_signature(sym.selection_range.start.line as usize);
     if !full.is_empty() { full } else { sym.detail.clone() }
 }
@@ -161,6 +192,21 @@ fn enrich_symbol<I: IndexRead>(
     let sym = find_symbol_entry(data, location, name)?;
 
     let raw_signature = extract_canonical_signature(sym, data);
+
+    // For unannotated val/var (no `: Type` in the signature), try to infer the
+    // concrete type so callers see `val foo: ReturnType` instead of `val foo = expr`.
+    let raw_signature = if matches!(sym.kind, SymbolKind::PROPERTY | SymbolKind::VARIABLE)
+        && !raw_signature.contains(&format!("{name}:"))
+    {
+        if let Some(inferred) = index.infer_variable_type_for(name, &location.uri) {
+            augment_property_sig(&raw_signature, name, sym.kind, &inferred)
+        } else {
+            raw_signature
+        }
+    } else {
+        raw_signature
+    };
+
     let subst = build_subst_if_needed(index, location, sym, &raw_signature, subst_ctx, options);
     let signature = apply_subst(&raw_signature, &subst);
     let doc = if options.include_doc {
@@ -177,6 +223,23 @@ fn enrich_symbol<I: IndexRead>(
         subst,
         doc,
     })
+}
+
+/// Rebuild a property signature with an inferred type annotation.
+///
+/// Replaces the `= rhs` initializer with `: InferredType`, preserving any
+/// leading modifiers (e.g. `private`, `override`).
+fn augment_property_sig(raw: &str, name: &str, kind: SymbolKind, inferred: &str) -> String {
+    let needle = format!(" {name}");
+    let name_pos = raw.find(&needle)
+        .map(|p| p + 1)
+        .or_else(|| if raw.starts_with(name) { Some(0) } else { None });
+    if let Some(pos) = name_pos {
+        format!("{}: {inferred}", &raw[..pos + name.len()])
+    } else {
+        let kw = if kind == SymbolKind::VARIABLE { "var" } else { "val" };
+        format!("{kw} {name}: {inferred}")
+    }
 }
 
 /// Build substitution map if requested by options and context.
@@ -395,6 +458,10 @@ impl IndexRead for super::Indexer {
             }
             self.resolve_symbol_no_rg(name, from_uri)
         }
+    }
+
+    fn infer_variable_type_for(&self, name: &str, uri: &Url) -> Option<String> {
+        self.infer_variable_type(name, uri)
     }
 }
 
