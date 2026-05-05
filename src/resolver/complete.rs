@@ -286,7 +286,7 @@ fn complete_super(idx: &Indexer, from_uri: &Url, snippets: bool) -> Vec<Completi
     }
     let mut items: Vec<CompletionItem> = Vec::new();
     let mut visited: Vec<String> = vec![from_uri.as_str().to_owned()];
-    collect_hierarchy_completions(idx, from_uri, &mut visited, 0, &mut items, snippets);
+    SuperWalker { idx, snippets }.collect(from_uri, &mut visited, 0, &mut items);
     // Filter out private/protected members — inaccessible even via super.
     items.retain(|i| {
         i.sort_text
@@ -299,41 +299,51 @@ fn complete_super(idx: &Indexer, from_uri: &Url, snippets: bool) -> Vec<Completi
     items
 }
 
-fn collect_hierarchy_completions(
-    idx: &Indexer,
-    from_uri: &Url,
-    visited: &mut Vec<String>,
-    depth: u8,
-    out: &mut Vec<CompletionItem>,
+/// Walks the supertype hierarchy from a given file URI, collecting completion items.
+///
+/// Visited keys are file URIs (not type-qualified) — this is a file-oriented
+/// walk, distinct from [`InheritanceWalker`] which is type-oriented.
+struct SuperWalker<'a> {
+    idx: &'a Indexer,
     snippets: bool,
-) {
-    const MAX_DEPTH: u8 = 4;
-    if depth >= MAX_DEPTH {
-        return;
-    }
+}
 
-    let supers: Vec<String> = match idx.files.get(from_uri.as_str()) {
-        Some(f) => f.supers.iter().map(|(_, n, _)| n.clone()).collect(),
-        None => return,
-    };
+impl<'a> SuperWalker<'a> {
+    fn collect(
+        &self,
+        from_uri: &Url,
+        visited: &mut Vec<String>,
+        depth: u8,
+        out: &mut Vec<CompletionItem>,
+    ) {
+        const MAX_DEPTH: u8 = 4;
+        if depth >= MAX_DEPTH {
+            return;
+        }
 
-    for super_name in supers {
-        let super_locs = resolve_symbol_inner(idx, &super_name, from_uri, false);
-        for super_loc in &super_locs {
-            let uri_str = super_loc.uri.as_str();
-            if visited.contains(&uri_str.to_owned()) {
-                continue;
-            }
-            visited.push(uri_str.to_owned());
-            let mut new_items = symbols_from_uri_as_completions(idx, uri_str);
-            if !snippets {
-                for item in &mut new_items {
-                    item.insert_text = None;
-                    item.insert_text_format = None;
+        let supers: Vec<String> = match self.idx.files.get(from_uri.as_str()) {
+            Some(f) => f.supers.iter().map(|(_, n, _)| n.clone()).collect(),
+            None => return,
+        };
+
+        for super_name in supers {
+            let super_locs = resolve_symbol_inner(self.idx, &super_name, from_uri, false);
+            for super_loc in &super_locs {
+                let uri_str = super_loc.uri.as_str();
+                if visited.contains(&uri_str.to_owned()) {
+                    continue;
                 }
+                visited.push(uri_str.to_owned());
+                let mut new_items = symbols_from_uri_as_completions(self.idx, uri_str);
+                if !self.snippets {
+                    for item in &mut new_items {
+                        item.insert_text = None;
+                        item.insert_text_format = None;
+                    }
+                }
+                out.extend(new_items);
+                self.collect(&super_loc.uri, visited, depth + 1, out);
             }
-            out.extend(new_items);
-            collect_hierarchy_completions(idx, &super_loc.uri, visited, depth + 1, out, snippets);
         }
     }
 }

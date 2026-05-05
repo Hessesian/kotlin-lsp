@@ -27,6 +27,22 @@ use crate::types::{FileIndexResult, IndexStats, WorkspaceIndexResult};
 
 // ─── LSP progress notification ────────────────────────────────────────────────
 
+/// Counters describing a workspace scan pass, used for progress notifications
+/// and the status-file JSON.
+#[derive(Copy, Clone)]
+struct ProgressSummary {
+    /// Number of files that need (re-)parsing (cache misses).
+    parse_count: usize,
+    /// Number of files discovered minus truncation (used in progress message).
+    indexed_count: usize,
+    /// Total files discovered before any truncation limit.
+    total: usize,
+    /// Number of files satisfied from disk cache.
+    cache_hits: usize,
+    /// Whether discovery was truncated by a file-count limit.
+    truncated: bool,
+}
+
 mod progress {
     use tower_lsp::lsp_types::ProgressParams;
 
@@ -417,12 +433,13 @@ fn spawn_progress_reporter(
     })
 }
 
-fn write_indexing_started_status(root: &Path, parse_count: usize, cache_hits: usize) {
+fn write_indexing_started_status(root: &Path, summary: &ProgressSummary) {
     let started_unix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let root_escaped = serde_json::to_string(&root.to_string_lossy().as_ref()).unwrap_or_default();
+    let (parse_count, cache_hits) = (summary.parse_count, summary.cache_hits);
     write_status_file(&format!(
         r#"{{"phase":"indexing","workspace":{root_escaped},"indexed":0,"total":{parse_count},"cache_hits":{cache_hits},"symbols":0,"started_at":{started_unix},"elapsed_secs":0,"estimated_total_secs":null}}"#
     ));
@@ -445,11 +462,7 @@ fn write_indexing_done_status(
 async fn send_progress_begin(
     client: &Option<tower_lsp::Client>,
     token: &NumberOrString,
-    parse_count: usize,
-    indexed_count: usize,
-    total: usize,
-    cache_hits: usize,
-    truncated: bool,
+    summary: &ProgressSummary,
 ) {
     if let Some(client) = client.as_ref() {
         let _ = tokio::time::timeout(
@@ -463,6 +476,13 @@ async fn send_progress_begin(
         .await;
     }
 
+    let (parse_count, indexed_count, total, cache_hits, truncated) = (
+        summary.parse_count,
+        summary.indexed_count,
+        summary.total,
+        summary.cache_hits,
+        summary.truncated,
+    );
     let begin_msg = if cache_hits > 0 {
         format!("Indexing {parse_count}/{indexed_count} files ({cache_hits} cached)…")
     } else if truncated {
@@ -955,17 +975,15 @@ impl Indexer {
 
         let index_start = std::time::Instant::now();
         let token = NumberOrString::String("kotlin-lsp/indexing".into());
-        write_indexing_started_status(root, parse_count, cache_hits);
-        send_progress_begin(
-            &client,
-            &token,
+        let progress = ProgressSummary {
             parse_count,
-            discovered.indexed_count,
-            discovered.total,
+            indexed_count: discovered.indexed_count,
+            total: discovered.total,
             cache_hits,
-            discovered.truncated,
-        )
-        .await;
+            truncated: discovered.truncated,
+        };
+        write_indexing_started_status(root, &progress);
+        send_progress_begin(&client, &token, &progress).await;
 
         let (results, scheduling_aborted) = run_parse_phase(
             Arc::clone(&self),

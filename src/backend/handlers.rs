@@ -411,20 +411,18 @@ impl Backend {
         let col = crate::indexer::live_tree::utf16_col_to_byte(line_text, pos.character as usize);
         let before = &line_text[..col];
 
-        // Extract (fn_name, qualifier, active_param) — CST first, text fallback.
-        let Some((name, qualifier, active_param)) =
-            extract_call_info(pos, &self.indexer, uri, lines, before, line_idx)
-        else {
+        // Extract CallInfo — CST first, text fallback.
+        let Some(ci) = extract_call_info(pos, &self.indexer, uri, lines, before, line_idx) else {
             return Ok(None);
         };
 
         let params_text =
-            find_fun_signature_with_receiver(&self.indexer, uri, &name, qualifier.as_deref());
+            find_fun_signature_with_receiver(&self.indexer, uri, &ci.fn_name, ci.qualifier.as_deref());
         if params_text.is_empty() {
             return Ok(None);
         }
 
-        Ok(build_signature_help(&name, &params_text, active_param))
+        Ok(build_signature_help(&ci.fn_name, &params_text, ci.active_param))
     }
 
     pub(super) async fn folding_range_impl(
@@ -595,7 +593,17 @@ fn build_signature_help(
     })
 }
 
-/// Extract `(fn_name, qualifier, active_param)` for the call under the cursor.
+/// Resolved call-site information needed for `textDocument/signatureHelp`.
+struct CallInfo {
+    /// Name of the function being called.
+    fn_name: String,
+    /// Optional receiver before the dot (e.g. `"builder"` in `builder.build()`).
+    qualifier: Option<String>,
+    /// Zero-based index of the parameter the cursor is currently inside.
+    active_param: u32,
+}
+
+/// Extract [`CallInfo`] for the call under the cursor.
 ///
 /// Tries the CST (live tree) first — O(depth), accurate qualifier extraction.
 /// Falls back to a text scan when no live tree is available, when the cursor
@@ -607,7 +615,7 @@ fn extract_call_info(
     lines: &[String],
     before: &str,
     line_idx: usize,
-) -> Option<(String, Option<String>, u32)> {
+) -> Option<CallInfo> {
     // ── CST path ─────────────────────────────────────────────────────────────
     if let Some(result) = cst_call_info(pos, indexer, uri) {
         return Some(result);
@@ -627,7 +635,7 @@ fn cst_call_info(
     pos: Position,
     indexer: &crate::indexer::Indexer,
     uri: &Url,
-) -> Option<(String, Option<String>, u32)> {
+) -> Option<CallInfo> {
     use crate::indexer::live_tree::utf16_col_to_byte;
     use tree_sitter::Point;
 
@@ -688,7 +696,7 @@ fn cst_call_info(
         count
     };
 
-    Some((fn_name, qualifier, active_param))
+    Some(CallInfo { fn_name, qualifier, active_param })
 }
 
 /// Scans a single source line for an unclosed call-site opening.
@@ -791,7 +799,7 @@ fn text_call_info(
     lines: &[String],
     before: &str,
     line_idx: usize,
-) -> Option<(String, Option<String>, u32)> {
+) -> Option<CallInfo> {
     let mut depth: i32 = 0;
     let mut active_param: u32 = 0;
     let mut call_name: Option<String> = None;
@@ -842,8 +850,8 @@ fn text_call_info(
         }
     }
 
-    let name = call_name.filter(|n| !n.is_empty())?;
-    Some((name, call_qualifier, active_param))
+    let fn_name = call_name.filter(|n| !n.is_empty())?;
+    Some(CallInfo { fn_name, qualifier: call_qualifier, active_param })
 }
 
 /// Iterator over the byte offsets in `line` where `word` occurs as a whole
