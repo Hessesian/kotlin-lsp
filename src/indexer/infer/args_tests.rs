@@ -26,7 +26,10 @@ fn extract_first_arg_nested_parens() {
 #[test]
 fn extract_first_arg_generic_type() {
     // Generic type in argument should not confuse the depth counter.
-    assert_eq!(extract_first_arg("convert(List<String>(), other)"), Some("List<String>()"));
+    assert_eq!(
+        extract_first_arg("convert(List<String>(), other)"),
+        Some("List<String>()")
+    );
 }
 
 #[test]
@@ -41,16 +44,22 @@ fn extract_first_arg_no_parens() {
 
 #[test]
 fn extract_first_arg_whitespace_trimmed() {
-    assert_eq!(extract_first_arg("fn(  receiver  , other)"), Some("receiver"));
+    assert_eq!(
+        extract_first_arg("fn(  receiver  , other)"),
+        Some("receiver")
+    );
 }
 
 // ─── extract_named_arg_name ───────────────────────────────────────────────────
 
 #[test]
 fn extract_named_arg_simple() {
-    assert_eq!(extract_named_arg_name("  buildingSavings = "), Some("buildingSavings"));
-    assert_eq!(extract_named_arg_name("  loan = "),            Some("loan"));
-    assert_eq!(extract_named_arg_name("  loan="),              Some("loan"));
+    assert_eq!(
+        extract_named_arg_name("  buildingSavings = "),
+        Some("buildingSavings")
+    );
+    assert_eq!(extract_named_arg_name("  loan = "), Some("loan"));
+    assert_eq!(extract_named_arg_name("  loan="), Some("loan"));
 }
 
 #[test]
@@ -75,7 +84,7 @@ fn extract_named_arg_operator_rejects() {
 #[test]
 fn extract_named_arg_open_paren_before_ident_rejects() {
     // Opening `(` before the identifier disqualifies it.
-    assert_eq!(extract_named_arg_name("(isRefresh = "),      None);
+    assert_eq!(extract_named_arg_name("(isRefresh = "), None);
     assert_eq!(extract_named_arg_name("fn(x, isRefresh = "), None);
 }
 
@@ -103,23 +112,38 @@ fn find_named_param_type_not_found() {
 #[test]
 fn find_named_param_type_simple_type() {
     let sig = "name: String, age: Int, active: Boolean";
-    assert_eq!(find_named_param_type_in_sig(sig, "name"),   Some("String".into()));
-    assert_eq!(find_named_param_type_in_sig(sig, "age"),    Some("Int".into()));
-    assert_eq!(find_named_param_type_in_sig(sig, "active"), Some("Boolean".into()));
+    assert_eq!(
+        find_named_param_type_in_sig(sig, "name"),
+        Some("String".into())
+    );
+    assert_eq!(find_named_param_type_in_sig(sig, "age"), Some("Int".into()));
+    assert_eq!(
+        find_named_param_type_in_sig(sig, "active"),
+        Some("Boolean".into())
+    );
 }
 
 #[test]
 fn find_named_param_type_suffix_not_matched() {
     // `otherParam:` must not match when searching for `Param`.
     let sig = "otherParam: String, param: Int";
-    assert_eq!(find_named_param_type_in_sig(sig, "param"), Some("Int".into()));
+    assert_eq!(
+        find_named_param_type_in_sig(sig, "param"),
+        Some("Int".into())
+    );
 }
 
 #[test]
 fn find_named_param_type_with_val_prefix() {
     let sig = "val key: ProductKey, val mapper: DetailMapper";
-    assert_eq!(find_named_param_type_in_sig(sig, "key"),    Some("ProductKey".into()));
-    assert_eq!(find_named_param_type_in_sig(sig, "mapper"), Some("DetailMapper".into()));
+    assert_eq!(
+        find_named_param_type_in_sig(sig, "key"),
+        Some("ProductKey".into())
+    );
+    assert_eq!(
+        find_named_param_type_in_sig(sig, "mapper"),
+        Some("DetailMapper".into())
+    );
 }
 
 // ─── has_named_params_not_it ──────────────────────────────────────────────────
@@ -131,7 +155,9 @@ fn has_named_params_single_named() {
 
 #[test]
 fn has_named_params_multi_named() {
-    assert!(has_named_params_not_it("loanId, isWustenrot -> setEvent(loanId)"));
+    assert!(has_named_params_not_it(
+        "loanId, isWustenrot -> setEvent(loanId)"
+    ));
 }
 
 #[test]
@@ -184,13 +210,19 @@ fn named_param_type_functional_type() {
 #[test]
 fn extract_first_arg_with_lambda_arrow() {
     // `->` inside the arg should not trip up the `>` depth tracking.
-    assert_eq!(extract_first_arg("run({ x -> x.name })"), Some("{ x -> x.name }"));
+    assert_eq!(
+        extract_first_arg("run({ x -> x.name })"),
+        Some("{ x -> x.name }")
+    );
 }
 
 #[test]
 fn extract_first_arg_generic_type_regression() {
     // A generic first arg like `listOf<String>()` — `>` closes a generic, not a lambda.
-    assert_eq!(extract_first_arg("fn(listOf<String>(), other)"), Some("listOf<String>()"));
+    assert_eq!(
+        extract_first_arg("fn(listOf<String>(), other)"),
+        Some("listOf<String>()")
+    );
 }
 
 // ─── Regression: `>` comparison operators in find_named_param_type_in_sig ────
@@ -201,16 +233,21 @@ fn named_param_type_default_value_with_gt_operator() {
     // Note: params_text is just the params, not the full `name: Type = default` form
     // that Kotlin allows. This tests that bare `>` at depth-0 is ignored.
     let sig = "threshold: Int, name: String";
-    assert_eq!(find_named_param_type_in_sig(sig, "name"), Some("String".to_owned()));
+    assert_eq!(
+        find_named_param_type_in_sig(sig, "name"),
+        Some("String".to_owned())
+    );
 }
 
 // ─── CST fast path for find_as_call_arg_type ─────────────────────────────────
 
-use tower_lsp::lsp_types::Url;
 use crate::indexer::Indexer;
 use crate::types::CursorPos;
+use tower_lsp::lsp_types::Url;
 
-fn uri(path: &str) -> Url { Url::parse(&format!("file:///test{path}")).unwrap() }
+fn uri(path: &str) -> Url {
+    Url::parse(&format!("file:///test{path}")).unwrap()
+}
 
 fn indexed_with_live(path: &str, src: &str) -> (Url, Indexer) {
     let u = uri(path);
@@ -221,7 +258,9 @@ fn indexed_with_live(path: &str, src: &str) -> (Url, Indexer) {
     (u, idx)
 }
 
-fn lines_of(src: &str) -> Vec<String> { src.lines().map(String::from).collect() }
+fn lines_of(src: &str) -> Vec<String> {
+    src.lines().map(String::from).collect()
+}
 
 #[test]
 fn cst_positional_arg_first() {
@@ -231,8 +270,14 @@ fn cst_positional_arg_first() {
     let (u, idx) = indexed_with_live("/t.kt", src);
     let lines = lines_of(src);
     // "fun main() { send(" is 18 chars → `it` starts at col 18
-    let pos = CursorPos { line: 1, utf16_col: 18 };
-    assert_eq!(find_as_call_arg_type(&lines, pos, &idx, &u).as_deref(), Some("Item"));
+    let pos = CursorPos {
+        line: 1,
+        utf16_col: 18,
+    };
+    assert_eq!(
+        find_as_call_arg_type(&lines, pos, &idx, &u).as_deref(),
+        Some("Item")
+    );
 }
 
 #[test]
@@ -243,8 +288,14 @@ fn cst_positional_arg_second() {
     let (u, idx) = indexed_with_live("/t.kt", src);
     let lines = lines_of(src);
     // "fun main() { zip(a, " is 21 chars → `it` starts at col 21
-    let pos = CursorPos { line: 1, utf16_col: 21 };
-    assert_eq!(find_as_call_arg_type(&lines, pos, &idx, &u).as_deref(), Some("B"));
+    let pos = CursorPos {
+        line: 1,
+        utf16_col: 21,
+    };
+    assert_eq!(
+        find_as_call_arg_type(&lines, pos, &idx, &u).as_deref(),
+        Some("B")
+    );
 }
 
 #[test]
@@ -255,7 +306,10 @@ fn cst_cursor_in_lambda_not_a_call_arg() {
     let (u, idx) = indexed_with_live("/t.kt", src);
     let lines = lines_of(src);
     // "fun main() { items.map { " = 25 chars → `it` at col 25
-    let pos = CursorPos { line: 0, utf16_col: 25 };
+    let pos = CursorPos {
+        line: 0,
+        utf16_col: 25,
+    };
     // Should return None since `it` is inside a lambda, not a direct argument.
     assert_eq!(find_as_call_arg_type(&lines, pos, &idx, &u), None);
 }

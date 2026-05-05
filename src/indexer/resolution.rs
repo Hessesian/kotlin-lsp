@@ -3,12 +3,12 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use tower_lsp::lsp_types::{Url, SymbolKind};
+use tower_lsp::lsp_types::{SymbolKind, Url};
 
+use crate::indexer::doc::extract_doc_comment;
 use crate::indexer::Location;
 use crate::types::{FileData, SymbolEntry};
 use crate::LinesExt;
-use crate::indexer::doc::extract_doc_comment;
 
 /// Domain-level resolution result. Small, owned data suitable for LSP adapters.
 pub struct ResolvedSymbol {
@@ -39,10 +39,31 @@ pub struct ResolveOptions {
 }
 
 impl ResolveOptions {
-    pub fn hover()      -> Self { Self { allow_rg: true,  include_doc: true,  apply_subst: true,  prefer_cached_detail: false } }
-    pub fn completion() -> Self { Self { allow_rg: false, include_doc: true,  apply_subst: true,  prefer_cached_detail: true  } }
+    pub fn hover() -> Self {
+        Self {
+            allow_rg: true,
+            include_doc: true,
+            apply_subst: true,
+            prefer_cached_detail: false,
+        }
+    }
+    pub fn completion() -> Self {
+        Self {
+            allow_rg: false,
+            include_doc: true,
+            apply_subst: true,
+            prefer_cached_detail: true,
+        }
+    }
     #[allow(dead_code)]
-    pub fn goto_def()   -> Self { Self { allow_rg: true,  include_doc: false, apply_subst: false, prefer_cached_detail: false } }
+    pub fn goto_def() -> Self {
+        Self {
+            allow_rg: true,
+            include_doc: false,
+            apply_subst: false,
+            prefer_cached_detail: false,
+        }
+    }
 }
 
 /// Substitution context used by the pipeline.
@@ -54,7 +75,10 @@ pub enum SubstitutionContext<'a> {
     /// `cursor_line`: the cursor's line in `calling_uri`, used to identify which
     /// class is calling (when a file has multiple classes extending the same base).
     /// `None` = unknown / don't disambiguate → picks the first matching class.
-    CrossFile { calling_uri: &'a str, cursor_line: Option<u32> },
+    CrossFile {
+        calling_uri: &'a str,
+        cursor_line: Option<u32>,
+    },
     #[allow(dead_code)]
     Precomputed(&'a HashMap<String, String>),
 }
@@ -75,8 +99,7 @@ pub trait IndexRead {
         allow_rg: bool,
     ) -> Vec<Location> {
         let _ = (qualifier, from_uri, allow_rg);
-        self.get_definitions(name)
-            .unwrap_or_default()
+        self.get_definitions(name).unwrap_or_default()
     }
 
     /// Infer the concrete type of an unannotated variable/property.
@@ -135,7 +158,9 @@ pub fn enrich_at_line<I: IndexRead>(
     options: &ResolveOptions,
 ) -> Option<ResolvedSymbol> {
     let data = index.get_file_data(uri_str)?;
-    let sym = data.symbols.iter()
+    let sym = data
+        .symbols
+        .iter()
         .find(|s| {
             s.start_line() == line
                 && s.selection_range.start.character <= col
@@ -144,12 +169,19 @@ pub fn enrich_at_line<I: IndexRead>(
         .or_else(|| data.symbols.iter().find(|s| s.start_line() == line))?;
 
     let uri = Url::parse(uri_str).ok()?;
-    let location = Location { uri, range: sym.selection_range };
+    let location = Location {
+        uri,
+        range: sym.selection_range,
+    };
     enrich_symbol(index, &data, &location, &sym.name, subst_ctx, options)
 }
 
 /// Build substitution map for enclosing class at cursor position.
-pub fn build_subst_map<I: IndexRead>(index: &I, uri: &str, cursor_line: u32) -> HashMap<String, String> {
+pub fn build_subst_map<I: IndexRead>(
+    index: &I,
+    uri: &str,
+    cursor_line: u32,
+) -> HashMap<String, String> {
     build_enclosing_class_subst_impl(index, uri, cursor_line)
 }
 
@@ -165,7 +197,11 @@ pub(crate) fn cross_file_type_subst<I: IndexRead>(
     sig: &str,
 ) -> String {
     let subst = build_type_param_subst_impl(index, sym_uri, sym_line, calling_uri, None);
-    if subst.is_empty() { sig.to_owned() } else { super::apply_type_subst(sig, &subst) }
+    if subst.is_empty() {
+        sig.to_owned()
+    } else {
+        super::apply_type_subst(sig, &subst)
+    }
 }
 
 /// Extract the simple type name from a property detail string.
@@ -206,7 +242,11 @@ fn extract_canonical_signature(sym: &SymbolEntry, data: &FileData, prefer_cached
         return sym.detail.clone();
     }
     let full = data.lines.collect_signature(sym.start_line() as usize);
-    if !full.is_empty() { full } else { sym.detail.clone() }
+    if !full.is_empty() {
+        full
+    } else {
+        sym.detail.clone()
+    }
 }
 
 /// Apply type-parameter substitution to a signature string.
@@ -224,11 +264,18 @@ fn locate_symbol<I: IndexRead>(
     from_uri: &Url,
     allow_rg: bool,
 ) -> Option<Location> {
-    index.resolve_locations(name, qualifier, from_uri, allow_rg).into_iter().next()
+    index
+        .resolve_locations(name, qualifier, from_uri, allow_rg)
+        .into_iter()
+        .next()
 }
 
 /// Find SymbolEntry in FileData by range or name.
-fn find_symbol_entry<'a>(data: &'a FileData, location: &Location, name: &str) -> Option<&'a SymbolEntry> {
+fn find_symbol_entry<'a>(
+    data: &'a FileData,
+    location: &Location,
+    name: &str,
+) -> Option<&'a SymbolEntry> {
     data.symbols
         .iter()
         .find(|s| s.selection_range == location.range)
@@ -287,13 +334,21 @@ fn enrich_symbol<I: IndexRead>(
 /// leading modifiers (e.g. `private`, `override`).
 fn augment_property_sig(raw: &str, name: &str, kind: SymbolKind, inferred: &str) -> String {
     let needle = format!(" {name}");
-    let name_pos = raw.find(&needle)
-        .map(|p| p + 1)
-        .or_else(|| if raw.starts_with(name) { Some(0) } else { None });
+    let name_pos = raw.find(&needle).map(|p| p + 1).or_else(|| {
+        if raw.starts_with(name) {
+            Some(0)
+        } else {
+            None
+        }
+    });
     if let Some(pos) = name_pos {
         format!("{}: {inferred}", &raw[..pos + name.len()])
     } else {
-        let kw = if kind == SymbolKind::VARIABLE { "var" } else { "val" };
+        let kw = if kind == SymbolKind::VARIABLE {
+            "var"
+        } else {
+            "val"
+        };
         format!("{kw} {name}: {inferred}")
     }
 }
@@ -313,9 +368,16 @@ fn build_subst_if_needed<I: IndexRead>(
 
     match subst_ctx {
         SubstitutionContext::None => HashMap::new(),
-        SubstitutionContext::CrossFile { calling_uri, cursor_line } => {
-            build_type_param_subst_impl(index, location.uri.as_str(), location.range.start.line, calling_uri, cursor_line)
-        }
+        SubstitutionContext::CrossFile {
+            calling_uri,
+            cursor_line,
+        } => build_type_param_subst_impl(
+            index,
+            location.uri.as_str(),
+            location.range.start.line,
+            calling_uri,
+            cursor_line,
+        ),
         SubstitutionContext::Precomputed(m) => m.clone(),
     }
 }
@@ -350,7 +412,9 @@ fn build_type_param_subst_impl<I: IndexRead>(
     };
 
     let type_params = &container_sym.type_params;
-    if type_params.is_empty() { return HashMap::new(); }
+    if type_params.is_empty() {
+        return HashMap::new();
+    }
 
     let calling_data = match index.get_file_data(calling_uri) {
         Some(d) => d,
@@ -366,7 +430,9 @@ fn build_type_param_subst_impl<I: IndexRead>(
         .and_then(|name| calling_data.symbols.iter().find(|s| s.name == name))
         .map(|s| s.start_line());
 
-    let type_args = calling_data.supers.iter()
+    let type_args = calling_data
+        .supers
+        .iter()
         .find(|(line, base, _)| {
             base == &container_name
                 && calling_class_line.is_none_or(|class_line| *line == class_line)
@@ -374,9 +440,13 @@ fn build_type_param_subst_impl<I: IndexRead>(
         .map(|(_, _, args)| args.clone())
         .unwrap_or_default();
 
-    if type_args.is_empty() { return HashMap::new(); }
+    if type_args.is_empty() {
+        return HashMap::new();
+    }
 
-    type_params.iter().zip(type_args.iter())
+    type_params
+        .iter()
+        .zip(type_args.iter())
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect()
 }
@@ -421,7 +491,8 @@ fn build_enclosing_class_subst_impl<I: IndexRead>(
             .and_then(|locs| locs.into_iter().next())
             .and_then(|loc| {
                 index.get_file_data(loc.uri.as_str()).and_then(|base_data| {
-                    base_data.symbols
+                    base_data
+                        .symbols
                         .iter()
                         .find(|s| s.name == *base_name)
                         .map(|s| s.type_params.clone())
@@ -441,22 +512,52 @@ fn build_enclosing_class_subst_impl<I: IndexRead>(
     // and that type extends `FlowReducer<Event, State>`, include
     // `{Event→…, State→…}` mappings from FlowReducer's type params.
     for sym in data.symbols.iter() {
-        if sym.start_line() <= class_line { continue; }
-        if sym.start_line() > class_end_line { continue; }
-        if !matches!(sym.kind, SymbolKind::FIELD | SymbolKind::PROPERTY) { continue; }
+        if sym.start_line() <= class_line {
+            continue;
+        }
+        if sym.start_line() > class_end_line {
+            continue;
+        }
+        if !matches!(sym.kind, SymbolKind::FIELD | SymbolKind::PROPERTY) {
+            continue;
+        }
         let type_name = extract_property_type_name(&sym.detail);
-        if type_name.is_empty() { continue; }
-        let Some(locs) = index.get_definitions(type_name) else { continue };
-        let Some(loc) = locs.into_iter().next() else { continue };
-        let Some(prop_type_data) = index.get_file_data(loc.uri.as_str()) else { continue };
-        let Some(prop_sym) = prop_type_data.symbols.iter().find(|s| s.name == type_name) else { continue };
+        if type_name.is_empty() {
+            continue;
+        }
+        let Some(locs) = index.get_definitions(type_name) else {
+            continue;
+        };
+        let Some(loc) = locs.into_iter().next() else {
+            continue;
+        };
+        let Some(prop_type_data) = index.get_file_data(loc.uri.as_str()) else {
+            continue;
+        };
+        let Some(prop_sym) = prop_type_data.symbols.iter().find(|s| s.name == type_name) else {
+            continue;
+        };
         let prop_class_line = prop_sym.start_line();
         for (line, super_name, type_args) in prop_type_data.supers.iter() {
-            if *line != prop_class_line || type_args.is_empty() { continue; }
-            let Some(super_locs) = index.get_definitions(super_name) else { continue };
-            let Some(super_loc) = super_locs.into_iter().next() else { continue };
-            let Some(super_file_data) = index.get_file_data(super_loc.uri.as_str()) else { continue };
-            let Some(super_sym) = super_file_data.symbols.iter().find(|s| s.name == *super_name) else { continue };
+            if *line != prop_class_line || type_args.is_empty() {
+                continue;
+            }
+            let Some(super_locs) = index.get_definitions(super_name) else {
+                continue;
+            };
+            let Some(super_loc) = super_locs.into_iter().next() else {
+                continue;
+            };
+            let Some(super_file_data) = index.get_file_data(super_loc.uri.as_str()) else {
+                continue;
+            };
+            let Some(super_sym) = super_file_data
+                .symbols
+                .iter()
+                .find(|s| s.name == *super_name)
+            else {
+                continue;
+            };
             for (param, arg) in super_sym.type_params.iter().zip(type_args.iter()) {
                 result.entry(param.clone()).or_insert_with(|| arg.clone());
             }
@@ -517,15 +618,19 @@ impl IndexRead for super::Indexer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tower_lsp::lsp_types::Url;
     use std::collections::HashMap;
+    use tower_lsp::lsp_types::Url;
 
     // ── Minimal stub (for tests that don't need real data) ───────────────────
 
     struct TestIndex;
     impl IndexRead for TestIndex {
-        fn get_definitions(&self, _name: &str) -> Option<Vec<Location>> { None }
-        fn get_file_data(&self, _uri: &str) -> Option<Arc<FileData>> { None }
+        fn get_definitions(&self, _name: &str) -> Option<Vec<Location>> {
+            None
+        }
+        fn get_file_data(&self, _uri: &str) -> Option<Arc<FileData>> {
+            None
+        }
     }
 
     // ── Fully-populated index for end-to-end tests ───────────────────────────
@@ -558,27 +663,36 @@ mod tests {
     fn make_range(start_line: u32, end_line: u32) -> tower_lsp::lsp_types::Range {
         use tower_lsp::lsp_types::Position;
         tower_lsp::lsp_types::Range {
-            start: Position { line: start_line, character: 0 },
-            end:   Position { line: end_line,   character: 0 },
+            start: Position {
+                line: start_line,
+                character: 0,
+            },
+            end: Position {
+                line: end_line,
+                character: 0,
+            },
         }
     }
 
     fn make_sym(name: &str, kind: SymbolKind, start_line: u32, end_line: u32) -> SymbolEntry {
         use crate::types::Visibility;
         SymbolEntry {
-            name:               name.to_owned(),
+            name: name.to_owned(),
             kind,
-            visibility:         Visibility::Public,
-            range:              make_range(start_line, end_line),
-            selection_range:    make_range(start_line, start_line),
-            detail:             String::new(),
-            type_params:        Vec::new(),
+            visibility: Visibility::Public,
+            range: make_range(start_line, end_line),
+            selection_range: make_range(start_line, start_line),
+            detail: String::new(),
+            type_params: Vec::new(),
             extension_receiver: String::new(),
         }
     }
 
     fn make_location(uri: &str, line: u32) -> Location {
-        Location { uri: Url::parse(uri).unwrap(), range: make_range(line, line) }
+        Location {
+            uri: Url::parse(uri).unwrap(),
+            range: make_range(line, line),
+        }
     }
 
     // ── Basic stub tests ──────────────────────────────────────────────────────
@@ -587,7 +701,9 @@ mod tests {
     fn stub_resolve_returns_none() {
         let idx = TestIndex;
         let res = resolve_symbol_info(
-            &idx, "Foo", None,
+            &idx,
+            "Foo",
+            None,
             &Url::parse("file:///x").unwrap(),
             SubstitutionContext::None,
             &ResolveOptions::hover(),
@@ -663,7 +779,11 @@ mod tests {
 
         let child_data = Arc::new(crate::types::FileData {
             symbols: vec![make_sym("Child", SymbolKind::CLASS, 0, 20)],
-            supers: vec![(0, "Base".to_owned(), vec!["String".to_owned(), "Int".to_owned()])],
+            supers: vec![(
+                0,
+                "Base".to_owned(),
+                vec!["String".to_owned(), "Int".to_owned()],
+            )],
             ..Default::default()
         });
 
@@ -723,7 +843,13 @@ mod tests {
 
     // ── enrich_at_line tests ──────────────────────────────────────────────────
 
-    fn make_sym_col(name: &str, kind: SymbolKind, line: u32, col_start: u32, col_end: u32) -> SymbolEntry {
+    fn make_sym_col(
+        name: &str,
+        kind: SymbolKind,
+        line: u32,
+        col_start: u32,
+        col_end: u32,
+    ) -> SymbolEntry {
         use crate::types::Visibility;
         use tower_lsp::lsp_types::{Position, Range};
         SymbolEntry {
@@ -731,12 +857,24 @@ mod tests {
             kind,
             visibility: Visibility::Public,
             range: Range {
-                start: Position { line, character: col_start },
-                end:   Position { line, character: col_end },
+                start: Position {
+                    line,
+                    character: col_start,
+                },
+                end: Position {
+                    line,
+                    character: col_end,
+                },
             },
             selection_range: Range {
-                start: Position { line, character: col_start },
-                end:   Position { line, character: col_end },
+                start: Position {
+                    line,
+                    character: col_start,
+                },
+                end: Position {
+                    line,
+                    character: col_end,
+                },
             },
             detail: format!("fun {}()", name),
             type_params: Vec::new(),
@@ -755,20 +893,40 @@ mod tests {
             symbols: vec![sym_a, sym_b],
             lines: std::sync::Arc::new(vec![
                 "fun process() {}".to_owned(),
-                String::new(), String::new(), String::new(), String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
                 "fun process() {}".to_owned(),
             ]),
             ..Default::default()
         });
         let mut files = HashMap::new();
         files.insert(file_uri.to_owned(), file_data);
-        let idx = RealTestIndex { files, definitions: HashMap::new() };
+        let idx = RealTestIndex {
+            files,
+            definitions: HashMap::new(),
+        };
 
         // Picking line 0 returns the first symbol; line 5 returns the second.
-        let res0 = enrich_at_line(&idx, file_uri, 0, 6, SubstitutionContext::None, &ResolveOptions::hover());
+        let res0 = enrich_at_line(
+            &idx,
+            file_uri,
+            0,
+            6,
+            SubstitutionContext::None,
+            &ResolveOptions::hover(),
+        );
         assert!(res0.is_some(), "should find symbol on line 0");
 
-        let res5 = enrich_at_line(&idx, file_uri, 5, 6, SubstitutionContext::None, &ResolveOptions::hover());
+        let res5 = enrich_at_line(
+            &idx,
+            file_uri,
+            5,
+            6,
+            SubstitutionContext::None,
+            &ResolveOptions::hover(),
+        );
         assert!(res5.is_some(), "should find symbol on line 5");
 
         // Both have the same name but came from different symbol entries.
@@ -785,17 +943,28 @@ mod tests {
         let file_data = Arc::new(crate::types::FileData {
             symbols: vec![sym],
             lines: std::sync::Arc::new(vec![
-                String::new(), String::new(),
+                String::new(),
+                String::new(),
                 "fun fetch() {}".to_owned(),
             ]),
             ..Default::default()
         });
         let mut files = HashMap::new();
         files.insert(file_uri.to_owned(), file_data);
-        let idx = RealTestIndex { files, definitions: HashMap::new() };
+        let idx = RealTestIndex {
+            files,
+            definitions: HashMap::new(),
+        };
 
         // col 99 is far outside [4,9) — should still resolve via fallback.
-        let res = enrich_at_line(&idx, file_uri, 2, 99, SubstitutionContext::None, &ResolveOptions::hover());
+        let res = enrich_at_line(
+            &idx,
+            file_uri,
+            2,
+            99,
+            SubstitutionContext::None,
+            &ResolveOptions::hover(),
+        );
         assert!(res.is_some(), "fallback should work when col misses");
         assert_eq!(res.unwrap().name, "fetch");
     }
@@ -829,7 +998,9 @@ mod tests {
         let idx = RealTestIndex { files, definitions };
 
         let result = resolve_symbol_info(
-            &idx, "compute", None,
+            &idx,
+            "compute",
+            None,
             &Url::parse("file:///caller.kt").unwrap(),
             SubstitutionContext::None,
             &ResolveOptions::goto_def(),
@@ -839,7 +1010,11 @@ mod tests {
         let r = result.unwrap();
         assert_eq!(r.location.uri.as_str(), file_uri);
         // collect_signature reads from source lines and should prefer those
-        assert!(r.raw_signature.contains("compute"), "raw_signature: {}", r.raw_signature);
+        assert!(
+            r.raw_signature.contains("compute"),
+            "raw_signature: {}",
+            r.raw_signature
+        );
     }
 
     /// With substitution context: `{T→String}` applied to the signature.
@@ -873,7 +1048,9 @@ mod tests {
         subst.insert("T".to_owned(), "String".to_owned());
 
         let result = resolve_symbol_info(
-            &idx, "process", None,
+            &idx,
+            "process",
+            None,
             &Url::parse("file:///caller.kt").unwrap(),
             SubstitutionContext::Precomputed(&subst),
             &ResolveOptions::hover(),
@@ -881,8 +1058,16 @@ mod tests {
 
         assert!(result.is_some());
         let r = result.unwrap();
-        assert!(r.signature.contains("String"), "signature should have substituted T→String: {}", r.signature);
-        assert!(!r.signature.contains(": T"), "raw T should be replaced: {}", r.signature);
+        assert!(
+            r.signature.contains("String"),
+            "signature should have substituted T→String: {}",
+            r.signature
+        );
+        assert!(
+            !r.signature.contains(": T"),
+            "raw T should be replaced: {}",
+            r.signature
+        );
     }
 
     // ── Unb5/TRjS regression: CrossFile with cursor_line ─────────────────────
@@ -893,7 +1078,7 @@ mod tests {
     fn crossfile_cursor_line_disambiguates_multiple_callers() {
         use crate::types::Visibility;
 
-        let base_uri   = "file:///base.kt";
+        let base_uri = "file:///base.kt";
         let caller_uri = "file:///caller.kt";
 
         // Base: class FlowReducer<E, S>  with fun reduce(e: E): S
@@ -937,8 +1122,16 @@ mod tests {
         let caller_data = Arc::new(crate::types::FileData {
             symbols: vec![dash_class, sett_class],
             supers: vec![
-                (0, "FlowReducer".to_owned(), vec!["DashEvent".to_owned(), "DashState".to_owned()]),
-                (10, "FlowReducer".to_owned(), vec!["SettEvent".to_owned(), "SettState".to_owned()]),
+                (
+                    0,
+                    "FlowReducer".to_owned(),
+                    vec!["DashEvent".to_owned(), "DashState".to_owned()],
+                ),
+                (
+                    10,
+                    "FlowReducer".to_owned(),
+                    vec!["SettEvent".to_owned(), "SettState".to_owned()],
+                ),
             ],
             ..Default::default()
         });
@@ -953,25 +1146,51 @@ mod tests {
 
         // Cursor inside DashReducer (line 4): should use DashEvent/DashState
         let result_dash = resolve_symbol_info(
-            &idx, "reduce", None,
+            &idx,
+            "reduce",
+            None,
             &Url::parse(caller_uri).unwrap(),
-            SubstitutionContext::CrossFile { calling_uri: caller_uri, cursor_line: Some(4) },
+            SubstitutionContext::CrossFile {
+                calling_uri: caller_uri,
+                cursor_line: Some(4),
+            },
             &ResolveOptions::hover(),
         );
         let dash = result_dash.expect("should resolve reduce");
-        assert!(dash.signature.contains("DashEvent"), "dash: {}", dash.signature);
-        assert!(dash.signature.contains("DashState"), "dash: {}", dash.signature);
+        assert!(
+            dash.signature.contains("DashEvent"),
+            "dash: {}",
+            dash.signature
+        );
+        assert!(
+            dash.signature.contains("DashState"),
+            "dash: {}",
+            dash.signature
+        );
 
         // Cursor inside SettingsReducer (line 14): should use SettEvent/SettState
         let result_sett = resolve_symbol_info(
-            &idx, "reduce", None,
+            &idx,
+            "reduce",
+            None,
             &Url::parse(caller_uri).unwrap(),
-            SubstitutionContext::CrossFile { calling_uri: caller_uri, cursor_line: Some(14) },
+            SubstitutionContext::CrossFile {
+                calling_uri: caller_uri,
+                cursor_line: Some(14),
+            },
             &ResolveOptions::hover(),
         );
         let sett = result_sett.expect("should resolve reduce");
-        assert!(sett.signature.contains("SettEvent"), "sett: {}", sett.signature);
-        assert!(sett.signature.contains("SettState"), "sett: {}", sett.signature);
+        assert!(
+            sett.signature.contains("SettEvent"),
+            "sett: {}",
+            sett.signature
+        );
+        assert!(
+            sett.signature.contains("SettState"),
+            "sett: {}",
+            sett.signature
+        );
     }
 
     // ── enrich_at_line (completion resolve) ──────────────────────────────────
@@ -996,12 +1215,15 @@ mod tests {
         let result = enrich_at_line(
             &idx,
             uri,
-            0,    // line
-            0,    // col
+            0, // line
+            0, // col
             SubstitutionContext::None,
             &ResolveOptions::completion(),
         );
-        assert!(result.is_some(), "enrich_at_line should return Some for documented function");
+        assert!(
+            result.is_some(),
+            "enrich_at_line should return Some for documented function"
+        );
         let info = result.unwrap();
         assert!(!info.signature.is_empty(), "signature should not be empty");
         assert_eq!(info.signature, "fun add(a: Int, b: Int): Int");
@@ -1028,12 +1250,15 @@ mod tests {
         let result = enrich_at_line(
             &idx,
             uri,
-            0,    // line (matches)
-            5,    // col (doesn't match, but fallback should find it)
+            0, // line (matches)
+            5, // col (doesn't match, but fallback should find it)
             SubstitutionContext::None,
             &ResolveOptions::completion(),
         );
-        assert!(result.is_some(), "enrich_at_line should fall back to line-only match");
+        assert!(
+            result.is_some(),
+            "enrich_at_line should fall back to line-only match"
+        );
         assert_eq!(result.unwrap().kind, SymbolKind::FUNCTION);
     }
 
@@ -1065,6 +1290,10 @@ mod tests {
             &ResolveOptions::completion(),
         );
         assert!(result.is_some());
-        assert_eq!(result.unwrap().name, "second", "should prefer exact position match");
+        assert_eq!(
+            result.unwrap().name,
+            "second",
+            "should prefer exact position match"
+        );
     }
 }

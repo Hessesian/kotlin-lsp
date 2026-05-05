@@ -13,14 +13,15 @@
 
 use tower_lsp::lsp_types::*;
 
+use super::Indexer;
 use crate::types::SymbolEntry;
 use crate::StrExt;
-use super::Indexer;
 
 impl Indexer {
     /// Returns true if `name` has at least one definition location inside `uri`.
     pub fn is_declared_in(&self, uri: &Url, name: &str) -> bool {
-        self.definitions.get(name)
+        self.definitions
+            .get(name)
             .map(|locs| locs.iter().any(|l| l.uri == *uri))
             .unwrap_or(false)
     }
@@ -98,23 +99,28 @@ impl Indexer {
     ) -> (Option<String>, Option<String>) {
         let file = match self.files.get(uri.as_str()) {
             Some(f) => f,
-            None    => return (None, None),
+            None => return (None, None),
         };
         for line in file.lines.iter() {
             let t = line.trim();
-            if !t.starts_with("import ") { continue; }
+            if !t.starts_with("import ") {
+                continue;
+            }
             // Handle `import a.b.c.Name` and `import a.b.c.Name as Alias`
             let import_path = t["import ".len()..].split_whitespace().next().unwrap_or("");
             let segments: Vec<&str> = import_path.split('.').collect();
             // Last segment should match `name` (or be `*`).
             let last = *segments.last().unwrap_or(&"");
-            if last != name && last != "*" { continue; }
+            if last != name && last != "*" {
+                continue;
+            }
 
             // Found a matching import. The declared package is everything up to (not incl.) `name`.
             // The parent class is the segment immediately before `name` if it starts uppercase.
             if last == name && segments.len() >= 2 {
                 let pkg = segments[..segments.len() - 1].join(".");
-                let parent = segments.get(segments.len() - 2)
+                let parent = segments
+                    .get(segments.len() - 2)
                     .filter(|s| s.starts_with_uppercase())
                     .map(|s| s.to_string());
                 return (parent, Some(pkg));
@@ -122,36 +128,39 @@ impl Indexer {
         }
         (None, None)
     }
-
 }
 
 pub(crate) fn symbol_kw(kind: SymbolKind) -> &'static str {
     match kind {
-        SymbolKind::CLASS          => "class",
-        SymbolKind::INTERFACE      => "interface",
-        SymbolKind::FUNCTION       => "fun",
-        SymbolKind::METHOD         => "fun",
-        SymbolKind::VARIABLE       => "var",
-        SymbolKind::CONSTANT       => "val",
-        SymbolKind::OBJECT         => "object",
+        SymbolKind::CLASS => "class",
+        SymbolKind::INTERFACE => "interface",
+        SymbolKind::FUNCTION => "fun",
+        SymbolKind::METHOD => "fun",
+        SymbolKind::VARIABLE => "var",
+        SymbolKind::CONSTANT => "val",
+        SymbolKind::OBJECT => "object",
         SymbolKind::TYPE_PARAMETER => "typealias",
-        SymbolKind::ENUM           => "enum class",
-        SymbolKind::FIELD          => "field",
-        _                          => "symbol",
+        SymbolKind::ENUM => "enum class",
+        SymbolKind::FIELD => "field",
+        _ => "symbol",
     }
 }
 
 pub(crate) fn symbol_kw_for_lang(kind: SymbolKind, lang: &str) -> &'static str {
     let kw = symbol_kw(kind);
     // Swift uses `func`, not `fun`.
-    if lang == "swift" && kw == "fun" { "func" } else { kw }
+    if lang == "swift" && kw == "fun" {
+        "func"
+    } else {
+        kw
+    }
 }
 
 pub(crate) fn lang_str(path: &str) -> &'static str {
     match crate::Language::from_path(path) {
         crate::Language::Kotlin => "kotlin",
-        crate::Language::Swift  => "swift",
-        crate::Language::Java   => "java",
+        crate::Language::Swift => "swift",
+        crate::Language::Java => "java",
     }
 }
 
@@ -164,8 +173,13 @@ pub(crate) fn lang_str(path: &str) -> &'static str {
 ///
 /// Re-exported as `crate::indexer::apply_type_subst` for use by inlay_hints,
 /// backend handlers, and the resolution module.
-pub(crate) fn apply_type_subst(sig: &str, subst: &std::collections::HashMap<String, String>) -> String {
-    if subst.is_empty() { return sig.to_owned(); }
+pub(crate) fn apply_type_subst(
+    sig: &str,
+    subst: &std::collections::HashMap<String, String>,
+) -> String {
+    if subst.is_empty() {
+        return sig.to_owned();
+    }
     let mut result = String::with_capacity(sig.len() + 16);
     let chars: Vec<char> = sig.chars().collect();
     let mut i = 0;

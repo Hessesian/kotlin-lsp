@@ -1,26 +1,26 @@
 use std::sync::Arc;
-use tower_lsp::lsp_types::{
-    CompletionItem, CompletionItemKind, InsertTextFormat, SymbolKind, Url,
-};
+use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, InsertTextFormat, SymbolKind, Url};
 
 use crate::indexer::Indexer;
-use crate::types::Visibility;
-use crate::LinesExt;
-use crate::StrExt;
 use crate::parser::parse_by_extension;
 use crate::stdlib::bare_completions;
 use crate::stdlib_tail::dot_completions_for_lang;
+use crate::types::Visibility;
+use crate::LinesExt;
+use crate::StrExt;
 
-use super::{fqns_for_name, already_imported,
-            resolve_symbol_inner, resolve_symbol_no_rg};
-use super::infer::{ReceiverKind, ReceiverType, infer_receiver_type};
+use super::infer::{infer_receiver_type, ReceiverKind, ReceiverType};
+use super::{already_imported, fqns_for_name, resolve_symbol_inner, resolve_symbol_no_rg};
 
 // ─── match scoring ────────────────────────────────────────────────────────────
 
 /// Returns true if `name` is SCREAMING_SNAKE_CASE (all letters are uppercase).
 /// Used to suppress constants/enum variants when the user types a CamelCase prefix.
 pub(crate) fn is_screaming_snake(name: &str) -> bool {
-    name.chars().any(|c| c.is_alphabetic()) && name.chars().all(|c| c.is_uppercase() || c == '_' || c.is_ascii_digit())
+    name.chars().any(|c| c.is_alphabetic())
+        && name
+            .chars()
+            .all(|c| c.is_uppercase() || c == '_' || c.is_ascii_digit())
 }
 
 /// Score how well `name` matches `prefix`. Lower = better.
@@ -32,12 +32,20 @@ pub(crate) fn is_screaming_snake(name: &str) -> bool {
 /// - `2` — `name` contains `prefix` as a case-insensitive substring
 /// - `None` — no match; exclude this symbol
 pub(crate) fn match_score(name: &str, prefix: &str) -> Option<u8> {
-    if prefix.is_empty() { return Some(0); }
-    let name_lower  = name.to_lowercase();
+    if prefix.is_empty() {
+        return Some(0);
+    }
+    let name_lower = name.to_lowercase();
     let prefix_lower = prefix.to_lowercase();
-    if name_lower.starts_with(&prefix_lower)        { return Some(0); }
-    if camel_acronym_match(name, prefix)            { return Some(1); }
-    if name_lower.contains(&prefix_lower)           { return Some(2); }
+    if name_lower.starts_with(&prefix_lower) {
+        return Some(0);
+    }
+    if camel_acronym_match(name, prefix) {
+        return Some(1);
+    }
+    if name_lower.contains(&prefix_lower) {
+        return Some(2);
+    }
     None
 }
 
@@ -73,8 +81,13 @@ fn camel_acronym_match(name: &str, prefix: &str) -> bool {
     let mut wi = 0;
     for &pc in &prefix_chars {
         loop {
-            if wi >= word_starts.len() { return false; }
-            if word_starts[wi] == pc   { wi += 1; break; }
+            if wi >= word_starts.len() {
+                return false;
+            }
+            if word_starts[wi] == pc {
+                wi += 1;
+                break;
+            }
             wi += 1;
         }
     }
@@ -145,20 +158,28 @@ pub(crate) fn is_annotation_context(line: &str, prefix: &str) -> bool {
 ///
 /// Only called for Kotlin files; Java files don't consume Kotlin extension functions.
 fn extension_fn_completions(
-    idx:           &Indexer,
+    idx: &Indexer,
     receiver_type: &str,
-    from_uri:      &Url,
-    snippets:      bool,
+    from_uri: &Url,
+    snippets: bool,
 ) -> Vec<CompletionItem> {
-    if receiver_type.is_empty() { return vec![]; }
+    if receiver_type.is_empty() {
+        return vec![];
+    }
 
     // Gather current imports + package once (to avoid repeating per symbol).
     let is_java = false;
     let live = idx.live_lines.get(from_uri.as_str()).map(|ll| ll.clone());
-    let (cur_imports, cur_pkg, cur_lines) = idx.files.get(from_uri.as_str())
+    let (cur_imports, cur_pkg, cur_lines) = idx
+        .files
+        .get(from_uri.as_str())
         .map(|f| {
             let lines = live.clone().unwrap_or_else(|| f.lines.clone());
-            let imports = if live.is_some() { lines.parse_imports() } else { f.imports.clone() };
+            let imports = if live.is_some() {
+                lines.parse_imports()
+            } else {
+                f.imports.clone()
+            };
             (imports, f.package.clone().unwrap_or_default(), lines)
         })
         .unwrap_or_else(|| {
@@ -175,25 +196,44 @@ fn extension_fn_completions(
         let file = file_entry.value();
         let is_same_file = file_uri_str == from_uri.as_str();
         // Only look at Kotlin files — extension functions are a Kotlin feature.
-        if !crate::Language::from_path(&file_uri_str).is_kotlin() { continue; }
+        if !crate::Language::from_path(&file_uri_str).is_kotlin() {
+            continue;
+        }
 
         for sym in &file.symbols {
-            if sym.extension_receiver != receiver_type { continue; }
+            if sym.extension_receiver != receiver_type {
+                continue;
+            }
             // Skip private/protected from other files — inaccessible across file boundaries.
             // Same-file private/protected are fine.
-            if !is_same_file && matches!(sym.visibility, Visibility::Private | Visibility::Protected) { continue; }
+            if !is_same_file
+                && matches!(sym.visibility, Visibility::Private | Visibility::Protected)
+            {
+                continue;
+            }
 
             let dedup_key = format!("{}:{}", sym.name, file_uri_str);
-            if !seen.insert(dedup_key) { continue; }
+            if !seen.insert(dedup_key) {
+                continue;
+            }
 
             // Build FQN for auto-import: package.funcName
             let pkg = file.package.as_deref().unwrap_or("");
-            let fqn = if pkg.is_empty() { sym.name.clone() } else { format!("{pkg}.{}", sym.name) };
+            let fqn = if pkg.is_empty() {
+                sym.name.clone()
+            } else {
+                format!("{pkg}.{}", sym.name)
+            };
 
-            let pkg_of_fqn = match fqn.rfind('.') { Some(i) => &fqn[..i], None => "" };
+            let pkg_of_fqn = match fqn.rfind('.') {
+                Some(i) => &fqn[..i],
+                None => "",
+            };
             let needs_import = !is_same_file
                 && !already_imported(&fqn, &cur_imports)
-                && !cur_imports.iter().any(|imp| imp.is_star && imp.full_path == pkg_of_fqn)
+                && !cur_imports
+                    .iter()
+                    .any(|imp| imp.is_star && imp.full_path == pkg_of_fqn)
                 && pkg_of_fqn != cur_pkg;
 
             let import_edit = if needs_import {
@@ -202,19 +242,35 @@ fn extension_fn_completions(
                 None
             };
 
-            let insert_text = if snippets { Some(format!("{}($1)", sym.name)) } else { None };
-            let detail = if !sym.detail.is_empty() { Some(sym.detail.clone()) }
-                         else if needs_import { Some(pkg_of_fqn.to_string()) }
-                         else { None };
+            let insert_text = if snippets {
+                Some(format!("{}($1)", sym.name))
+            } else {
+                None
+            };
+            let detail = if !sym.detail.is_empty() {
+                Some(sym.detail.clone())
+            } else if needs_import {
+                Some(pkg_of_fqn.to_string())
+            } else {
+                None
+            };
 
             items.push(CompletionItem {
-                label:                sym.name.clone(),
-                kind:                 Some(CompletionItemKind::FUNCTION),
+                label: sym.name.clone(),
+                kind: Some(CompletionItemKind::FUNCTION),
                 insert_text,
-                insert_text_format:   if snippets { Some(InsertTextFormat::SNIPPET) } else { None },
-                sort_text:            Some(format!("01:ext:{}", sym.name)),
+                insert_text_format: if snippets {
+                    Some(InsertTextFormat::SNIPPET)
+                } else {
+                    None
+                },
+                sort_text: Some(format!("01:ext:{}", sym.name)),
                 detail,
-                command:              if snippets { Some(trigger_parameter_hints()) } else { None },
+                command: if snippets {
+                    Some(trigger_parameter_hints())
+                } else {
+                    None
+                },
                 additional_text_edits: import_edit,
                 ..Default::default()
             });
@@ -225,12 +281,19 @@ fn extension_fn_completions(
 }
 
 fn complete_super(idx: &Indexer, from_uri: &Url, snippets: bool) -> Vec<CompletionItem> {
-    if idx.files.get(from_uri.as_str()).is_none() { return vec![]; }
+    if idx.files.get(from_uri.as_str()).is_none() {
+        return vec![];
+    }
     let mut items: Vec<CompletionItem> = Vec::new();
     let mut visited: Vec<String> = vec![from_uri.as_str().to_owned()];
     collect_hierarchy_completions(idx, from_uri, &mut visited, 0, &mut items, snippets);
     // Filter out private/protected members — inaccessible even via super.
-    items.retain(|i| i.sort_text.as_deref().map(|s| !s.starts_with("prv:") && !s.starts_with("prt:")).unwrap_or(true));
+    items.retain(|i| {
+        i.sort_text
+            .as_deref()
+            .map(|s| !s.starts_with("prv:") && !s.starts_with("prt:"))
+            .unwrap_or(true)
+    });
     items.sort_by_key(|i| (kind_sort_rank(i.kind), i.label.clone()));
     items.dedup_by_key(|i| i.label.clone());
     items
@@ -245,7 +308,9 @@ fn collect_hierarchy_completions(
     snippets: bool,
 ) {
     const MAX_DEPTH: u8 = 4;
-    if depth >= MAX_DEPTH { return; }
+    if depth >= MAX_DEPTH {
+        return;
+    }
 
     let supers: Vec<String> = match idx.files.get(from_uri.as_str()) {
         Some(f) => f.supers.iter().map(|(_, n, _)| n.clone()).collect(),
@@ -256,11 +321,16 @@ fn collect_hierarchy_completions(
         let super_locs = resolve_symbol_inner(idx, &super_name, from_uri, false);
         for super_loc in &super_locs {
             let uri_str = super_loc.uri.as_str();
-            if visited.contains(&uri_str.to_owned()) { continue; }
+            if visited.contains(&uri_str.to_owned()) {
+                continue;
+            }
             visited.push(uri_str.to_owned());
             let mut new_items = symbols_from_uri_as_completions(idx, uri_str);
             if !snippets {
-                for item in &mut new_items { item.insert_text = None; item.insert_text_format = None; }
+                for item in &mut new_items {
+                    item.insert_text = None;
+                    item.insert_text_format = None;
+                }
             }
             out.extend(new_items);
             collect_hierarchy_completions(idx, &super_loc.uri, visited, depth + 1, out, snippets);
@@ -270,7 +340,12 @@ fn collect_hierarchy_completions(
 
 /// Dot-completion: return all members of the receiver's inferred type,
 /// sorted: methods first, then fields/vars, then class-level names last.
-pub(crate) fn complete_dot(idx: &Indexer, receiver: &str, from_uri: &Url, snippets: bool) -> Vec<CompletionItem> {
+pub(crate) fn complete_dot(
+    idx: &Indexer,
+    receiver: &str,
+    from_uri: &Url,
+    snippets: bool,
+) -> Vec<CompletionItem> {
     // `super.` — collect all members from the parent class hierarchy.
     if receiver == "super" {
         return complete_super(idx, from_uri, snippets);
@@ -292,7 +367,7 @@ pub(crate) fn complete_dot(idx: &Indexer, receiver: &str, from_uri: &Url, snippe
     // Resolve the outer type to its source file (no rg — per-keystroke path).
     let file_uri = match resolve_symbol_no_rg(idx, &rt.outer, from_uri).first() {
         Some(loc) => loc.uri.to_string(),
-        None      => return vec![],
+        None => return vec![],
     };
 
     // For dotted types (e.g. `Outer.Inner`), show only the inner type's members.
@@ -300,12 +375,26 @@ pub(crate) fn complete_dot(idx: &Indexer, receiver: &str, from_uri: &Url, snippe
     let mut items = symbols_from_nested_type(idx, &file_uri, &rt.leaf, Some(from_uri.as_str()));
 
     // Filter out private/protected members — they are inaccessible from outside the class.
-    items.retain(|i| i.sort_text.as_deref().map(|s| !s.starts_with("prv:") && !s.starts_with("prt:")).unwrap_or(true));
+    items.retain(|i| {
+        i.sort_text
+            .as_deref()
+            .map(|s| !s.starts_with("prv:") && !s.starts_with("prt:"))
+            .unwrap_or(true)
+    });
 
     // Walk the inheritance hierarchy to include members from parent classes/interfaces.
     // Tracks "file_uri#TypeName" to prevent cycles; seed with the direct type.
     let mut visited = vec![format!("{}#{}", file_uri, rt.leaf)];
-    collect_inherited_members(idx, &file_uri, &rt.leaf, from_uri, &mut visited, 0, &mut items, snippets);
+    collect_inherited_members(
+        idx,
+        &file_uri,
+        &rt.leaf,
+        from_uri,
+        &mut visited,
+        0,
+        &mut items,
+        snippets,
+    );
 
     // Deduplicate by label: direct members win over inherited ones (they come first).
     let mut seen_labels = std::collections::HashSet::new();
@@ -314,7 +403,7 @@ pub(crate) fn complete_dot(idx: &Indexer, receiver: &str, from_uri: &Url, snippe
     // Strip snippet fields if client doesn't support them.
     if !snippets {
         for item in &mut items {
-            item.insert_text        = None;
+            item.insert_text = None;
             item.insert_text_format = None;
         }
     }
@@ -342,29 +431,35 @@ pub(crate) fn complete_dot(idx: &Indexer, receiver: &str, from_uri: &Url, snippe
 /// `visited` tracks `"file_uri#TypeName"` pairs to prevent infinite cycles.
 /// Only non-private members are added (matching `complete_dot` behaviour).
 fn collect_inherited_members(
-    idx:         &Indexer,
-    file_uri:    &str,
-    type_name:   &str,
+    idx: &Indexer,
+    file_uri: &str,
+    type_name: &str,
     calling_uri: &Url,
-    visited:     &mut Vec<String>,
-    depth:       u8,
-    out:         &mut Vec<CompletionItem>,
-    snippets:    bool,
+    visited: &mut Vec<String>,
+    depth: u8,
+    out: &mut Vec<CompletionItem>,
+    snippets: bool,
 ) {
     const MAX_DEPTH: u8 = 4;
-    if depth >= MAX_DEPTH { return; }
+    if depth >= MAX_DEPTH {
+        return;
+    }
 
     // Find the class's declaration line, then fetch its supertype names.
     let supers: Vec<String> = {
         let data = match idx.files.get(file_uri) {
             Some(d) => d,
-            None    => return,
+            None => return,
         };
-        let class_line = data.symbols.iter()
+        let class_line = data
+            .symbols
+            .iter()
             .find(|s| s.name == type_name)
             .map(|s| s.start_line());
         match class_line {
-            Some(line) => data.supers.iter()
+            Some(line) => data
+                .supers
+                .iter()
                 .filter(|(l, _, _)| *l == line)
                 .map(|(_, n, _)| n.clone())
                 .collect(),
@@ -373,25 +468,50 @@ fn collect_inherited_members(
         }
     };
 
-    let type_url = match Url::parse(file_uri) { Ok(u) => u, Err(_) => return };
+    let type_url = match Url::parse(file_uri) {
+        Ok(u) => u,
+        Err(_) => return,
+    };
 
     for super_name in supers {
         let super_locs = resolve_symbol_inner(idx, &super_name, &type_url, false);
         for loc in &super_locs {
             let key = format!("{}#{}", loc.uri.as_str(), super_name);
-            if visited.contains(&key) { continue; }
+            if visited.contains(&key) {
+                continue;
+            }
             visited.push(key);
 
             let mut inherited = symbols_from_nested_type(
-                idx, loc.uri.as_str(), &super_name, Some(calling_uri.as_str()),
+                idx,
+                loc.uri.as_str(),
+                &super_name,
+                Some(calling_uri.as_str()),
             );
-            inherited.retain(|i| i.sort_text.as_deref().map(|s| !s.starts_with("prv:") && !s.starts_with("prt:")).unwrap_or(true));
+            inherited.retain(|i| {
+                i.sort_text
+                    .as_deref()
+                    .map(|s| !s.starts_with("prv:") && !s.starts_with("prt:"))
+                    .unwrap_or(true)
+            });
             if !snippets {
-                for item in &mut inherited { item.insert_text = None; item.insert_text_format = None; }
+                for item in &mut inherited {
+                    item.insert_text = None;
+                    item.insert_text_format = None;
+                }
             }
             out.extend(inherited);
 
-            collect_inherited_members(idx, loc.uri.as_str(), &super_name, calling_uri, visited, depth + 1, out, snippets);
+            collect_inherited_members(
+                idx,
+                loc.uri.as_str(),
+                &super_name,
+                calling_uri,
+                visited,
+                depth + 1,
+                out,
+                snippets,
+            );
         }
     }
 }
@@ -402,15 +522,22 @@ fn collect_inherited_members(
 /// The `sort_text` prefix is the `kind_sort_rank` value so the list is ordered
 /// consistently with the rest of the completion results.
 fn completion_item_for_nested_symbol(
-    idx:         &Indexer,
-    s:           &crate::types::SymbolEntry,
-    uri_str:     &str,
+    idx: &Indexer,
+    s: &crate::types::SymbolEntry,
+    uri_str: &str,
     calling_uri: Option<&str>,
 ) -> CompletionItem {
-    let kind  = symbol_kind_to_completion(s.kind);
-    let is_fn = matches!(kind, CompletionItemKind::FUNCTION | CompletionItemKind::METHOD);
+    let kind = symbol_kind_to_completion(s.kind);
+    let is_fn = matches!(
+        kind,
+        CompletionItemKind::FUNCTION | CompletionItemKind::METHOD
+    );
     // Apply generic type param substitution when the symbol is from a different file.
-    let detail_raw = if s.detail.is_empty() { None } else { Some(s.detail.clone()) };
+    let detail_raw = if s.detail.is_empty() {
+        None
+    } else {
+        Some(s.detail.clone())
+    };
     let detail = detail_raw.map(|d| {
         if let Some(cu) = calling_uri {
             crate::indexer::resolution::cross_file_type_subst(idx, uri_str, s.start_line(), cu, &d)
@@ -419,16 +546,30 @@ fn completion_item_for_nested_symbol(
         }
     });
     let mut data = serde_json::json!({"u": uri_str, "l": s.start_line(), "c": s.selection_range.start.character});
-    if let Some(cu) = calling_uri { data["cu"] = serde_json::Value::String(cu.to_owned()); }
+    if let Some(cu) = calling_uri {
+        data["cu"] = serde_json::Value::String(cu.to_owned());
+    }
     CompletionItem {
-        label:              s.name.clone(),
-        kind:               Some(kind),
-        insert_text:        if is_fn { Some(format!("{}($1)", s.name)) } else { None },
-        insert_text_format: if is_fn { Some(InsertTextFormat::SNIPPET) } else { None },
-        sort_text:          Some(format!("{:02}:{}", kind_sort_rank(Some(kind)), s.name)),
+        label: s.name.clone(),
+        kind: Some(kind),
+        insert_text: if is_fn {
+            Some(format!("{}($1)", s.name))
+        } else {
+            None
+        },
+        insert_text_format: if is_fn {
+            Some(InsertTextFormat::SNIPPET)
+        } else {
+            None
+        },
+        sort_text: Some(format!("{:02}:{}", kind_sort_rank(Some(kind)), s.name)),
         detail,
-        command:            if is_fn { Some(trigger_parameter_hints()) } else { None },
-        data:               Some(data),
+        command: if is_fn {
+            Some(trigger_parameter_hints())
+        } else {
+            None
+        },
+        data: Some(data),
         ..Default::default()
     }
 }
@@ -437,9 +578,9 @@ fn completion_item_for_nested_symbol(
 /// Uses the symbol's range end (the closing `}` of the class body) to determine
 /// membership — no indentation heuristics needed.
 fn symbols_from_nested_type(
-    idx:         &Indexer,
-    file_uri:    &str,
-    inner_name:  &str,
+    idx: &Indexer,
+    file_uri: &str,
+    inner_name: &str,
     calling_uri: Option<&str>,
 ) -> Vec<CompletionItem> {
     // Try in-memory index first; fall back to on-demand disk parse.
@@ -450,9 +591,18 @@ fn symbols_from_nested_type(
         &owned.symbols
     } else {
         // File not yet indexed — parse it on demand.
-        let url = match Url::parse(file_uri) { Ok(u) => u, Err(_) => return vec![] };
-        let path = match url.to_file_path() { Ok(p) => p, Err(_) => return vec![] };
-        let content = match std::fs::read_to_string(&path) { Ok(c) => c, Err(_) => return vec![] };
+        let url = match Url::parse(file_uri) {
+            Ok(u) => u,
+            Err(_) => return vec![],
+        };
+        let path = match url.to_file_path() {
+            Ok(p) => p,
+            Err(_) => return vec![],
+        };
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => return vec![],
+        };
         owned = parse_by_extension(file_uri, &content);
         &owned.symbols
     };
@@ -460,9 +610,10 @@ fn symbols_from_nested_type(
     // Find the type's declaration to get its body span.
     let type_sym = match symbols_ref.iter().find(|s| s.name == inner_name) {
         Some(s) => s,
-        None    => {
+        None => {
             // Unknown type — return all non-private symbols as a fallback.
-            return symbols_ref.iter()
+            return symbols_ref
+                .iter()
                 .filter(|s| s.visibility != Visibility::Private)
                 .map(|s| completion_item_for_nested_symbol(idx, s, file_uri, calling_uri))
                 .collect();
@@ -470,12 +621,13 @@ fn symbols_from_nested_type(
     };
 
     let type_start = type_sym.range.start;
-    let type_end   = type_sym.range.end;
+    let type_end = type_sym.range.end;
 
     // Collect symbols whose start position falls within the type's body span.
     // Compare both line and character so one-line declarations like
     // `class Foo { fun bar() {} }` still include same-line members.
-    symbols_ref.iter()
+    symbols_ref
+        .iter()
         .filter(|s| {
             let start = s.range.start;
             let starts_after = start.line > type_start.line
@@ -493,10 +645,14 @@ fn symbols_from_nested_type(
 fn kind_sort_rank(kind: Option<CompletionItemKind>) -> u8 {
     match kind {
         Some(CompletionItemKind::FUNCTION) | Some(CompletionItemKind::METHOD) => 0,
-        Some(CompletionItemKind::FIELD)    | Some(CompletionItemKind::VARIABLE)
-        | Some(CompletionItemKind::CONSTANT) | Some(CompletionItemKind::ENUM_MEMBER) => 1,
-        Some(CompletionItemKind::CLASS)    | Some(CompletionItemKind::INTERFACE)
-        | Some(CompletionItemKind::ENUM)   | Some(CompletionItemKind::MODULE) => 3,
+        Some(CompletionItemKind::FIELD)
+        | Some(CompletionItemKind::VARIABLE)
+        | Some(CompletionItemKind::CONSTANT)
+        | Some(CompletionItemKind::ENUM_MEMBER) => 1,
+        Some(CompletionItemKind::CLASS)
+        | Some(CompletionItemKind::INTERFACE)
+        | Some(CompletionItemKind::ENUM)
+        | Some(CompletionItemKind::MODULE) => 3,
         _ => 2,
     }
 }
@@ -505,9 +661,9 @@ fn kind_sort_rank(kind: Option<CompletionItemKind>) -> u8 {
 /// Private symbols get the `"prv:"` tag so `complete_dot` can filter them out.
 fn vis_tag(vis: Visibility) -> &'static str {
     match vis {
-        Visibility::Private   => "prv:",
+        Visibility::Private => "prv:",
         Visibility::Protected => "prt:",
-        _                     => "",
+        _ => "",
     }
 }
 
@@ -521,9 +677,13 @@ fn vis_tag(vis: Visibility) -> &'static str {
 ///
 /// Returns `(items, hit_cap)` — callers should propagate `hit_cap` to
 /// `CompletionList.is_incomplete` so the client re-queries each keystroke.
-pub(crate) fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippets: bool, annotation_only: bool)
-    -> (Vec<CompletionItem>, bool)
-{
+pub(crate) fn complete_bare(
+    idx: &Indexer,
+    prefix: &str,
+    from_uri: &Url,
+    snippets: bool,
+    annotation_only: bool,
+) -> (Vec<CompletionItem>, bool) {
     let first_char = prefix.chars().next();
     let lowercase_mode = first_char.map(|c| c.is_lowercase()).unwrap_or(false);
     // Symmetric to lowercase_mode: user is deliberately typing a CamelCase name.
@@ -536,7 +696,11 @@ pub(crate) fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippet
     // hits from filling the cap and crowding out precise tier-2 cross-package matches
     // (e.g. typing "ChildDash" must surface ChildDashboardViewModel even if the same
     // package has many classes that contain "child" as a substring).
-    let local_max_score: u8 = if prefix.len() >= MIN_PREFIX_SCORE_REDUCTION { 1 } else { 2 };
+    let local_max_score: u8 = if prefix.len() >= MIN_PREFIX_SCORE_REDUCTION {
+        1
+    } else {
+        2
+    };
     let mut seen = std::collections::HashSet::new();
     let mut items: Vec<CompletionItem> = Vec::new();
 
@@ -544,12 +708,22 @@ pub(crate) fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippet
     // Full sort_text: "{src_tier}{match_score}:{name_lower}" so that
     //   same-file exact match ("000:column") beats same-file acronym ("001:columnbutton")
     //   which beats same-pkg exact ("010:column"), etc.
-    let mut add = |name: &str, kind: CompletionItemKind, src_tier: u8, max_score: u8, detail: &str, item_data: Option<serde_json::Value>| {
+    let mut add = |name: &str,
+                   kind: CompletionItemKind,
+                   src_tier: u8,
+                   max_score: u8,
+                   detail: &str,
+                   item_data: Option<serde_json::Value>| {
         // In annotation context (@Foo), only emit class/interface/type items.
-        if annotation_only && matches!(kind,
-            CompletionItemKind::FUNCTION | CompletionItemKind::METHOD |
-            CompletionItemKind::VARIABLE | CompletionItemKind::FIELD  |
-            CompletionItemKind::PROPERTY)
+        if annotation_only
+            && matches!(
+                kind,
+                CompletionItemKind::FUNCTION
+                    | CompletionItemKind::METHOD
+                    | CompletionItemKind::VARIABLE
+                    | CompletionItemKind::FIELD
+                    | CompletionItemKind::PROPERTY
+            )
         {
             return;
         }
@@ -568,18 +742,40 @@ pub(crate) fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippet
             Some(s) if s <= max_score => s,
             _ => return,
         };
-        if !seen.insert(name.to_string()) { return; }
-        let is_fn = snippets && matches!(kind, CompletionItemKind::FUNCTION | CompletionItemKind::METHOD);
+        if !seen.insert(name.to_string()) {
+            return;
+        }
+        let is_fn = snippets
+            && matches!(
+                kind,
+                CompletionItemKind::FUNCTION | CompletionItemKind::METHOD
+            );
         items.push(CompletionItem {
-            label:              name.to_string(),
-            kind:               Some(kind),
-            filter_text:        Some(name.to_string()),
-            sort_text:          Some(format!("{}{}{}", src_tier, score, name.to_lowercase())),
-            insert_text:        if is_fn { Some(format!("{}($1)", name)) } else { None },
-            insert_text_format: if is_fn { Some(InsertTextFormat::SNIPPET) } else { None },
-            detail:             if detail.is_empty() { None } else { Some(detail.to_string()) },
-            command:            if is_fn { Some(trigger_parameter_hints()) } else { None },
-            data:               item_data,
+            label: name.to_string(),
+            kind: Some(kind),
+            filter_text: Some(name.to_string()),
+            sort_text: Some(format!("{}{}{}", src_tier, score, name.to_lowercase())),
+            insert_text: if is_fn {
+                Some(format!("{}($1)", name))
+            } else {
+                None
+            },
+            insert_text_format: if is_fn {
+                Some(InsertTextFormat::SNIPPET)
+            } else {
+                None
+            },
+            detail: if detail.is_empty() {
+                None
+            } else {
+                Some(detail.to_string())
+            },
+            command: if is_fn {
+                Some(trigger_parameter_hints())
+            } else {
+                None
+            },
+            data: item_data,
             ..Default::default()
         });
     };
@@ -587,31 +783,56 @@ pub(crate) fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippet
     // 1. Local file symbols — src_tier 0, substring fallback only for short prefixes.
     if let Some(f) = idx.files.get(from_uri.as_str()) {
         for sym in &f.symbols {
-            add(&sym.name, symbol_kind_to_completion(sym.kind), 0, local_max_score,
+            add(
+                &sym.name,
+                symbol_kind_to_completion(sym.kind),
+                0,
+                local_max_score,
                 &sym.detail,
-                Some(serde_json::json!({"u": from_uri.as_str(), "l": sym.start_line(), "c": sym.selection_range.start.character})));
+                Some(
+                    serde_json::json!({"u": from_uri.as_str(), "l": sym.start_line(), "c": sym.selection_range.start.character}),
+                ),
+            );
         }
         // Constructor params / local vars from declared_names (lowercase only).
         if lowercase_mode {
             for name in &f.declared_names {
-                add(name, CompletionItemKind::VARIABLE, 0, local_max_score, "", None);
+                add(
+                    name,
+                    CompletionItemKind::VARIABLE,
+                    0,
+                    local_max_score,
+                    "",
+                    None,
+                );
             }
         }
     }
 
     // 2. Same-package symbols — src_tier 1, substring fallback only for short prefixes.
-    let pkg = idx.files.get(from_uri.as_str())
+    let pkg = idx
+        .files
+        .get(from_uri.as_str())
         .and_then(|f| f.package.clone())
         .unwrap_or_default();
     if !pkg.is_empty() {
         if let Some(uris) = idx.packages.get(&pkg) {
             for uri_str in uris.iter() {
-                if uri_str == from_uri.as_str() { continue; }
+                if uri_str == from_uri.as_str() {
+                    continue;
+                }
                 if let Some(f) = idx.files.get(uri_str.as_str()) {
                     for sym in &f.symbols {
-                        add(&sym.name, symbol_kind_to_completion(sym.kind), 1, local_max_score,
+                        add(
+                            &sym.name,
+                            symbol_kind_to_completion(sym.kind),
+                            1,
+                            local_max_score,
                             &sym.detail,
-                            Some(serde_json::json!({"u": uri_str.as_str(), "l": sym.start_line(), "c": sym.selection_range.start.character})));
+                            Some(
+                                serde_json::json!({"u": uri_str.as_str(), "l": sym.start_line(), "c": sym.selection_range.start.character}),
+                            ),
+                        );
                     }
                 }
             }
@@ -626,7 +847,9 @@ pub(crate) fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippet
         // Prefer live_lines (updated on every keystroke) over the indexed snapshot so that
         // import deduplication and insertion position are based on the current buffer state.
         let live = idx.live_lines.get(from_uri.as_str()).map(|ll| ll.clone());
-        let (cur_imports, cur_pkg, cur_lines) = idx.files.get(from_uri.as_str())
+        let (cur_imports, cur_pkg, cur_lines) = idx
+            .files
+            .get(from_uri.as_str())
             .map(|f| {
                 let lines = live.clone().unwrap_or_else(|| f.lines.clone());
                 // Re-scan live lines for imports so we don't use a stale snapshot.
@@ -646,25 +869,31 @@ pub(crate) fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippet
         if let Ok(cache) = idx.bare_name_cache.read() {
             for name in cache.iter() {
                 // Case gate + match quality gate (prefix or acronym only).
-                if name.starts_with_lowercase() { continue; }
-                if camel_mode && is_screaming_snake(name) { continue; }
+                if name.starts_with_lowercase() {
+                    continue;
+                }
+                if camel_mode && is_screaming_snake(name) {
+                    continue;
+                }
                 let score = match match_score(name, prefix) {
                     Some(s) if s <= 1 => s,
                     _ => continue,
                 };
 
                 // Already visible via tier-0 or tier-1 — skip, no import needed.
-                if seen.contains(name.as_str()) { continue; }
+                if seen.contains(name.as_str()) {
+                    continue;
+                }
 
                 let fqns = fqns_for_name(idx, name);
 
                 if fqns.is_empty() {
                     if seen.insert(name.clone()) {
                         items.push(CompletionItem {
-                            label:       name.clone(),
-                            kind:        Some(CompletionItemKind::CLASS),
+                            label: name.clone(),
+                            kind: Some(CompletionItemKind::CLASS),
                             filter_text: Some(name.clone()),
-                            sort_text:   Some(format!("2{}:{}", score, name.to_lowercase())),
+                            sort_text: Some(format!("2{}:{}", score, name.to_lowercase())),
                             ..Default::default()
                         });
                     }
@@ -678,24 +907,32 @@ pub(crate) fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippet
                     };
 
                     let needs_import = !already_imported(fqn, &cur_imports)
-                        && !cur_imports.iter().any(|imp| imp.is_star && imp.full_path == pkg_of_fqn)
+                        && !cur_imports
+                            .iter()
+                            .any(|imp| imp.is_star && imp.full_path == pkg_of_fqn)
                         && pkg_of_fqn != cur_pkg;
 
                     let item_key = format!("{}:{}", name, fqn);
-                    if !seen.insert(item_key) { continue; }
+                    if !seen.insert(item_key) {
+                        continue;
+                    }
 
                     let import_edit = if needs_import {
                         Some(vec![cur_lines.make_import_edit(fqn, is_java)])
                     } else {
                         None
                     };
-                    let detail = if needs_import { Some(pkg_of_fqn.to_string()) } else { None };
+                    let detail = if needs_import {
+                        Some(pkg_of_fqn.to_string())
+                    } else {
+                        None
+                    };
 
                     items.push(CompletionItem {
-                        label:                name.clone(),
-                        kind:                 Some(CompletionItemKind::CLASS),
-                        filter_text:          Some(name.clone()),
-                        sort_text:            Some(format!("2{}:{}", score, name.to_lowercase())),
+                        label: name.clone(),
+                        kind: Some(CompletionItemKind::CLASS),
+                        filter_text: Some(name.clone()),
+                        sort_text: Some(format!("2{}:{}", score, name.to_lowercase())),
                         detail,
                         additional_text_edits: import_edit,
                         ..Default::default()
@@ -711,14 +948,16 @@ pub(crate) fn complete_bare(idx: &Indexer, prefix: &str, from_uri: &Url, snippet
         if lowercase_mode && label.starts_with_uppercase() {
             continue;
         }
-        if camel_mode && is_screaming_snake(&label) { continue; }
+        if camel_mode && is_screaming_snake(&label) {
+            continue;
+        }
         let score = match match_score(&label, prefix) {
             Some(s) if s <= 2 => s,
             _ => continue,
         };
         if seen.insert(label.clone()) {
             item.filter_text = Some(label.clone());
-            item.sort_text   = Some(format!("3{}:{}", score, label.to_lowercase()));
+            item.sort_text = Some(format!("3{}:{}", score, label.to_lowercase()));
             items.push(item);
         }
     }
@@ -755,14 +994,19 @@ fn build_completion_items(idx: &Indexer, file_uri: &str) -> Vec<CompletionItem> 
     // From index if available.
     if let Some(f) = idx.files.get(file_uri) {
         for sym in &f.symbols {
-            let ck       = symbol_kind_to_completion(sym.kind);
-            let vt       = vis_tag(sym.visibility);
+            let ck = symbol_kind_to_completion(sym.kind);
+            let vt = vis_tag(sym.visibility);
             let sort_txt = format!("{vt}{}{}", kind_sort_rank(Some(ck)), sym.name);
             items.push(make_completion_item(&sym.name, ck, sort_txt, true));
         }
         for name in &f.declared_names {
             if !items.iter().any(|i: &CompletionItem| i.label == *name) {
-                items.push(make_completion_item(name, CompletionItemKind::FIELD, format!("1{name}"), true));
+                items.push(make_completion_item(
+                    name,
+                    CompletionItemKind::FIELD,
+                    format!("1{name}"),
+                    true,
+                ));
             }
         }
         return items;
@@ -774,14 +1018,19 @@ fn build_completion_items(idx: &Indexer, file_uri: &str) -> Vec<CompletionItem> 
             if let Ok(content) = std::fs::read_to_string(&path) {
                 let file_data = parse_by_extension(file_uri, &content);
                 for sym in &file_data.symbols {
-                    let ck       = symbol_kind_to_completion(sym.kind);
-                    let vt       = vis_tag(sym.visibility);
+                    let ck = symbol_kind_to_completion(sym.kind);
+                    let vt = vis_tag(sym.visibility);
                     let sort_txt = format!("{vt}{}{}", kind_sort_rank(Some(ck)), sym.name);
                     items.push(make_completion_item(&sym.name, ck, sort_txt, true));
                 }
                 for name in &file_data.declared_names {
                     if !items.iter().any(|i: &CompletionItem| i.label == *name) {
-                        items.push(make_completion_item(name, CompletionItemKind::FIELD, format!("1{name}"), true));
+                        items.push(make_completion_item(
+                            name,
+                            CompletionItemKind::FIELD,
+                            format!("1{name}"),
+                            true,
+                        ));
                     }
                 }
             }
@@ -793,14 +1042,14 @@ fn build_completion_items(idx: &Indexer, file_uri: &str) -> Vec<CompletionItem> 
 fn symbol_kind_to_completion(kind: SymbolKind) -> CompletionItemKind {
     match kind {
         SymbolKind::FUNCTION | SymbolKind::METHOD => CompletionItemKind::FUNCTION,
-        SymbolKind::CLASS                          => CompletionItemKind::CLASS,
-        SymbolKind::INTERFACE                      => CompletionItemKind::INTERFACE,
-        SymbolKind::ENUM                           => CompletionItemKind::ENUM,
-        SymbolKind::ENUM_MEMBER                    => CompletionItemKind::ENUM_MEMBER,
-        SymbolKind::CONSTANT                       => CompletionItemKind::CONSTANT,
-        SymbolKind::VARIABLE                       => CompletionItemKind::VARIABLE,
-        SymbolKind::OBJECT | SymbolKind::MODULE    => CompletionItemKind::MODULE,
-        _                                          => CompletionItemKind::VALUE,
+        SymbolKind::CLASS => CompletionItemKind::CLASS,
+        SymbolKind::INTERFACE => CompletionItemKind::INTERFACE,
+        SymbolKind::ENUM => CompletionItemKind::ENUM,
+        SymbolKind::ENUM_MEMBER => CompletionItemKind::ENUM_MEMBER,
+        SymbolKind::CONSTANT => CompletionItemKind::CONSTANT,
+        SymbolKind::VARIABLE => CompletionItemKind::VARIABLE,
+        SymbolKind::OBJECT | SymbolKind::MODULE => CompletionItemKind::MODULE,
+        _ => CompletionItemKind::VALUE,
     }
 }
 
@@ -809,15 +1058,36 @@ fn symbol_kind_to_completion(kind: SymbolKind) -> CompletionItemKind {
 /// Functions and methods get a snippet `name($1)` so the cursor lands inside
 /// the parentheses after accepting the completion.  All other kinds are plain
 /// text insertions.
-fn make_completion_item(name: &str, ck: CompletionItemKind, sort_text: String, snippets: bool) -> CompletionItem {
-    let is_fn = snippets && matches!(ck, CompletionItemKind::FUNCTION | CompletionItemKind::METHOD);
+fn make_completion_item(
+    name: &str,
+    ck: CompletionItemKind,
+    sort_text: String,
+    snippets: bool,
+) -> CompletionItem {
+    let is_fn = snippets
+        && matches!(
+            ck,
+            CompletionItemKind::FUNCTION | CompletionItemKind::METHOD
+        );
     CompletionItem {
-        label:              name.to_string(),
-        kind:               Some(ck),
-        sort_text:          Some(sort_text),
-        insert_text:        if is_fn { Some(format!("{}($1)", name)) } else { None },
-        insert_text_format: if is_fn { Some(InsertTextFormat::SNIPPET) } else { None },
-        command:            if is_fn { Some(trigger_parameter_hints()) } else { None },
+        label: name.to_string(),
+        kind: Some(ck),
+        sort_text: Some(sort_text),
+        insert_text: if is_fn {
+            Some(format!("{}($1)", name))
+        } else {
+            None
+        },
+        insert_text_format: if is_fn {
+            Some(InsertTextFormat::SNIPPET)
+        } else {
+            None
+        },
+        command: if is_fn {
+            Some(trigger_parameter_hints())
+        } else {
+            None
+        },
         ..Default::default()
     }
 }
@@ -834,8 +1104,8 @@ pub fn symbols_from_uri_as_completions_pub(idx: &Indexer, file_uri: &str) -> Vec
 /// which is also what rust-analyzer emits.
 fn trigger_parameter_hints() -> tower_lsp::lsp_types::Command {
     tower_lsp::lsp_types::Command {
-        title:     "triggerParameterHints".into(),
-        command:   "editor.action.triggerParameterHints".into(),
+        title: "triggerParameterHints".into(),
+        command: "editor.action.triggerParameterHints".into(),
         arguments: None,
     }
 }
@@ -844,10 +1114,21 @@ fn trigger_parameter_hints() -> tower_lsp::lsp_types::Command {
 
 #[allow(dead_code)]
 impl crate::indexer::Indexer {
-    pub(crate) fn complete_dot(&self, receiver: &str, from_uri: &Url, snippets: bool) -> Vec<CompletionItem> {
+    pub(crate) fn complete_dot(
+        &self,
+        receiver: &str,
+        from_uri: &Url,
+        snippets: bool,
+    ) -> Vec<CompletionItem> {
         complete_dot(self, receiver, from_uri, snippets)
     }
-    pub(crate) fn complete_bare(&self, prefix: &str, from_uri: &Url, snippets: bool, annotation_only: bool) -> (Vec<CompletionItem>, bool) {
+    pub(crate) fn complete_bare(
+        &self,
+        prefix: &str,
+        from_uri: &Url,
+        snippets: bool,
+        annotation_only: bool,
+    ) -> (Vec<CompletionItem>, bool) {
         complete_bare(self, prefix, from_uri, snippets, annotation_only)
     }
     pub(super) fn complete_super_w(&self, from_uri: &Url, snippets: bool) -> Vec<CompletionItem> {

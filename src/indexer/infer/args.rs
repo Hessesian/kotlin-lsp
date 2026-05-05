@@ -5,9 +5,11 @@
 
 use tower_lsp::lsp_types::Url;
 
-use crate::indexer::{Indexer, is_id_char, find_enclosing_call_name};
+use crate::indexer::infer::sig::{
+    find_fun_signature_full, nth_fun_param_type_str, split_params_at_depth_zero,
+};
 use crate::indexer::NodeExt;
-use crate::indexer::infer::sig::{find_fun_signature_full, nth_fun_param_type_str, split_params_at_depth_zero};
+use crate::indexer::{find_enclosing_call_name, is_id_char, Indexer};
 use crate::queries::KIND_CALL_EXPR;
 use crate::types::CursorPos;
 use crate::StrExt;
@@ -33,9 +35,9 @@ const ARG_SCAN_BACK_LINES: usize = 20;
 ///   `fn(a, it)`             → second param of `fn` → e.g. `String`
 pub(crate) fn find_as_call_arg_type(
     lines: &[String],
-    pos:   CursorPos,
-    idx:   &Indexer,
-    uri:   &Url,
+    pos: CursorPos,
+    idx: &Indexer,
+    uri: &Url,
 ) -> Option<String> {
     let line = lines.get(pos.line)?;
     // Slice the line up to (but not including) the cursor position.
@@ -57,20 +59,32 @@ pub(crate) fn find_as_call_arg_type(
     if let Some(s) = s.strip_suffix('=') {
         if !s.ends_with(|c: char| "!<>=".contains(c)) {
             let s = s.trim_end();
-            let ident_start = s.rfind(|c: char| !c.is_alphanumeric() && c != '_')
-                .map(|i| i + 1).unwrap_or(0);
+            let ident_start = s
+                .rfind(|c: char| !c.is_alphanumeric() && c != '_')
+                .map(|i| i + 1)
+                .unwrap_or(0);
             let named_arg = &s[ident_start..];
             if !named_arg.is_empty()
-                && named_arg.chars().next().map(|c| !c.is_uppercase()).unwrap_or(false)
+                && named_arg
+                    .chars()
+                    .next()
+                    .map(|c| !c.is_uppercase())
+                    .unwrap_or(false)
             {
                 let preceding = s[..ident_start].trim_end().chars().last();
                 if matches!(preceding, Some('(') | Some(',')) {
                     if let Some(fn_full) = find_enclosing_call_name(lines, pos.line, col) {
-                        if let Some(fn_name) = fn_full.split('.').next_back().filter(|n| !n.is_empty()) {
+                        if let Some(fn_name) =
+                            fn_full.split('.').next_back().filter(|n| !n.is_empty())
+                        {
                             if let Some(sig) = find_fun_signature_full(fn_name, idx, uri) {
-                                if let Some(param_type) = find_named_param_type_in_sig(&sig, named_arg) {
+                                if let Some(param_type) =
+                                    find_named_param_type_in_sig(&sig, named_arg)
+                                {
                                     let base = param_type.trim().ident_prefix();
-                                    if !base.is_empty() { return Some(base); }
+                                    if !base.is_empty() {
+                                        return Some(base);
+                                    }
                                 }
                             }
                         }
@@ -94,7 +108,11 @@ pub(crate) fn find_as_call_arg_type(
 
     for ln in (scan_start..=pos.line).rev() {
         let chars: Vec<char> = lines[ln].chars().collect();
-        let scan_to = if ln == pos.line { col.min(chars.len()) } else { chars.len() };
+        let scan_to = if ln == pos.line {
+            col.min(chars.len())
+        } else {
+            chars.len()
+        };
 
         for i in (0..scan_to).rev() {
             match chars[i] {
@@ -114,16 +132,23 @@ pub(crate) fn find_as_call_arg_type(
                 '(' | '[' => {
                     depth -= 1;
                     if depth < 0 {
-                        if i == 0 { return None; }
+                        if i == 0 {
+                            return None;
+                        }
                         // Extract function name (possibly dotted) before `(`.
                         let mut end = i;
                         while end > 0 && (is_id_char(chars[end - 1]) || chars[end - 1] == '.') {
                             end -= 1;
                         }
-                        if end >= i { return None; }
+                        if end >= i {
+                            return None;
+                        }
                         let full_name: String = chars[end..i].iter().collect();
-                        let fn_name = full_name.trim_matches('.')
-                            .split('.').next_back().filter(|n| !n.is_empty())?;
+                        let fn_name = full_name
+                            .trim_matches('.')
+                            .split('.')
+                            .next_back()
+                            .filter(|n| !n.is_empty())?;
                         let sig = find_fun_signature_full(fn_name, idx, uri)?;
                         let param_type = nth_fun_param_type_str(&sig, arg_pos)?;
                         let base = param_type.trim().ident_prefix();
@@ -153,21 +178,33 @@ pub(crate) fn extract_named_arg_name(before_brace: &str) -> Option<&str> {
     let s = before_brace.trim_end();
     let s = s.strip_suffix('=')?;
     // Guard against `!=`, `<=`, `>=`, `==`
-    if s.ends_with(|c: char| "!<>=".contains(c)) { return None; }
+    if s.ends_with(|c: char| "!<>=".contains(c)) {
+        return None;
+    }
     let s = s.trim_end();
     // Extract trailing identifier
-    let ident_start = s.rfind(|c: char| !c.is_alphanumeric() && c != '_')
+    let ident_start = s
+        .rfind(|c: char| !c.is_alphanumeric() && c != '_')
         .map(|i| i + 1)
         .unwrap_or(0);
     let ident = &s[ident_start..];
-    if ident.is_empty() { return None; }
+    if ident.is_empty() {
+        return None;
+    }
     // Named args start with a lowercase letter
-    if ident.starts_with_uppercase() { return None; }
+    if ident.starts_with_uppercase() {
+        return None;
+    }
     // Require the prefix to be only whitespace (optionally preceded by a comma).
     // This prevents `(isRefresh = {` from matching — the `(` before `isRefresh`
     // makes the prefix non-empty after stripping commas and whitespace.
-    let prefix = s[..ident_start].trim_start().trim_start_matches(',').trim_start();
-    if !prefix.is_empty() { return None; }
+    let prefix = s[..ident_start]
+        .trim_start()
+        .trim_start_matches(',')
+        .trim_start();
+    if !prefix.is_empty() {
+        return None;
+    }
     Some(ident)
 }
 
@@ -181,15 +218,27 @@ pub(crate) fn find_named_param_type_in_sig(sig: &str, param_name: &str) -> Optio
 
     let colon_pat = format!("{param_name}:");
     for part in parts {
-        let part = part.trim().trim_start_matches("val ").trim_start_matches("var ");
+        let part = part
+            .trim()
+            .trim_start_matches("val ")
+            .trim_start_matches("var ");
         // Exact param_name match (no suffix)
-        let Some(col_pos) = part.find(&colon_pat) else { continue };
+        let Some(col_pos) = part.find(&colon_pat) else {
+            continue;
+        };
         let before = &part[..col_pos];
-        if before.chars().last().map(|c| c.is_alphanumeric() || c == '_').unwrap_or(false) {
+        if before
+            .chars()
+            .last()
+            .map(|c| c.is_alphanumeric() || c == '_')
+            .unwrap_or(false)
+        {
             continue; // suffix match like `otherParam:`
         }
         let after = part[col_pos + colon_pat.len()..].trim();
-        if !after.is_empty() { return Some(after.to_owned()); }
+        if !after.is_empty() {
+            return Some(after.to_owned());
+        }
     }
     None
 }
@@ -215,21 +264,33 @@ pub(crate) fn has_named_params_not_it(after_open_brace: &str) -> bool {
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
-            b'{' => { depth += 1; i += 1; }
-            b'}' => { depth -= 1; i += 1; }
-            b'-' if depth == 0 && i + 1 < bytes.len() && bytes[i + 1] == b'>' => {
-                arrow_pos = Some(i); break;
+            b'{' => {
+                depth += 1;
+                i += 1;
             }
-            _ => { i += 1; }
+            b'}' => {
+                depth -= 1;
+                i += 1;
+            }
+            b'-' if depth == 0 && i + 1 < bytes.len() && bytes[i + 1] == b'>' => {
+                arrow_pos = Some(i);
+                break;
+            }
+            _ => {
+                i += 1;
+            }
         }
     }
-    let Some(ap) = arrow_pos else { return false; };
+    let Some(ap) = arrow_pos else {
+        return false;
+    };
     let before_arrow = s[..ap].trim_end();
     // All tokens before `->` must be valid identifiers.
     // If any non-`it`, non-`_` identifier is present, it's a named-param lambda.
     for tok in before_arrow.split(',') {
         let tok = tok.trim();
-        let name: String = tok.chars()
+        let name: String = tok
+            .chars()
             .take_while(|&c| c.is_alphanumeric() || c == '_')
             .collect();
         if !name.is_empty() && name != "it" && name != "_" {
@@ -254,16 +315,29 @@ pub(crate) fn extract_first_arg(call_expr: &str) -> Option<&str> {
     for (i, ch) in rest.char_indices() {
         match ch {
             '(' | '<' | '[' => depth += 1,
-            ')' | ']' => { if depth == 0 { end = i; break; } depth -= 1; }
+            ')' | ']' => {
+                if depth == 0 {
+                    end = i;
+                    break;
+                }
+                depth -= 1;
+            }
             // Skip the `>` in `->` (lambda arrow) and never go negative.
             '>' if prev != '-' && depth > 0 => depth -= 1,
-            ',' if depth == 0 => { end = i; break; }
+            ',' if depth == 0 => {
+                end = i;
+                break;
+            }
             _ => {}
         }
         prev = ch;
     }
     let arg = rest[..end].trim();
-    if arg.is_empty() { None } else { Some(arg) }
+    if arg.is_empty() {
+        None
+    } else {
+        Some(arg)
+    }
 }
 
 // ─── CST helpers for call-argument type inference ────────────────────────────
@@ -276,19 +350,26 @@ pub(crate) fn extract_first_arg(call_expr: &str) -> Option<&str> {
 /// - cursor is inside a lambda literal rather than a direct call argument
 /// - the enclosing function is not indexed
 fn cst_call_arg_type(pos: CursorPos, idx: &Indexer, uri: &Url) -> Option<String> {
-    use tree_sitter::Point;
     use crate::indexer::live_tree::utf16_col_to_byte;
+    use tree_sitter::Point;
 
     let doc = idx.live_doc(uri)?;
     let bytes = &doc.bytes;
 
     // Get the line text to convert UTF-16 col → byte offset.
-    let line_text = std::str::from_utf8(bytes).ok()
+    let line_text = std::str::from_utf8(bytes)
+        .ok()
         .and_then(|s| s.lines().nth(pos.line))
         .unwrap_or("");
     let byte_col = utf16_col_to_byte(line_text, pos.utf16_col);
-    let point = Point { row: pos.line, column: byte_col };
-    let start_node = doc.tree.root_node().descendant_for_point_range(point, point)?;
+    let point = Point {
+        row: pos.line,
+        column: byte_col,
+    };
+    let start_node = doc
+        .tree
+        .root_node()
+        .descendant_for_point_range(point, point)?;
 
     // Walk up: look for value_argument; bail out if we hit lambda_literal first.
     let mut cur = start_node;
@@ -299,7 +380,7 @@ fn cst_call_arg_type(pos: CursorPos, idx: &Indexer, uri: &Url) -> Option<String>
             _ => match cur.parent() {
                 Some(p) => cur = p,
                 None => break None,
-            }
+            },
         }
     }?;
 
@@ -324,7 +405,11 @@ fn cst_call_arg_type(pos: CursorPos, idx: &Indexer, uri: &Url) -> Option<String>
     }?;
 
     let base = param_type.trim().ident_prefix();
-    if base.is_empty() { None } else { Some(base) }
+    if base.is_empty() {
+        None
+    } else {
+        Some(base)
+    }
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

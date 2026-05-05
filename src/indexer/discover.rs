@@ -27,13 +27,20 @@ pub(super) fn find_source_files(root: &Path, matcher: Option<&IgnoreMatcher>) ->
     }
     let hardcoded: &[&str] = &[
         "--absolute-path",
-        "--exclude", ".git",
-        "--exclude", "build",
-        "--exclude", "target",
-        "--exclude", ".gradle",
-        "--exclude", ".build",       // SwiftPM
-        "--exclude", "DerivedData",  // Xcode
-        "--exclude", "Generated",    // SwiftGen / R.swift codegen output
+        "--exclude",
+        ".git",
+        "--exclude",
+        "build",
+        "--exclude",
+        "target",
+        "--exclude",
+        ".gradle",
+        "--exclude",
+        ".build", // SwiftPM
+        "--exclude",
+        "DerivedData", // Xcode
+        "--exclude",
+        "Generated", // SwiftGen / R.swift codegen output
     ];
     for a in hardcoded {
         fd_args.push(a.to_string());
@@ -65,14 +72,17 @@ pub(super) fn find_source_files(root: &Path, matcher: Option<&IgnoreMatcher>) ->
 
 fn walkdir_find(root: &Path, matcher: Option<&IgnoreMatcher>) -> Vec<PathBuf> {
     const EXCLUDED_DIRS: &[&str] = &[
-        ".git", "build", "target", ".gradle", ".build", "DerivedData", "Generated",
+        ".git",
+        "build",
+        "target",
+        ".gradle",
+        ".build",
+        "DerivedData",
+        "Generated",
     ];
     let mut paths: Vec<PathBuf> = Vec::new();
     let mut builder = ignore::WalkBuilder::new(root);
-    builder
-        .standard_filters(true)
-        .hidden(false)
-        .parents(false);
+    builder.standard_filters(true).hidden(false).parents(false);
 
     let root_owned = root.to_path_buf();
     let user_glob_set: Option<Arc<globset::GlobSet>> =
@@ -153,7 +163,10 @@ pub(super) fn find_source_files_unconstrained(root: &Path) -> Vec<PathBuf> {
         }
     }
 
-    log::info!("fd unavailable or failed; falling back to walkdir for source path {}", root.display());
+    log::info!(
+        "fd unavailable or failed; falling back to walkdir for source path {}",
+        root.display()
+    );
     let mut paths = Vec::new();
     let mut builder = ignore::WalkBuilder::new(root);
     builder.standard_filters(false).hidden(false).parents(false);
@@ -182,8 +195,10 @@ fn find_source_files_newer_than(
     let root_str = root.to_string_lossy();
     let window = format!("{}s", elapsed_secs);
     let mut fd_args: Vec<String> = vec![
-        "--type".into(), "f".into(),
-        "--changed-within".into(), window,
+        "--type".into(),
+        "f".into(),
+        "--changed-within".into(),
+        window,
     ];
     for ext in SOURCE_EXTENSIONS {
         fd_args.push("--extension".into());
@@ -191,13 +206,20 @@ fn find_source_files_newer_than(
     }
     let hardcoded: &[&str] = &[
         "--absolute-path",
-        "--exclude", ".git",
-        "--exclude", "build",
-        "--exclude", "target",
-        "--exclude", ".gradle",
-        "--exclude", ".build",
-        "--exclude", "DerivedData",
-        "--exclude", "Generated",
+        "--exclude",
+        ".git",
+        "--exclude",
+        "build",
+        "--exclude",
+        "target",
+        "--exclude",
+        ".gradle",
+        "--exclude",
+        ".build",
+        "--exclude",
+        "DerivedData",
+        "--exclude",
+        "Generated",
     ];
     for a in hardcoded {
         fd_args.push(a.to_string());
@@ -254,20 +276,25 @@ pub(super) fn warm_discover_files(
     // Phase 1: all previously cached files, filtered through the current ignore
     // matcher so newly-configured ignorePatterns take effect on warm start.
     // Skip paths no longer on disk (e.g. deleted by a branch switch).
-    let cached_paths: HashSet<String> = cache.entries.keys()
+    let cached_paths: HashSet<String> = cache
+        .entries
+        .keys()
         .filter(|p| {
             if let Some(m) = matcher {
                 if !m.is_empty() {
                     let path = Path::new(p.as_str());
                     let rel = path.strip_prefix(root).unwrap_or(path);
-                    if m.matches(rel) { return false; }
+                    if m.matches(rel) {
+                        return false;
+                    }
                 }
             }
             true
         })
         .cloned()
         .collect();
-    let mut paths: Vec<PathBuf> = cached_paths.iter()
+    let mut paths: Vec<PathBuf> = cached_paths
+        .iter()
         .map(PathBuf::from)
         .filter(|p| p.exists())
         .collect();
@@ -277,7 +304,8 @@ pub(super) fn warm_discover_files(
     // Modified files are already in Phase 1; they will fail the mtime check
     // in the scan phase and be re-parsed then.
     let newer = find_source_files_newer_than(root, elapsed_secs, matcher);
-    let new_count = newer.iter()
+    let new_count = newer
+        .iter()
         .filter(|f| !cached_paths.contains(f.to_string_lossy().as_ref()))
         .count();
     for f in newer {
@@ -288,7 +316,9 @@ pub(super) fn warm_discover_files(
 
     log::info!(
         "Warm start: {} cached (on-disk) + {} new files (scanned last {}s window)",
-        on_disk_cached_count, new_count, elapsed_secs
+        on_disk_cached_count,
+        new_count,
+        elapsed_secs
     );
     paths
 }

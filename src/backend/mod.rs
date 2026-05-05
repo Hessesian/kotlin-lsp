@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use dashmap::DashMap;
 use tokio::task::AbortHandle;
@@ -7,19 +7,19 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{async_trait, Client, LanguageServer};
 
-use crate::indexer::{Indexer, IgnoreMatcher, workspace_cache_path};
 use self::helpers::syntax_diagnostics;
+use crate::indexer::{workspace_cache_path, IgnoreMatcher, Indexer};
 
-pub mod nav;
-pub mod handlers;
-pub mod rename;
 pub mod actions;
-pub mod helpers;
 pub mod cursor;
 pub mod format;
+pub mod handlers;
+pub mod helpers;
+pub mod nav;
+pub mod rename;
 
 pub struct Backend {
-    pub(super) client:  Client,
+    pub(super) client: Client,
     pub(super) indexer: Arc<Indexer>,
     /// Per-URI abort handle for the pending debounced reindex task.
     /// When a new change arrives we abort the previous pending task so only
@@ -48,9 +48,12 @@ impl Backend {
         rt: &crate::resolver::ReceiverType,
         uri: &Url,
     ) -> Vec<Location> {
-        let locs = self.indexer.find_definition_qualified(word, Some(&rt.qualified), uri);
+        let locs = self
+            .indexer
+            .find_definition_qualified(word, Some(&rt.qualified), uri);
         if locs.is_empty() && rt.leaf != rt.qualified {
-            self.indexer.find_definition_qualified(word, Some(&rt.leaf), uri)
+            self.indexer
+                .find_definition_qualified(word, Some(&rt.leaf), uri)
         } else {
             locs
         }
@@ -63,13 +66,16 @@ impl LanguageServer for Backend {
 
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
         // Detect snippet support from client capabilities.
-        let supports_snippets = params.capabilities
-            .text_document.as_ref()
+        let supports_snippets = params
+            .capabilities
+            .text_document
+            .as_ref()
             .and_then(|td| td.completion.as_ref())
             .and_then(|c| c.completion_item.as_ref())
             .and_then(|ci| ci.snippet_support)
             .unwrap_or(false);
-        self.snippet_support.store(supports_snippets, Ordering::Relaxed);
+        self.snippet_support
+            .store(supports_snippets, Ordering::Relaxed);
         log::info!("client snippet support: {supports_snippets}");
 
         // Accept either rootUri or the first workspaceFolder.
@@ -91,7 +97,9 @@ impl LanguageServer for Backend {
             .map(std::path::PathBuf::from)
             .filter(|p| p.is_dir());
 
-        let client_root = root_uri.as_ref().and_then(|uri| uri.to_file_path().ok())
+        let client_root = root_uri
+            .as_ref()
+            .and_then(|uri| uri.to_file_path().ok())
             .filter(|p| p.is_dir())
             .map(|p| {
                 // Walk up to the nearest .git root so that opening a sub-module
@@ -104,7 +112,7 @@ impl LanguageServer for Backend {
                     }
                     match cur.parent() {
                         Some(p) => cur = p,
-                        None    => return p.clone(),
+                        None => return p.clone(),
                     }
                 }
             });
@@ -112,7 +120,8 @@ impl LanguageServer for Backend {
         let config_fallback = || -> Option<std::path::PathBuf> {
             let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
             let config_file = std::path::Path::new(&home).join(".config/kotlin-lsp/workspace");
-            std::fs::read_to_string(&config_file).ok()
+            std::fs::read_to_string(&config_file)
+                .ok()
                 .map(|s| std::path::PathBuf::from(s.trim()))
                 .filter(|p| p.is_dir())
         };
@@ -123,9 +132,7 @@ impl LanguageServer for Backend {
         // the in-progress workspace index and discards half its results.
         // Pure auto-detection (no config at all) still works: workspace_pinned stays false until
         // did_open fires and a root is detected for the first time.
-        let resolved_root = env_override
-            .or(client_root)
-            .or_else(config_fallback);
+        let resolved_root = env_override.or(client_root).or_else(config_fallback);
         let workspace_pinned = resolved_root.is_some();
 
         if let Some(path) = resolved_root {
@@ -134,7 +141,9 @@ impl LanguageServer for Backend {
             *self.indexer.workspace_root.write().unwrap() = Some(path.clone());
             if workspace_pinned {
                 // Explicitly configured — prevent did_open auto-detection from overriding.
-                self.indexer.workspace_pinned.store(true, std::sync::atomic::Ordering::Relaxed);
+                self.indexer
+                    .workspace_pinned
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
             }
 
             // Parse ignore patterns from initializationOptions.indexingOptions.ignorePatterns.
@@ -174,43 +183,45 @@ impl LanguageServer for Backend {
             }
 
             let indexer = Arc::clone(&self.indexer);
-            let client  = self.client.clone();
+            let client = self.client.clone();
             // Background task — server is usable before indexing finishes.
             tokio::spawn(async move {
                 // No specific open-file priorities at initialize.
-                indexer.index_workspace_prioritized(&path, Vec::new(), Some(client)).await;
+                indexer
+                    .index_workspace_prioritized(&path, Vec::new(), Some(client))
+                    .await;
             });
         }
 
         Ok(InitializeResult {
             server_info: Some(ServerInfo {
-                name:    "kotlin-lsp".into(),
+                name: "kotlin-lsp".into(),
                 version: Some(env!("CARGO_PKG_VERSION").into()),
             }),
             capabilities: ServerCapabilities {
                 // FULL sync: each change event carries the whole document.
                 text_document_sync: Some(TextDocumentSyncCapability::Options(
                     TextDocumentSyncOptions {
-                        open_close:   Some(true),
-                        change:       Some(TextDocumentSyncKind::FULL),
-                        save:         Some(TextDocumentSyncSaveOptions::SaveOptions(SaveOptions {
+                        open_close: Some(true),
+                        change: Some(TextDocumentSyncKind::FULL),
+                        save: Some(TextDocumentSyncSaveOptions::SaveOptions(SaveOptions {
                             include_text: Some(false),
                         })),
                         ..Default::default()
-                    }
+                    },
                 )),
                 completion_provider: Some(CompletionOptions {
                     trigger_characters: Some(vec![".".into(), ":".into()]),
-                    resolve_provider:   Some(true),
+                    resolve_provider: Some(true),
                     ..Default::default()
                 }),
-                hover_provider:          Some(HoverProviderCapability::Simple(true)),
-                definition_provider:     Some(OneOf::Left(true)),
-                declaration_provider:    Some(DeclarationCapability::Simple(true)),
+                hover_provider: Some(HoverProviderCapability::Simple(true)),
+                definition_provider: Some(OneOf::Left(true)),
+                declaration_provider: Some(DeclarationCapability::Simple(true)),
                 implementation_provider: Some(ImplementationProviderCapability::Simple(true)),
-                references_provider:          Some(OneOf::Left(true)),
-                document_highlight_provider:  Some(OneOf::Left(true)),
-                document_symbol_provider:     Some(OneOf::Left(true)),
+                references_provider: Some(OneOf::Left(true)),
+                document_highlight_provider: Some(OneOf::Left(true)),
+                document_symbol_provider: Some(OneOf::Left(true)),
                 inlay_hint_provider: Some(OneOf::Left(true)),
                 workspace: Some(WorkspaceServerCapabilities {
                     workspace_folders: None,
@@ -252,18 +263,17 @@ impl LanguageServer for Backend {
                 kind: None,
             })
             .collect();
-        let _ = self.client.register_capability(vec![
-            Registration {
-                id:     "watched-source-files".into(),
+        let _ = self
+            .client
+            .register_capability(vec![Registration {
+                id: "watched-source-files".into(),
                 method: "workspace/didChangeWatchedFiles".into(),
                 register_options: Some(
-                    serde_json::to_value(DidChangeWatchedFilesRegistrationOptions {
-                        watchers,
-                    })
-                    .unwrap_or_default(),
+                    serde_json::to_value(DidChangeWatchedFilesRegistrationOptions { watchers })
+                        .unwrap_or_default(),
                 ),
-            },
-        ]).await;
+            }])
+            .await;
     }
 
     async fn shutdown(&self) -> Result<()> {
@@ -274,28 +284,43 @@ impl LanguageServer for Backend {
         Ok(())
     }
 
-    async fn execute_command(&self, params: ExecuteCommandParams) -> Result<Option<serde_json::Value>> {
+    async fn execute_command(
+        &self,
+        params: ExecuteCommandParams,
+    ) -> Result<Option<serde_json::Value>> {
         if params.command == "kotlin-lsp/reindex" {
             let root = self.indexer.workspace_root.read().unwrap().clone();
             let Some(root) = root else {
-                self.client.show_message(MessageType::WARNING, "kotlin-lsp: no workspace root set").await;
+                self.client
+                    .show_message(MessageType::WARNING, "kotlin-lsp: no workspace root set")
+                    .await;
                 return Ok(None);
             };
-            let idx    = Arc::clone(&self.indexer);
+            let idx = Arc::clone(&self.indexer);
             let client = self.client.clone();
             idx.reset_index_state();
             tokio::spawn(async move {
                 idx.index_workspace(&root, Some(client)).await;
             });
-            self.client.show_message(MessageType::INFO, "kotlin-lsp: reindexing workspace…").await;
+            self.client
+                .show_message(MessageType::INFO, "kotlin-lsp: reindexing workspace…")
+                .await;
         } else if params.command == "kotlin-lsp/clearCache" {
             // Optional arg: path to workspace root. If absent, clear current root's cache.
-            let arg = params.arguments.first().and_then(|v| v.as_str()).map(|s| s.to_string());
+            let arg = params
+                .arguments
+                .first()
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
             let target_root = if let Some(p) = arg {
                 let pb = std::path::PathBuf::from(p);
                 if !pb.is_dir() {
-                    self.client.show_message(MessageType::WARNING,
-                        format!("kotlin-lsp/clearCache: not a directory: {}", pb.display())).await;
+                    self.client
+                        .show_message(
+                            MessageType::WARNING,
+                            format!("kotlin-lsp/clearCache: not a directory: {}", pb.display()),
+                        )
+                        .await;
                     return Ok(None);
                 }
                 pb
@@ -305,8 +330,12 @@ impl LanguageServer for Backend {
                 match current_root_opt {
                     Some(r) => r,
                     None => {
-                        self.client.show_message(MessageType::WARNING,
-                            "kotlin-lsp/clearCache: no workspace root set and no path provided").await;
+                        self.client
+                            .show_message(
+                                MessageType::WARNING,
+                                "kotlin-lsp/clearCache: no workspace root set and no path provided",
+                            )
+                            .await;
                         return Ok(None);
                     }
                 }
@@ -316,18 +345,30 @@ impl LanguageServer for Backend {
                 match std::fs::remove_dir_all(cache_dir) {
                     Ok(_) => {
                         log::info!("Cleared workspace cache directory: {}", cache_dir.display());
-                        self.client.show_message(MessageType::INFO,
-                            format!("kotlin-lsp: cleared cache for {}", target_root.display())).await;
+                        self.client
+                            .show_message(
+                                MessageType::INFO,
+                                format!("kotlin-lsp: cleared cache for {}", target_root.display()),
+                            )
+                            .await;
                     }
                     Err(e) => {
                         log::warn!("Failed to remove cache dir {}: {}", cache_dir.display(), e);
-                        self.client.show_message(MessageType::WARNING,
-                            format!("kotlin-lsp: failed to clear cache: {}", e)).await;
+                        self.client
+                            .show_message(
+                                MessageType::WARNING,
+                                format!("kotlin-lsp: failed to clear cache: {}", e),
+                            )
+                            .await;
                     }
                 }
             } else {
-                self.client.show_message(MessageType::WARNING,
-                    "kotlin-lsp/clearCache: cache path parent missing").await;
+                self.client
+                    .show_message(
+                        MessageType::WARNING,
+                        "kotlin-lsp/clearCache: cache path parent missing",
+                    )
+                    .await;
             }
         }
         Ok(None)
@@ -336,7 +377,7 @@ impl LanguageServer for Backend {
     // ── document sync ────────────────────────────────────────────────────────
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
-        let uri  = params.text_document.uri;
+        let uri = params.text_document.uri;
         let text = params.text_document.text;
 
         // Keep the opened file path (if available) so prioritized indexing can seed it.
@@ -353,22 +394,31 @@ impl LanguageServer for Backend {
         // This correctly handles mono-repos where .git is at the parent of a subproject
         // (e.g. Moneta/.git with Moneta/android/settings.gradle.kts) and Swift mono-repos
         // where ios/.git is the right root but ios/Modules/*/Package.swift should be ignored.
-        let pinned = self.indexer.workspace_pinned.load(std::sync::atomic::Ordering::Relaxed);
+        let pinned = self
+            .indexer
+            .workspace_pinned
+            .load(std::sync::atomic::Ordering::Relaxed);
         let mut need_root_switch: Option<std::path::PathBuf> = None;
 
         if !pinned {
             if let Some(ref path) = opened_path_opt {
                 let strong_markers = [
-                    "build.gradle", "settings.gradle", "build.gradle.kts",
-                    "Cargo.toml", "pom.xml", "settings.gradle.kts",
+                    "build.gradle",
+                    "settings.gradle",
+                    "build.gradle.kts",
+                    "Cargo.toml",
+                    "pom.xml",
+                    "settings.gradle.kts",
                 ];
                 let weak_markers = ["Package.swift"];
                 let mut cur = path.parent().map(|p| p.to_path_buf());
                 let mut nearest_strong: Option<std::path::PathBuf> = None;
-                let mut git_root:        Option<std::path::PathBuf> = None;
-                let mut nearest_weak:    Option<std::path::PathBuf> = None;
+                let mut git_root: Option<std::path::PathBuf> = None;
+                let mut nearest_weak: Option<std::path::PathBuf> = None;
                 while let Some(ref dir) = cur {
-                    if nearest_strong.is_none() && strong_markers.iter().any(|m| dir.join(m).exists()) {
+                    if nearest_strong.is_none()
+                        && strong_markers.iter().any(|m| dir.join(m).exists())
+                    {
                         nearest_strong = Some(dir.clone());
                     }
                     if dir.join(".git").exists() {
@@ -384,14 +434,16 @@ impl LanguageServer for Backend {
                 let chosen = found.or_else(|| path.parent().map(|p| p.to_path_buf()));
                 if let Some(candidate_root) = chosen {
                     let current_root = self.indexer.workspace_root.read().unwrap().clone();
-                    let cand_canon = std::fs::canonicalize(&candidate_root).unwrap_or_else(|_| candidate_root.clone());
+                    let cand_canon = std::fs::canonicalize(&candidate_root)
+                        .unwrap_or_else(|_| candidate_root.clone());
                     let should_switch = match current_root {
                         None => true,
                         Some(ref r) => {
                             let cur_canon = std::fs::canonicalize(r).unwrap_or_else(|_| r.clone());
-                            let path_canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+                            let path_canon =
+                                std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
                             !path_canon.starts_with(&cur_canon) && cand_canon != cur_canon
-                        },
+                        }
                     };
                     if should_switch {
                         need_root_switch = Some(candidate_root);
@@ -404,19 +456,28 @@ impl LanguageServer for Backend {
             *self.indexer.workspace_root.write().unwrap() = Some(root.clone());
             // Pin the workspace after the first auto-detection so that opening a file
             // from a second project later in the same session doesn't switch again.
-            self.indexer.workspace_pinned.store(true, std::sync::atomic::Ordering::Relaxed);
-            self.indexer.root_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.indexer
+                .workspace_pinned
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            self.indexer
+                .root_generation
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.indexer.reset_index_state();
-            log::info!("Auto-detected workspace root (now pinned): {}", root.display());
+            log::info!(
+                "Auto-detected workspace root (now pinned): {}",
+                root.display()
+            );
             let idx = Arc::clone(&self.indexer);
             let client = self.client.clone();
             let root2 = root.clone();
             let opened = opened_path_opt.clone();
             tokio::spawn(async move {
                 if let Some(op) = opened {
-                    idx.index_workspace_prioritized(&root2, vec![op], Some(client)).await;
+                    idx.index_workspace_prioritized(&root2, vec![op], Some(client))
+                        .await;
                 } else {
-                    idx.index_workspace_prioritized(&root2, Vec::new(), Some(client)).await;
+                    idx.index_workspace_prioritized(&root2, Vec::new(), Some(client))
+                        .await;
                 }
             });
         }
@@ -439,14 +500,18 @@ impl LanguageServer for Backend {
         if outside_root {
             log::info!(
                 "Outside-root file — indexing content only: {}",
-                opened_path_opt.as_deref().map(|p| p.display().to_string()).unwrap_or_default()
+                opened_path_opt
+                    .as_deref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default()
             );
             self.indexer.set_live_lines(&uri, &text);
             {
                 let idx2 = Arc::clone(&self.indexer);
                 let uri2 = uri.clone();
                 let text2 = text.clone();
-                let _ = tokio::task::spawn_blocking(move || idx2.store_live_tree(&uri2, &text2)).await;
+                let _ =
+                    tokio::task::spawn_blocking(move || idx2.store_live_tree(&uri2, &text2)).await;
             }
             // Index just this file so hover/go-to-def work, then return.
             let idx = Arc::clone(&self.indexer);
@@ -456,7 +521,9 @@ impl LanguageServer for Backend {
                     tokio::task::spawn_blocking(move || {
                         let _permit = permit;
                         idx.index_content(&uri, &text);
-                    }).await.ok();
+                    })
+                    .await
+                    .ok();
                 }
             });
             return;
@@ -472,20 +539,23 @@ impl LanguageServer for Backend {
             let _ = tokio::task::spawn_blocking(move || idx2.store_live_tree(&uri2, &text2)).await;
         }
 
-        let idx  = Arc::clone(&self.indexer);
-        let sem  = idx.parse_sem();
+        let idx = Arc::clone(&self.indexer);
+        let sem = idx.parse_sem();
         let client = self.client.clone();
         let idx2 = Arc::clone(&self.indexer);
         tokio::task::spawn(async move {
             let uri2 = uri.clone();
-            let Ok(permit) = sem.acquire_owned().await else { return; };
+            let Ok(permit) = sem.acquire_owned().await else {
+                return;
+            };
             let result = tokio::task::spawn_blocking(move || {
                 let _permit = permit;
                 let data = idx.index_content(&uri, &text);
                 // Pre-warm completion cache for all types referenced in this file.
                 Arc::clone(&idx).prewarm_completion_cache(&uri);
                 data
-            }).await;
+            })
+            .await;
 
             // Publish diagnostics from syntax errors (or clear if hash-skipped).
             let diags = match result {
@@ -493,7 +563,8 @@ impl LanguageServer for Backend {
                 Ok(None) => {
                     // Hash-skipped — read cached errors.
                     let uri_str = uri2.to_string();
-                    idx2.files.get(&uri_str)
+                    idx2.files
+                        .get(&uri_str)
                         .map(|fd| syntax_diagnostics(&fd.syntax_errors))
                         .unwrap_or_default()
                 }
@@ -503,12 +574,11 @@ impl LanguageServer for Backend {
         });
     }
 
-
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         if let Some(change) = params.content_changes.into_iter().last() {
-            let uri  = params.text_document.uri;
+            let uri = params.text_document.uri;
             let text = change.text;
-            let idx  = Arc::clone(&self.indexer);
+            let idx = Arc::clone(&self.indexer);
 
             // Update live_lines immediately (no debounce) so completions()
             // always sees the current line text even before re-indexing.
@@ -519,7 +589,8 @@ impl LanguageServer for Backend {
                 let idx2 = Arc::clone(&self.indexer);
                 let uri2 = uri.clone();
                 let text2 = text.clone();
-                let _ = tokio::task::spawn_blocking(move || idx2.store_live_tree(&uri2, &text2)).await;
+                let _ =
+                    tokio::task::spawn_blocking(move || idx2.store_live_tree(&uri2, &text2)).await;
             }
 
             // True debounce: cancel any pending reindex for this file.
@@ -543,7 +614,8 @@ impl LanguageServer for Backend {
                     let data = idx.index_content(&uri, &text);
                     drop(permit);
                     data
-                }).await;
+                })
+                .await;
 
                 if let Ok(Some(data)) = result {
                     let diags = syntax_diagnostics(&data.syntax_errors);
@@ -567,7 +639,9 @@ impl LanguageServer for Backend {
         self.indexer.remove_live_tree(uri);
         self.indexer.live_lines.remove(uri.as_str());
         // Clear diagnostics so stale errors don't linger after the file is closed.
-        self.client.publish_diagnostics(params.text_document.uri, Vec::new(), None).await;
+        self.client
+            .publish_diagnostics(params.text_document.uri, Vec::new(), None)
+            .await;
     }
 
     // ── textDocument/didSave ─────────────────────────────────────────────────
@@ -614,7 +688,9 @@ impl LanguageServer for Backend {
                             tokio::task::spawn_blocking(move || {
                                 let _permit = permit;
                                 idx.index_content(&uri, &content);
-                            }).await.ok();
+                            })
+                            .await
+                            .ok();
                         }
                     }
                 }
@@ -660,14 +736,14 @@ impl LanguageServer for Backend {
     // ── completionItem/resolve ────────────────────────────────────────────────
 
     async fn completion_resolve(&self, mut item: CompletionItem) -> Result<CompletionItem> {
-        use crate::indexer::resolution::{enrich_at_line, SubstitutionContext, ResolveOptions};
+        use crate::indexer::resolution::{enrich_at_line, ResolveOptions, SubstitutionContext};
 
         if let Some(ref data) = item.data {
             if let (Some(uri), Some(line)) = (
                 data.get("u").and_then(|v| v.as_str()),
                 data.get("l").and_then(|v| v.as_u64()),
             ) {
-                let col         = data.get("c").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                let col = data.get("c").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
                 let calling_uri = data.get("cu").and_then(|v| v.as_str());
 
                 let subst_ctx = match calling_uri {
@@ -691,7 +767,7 @@ impl LanguageServer for Backend {
                     }
                     if !info.doc.is_empty() {
                         item.documentation = Some(Documentation::MarkupContent(MarkupContent {
-                            kind:  MarkupKind::Markdown,
+                            kind: MarkupKind::Markdown,
                             value: info.doc,
                         }));
                     }
@@ -746,10 +822,7 @@ impl LanguageServer for Backend {
 
     // ── textDocument/signatureHelp ───────────────────────────────────────────
 
-    async fn signature_help(
-        &self,
-        params: SignatureHelpParams,
-    ) -> Result<Option<SignatureHelp>> {
+    async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
         self.signature_help_impl(params).await
     }
 
@@ -768,10 +841,7 @@ impl LanguageServer for Backend {
 
     // ── textDocument/foldingRange ────────────────────────────────────────────
 
-    async fn folding_range(
-        &self,
-        params: FoldingRangeParams,
-    ) -> Result<Option<Vec<FoldingRange>>> {
+    async fn folding_range(&self, params: FoldingRangeParams) -> Result<Option<Vec<FoldingRange>>> {
         self.folding_range_impl(params).await
     }
 

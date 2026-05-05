@@ -33,12 +33,18 @@ pub(crate) trait StrExt {
 impl StrExt for str {
     #[inline]
     fn starts_with_uppercase(&self) -> bool {
-        self.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+        self.chars()
+            .next()
+            .map(|c| c.is_uppercase())
+            .unwrap_or(false)
     }
 
     #[inline]
     fn starts_with_lowercase(&self) -> bool {
-        self.chars().next().map(|c| c.is_lowercase()).unwrap_or(false)
+        self.chars()
+            .next()
+            .map(|c| c.is_lowercase())
+            .unwrap_or(false)
     }
 
     #[inline]
@@ -48,7 +54,9 @@ impl StrExt for str {
 
     #[inline]
     fn dotted_ident_prefix(&self) -> String {
-        self.chars().take_while(|&c| is_id_char(c) || c == '.').collect()
+        self.chars()
+            .take_while(|&c| is_id_char(c) || c == '.')
+            .collect()
     }
 
     #[inline]
@@ -58,7 +66,9 @@ impl StrExt for str {
 
     #[inline]
     fn last_ident_in(&self) -> &str {
-        let ident_bytes: usize = self.chars().rev()
+        let ident_bytes: usize = self
+            .chars()
+            .rev()
             .take_while(|&c| is_id_char(c))
             .map(|c| c.len_utf8())
             .sum();
@@ -67,9 +77,11 @@ impl StrExt for str {
 
     #[inline]
     fn decl_prefix(&self) -> &str {
-        self.split_once('{').map(|(l, _)| l)
+        self.split_once('{')
+            .map(|(l, _)| l)
             .unwrap_or(self)
-            .split_once('=').map(|(l, _)| l)
+            .split_once('=')
+            .map(|(l, _)| l)
             .unwrap_or(self)
     }
 }

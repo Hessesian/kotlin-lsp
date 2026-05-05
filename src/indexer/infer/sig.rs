@@ -9,7 +9,7 @@
 use tower_lsp::lsp_types::{SymbolKind, Url};
 
 use crate::indexer::Indexer;
-use crate::resolver::{ReceiverKind, infer_receiver_type};
+use crate::resolver::{infer_receiver_type, ReceiverKind};
 
 // ─── Multiline signature collector ───────────────────────────────────────────
 
@@ -37,13 +37,19 @@ pub(crate) fn collect_signature(lines: &[String], start_line: usize) -> String {
 
         // Count parens in this line.
         for ch in raw.chars() {
-            match ch { '(' => depth += 1, ')' => depth -= 1, _ => {} }
+            match ch {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ => {}
+            }
         }
 
         if raw.ends_with('{') {
             // Body starts — include the line without the brace (shows inheritance).
             let trimmed = raw.trim_end_matches('{').trim_end();
-            if !trimmed.is_empty() { parts.push(trimmed.to_owned()); }
+            if !trimmed.is_empty() {
+                parts.push(trimmed.to_owned());
+            }
             break;
         }
 
@@ -82,7 +88,9 @@ fn find_fun_signature(fn_name: &str, idx: &Indexer, uri: &Url) -> Option<String>
         return Some(sig);
     }
     for entry in idx.files.iter() {
-        if entry.key() == uri.as_str() { continue; }
+        if entry.key() == uri.as_str() {
+            continue;
+        }
         if let Some(sig) = collect_fun_params_text(fn_name, entry.key(), idx) {
             return Some(sig);
         }
@@ -119,24 +127,42 @@ pub(crate) fn find_fun_signature_full(fn_name: &str, idx: &Indexer, uri: &Url) -
 /// Collect everything between the outer `(…)` of a function's parameter list.
 /// Scans the symbol's start line and up to 20 following lines.
 /// Matches both top-level `fun` (FUNCTION) and class methods (METHOD).
-pub(crate) fn collect_fun_params_text(fn_name: &str, uri_str: &str, idx: &Indexer) -> Option<String> {
-    collect_all_fun_params_texts(fn_name, uri_str, idx).into_iter().next()
+pub(crate) fn collect_fun_params_text(
+    fn_name: &str,
+    uri_str: &str,
+    idx: &Indexer,
+) -> Option<String> {
+    collect_all_fun_params_texts(fn_name, uri_str, idx)
+        .into_iter()
+        .next()
 }
 
 /// Like `collect_fun_params_text` but returns ALL params texts for every symbol
 /// named `fn_name` in the file (a file may have multiple same-named nested classes).
-pub(crate) fn collect_all_fun_params_texts(fn_name: &str, uri_str: &str, idx: &Indexer) -> Vec<String> {
-    let data = match idx.files.get(uri_str) { Some(d) => d, None => return vec![] };
-    let start_lines: Vec<usize> = data.symbols.iter()
-        .filter(|s| s.name == fn_name
-               && (s.kind == SymbolKind::FUNCTION
-                   || s.kind == SymbolKind::METHOD
-                   || s.kind == SymbolKind::CLASS
-                   || s.kind == SymbolKind::STRUCT))  // data class → STRUCT
+pub(crate) fn collect_all_fun_params_texts(
+    fn_name: &str,
+    uri_str: &str,
+    idx: &Indexer,
+) -> Vec<String> {
+    let data = match idx.files.get(uri_str) {
+        Some(d) => d,
+        None => return vec![],
+    };
+    let start_lines: Vec<usize> = data
+        .symbols
+        .iter()
+        .filter(|s| {
+            s.name == fn_name
+                && (s.kind == SymbolKind::FUNCTION
+                    || s.kind == SymbolKind::METHOD
+                    || s.kind == SymbolKind::CLASS
+                    || s.kind == SymbolKind::STRUCT)
+        }) // data class → STRUCT
         .map(|s| s.range.start.line as usize)
         .collect();
 
-    start_lines.into_iter()
+    start_lines
+        .into_iter()
         .filter_map(|start_line| collect_params_from_line(&data.lines, start_line))
         .collect()
 }
@@ -151,28 +177,46 @@ pub(crate) fn collect_params_from_line(lines: &[String], start_line: usize) -> O
     let mut params = String::new();
 
     'outer: for ln in start_line..start_line + FUN_PARAMS_SCAN_LINES {
-        let line = match lines.get(ln) { Some(l) => l, None => break };
+        let line = match lines.get(ln) {
+            Some(l) => l,
+            None => break,
+        };
         let chars = line.char_indices().peekable();
         for (_, ch) in chars {
             match ch {
                 '(' => {
                     paren_depth += 1;
-                    if paren_depth == 1 { found_open = true; continue; }
-                    if found_open { params.push(ch); }
+                    if paren_depth == 1 {
+                        found_open = true;
+                        continue;
+                    }
+                    if found_open {
+                        params.push(ch);
+                    }
                 }
                 ')' => {
                     paren_depth -= 1;
-                    if found_open && paren_depth == 0 { break 'outer; }
-                    if found_open { params.push(ch); }
+                    if found_open && paren_depth == 0 {
+                        break 'outer;
+                    }
+                    if found_open {
+                        params.push(ch);
+                    }
                 }
                 _ if found_open => params.push(ch),
                 _ => {}
             }
         }
-        if found_open { params.push('\n'); }
+        if found_open {
+            params.push('\n');
+        }
     }
 
-    if params.is_empty() { None } else { Some(params) }
+    if params.is_empty() {
+        None
+    } else {
+        Some(params)
+    }
 }
 
 // ─── Parameter type accessors ─────────────────────────────────────────────────
@@ -215,7 +259,9 @@ pub(crate) fn nth_fun_param_type_str(params_text: &str, n: usize) -> Option<Stri
     let mut parts = split_params_at_depth_zero(params_text);
     // Drop trailing-comma empty parts (Kotlin allows `fun f(a: A, b: B,) {}`).
     parts.retain(|p| !p.trim().is_empty());
-    if parts.is_empty() { return None; }
+    if parts.is_empty() {
+        return None;
+    }
 
     let param = parts.get(n).unwrap_or_else(|| parts.last().unwrap()).trim();
     // Strip leading non-identifier characters (annotations, whitespace).
@@ -240,7 +286,9 @@ pub(crate) fn last_fun_param_type_str(params_text: &str) -> Option<String> {
 /// `"collection.method(arg1, arg2)"` → `"collection.method"`
 /// `"collection.forEach"`           → `"collection.forEach"`  (unchanged)
 pub(crate) fn strip_trailing_call_args(s: &str) -> &str {
-    if !s.ends_with(')') { return s; }
+    if !s.ends_with(')') {
+        return s;
+    }
     let bytes = s.as_bytes();
     let mut depth = 0i32;
     let mut i = bytes.len();
@@ -250,7 +298,9 @@ pub(crate) fn strip_trailing_call_args(s: &str) -> &str {
             b')' => depth += 1,
             b'(' => {
                 depth -= 1;
-                if depth == 0 { return &s[..i]; }
+                if depth == 0 {
+                    return &s[..i];
+                }
             }
             _ => {}
         }
@@ -269,9 +319,9 @@ pub(crate) fn strip_trailing_call_args(s: &str) -> &str {
 /// This is the free-function form of the former `Indexer::find_fun_signature_with_receiver`
 /// method.  `backend.rs` calls this directly.
 pub(crate) fn find_fun_signature_with_receiver(
-    idx:      &Indexer,
-    uri:      &Url,
-    name:     &str,
+    idx: &Indexer,
+    uri: &Url,
+    name: &str,
     receiver: Option<&str>,
 ) -> String {
     if let Some(recv) = receiver {
@@ -287,17 +337,20 @@ pub(crate) fn find_fun_signature_with_receiver(
                     return sig;
                 }
                 // Also search by line range within the type's body.
-                let type_end = data.symbols.iter()
+                let type_end = data
+                    .symbols
+                    .iter()
                     .find(|s| s.name == rt.outer)
                     .map(|s| s.range.end.line)
                     .unwrap_or(u32::MAX);
-                for sym in data.symbols.iter()
+                for sym in data
+                    .symbols
+                    .iter()
                     .filter(|s| s.name == name && s.range.start.line <= type_end)
                 {
-                    if let Some(sig) = collect_params_from_line(
-                        &data.lines,
-                        sym.range.start.line as usize,
-                    ) {
+                    if let Some(sig) =
+                        collect_params_from_line(&data.lines, sym.range.start.line as usize)
+                    {
                         return sig;
                     }
                 }

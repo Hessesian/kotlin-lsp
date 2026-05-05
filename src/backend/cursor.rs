@@ -12,14 +12,14 @@
 use tower_lsp::lsp_types::{Location, Position, Url};
 
 use crate::indexer::Indexer;
-use crate::resolver::{ReceiverKind, ReceiverType, infer_receiver_type};
+use crate::resolver::{infer_receiver_type, ReceiverKind, ReceiverType};
 
 /// Cursor context for identifier-based LSP features (hover, goto-def, completion).
 ///
 /// Built once per request; individual fields are `None` when not applicable.
 pub struct CursorContext {
     /// The identifier token under the cursor.
-    pub word:      String,
+    pub word: String,
     /// The dot-qualifier to the left of the cursor (e.g. `"it"`, `"viewModel"`).
     /// `None` when cursor is on a bare name with no qualifying expression.
     pub qualifier: Option<String>,
@@ -42,10 +42,12 @@ impl CursorContext {
         let (word, qualifier) = idx.word_and_qualifier_at(uri, position)?;
 
         let line = position.line as usize;
-        let col  = position.character as usize;
+        let col = position.character as usize;
 
         // `it`/`this` are always contextual (lambda receiver inference).
-        let is_it_or_this = qualifier.as_deref().is_some_and(|q| q == "it" || q == "this")
+        let is_it_or_this = qualifier
+            .as_deref()
+            .is_some_and(|q| q == "it" || q == "this")
             || (qualifier.is_none() && (word == "it" || word == "this"));
 
         // For other lowercase bare identifiers, confirm they are in scope as lambda
@@ -89,6 +91,11 @@ impl CursorContext {
             None
         };
 
-        Some(CursorContext { word, qualifier, contextual, lambda_decl })
+        Some(CursorContext {
+            word,
+            qualifier,
+            contextual,
+            lambda_decl,
+        })
     }
 }

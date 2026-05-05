@@ -71,21 +71,21 @@ pub trait InferDeps {
 #[cfg(test)]
 pub(crate) struct TestDeps {
     /// `(uri_str, fn_name)` → raw params text
-    pub fun_sigs:      std::collections::HashMap<(String, String), String>,
+    pub fun_sigs: std::collections::HashMap<(String, String), String>,
     /// `(uri_str, var_name)` → type name
-    pub var_types:     std::collections::HashMap<(String, String), String>,
+    pub var_types: std::collections::HashMap<(String, String), String>,
     /// `(class_name, field_name)` → raw type (with generics)
-    pub field_types:   std::collections::HashMap<(String, String), String>,
+    pub field_types: std::collections::HashMap<(String, String), String>,
     /// `fn_name` → raw return type (with generics)
-    pub return_types:  std::collections::HashMap<String, String>,
+    pub return_types: std::collections::HashMap<String, String>,
 }
 
 #[cfg(test)]
 impl TestDeps {
     pub fn new() -> Self {
         TestDeps {
-            fun_sigs:    std::collections::HashMap::new(),
-            var_types:   std::collections::HashMap::new(),
+            fun_sigs: std::collections::HashMap::new(),
+            var_types: std::collections::HashMap::new(),
             field_types: std::collections::HashMap::new(),
             return_types: std::collections::HashMap::new(),
         }
@@ -93,25 +93,31 @@ impl TestDeps {
 
     /// Register `fn_name` → `params_text` for `uri`.
     pub fn with_fun(mut self, uri: &str, fn_name: &str, params: &str) -> Self {
-        self.fun_sigs.insert((uri.to_string(), fn_name.to_string()), params.to_string());
+        self.fun_sigs
+            .insert((uri.to_string(), fn_name.to_string()), params.to_string());
         self
     }
 
     /// Register `var_name` → `type_name` for `uri`.
     pub fn with_var(mut self, uri: &str, var_name: &str, ty: &str) -> Self {
-        self.var_types.insert((uri.to_string(), var_name.to_string()), ty.to_string());
+        self.var_types
+            .insert((uri.to_string(), var_name.to_string()), ty.to_string());
         self
     }
 
     /// Register `field_name` in `class_name` → raw type (with generics).
     pub fn with_field(mut self, class_name: &str, field_name: &str, ty: &str) -> Self {
-        self.field_types.insert((class_name.to_string(), field_name.to_string()), ty.to_string());
+        self.field_types.insert(
+            (class_name.to_string(), field_name.to_string()),
+            ty.to_string(),
+        );
         self
     }
 
     /// Register `fn_name` → raw return type (with generics), for method-chain tests.
     pub fn with_return(mut self, fn_name: &str, ty: &str) -> Self {
-        self.return_types.insert(fn_name.to_string(), ty.to_string());
+        self.return_types
+            .insert(fn_name.to_string(), ty.to_string());
         self
     }
 }
@@ -119,13 +125,19 @@ impl TestDeps {
 #[cfg(test)]
 impl InferDeps for TestDeps {
     fn find_fun_params_text(&self, fn_name: &str, uri: &Url) -> Option<String> {
-        self.fun_sigs.get(&(uri.to_string(), fn_name.to_string())).cloned()
+        self.fun_sigs
+            .get(&(uri.to_string(), fn_name.to_string()))
+            .cloned()
     }
     fn find_var_type(&self, var_name: &str, uri: &Url) -> Option<String> {
-        self.var_types.get(&(uri.to_string(), var_name.to_string())).cloned()
+        self.var_types
+            .get(&(uri.to_string(), var_name.to_string()))
+            .cloned()
     }
     fn find_field_type(&self, class_name: &str, field_name: &str) -> Option<String> {
-        self.field_types.get(&(class_name.to_string(), field_name.to_string())).cloned()
+        self.field_types
+            .get(&(class_name.to_string(), field_name.to_string()))
+            .cloned()
     }
     fn find_fun_return_type(&self, fn_name: &str) -> Option<String> {
         self.return_types.get(fn_name).cloned()

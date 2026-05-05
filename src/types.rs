@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tower_lsp::lsp_types::{Range, SymbolKind};
 
 /// Source language inferred from a file's path extension.
@@ -21,14 +21,24 @@ impl Language {
     /// Everything else (`.kt`, `.kts`, unknown extensions) → Kotlin, since this
     /// server is Kotlin-primary and `.kts` files use the same language features.
     pub fn from_path(path: &str) -> Self {
-        if path.ends_with(".swift")                        { Language::Swift }
-        else if path.ends_with(".java")                    { Language::Java  }
-        else                                               { Language::Kotlin }
+        if path.ends_with(".swift") {
+            Language::Swift
+        } else if path.ends_with(".java") {
+            Language::Java
+        } else {
+            Language::Kotlin
+        }
     }
 
-    pub fn is_kotlin(self)  -> bool { matches!(self, Language::Kotlin) }
-    pub fn is_java(self)    -> bool { matches!(self, Language::Java)   }
-    pub fn is_swift(self)   -> bool { matches!(self, Language::Swift)  }
+    pub fn is_kotlin(self) -> bool {
+        matches!(self, Language::Kotlin)
+    }
+    pub fn is_java(self) -> bool {
+        matches!(self, Language::Java)
+    }
+    pub fn is_swift(self) -> bool {
+        matches!(self, Language::Swift)
+    }
 }
 
 /// A position within a document used by infer functions.
@@ -38,7 +48,7 @@ impl Language {
 /// transposition of line and column arguments at call sites.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CursorPos {
-    pub line:      usize,
+    pub line: usize,
     pub utf16_col: usize,
 }
 
@@ -55,29 +65,29 @@ pub enum Visibility {
 /// Single symbol definition entry stored in the index.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SymbolEntry {
-    pub name:             String,
-    pub kind:             SymbolKind,
-    pub visibility:       Visibility,
+    pub name: String,
+    pub kind: SymbolKind,
+    pub visibility: Visibility,
     /// Span of the entire declaration node.
-    pub range:            Range,
+    pub range: Range,
     /// Span of only the identifier — used for `selectionRange` in DocumentSymbol.
-    pub selection_range:  Range,
+    pub selection_range: Range,
     /// Short signature shown in hover/symbol lists.
     /// e.g. `"fun addBiometryToPowerAuth(isAllowedForActiveOp: Boolean)"`,
     ///      `"class CreatePinViewModel"`, `"val isChecked: Boolean"`.
     /// Empty string when not computed.
     #[serde(default)]
-    pub detail:           String,
+    pub detail: String,
     /// Generic type parameter names extracted from the CST at parse time.
     /// e.g. `class Foo<T, U>` → `["T", "U"]`.
     /// Empty for non-generic symbols.
     #[serde(default)]
-    pub type_params:          Vec<String>,
+    pub type_params: Vec<String>,
     /// For extension functions: the receiver type name (without generics).
     /// e.g. `fun MyType.foo()` → `"MyType"`, `fun <T> List<T>.bar()` → `"List"`.
     /// Empty string for non-extension symbols.
     #[serde(default)]
-    pub extension_receiver:   String,
+    pub extension_receiver: String,
 }
 
 impl SymbolEntry {
@@ -96,11 +106,11 @@ impl SymbolEntry {
 pub struct ImportEntry {
     /// Fully-qualified path without the trailing `.*`.
     /// e.g. `"com.example.Foo"` or `"com.example"` for star imports.
-    pub full_path:  String,
+    pub full_path: String,
     /// The name usable locally: last segment, alias, or `"*"` for star.
     pub local_name: String,
     /// True for `import com.example.*`.
-    pub is_star:    bool,
+    pub is_star: bool,
 }
 
 /// A structural syntax error detected by tree-sitter.
@@ -110,7 +120,7 @@ pub struct ImportEntry {
 /// (cheap to recompute on every parse).
 #[derive(Debug, Clone)]
 pub struct SyntaxError {
-    pub range:   Range,
+    pub range: Range,
     pub message: String,
 }
 
@@ -124,7 +134,7 @@ pub struct FileData {
     /// Raw source lines — kept for `word_at()` lookups without hitting disk.
     /// Wrapped in Arc so that `clone()` is a cheap atomic refcount bump,
     /// not a full Vec<String> copy (which allocates one heap block per line).
-    pub lines:   Arc<Vec<String>>,
+    pub lines: Arc<Vec<String>>,
     /// Lower-cased identifiers found before `:` on non-comment lines.
     /// Populated once at parse time; used by completion without re-scanning.
     pub declared_names: Vec<String>,
@@ -158,17 +168,20 @@ impl FileData {
     /// top-level (not inside any class).
     pub fn containing_class_at(&self, line: u32) -> Option<String> {
         const CLASS_KINDS: &[SymbolKind] = &[
-            SymbolKind::CLASS, SymbolKind::INTERFACE, SymbolKind::STRUCT,
-            SymbolKind::ENUM,  SymbolKind::OBJECT,
+            SymbolKind::CLASS,
+            SymbolKind::INTERFACE,
+            SymbolKind::STRUCT,
+            SymbolKind::ENUM,
+            SymbolKind::OBJECT,
         ];
-        self.symbols.iter()
+        self.symbols
+            .iter()
             .filter(|s| CLASS_KINDS.contains(&s.kind))
             .filter(|s| s.range.start.line <= line && line <= s.range.end.line)
             .min_by_key(|s| s.range.end.line.saturating_sub(s.range.start.line))
             .map(|s| s.name.clone())
     }
 }
-
 
 /// Result of parsing a single file. Pure data, no side effects.
 /// This is what index_content will return instead of mutating DashMaps.

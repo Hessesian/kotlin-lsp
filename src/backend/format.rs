@@ -4,9 +4,9 @@
 //! returned by the `textDocument/hover` handler.  They are presentation-only
 //! and contain no resolution logic.
 
-use tower_lsp::lsp_types::SymbolKind;
-use crate::indexer::lookup::{symbol_kw_for_lang, lang_str};
+use crate::indexer::lookup::{lang_str, symbol_kw_for_lang};
 use crate::indexer::resolution::ResolvedSymbol;
+use tower_lsp::lsp_types::SymbolKind;
 
 /// Format a standard symbol hover: optional KDoc block + fenced code block.
 ///
@@ -21,11 +21,15 @@ use crate::indexer::resolution::ResolvedSymbol;
 /// ```
 pub(super) fn format_symbol_hover(info: &ResolvedSymbol, uri_path: &str) -> String {
     let lang = lang_str(uri_path);
-    let sig  = info.signature.as_str();
+    let sig = info.signature.as_str();
 
     let code_block = if sig.is_empty() {
         // Signature unavailable — fall back to keyword + known symbol name.
-        format!("```{lang}\n{} {}\n```", symbol_kw_for_lang(info.kind, lang), info.name)
+        format!(
+            "```{lang}\n{} {}\n```",
+            symbol_kw_for_lang(info.kind, lang),
+            info.name
+        )
     } else {
         format!("```{lang}\n{sig}\n```")
     };
@@ -52,9 +56,9 @@ pub(super) fn format_symbol_hover(info: &ResolvedSymbol, uri_path: &str) -> Stri
 /// `type_sig_md` — the synthesized declaration line, e.g. `"val it: AccountType"`.
 /// `type_detail` — optional hover markdown for the resolved type symbol itself.
 pub(super) fn format_contextual_hover(
-    type_sig_md:  &str,
-    uri_path:     &str,
-    type_detail:  Option<&str>,
+    type_sig_md: &str,
+    uri_path: &str,
+    type_detail: Option<&str>,
 ) -> String {
     let lang = lang_str(uri_path);
     let sig_block = format!("```{lang}\n{type_sig_md}\n```");

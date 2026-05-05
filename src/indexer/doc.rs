@@ -21,20 +21,23 @@
 /// - Skips `@suppress`, `@hide`, `@internal` — not user-facing
 /// - Strips `[LinkText](url)` Markdown links from KDoc `[Symbol]` references
 pub(super) fn extract_doc_comment(lines: &[String], decl_line: usize) -> Option<String> {
-    if decl_line == 0 { return None; }
+    if decl_line == 0 {
+        return None;
+    }
 
     // Find the end of the doc comment block by scanning backward over
     // annotations, blank lines, and modifier-only lines.
     let mut search_end = decl_line;
     loop {
-        if search_end == 0 { return None; }
+        if search_end == 0 {
+            return None;
+        }
         search_end -= 1;
         let trimmed = lines[search_end].trim();
-        if trimmed.is_empty()
-            || trimmed.starts_with('@')
-            || is_modifier_line(trimmed)
-        {
-            if search_end == 0 { return None; }
+        if trimmed.is_empty() || trimmed.starts_with('@') || is_modifier_line(trimmed) {
+            if search_end == 0 {
+                return None;
+            }
             continue;
         }
         break;
@@ -49,8 +52,12 @@ pub(super) fn extract_doc_comment(lines: &[String], decl_line: usize) -> Option<
         let mut start = search_end;
         loop {
             let t = lines[start].trim();
-            if t.starts_with("/**") || t.starts_with("/*") { break; }
-            if start == 0 { return None; }
+            if t.starts_with("/**") || t.starts_with("/*") {
+                break;
+            }
+            if start == 0 {
+                return None;
+            }
             start -= 1;
         }
 
@@ -82,7 +89,11 @@ pub(super) fn extract_doc_comment(lines: &[String], decl_line: usize) -> Option<
             .collect::<Vec<_>>()
             .join("\n");
         let rendered = format_doc_tags(&text);
-        return if rendered.trim().is_empty() { None } else { Some(rendered) };
+        return if rendered.trim().is_empty() {
+            None
+        } else {
+            Some(rendered)
+        };
     }
 
     None
@@ -92,10 +103,27 @@ pub(super) fn extract_doc_comment(lines: &[String], decl_line: usize) -> Option<
 /// (e.g. `override`, `public final`) — we skip these when hunting for docs.
 fn is_modifier_line(s: &str) -> bool {
     const MODIFIERS: &[&str] = &[
-        "public", "private", "protected", "internal", "override", "open",
-        "abstract", "sealed", "final", "static", "inline", "tailrec",
-        "external", "suspend", "operator", "infix", "data", "inner",
-        "companion", "lateinit", "const",
+        "public",
+        "private",
+        "protected",
+        "internal",
+        "override",
+        "open",
+        "abstract",
+        "sealed",
+        "final",
+        "static",
+        "inline",
+        "tailrec",
+        "external",
+        "suspend",
+        "operator",
+        "infix",
+        "data",
+        "inner",
+        "companion",
+        "lateinit",
+        "const",
     ];
     s.split_whitespace().all(|w| MODIFIERS.contains(&w))
 }
@@ -108,7 +136,11 @@ fn render_block_doc(raw_lines: &[&str]) -> String {
         let t = t.strip_prefix("/**").unwrap_or(t);
         let t = t.strip_suffix("*/").unwrap_or(t);
         let t = t.strip_prefix("/*").unwrap_or(t);
-        let t = if let Some(rest) = t.strip_prefix('*') { rest } else { t };
+        let t = if let Some(rest) = t.strip_prefix('*') {
+            rest
+        } else {
+            t
+        };
         let t = t.trim();
         // Skip the lone opening/closing marker lines that become empty
         if !t.is_empty() {
@@ -134,22 +166,23 @@ fn format_doc_tags(text: &str) -> String {
     // Split on Javadoc/KDoc tag boundaries (lines starting with @).
     // We need to preserve multi-line tag bodies.
     let mut description: Vec<String> = Vec::new();
-    let mut params:  Vec<(String, String)> = Vec::new();
+    let mut params: Vec<(String, String)> = Vec::new();
     let mut returns: Option<String> = None;
-    let mut throws:  Vec<(String, String)> = Vec::new();
-    let mut see:     Vec<String> = Vec::new();
-    let mut since:   Option<String> = None;
+    let mut throws: Vec<(String, String)> = Vec::new();
+    let mut see: Vec<String> = Vec::new();
+    let mut since: Option<String> = None;
 
     // Accumulate current tag body across newlines.
-    let mut cur_tag: Option<String>  = None;
-    let mut cur_body: Vec<String>    = Vec::new();
+    let mut cur_tag: Option<String> = None;
+    let mut cur_body: Vec<String> = Vec::new();
 
-    let flush = |cur_tag: &Option<String>, cur_body: &Vec<String>,
-                  params: &mut Vec<(String, String)>,
-                  returns: &mut Option<String>,
-                  throws: &mut Vec<(String, String)>,
-                  see: &mut Vec<String>,
-                  since: &mut Option<String>| {
+    let flush = |cur_tag: &Option<String>,
+                 cur_body: &Vec<String>,
+                 params: &mut Vec<(String, String)>,
+                 returns: &mut Option<String>,
+                 throws: &mut Vec<(String, String)>,
+                 see: &mut Vec<String>,
+                 since: &mut Option<String>| {
         let body = cur_body.join(" ").trim().to_owned();
         if let Some(tag) = cur_tag {
             match tag.as_str() {
@@ -162,7 +195,7 @@ fn format_doc_tags(text: &str) -> String {
                     let (name, rest) = split_first_word(&body);
                     throws.push((name.to_owned(), rest.trim().to_owned()));
                 }
-                "see"   => see.push(body),
+                "see" => see.push(body),
                 "since" => *since = Some(body),
                 _ => {} // suppress, hide, internal, author, etc.
             }
@@ -173,21 +206,39 @@ fn format_doc_tags(text: &str) -> String {
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix('@') {
             // Flush previous tag
-            flush(&cur_tag, &cur_body, &mut params, &mut returns,
-                  &mut throws, &mut see, &mut since);
+            flush(
+                &cur_tag,
+                &cur_body,
+                &mut params,
+                &mut returns,
+                &mut throws,
+                &mut see,
+                &mut since,
+            );
             cur_body.clear();
 
             let (tag, body) = split_first_word(rest);
             cur_tag = Some(tag.to_lowercase());
-            if !body.is_empty() { cur_body.push(body.trim().to_owned()); }
+            if !body.is_empty() {
+                cur_body.push(body.trim().to_owned());
+            }
         } else if cur_tag.is_some() {
-            if !trimmed.is_empty() { cur_body.push(trimmed.to_owned()); }
+            if !trimmed.is_empty() {
+                cur_body.push(trimmed.to_owned());
+            }
         } else {
             description.push(trimmed.to_owned());
         }
     }
-    flush(&cur_tag, &cur_body, &mut params, &mut returns,
-          &mut throws, &mut see, &mut since);
+    flush(
+        &cur_tag,
+        &cur_body,
+        &mut params,
+        &mut returns,
+        &mut throws,
+        &mut see,
+        &mut since,
+    );
 
     // Reassemble as Markdown.
     let mut md = description.join("\n").trim().to_owned();
@@ -221,7 +272,11 @@ fn format_doc_tags(text: &str) -> String {
         }
     }
     if !see.is_empty() {
-        let refs = see.iter().map(|s| format!("`{}`", s.trim())).collect::<Vec<_>>().join(", ");
+        let refs = see
+            .iter()
+            .map(|s| format!("`{}`", s.trim()))
+            .collect::<Vec<_>>()
+            .join(", ");
         md.push_str(&format!("\n\n**See also:** {refs}"));
     }
     if let Some(s) = since {
@@ -241,7 +296,10 @@ fn inline_doc_markup(s: &str) -> String {
         rest = &rest[pos..];
         if let Some(end) = rest.find('}') {
             let inner = &rest[1..end]; // strip braces
-            let inner = inner.trim_start_matches("@code").trim_start_matches("@link").trim();
+            let inner = inner
+                .trim_start_matches("@code")
+                .trim_start_matches("@link")
+                .trim();
             out.push('`');
             out.push_str(inner);
             out.push('`');
@@ -255,7 +313,7 @@ fn inline_doc_markup(s: &str) -> String {
 
     // KDoc `[Symbol]` → `Symbol`
     // Avoid matching Markdown links `[text](url)` — only bare `[Word]`
-    
+
     regex_replace_kdoc_links(&out)
 }
 
@@ -293,7 +351,7 @@ fn split_first_word(s: &str) -> (&str, &str) {
     let s = s.trim();
     match s.find(char::is_whitespace) {
         Some(i) => (&s[..i], &s[i..]),
-        None    => (s, ""),
+        None => (s, ""),
     }
 }
 

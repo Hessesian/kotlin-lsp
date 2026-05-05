@@ -2,13 +2,13 @@
 //!
 //! These methods are lightweight convenience wrappers around tree-sitter node
 //! traversal; their bodies were extracted from the free functions they replace.
-use tree_sitter::Node;
-use crate::StrExt;
 use crate::queries::{
-    KIND_SIMPLE_IDENT, KIND_TYPE_IDENT, KIND_IDENTIFIER, KIND_VALUE_ARG, KIND_VALUE_ARGS,
-    KIND_LAMBDA_PARAMS, KIND_TYPE_PARAMS, KIND_TYPE_PARAM, KIND_TYPE_ARGS,
-    KIND_USER_TYPE, KIND_TYPE_LIST,
+    KIND_IDENTIFIER, KIND_LAMBDA_PARAMS, KIND_SIMPLE_IDENT, KIND_TYPE_ARGS, KIND_TYPE_IDENT,
+    KIND_TYPE_LIST, KIND_TYPE_PARAM, KIND_TYPE_PARAMS, KIND_USER_TYPE, KIND_VALUE_ARG,
+    KIND_VALUE_ARGS,
 };
+use crate::StrExt;
+use tree_sitter::Node;
 
 pub(crate) trait NodeExt<'a>: Sized + Copy {
     /// Extract the node's text as an owned `String`.  Returns `None` if the bytes
@@ -175,8 +175,7 @@ impl<'a> NodeExt<'a> for Node<'a> {
     }
 
     fn has_lambda_named_params(self, bytes: &[u8]) -> bool {
-        let Some(lp) = self.first_child_of_kind(KIND_LAMBDA_PARAMS)
-        else {
+        let Some(lp) = self.first_child_of_kind(KIND_LAMBDA_PARAMS) else {
             return false;
         };
 
@@ -195,8 +194,7 @@ impl<'a> NodeExt<'a> for Node<'a> {
     }
 
     fn collect_lambda_param_names(self, bytes: &[u8], existing: &[String]) -> Vec<String> {
-        let Some(lp) = self.first_child_of_kind(KIND_LAMBDA_PARAMS)
-        else {
+        let Some(lp) = self.first_child_of_kind(KIND_LAMBDA_PARAMS) else {
             return Vec::new();
         };
 
@@ -260,7 +258,9 @@ impl<'a> NodeExt<'a> for Node<'a> {
                         "navigation_suffix" => {
                             fn_name_opt = (0..child.child_count())
                                 .filter_map(|i| child.child(i))
-                                .find(|c| c.kind() == KIND_SIMPLE_IDENT || c.kind() == KIND_TYPE_IDENT)
+                                .find(|c| {
+                                    c.kind() == KIND_SIMPLE_IDENT || c.kind() == KIND_TYPE_IDENT
+                                })
                                 .and_then(|c| c.utf8_text_owned(bytes));
                         }
                         _ => {}
@@ -275,7 +275,11 @@ impl<'a> NodeExt<'a> for Node<'a> {
     fn user_type_name(self, bytes: &[u8]) -> Option<String> {
         let mut segments = Vec::new();
         collect_user_type_segments(self, bytes, &mut segments);
-        if segments.is_empty() { None } else { Some(segments.join(".")) }
+        if segments.is_empty() {
+            None
+        } else {
+            Some(segments.join("."))
+        }
     }
 
     fn java_first_type_name(self, bytes: &[u8]) -> Option<String> {
@@ -298,7 +302,9 @@ impl<'a> NodeExt<'a> for Node<'a> {
             }
             let mut cur = n.walk();
             for child in n.children(&mut cur) {
-                if child.is_named() { stack.push(child); }
+                if child.is_named() {
+                    stack.push(child);
+                }
             }
         }
         None
@@ -309,7 +315,8 @@ impl<'a> NodeExt<'a> for Node<'a> {
             return Vec::new();
         };
         let mut cur = args_node.walk();
-        args_node.children(&mut cur)
+        args_node
+            .children(&mut cur)
             .filter(|c| c.is_named())
             .filter_map(|c| c.utf8_text(bytes).ok())
             .map(|t| t.trim().to_owned())
@@ -318,7 +325,9 @@ impl<'a> NodeExt<'a> for Node<'a> {
     }
 
     fn extract_type_params(self, bytes: &[u8]) -> Vec<String> {
-        let Some(tp) = self.first_child_of_kind(KIND_TYPE_PARAMS) else { return Vec::new() };
+        let Some(tp) = self.first_child_of_kind(KIND_TYPE_PARAMS) else {
+            return Vec::new();
+        };
         let mut result = Vec::new();
         for param in tp.children_of_kind(KIND_TYPE_PARAM) {
             if let Some(id) = param.first_child_of_kind(KIND_TYPE_IDENT) {
@@ -332,7 +341,9 @@ impl<'a> NodeExt<'a> for Node<'a> {
 
     fn extract_type_params_or_error_child(self, bytes: &[u8]) -> Vec<String> {
         let direct = self.extract_type_params(bytes);
-        if !direct.is_empty() { return direct; }
+        if !direct.is_empty() {
+            return direct;
+        }
         // For `fun interface Foo<T>` misparsing, tree-sitter may wrap `<T>` in an
         // ERROR child.  Search only ERROR children — not the full subtree — to
         // avoid picking up type params from methods inside the interface body.
@@ -340,11 +351,15 @@ impl<'a> NodeExt<'a> for Node<'a> {
         for child in self.children(&mut cur) {
             if child.is_error() {
                 let params = child.extract_type_params(bytes);
-                if !params.is_empty() { return params; }
+                if !params.is_empty() {
+                    return params;
+                }
                 // `<T>` may land as raw tokens (no type_parameters node) — scan bytes directly.
                 if let Ok(text) = child.utf8_text(bytes) {
                     let params = type_params_from_angle_brackets(text);
-                    if !params.is_empty() { return params; }
+                    if !params.is_empty() {
+                        return params;
+                    }
                 }
             }
         }
@@ -364,17 +379,23 @@ impl<'a> NodeExt<'a> for Node<'a> {
             let kind = child.kind();
             if kind == "constructor_invocation" || kind == "explicit_delegation" {
                 if let Some(ut) = child.first_child_of_kind(KIND_USER_TYPE) {
-                    return ut.user_type_name(bytes).map(|n| (n, ut.type_arg_strings(bytes)));
+                    return ut
+                        .user_type_name(bytes)
+                        .map(|n| (n, ut.type_arg_strings(bytes)));
                 }
             } else if kind == KIND_USER_TYPE {
-                return child.user_type_name(bytes).map(|n| (n, child.type_arg_strings(bytes)));
+                return child
+                    .user_type_name(bytes)
+                    .map(|n| (n, child.type_arg_strings(bytes)));
             }
         }
         None
     }
 
     fn java_type_list(self, bytes: &[u8]) -> Vec<(String, Vec<String>)> {
-        let Some(type_list) = self.first_child_of_kind(KIND_TYPE_LIST) else { return Vec::new() };
+        let Some(type_list) = self.first_child_of_kind(KIND_TYPE_LIST) else {
+            return Vec::new();
+        };
         let mut result = Vec::new();
         let mut cc = type_list.walk();
         for type_node in type_list.children(&mut cc) {
@@ -383,9 +404,14 @@ impl<'a> NodeExt<'a> for Node<'a> {
             let (name, type_args) = if type_node.kind() == KIND_TYPE_IDENT {
                 (type_node.utf8_text_owned(bytes), Vec::new())
             } else {
-                (type_node.java_first_type_name(bytes), type_node.type_arg_strings(bytes))
+                (
+                    type_node.java_first_type_name(bytes),
+                    type_node.type_arg_strings(bytes),
+                )
             };
-            if let Some(n) = name { result.push((n, type_args)); }
+            if let Some(n) = name {
+                result.push((n, type_args));
+            }
         }
         result
     }
@@ -408,7 +434,6 @@ impl<'a> NodeExt<'a> for Node<'a> {
     }
 }
 
-
 /// Scan `text` for the first `<…>` block and return simple identifier names inside.
 /// Used as a last-resort fallback when tree-sitter ERROR nodes don't produce a
 /// `type_parameters` child (e.g. `fun interface Foo<T>` in tree-sitter-kotlin 0.3).
@@ -425,7 +450,10 @@ fn type_params_from_angle_brackets(text: &str) -> Vec<String> {
             '<' => depth += 1,
             '>' => {
                 depth -= 1;
-                if depth == 0 { close = Some(i); break; }
+                if depth == 0 {
+                    close = Some(i);
+                    break;
+                }
             }
             _ => {}
         }
@@ -441,8 +469,11 @@ fn type_params_from_angle_brackets(text: &str) -> Vec<String> {
         .filter_map(|s| {
             let s = s.trim();
             // Strip variance annotation prefix
-            let s = s.strip_prefix("out ").or_else(|| s.strip_prefix("in "))
-                .unwrap_or(s).trim();
+            let s = s
+                .strip_prefix("out ")
+                .or_else(|| s.strip_prefix("in "))
+                .unwrap_or(s)
+                .trim();
             // Strip upper bound suffix (e.g. `T : Any`, `T: Comparable`)
             let s = s.split(':').next().unwrap_or(s).trim();
             if !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_') {
@@ -463,7 +494,9 @@ fn collect_user_type_segments(node: Node<'_>, bytes: &[u8], segments: &mut Vec<S
         } else if kind == KIND_SIMPLE_IDENT || kind == KIND_TYPE_IDENT || kind == KIND_IDENTIFIER {
             if let Ok(text) = child.utf8_text(bytes) {
                 let text = text.trim();
-                if !text.is_empty() { segments.push(text.to_owned()); }
+                if !text.is_empty() {
+                    segments.push(text.to_owned());
+                }
             }
         } else if child.is_named() {
             collect_user_type_segments(child, bytes, segments);
@@ -476,7 +509,7 @@ fn collect_user_type_segments(node: Node<'_>, bytes: &[u8], segments: &mut Vec<S
 #[cfg(test)]
 mod tests {
     use super::NodeExt;
-    use crate::queries::{KIND_CALL_EXPR, KIND_VALUE_ARGS, KIND_VALUE_ARG, KIND_LAMBDA_LIT};
+    use crate::queries::{KIND_CALL_EXPR, KIND_LAMBDA_LIT, KIND_VALUE_ARG, KIND_VALUE_ARGS};
 
     fn parse_kotlin(src: &str) -> (tree_sitter::Tree, Vec<u8>) {
         let mut parser = tree_sitter::Parser::new();
@@ -537,8 +570,16 @@ mod tests {
             }
         }
         assert_eq!(args.len(), 2);
-        assert_eq!(args[0].value_arg_position(), 0, "first arg position should be 0");
-        assert_eq!(args[1].value_arg_position(), 1, "second arg position should be 1");
+        assert_eq!(
+            args[0].value_arg_position(),
+            0,
+            "first arg position should be 0"
+        );
+        assert_eq!(
+            args[1].value_arg_position(),
+            1,
+            "second arg position should be 1"
+        );
     }
 
     #[test]
@@ -589,7 +630,10 @@ mod tests {
     fn call_fn_and_qualifier_simple_call() {
         let (tree, bytes) = parse_kotlin("val x = foo(1)");
         let call = find_node_kind(tree.root_node(), KIND_CALL_EXPR).unwrap();
-        assert_eq!(call.call_fn_and_qualifier(&bytes), Some(("foo".to_string(), None)));
+        assert_eq!(
+            call.call_fn_and_qualifier(&bytes),
+            Some(("foo".to_string(), None))
+        );
     }
 
     #[test]

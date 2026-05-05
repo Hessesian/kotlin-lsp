@@ -3,15 +3,15 @@
 //! `super` = `crate::indexer::apply`
 //! `crate::indexer` = the parent `indexer` module.
 
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use dashmap::DashMap;
 use tower_lsp::lsp_types::*;
 
-use crate::indexer::{Indexer, file_contributions, stale_keys_for, build_bare_names};
-use super::super::cache::{FileCacheEntry, cache_entry_to_file_result};
-use crate::types::{WorkspaceIndexResult, IndexStats};
+use super::super::cache::{cache_entry_to_file_result, FileCacheEntry};
+use crate::indexer::{build_bare_names, file_contributions, stale_keys_for, Indexer};
+use crate::types::{IndexStats, WorkspaceIndexResult};
 
 // ── Test helpers ──────────────────────────────────────────────────────────────
 
@@ -48,10 +48,25 @@ class Foo {
 
     assert_eq!(result.uri, u);
     assert_eq!(result.data.package, Some("com.example".to_string()));
-    assert_eq!(result.data.symbols.len(), 2, "expected class + fun, got: {:?}",
-        result.data.symbols.iter().map(|s| &s.name).collect::<Vec<_>>());
-    assert!(result.data.symbols.iter().any(|s| s.name == "Foo"), "Foo missing");
-    assert!(result.data.symbols.iter().any(|s| s.name == "bar"), "bar missing");
+    assert_eq!(
+        result.data.symbols.len(),
+        2,
+        "expected class + fun, got: {:?}",
+        result
+            .data
+            .symbols
+            .iter()
+            .map(|s| &s.name)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        result.data.symbols.iter().any(|s| s.name == "Foo"),
+        "Foo missing"
+    );
+    assert!(
+        result.data.symbols.iter().any(|s| s.name == "bar"),
+        "bar missing"
+    );
     assert!(result.error.is_none());
 }
 
@@ -67,7 +82,8 @@ class Child : Base
 
     assert!(
         result.supertypes.iter().any(|(name, _)| name == "Base"),
-        "expected (\"Base\", _) in supertypes; got: {:?}", result.supertypes,
+        "expected (\"Base\", _) in supertypes; got: {:?}",
+        result.supertypes,
     );
 }
 
@@ -80,7 +96,10 @@ fn apply_file_result_updates_index_issue_apply() {
     let idx = Indexer::new();
     idx.apply_file_result(&result);
 
-    assert!(idx.definitions.contains_key("TestClass"), "TestClass missing from definitions");
+    assert!(
+        idx.definitions.contains_key("TestClass"),
+        "TestClass missing from definitions"
+    );
     let locs = idx.definitions.get("TestClass").unwrap();
     assert_eq!(locs.len(), 1);
     assert_eq!(locs[0].uri, u);
@@ -94,16 +113,27 @@ fn apply_file_result_clears_stale_entries_issue_apply() {
 
     // First pass: OldName
     idx.apply_file_result(&Indexer::parse_file(&u, "class OldName"));
-    assert!(idx.definitions.contains_key("OldName"), "OldName must exist after first apply");
+    assert!(
+        idx.definitions.contains_key("OldName"),
+        "OldName must exist after first apply"
+    );
 
     // Second pass: NewName (same URI)
     idx.apply_file_result(&Indexer::parse_file(&u, "class NewName"));
 
-    let old_empty = idx.definitions.get("OldName")
+    let old_empty = idx
+        .definitions
+        .get("OldName")
         .map(|v| v.is_empty())
         .unwrap_or(true);
-    assert!(old_empty, "OldName locations should be cleared after re-index");
-    assert!(idx.definitions.contains_key("NewName"), "NewName should be present");
+    assert!(
+        old_empty,
+        "OldName locations should be cleared after re-index"
+    );
+    assert!(
+        idx.definitions.contains_key("NewName"),
+        "NewName should be present"
+    );
 }
 
 /// When file `Foo.kt` declares `class Bar`, `apply_file_result` must insert
@@ -116,13 +146,25 @@ fn apply_file_result_removes_both_stale_qualified_keys_issue_apply() {
 
     // First index: Bar exists
     idx.index_content(&u, "package com.example\nclass Bar {}");
-    assert!(idx.qualified.contains_key("com.example.Bar"),     "initial pkg.Sym missing");
-    assert!(idx.qualified.contains_key("com.example.Foo.Bar"), "initial pkg.Stem.Sym missing");
+    assert!(
+        idx.qualified.contains_key("com.example.Bar"),
+        "initial pkg.Sym missing"
+    );
+    assert!(
+        idx.qualified.contains_key("com.example.Foo.Bar"),
+        "initial pkg.Stem.Sym missing"
+    );
 
     // Re-index: Bar removed
     idx.index_content(&u, "package com.example\n// empty");
-    assert!(!idx.qualified.contains_key("com.example.Bar"),     "stale pkg.Sym not removed");
-    assert!(!idx.qualified.contains_key("com.example.Foo.Bar"), "stale pkg.Stem.Sym not removed");
+    assert!(
+        !idx.qualified.contains_key("com.example.Bar"),
+        "stale pkg.Sym not removed"
+    );
+    assert!(
+        !idx.qualified.contains_key("com.example.Foo.Bar"),
+        "stale pkg.Stem.Sym not removed"
+    );
 }
 
 /// `apply_workspace_result` must index files that were cache-hits (not just freshly parsed).
@@ -133,19 +175,22 @@ fn apply_workspace_result_includes_cached_files_issue_apply() {
     // Simulate a cache hit: parse first, then wrap in a FileCacheEntry.
     let parsed = Indexer::parse_file(&u, "class CachedClass");
     let entry = FileCacheEntry {
-        mtime_secs:   0,
-        file_size:    0,
+        mtime_secs: 0,
+        file_size: 0,
         content_hash: 0,
-        file_data:    parsed.data.clone(),
+        file_data: parsed.data.clone(),
     };
     let cached_result = cache_entry_to_file_result(&u, &entry);
 
     let workspace_result = WorkspaceIndexResult {
-        files:          vec![cached_result],
-        stats:          IndexStats { cache_hits: 1, ..Default::default() },
+        files: vec![cached_result],
+        stats: IndexStats {
+            cache_hits: 1,
+            ..Default::default()
+        },
         workspace_root: std::path::PathBuf::from("/"),
-        aborted:        false,
-        complete_scan:  true,
+        aborted: false,
+        complete_scan: true,
     };
 
     let idx = Indexer::new();
@@ -170,22 +215,25 @@ fn apply_workspace_result_clears_stale_workspace_issue_apply() {
     // First workspace: ClassA
     let u1 = uri("/A.kt");
     idx.apply_workspace_result(&WorkspaceIndexResult {
-        files:          vec![Indexer::parse_file(&u1, "class ClassA")],
-        stats:          IndexStats::default(),
+        files: vec![Indexer::parse_file(&u1, "class ClassA")],
+        stats: IndexStats::default(),
         workspace_root: std::path::PathBuf::from("/workspace_a"),
-        aborted:        false,
-        complete_scan:  true,
+        aborted: false,
+        complete_scan: true,
     });
-    assert!(idx.definitions.contains_key("ClassA"), "ClassA must be present after first apply");
+    assert!(
+        idx.definitions.contains_key("ClassA"),
+        "ClassA must be present after first apply"
+    );
 
     // Second workspace: ClassB only
     let u2 = uri("/B.kt");
     idx.apply_workspace_result(&WorkspaceIndexResult {
-        files:          vec![Indexer::parse_file(&u2, "class ClassB")],
-        stats:          IndexStats::default(),
+        files: vec![Indexer::parse_file(&u2, "class ClassB")],
+        stats: IndexStats::default(),
         workspace_root: std::path::PathBuf::from("/workspace_b"),
-        aborted:        false,
-        complete_scan:  true,
+        aborted: false,
+        complete_scan: true,
     });
 
     assert!(
@@ -202,27 +250,39 @@ fn apply_workspace_result_clears_stale_workspace_issue_apply() {
 #[test]
 fn apply_workspace_result_mixed_cache_and_parsed_issue_apply() {
     let u_cached = uri("/Cached.kt");
-    let u_parsed  = uri("/Parsed.kt");
+    let u_parsed = uri("/Parsed.kt");
 
     let cached_parse = Indexer::parse_file(&u_cached, "class CachedClass");
     let entry = FileCacheEntry {
-        mtime_secs: 0, file_size: 0, content_hash: 0,
+        mtime_secs: 0,
+        file_size: 0,
+        content_hash: 0,
         file_data: cached_parse.data.clone(),
     };
     let cached_result = cache_entry_to_file_result(&u_cached, &entry);
-    let parsed_result  = Indexer::parse_file(&u_parsed, "class ParsedClass");
+    let parsed_result = Indexer::parse_file(&u_parsed, "class ParsedClass");
 
     let idx = Indexer::new();
     idx.apply_workspace_result(&WorkspaceIndexResult {
-        files:          vec![cached_result, parsed_result],
-        stats:          IndexStats { cache_hits: 1, files_parsed: 1, ..Default::default() },
+        files: vec![cached_result, parsed_result],
+        stats: IndexStats {
+            cache_hits: 1,
+            files_parsed: 1,
+            ..Default::default()
+        },
         workspace_root: std::path::PathBuf::from("/"),
-        aborted:        false,
-        complete_scan:  true,
+        aborted: false,
+        complete_scan: true,
     });
 
-    assert!(idx.definitions.contains_key("CachedClass"),  "CachedClass (from cache) should be in index");
-    assert!(idx.definitions.contains_key("ParsedClass"),  "ParsedClass (freshly parsed) should be in index");
+    assert!(
+        idx.definitions.contains_key("CachedClass"),
+        "CachedClass (from cache) should be in index"
+    );
+    assert!(
+        idx.definitions.contains_key("ParsedClass"),
+        "ParsedClass (freshly parsed) should be in index"
+    );
     assert_eq!(idx.files.len(), 2, "exactly 2 files in index");
 }
 
@@ -316,7 +376,10 @@ fn file_contributions_populates_subtypes_from_supertypes_issue_apply() {
         contrib.subtypes.keys().collect::<Vec<_>>(),
     );
     let locs = &contrib.subtypes["Base"];
-    assert!(!locs.is_empty(), "subtypes[\"Base\"] must have at least one location");
+    assert!(
+        !locs.is_empty(),
+        "subtypes[\"Base\"] must have at least one location"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -332,11 +395,13 @@ fn stale_keys_returns_definition_names_issue_apply() {
 
     assert!(
         stale.definition_names.contains(&"Foo".to_string()),
-        "Foo missing from stale definition_names: {:?}", stale.definition_names,
+        "Foo missing from stale definition_names: {:?}",
+        stale.definition_names,
     );
     assert!(
         stale.definition_names.contains(&"bar".to_string()),
-        "bar missing from stale definition_names: {:?}", stale.definition_names,
+        "bar missing from stale definition_names: {:?}",
+        stale.definition_names,
     );
 }
 
@@ -349,12 +414,18 @@ fn stale_keys_returns_both_qualified_keys_when_stem_differs_issue_apply() {
     let stale = stale_keys_for(&u, &result.data);
 
     assert!(
-        stale.qualified_keys.contains(&"com.example.Bar".to_string()),
-        "pkg.Sym key missing from stale keys: {:?}", stale.qualified_keys,
+        stale
+            .qualified_keys
+            .contains(&"com.example.Bar".to_string()),
+        "pkg.Sym key missing from stale keys: {:?}",
+        stale.qualified_keys,
     );
     assert!(
-        stale.qualified_keys.contains(&"com.example.Foo.Bar".to_string()),
-        "pkg.Stem.Sym key missing from stale keys: {:?}", stale.qualified_keys,
+        stale
+            .qualified_keys
+            .contains(&"com.example.Foo.Bar".to_string()),
+        "pkg.Stem.Sym key missing from stale keys: {:?}",
+        stale.qualified_keys,
     );
 }
 
@@ -367,11 +438,16 @@ fn stale_keys_no_stem_key_when_sym_equals_stem_issue_apply() {
     let stale = stale_keys_for(&u, &result.data);
 
     assert!(
-        stale.qualified_keys.contains(&"com.example.Foo".to_string()),
-        "pkg.Sym must be present: {:?}", stale.qualified_keys,
+        stale
+            .qualified_keys
+            .contains(&"com.example.Foo".to_string()),
+        "pkg.Sym must be present: {:?}",
+        stale.qualified_keys,
     );
     assert!(
-        !stale.qualified_keys.contains(&"com.example.Foo.Foo".to_string()),
+        !stale
+            .qualified_keys
+            .contains(&"com.example.Foo.Foo".to_string()),
         "duplicate pkg.Stem.Sym must NOT appear when stem == sym: {:?}",
         stale.qualified_keys,
     );
@@ -416,11 +492,21 @@ fn build_bare_names_sorted_and_deduped_issue_apply() {
         v.dedup();
         v.len()
     };
-    assert_eq!(names.len(), unique_count, "names must be deduplicated; got: {names:?}");
+    assert_eq!(
+        names.len(),
+        unique_count,
+        "names must be deduplicated; got: {names:?}"
+    );
 
     // Contains both symbols
-    assert!(names.contains(&"Alpha".to_string()), "Alpha missing: {names:?}");
-    assert!(names.contains(&"Zebra".to_string()), "Zebra missing: {names:?}");
+    assert!(
+        names.contains(&"Alpha".to_string()),
+        "Alpha missing: {names:?}"
+    );
+    assert!(
+        names.contains(&"Zebra".to_string()),
+        "Zebra missing: {names:?}"
+    );
 }
 
 /// `build_bare_names` on an empty map must return an empty vec.
@@ -428,7 +514,10 @@ fn build_bare_names_sorted_and_deduped_issue_apply() {
 fn build_bare_names_empty_map_returns_empty_issue_apply() {
     let map: DashMap<String, Vec<Location>> = DashMap::new();
     let names = build_bare_names(&map);
-    assert!(names.is_empty(), "expected empty vec for empty map; got: {names:?}");
+    assert!(
+        names.is_empty(),
+        "expected empty vec for empty map; got: {names:?}"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -450,7 +539,10 @@ fn index_content_returns_none_on_unchanged_content_issue_apply() {
 
     // Second call: identical content → should skip
     let result2 = idx.index_content(&u, src);
-    assert!(result2.is_none(), "second index_content with same content must return None");
+    assert!(
+        result2.is_none(),
+        "second index_content with same content must return None"
+    );
     assert_eq!(
         idx.parse_count.load(Ordering::Relaxed),
         count_after_first,

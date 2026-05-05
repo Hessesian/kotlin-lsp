@@ -6,8 +6,8 @@ use std::sync::{Arc, RwLock};
 use dashmap::{DashMap, DashSet};
 use tower_lsp::lsp_types::*;
 
+use crate::types::{CursorPos, FileData};
 use crate::StrExt;
-use crate::types::{FileData, CursorPos};
 
 // Re-export rg-module items that existing callers reach via `crate::indexer::`.
 pub(crate) use crate::rg::IgnoreMatcher;
@@ -21,34 +21,34 @@ pub(crate) mod resolution;
 // and the inline test module (`use super::*`) continue to resolve them by name.
 #[allow(unused_imports)]
 pub(crate) use self::infer::{
+    collect_all_fun_params_texts,
+    collect_params_from_line,
     // sig.rs
     collect_signature,
-    collect_params_from_line,
-    find_fun_signature_full,
-    find_fun_signature_with_receiver,
-    collect_all_fun_params_texts,
-    nth_fun_param_type_str,
-    last_fun_param_type_str,
-    strip_trailing_call_args,
-    // args.rs
-    find_as_call_arg_type,
     extract_first_arg,
     extract_named_arg_name,
-    find_named_param_type_in_sig,
-    lambda_param_position_on_line,
-    has_named_params_not_it,
+    // args.rs
+    find_as_call_arg_type,
+    find_fun_signature_full,
+    find_fun_signature_with_receiver,
     // it_this.rs
     find_it_element_type,
     find_it_element_type_in_lines,
-    find_this_element_type_in_lines,
-    find_named_lambda_param_type_in_lines,
-    find_named_lambda_param_type,
-    is_lambda_param,
-    lambda_receiver_type_from_context,
-    line_has_lambda_param,
-    lambda_brace_pos_for_param,
     find_last_dot_at_depth_zero,
+    find_named_lambda_param_type,
+    find_named_lambda_param_type_in_lines,
+    find_named_param_type_in_sig,
+    find_this_element_type_in_lines,
+    has_named_params_not_it,
     is_inside_receiver_lambda,
+    is_lambda_param,
+    lambda_brace_pos_for_param,
+    lambda_param_position_on_line,
+    lambda_receiver_type_from_context,
+    last_fun_param_type_str,
+    line_has_lambda_param,
+    nth_fun_param_type_str,
+    strip_trailing_call_args,
 };
 
 mod cache;
@@ -61,7 +61,7 @@ pub const MAX_FILES_UNLIMITED: usize = usize::MAX;
 
 mod apply;
 #[allow(unused_imports)]
-pub(crate) use self::apply::{file_contributions, stale_keys_for, build_bare_names};
+pub(crate) use self::apply::{build_bare_names, file_contributions, stale_keys_for};
 
 pub(crate) mod lookup;
 pub(crate) use lookup::apply_type_subst;
@@ -70,9 +70,9 @@ mod node_ext;
 pub(crate) use node_ext::NodeExt;
 
 mod scope;
+pub(crate) use scope::find_enclosing_call_name;
 pub(crate) use scope::is_id_char;
 pub(crate) use scope::last_ident_in;
-pub(crate) use scope::find_enclosing_call_name;
 
 pub(crate) mod live_tree;
 pub(crate) use live_tree::LiveDoc;
@@ -80,13 +80,15 @@ mod live_tree_impl;
 
 // Re-export cache/scan items needed by the inline test module below.
 #[cfg(test)]
-use self::cache::{FileCacheEntry, cache_entry_to_file_result};
-#[cfg(test)]
-#[allow(unused_imports)]
-use crate::types::{IndexStats, FileIndexResult};
+use self::cache::{cache_entry_to_file_result, FileCacheEntry};
+use crate::resolver::{
+    complete_symbol, complete_symbol_with_context, infer_variable_type_raw, is_annotation_context,
+};
 #[cfg(test)]
 use crate::rg::regex_escape;
-use crate::resolver::{complete_symbol, complete_symbol_with_context, is_annotation_context, infer_variable_type_raw};
+#[cfg(test)]
+#[allow(unused_imports)]
+use crate::types::{FileIndexResult, IndexStats};
 #[cfg(test)]
 use std::path::Path;
 
@@ -97,32 +99,32 @@ pub(crate) mod test_helpers;
 
 /// Everything a single file *adds* to the index. Pure value — no DashMaps.
 pub(crate) struct FileContributions {
-    pub definitions:    HashMap<String, Vec<Location>>,
+    pub definitions: HashMap<String, Vec<Location>>,
     /// Both `pkg.Sym` and `pkg.FileStem.Sym` keys.
-    pub qualified:      HashMap<String, Location>,
-    pub packages:       HashMap<String, Vec<String>>,
-    pub subtypes:       HashMap<String, Vec<Location>>,
-    pub file_data:      (String, Arc<crate::types::FileData>),
-    pub content_hash:   (String, u64),
+    pub qualified: HashMap<String, Location>,
+    pub packages: HashMap<String, Vec<String>>,
+    pub subtypes: HashMap<String, Vec<Location>>,
+    pub file_data: (String, Arc<crate::types::FileData>),
+    pub content_hash: (String, u64),
 }
 
 /// Keys to remove from the index when a file is replaced.
 pub(crate) struct StaleKeys {
     pub definition_names: Vec<String>,
     /// Both aliases: `pkg.Sym` AND `pkg.FileStem.Sym`.
-    pub qualified_keys:   Vec<String>,
-    pub package:          Option<String>,
+    pub qualified_keys: Vec<String>,
+    pub package: Option<String>,
 }
 
 pub struct Indexer {
     /// URI string → parsed file data.
-    pub(crate) files:       DashMap<String, Arc<FileData>>,
+    pub(crate) files: DashMap<String, Arc<FileData>>,
     /// Short name → definition locations  (fast first-pass lookup).
     pub(crate) definitions: DashMap<String, Vec<Location>>,
     /// Fully-qualified name → location   (e.g. "com.example.Foo" → …).
-    pub(crate) qualified:   DashMap<String, Location>,
+    pub(crate) qualified: DashMap<String, Location>,
     /// Package name → vec of URI strings (for same-package resolution).
-    pub(crate) packages:    DashMap<String, Vec<String>>,
+    pub(crate) packages: DashMap<String, Vec<String>>,
     /// Absolute path to the workspace root, set once on first `index_workspace`.
     pub(crate) workspace_root: RwLock<Option<PathBuf>>,
     /// URI string → xxHash of last indexed content (skip identical re-parses).
@@ -223,27 +225,30 @@ impl Indexer {
 
     pub fn new() -> Self {
         Self {
-            files:          DashMap::new(),
-            definitions:    DashMap::new(),
-            qualified:      DashMap::new(),
-            packages:       DashMap::new(),
+            files: DashMap::new(),
+            definitions: DashMap::new(),
+            qualified: DashMap::new(),
+            packages: DashMap::new(),
             workspace_root: RwLock::new(None),
             content_hashes: DashMap::new(),
             // Allow configurable concurrent parse workers. Default to number of CPU cores.
             // Use env KOTLIN_LSP_PARSE_WORKERS to override.
             parse_sem: {
                 // Default to half of available CPUs to avoid saturating system.
-                let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+                let cpus = std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(4);
                 let default = (cpus / 2).max(1);
-                let configured = std::env::var("KOTLIN_LSP_PARSE_WORKERS").ok()
+                let configured = std::env::var("KOTLIN_LSP_PARSE_WORKERS")
+                    .ok()
                     .and_then(|v| v.parse::<usize>().ok())
                     .unwrap_or(default);
                 Arc::new(tokio::sync::Semaphore::new(configured))
             },
-            parse_count:    AtomicU64::new(0),
+            parse_count: AtomicU64::new(0),
             completion_cache: DashMap::new(),
-            live_lines:     DashMap::new(),
-            subtypes:       DashMap::new(),
+            live_lines: DashMap::new(),
+            subtypes: DashMap::new(),
             bare_name_cache: std::sync::RwLock::new(Vec::new()),
             last_completion: std::sync::Mutex::new(None),
             root_generation: AtomicU64::new(0),
@@ -347,7 +352,10 @@ impl Indexer {
             }
             // Multi-line fallback: lambda opened on a previous line.
             let lines = self.mem_lines_for(uri.as_str());
-            let pos = CursorPos { line: cursor_line, utf16_col: cursor_col };
+            let pos = CursorPos {
+                line: cursor_line,
+                utf16_col: cursor_col,
+            };
             let ml = lines.and_then(|ls| {
                 if recv == "this" {
                     find_this_element_type_in_lines(&ls, pos, self, uri)
@@ -381,8 +389,8 @@ impl Indexer {
                 && !items.iter().any(|i| i.label == param)
             {
                 items.push(CompletionItem {
-                    label:     param.clone(),
-                    kind:      Some(CompletionItemKind::VARIABLE),
+                    label: param.clone(),
+                    kind: Some(CompletionItemKind::VARIABLE),
                     sort_text: Some(format!("005:{param}")),
                     ..Default::default()
                 });
@@ -393,7 +401,12 @@ impl Indexer {
     ///
     /// Uses `live_lines` (updated synchronously on every keystroke) for the
     /// current file's line text, falling back to indexed lines or disk.
-    pub fn completions(&self, uri: &Url, position: Position, snippets: bool) -> (Vec<CompletionItem>, bool) {
+    pub fn completions(
+        &self,
+        uri: &Url,
+        position: Position,
+        snippets: bool,
+    ) -> (Vec<CompletionItem>, bool) {
         self.ensure_indexed(uri);
 
         let Some(line) = self.line_for_position(uri, position.line) else {
@@ -413,7 +426,13 @@ impl Indexer {
         let cache_key = if before_prefix.ends_with('.') {
             format!("{}|{}|{}", uri.as_str(), before_prefix, position.line)
         } else {
-            format!("{}|{}|{}|{}", uri.as_str(), before_prefix, position.line, prefix)
+            format!(
+                "{}|{}|{}|{}",
+                uri.as_str(),
+                before_prefix,
+                position.line,
+                prefix
+            )
         };
         if let Ok(guard) = self.last_completion.lock() {
             if let Some((ref k, _, ref cached)) = *guard {
@@ -430,24 +449,29 @@ impl Indexer {
         // `it` means: implicit lambda param.
         // Named lambda params are detected via `is_lambda_param`.
         if let Some(ref recv) = dot_recv {
-            if recv == "it" || recv == "this"
+            if recv == "it"
+                || recv == "this"
                 || is_lambda_param(recv, before, self, uri, position.line as usize)
             {
                 let cursor_line = position.line as usize;
-                let cursor_col  = before.chars().count();
-                let elem_type = self.resolve_lambda_recv_type(recv, before, cursor_line, cursor_col, uri);
+                let cursor_col = before.chars().count();
+                let elem_type =
+                    self.resolve_lambda_recv_type(recv, before, cursor_line, cursor_col, uri);
                 if let Some(elem_type) = elem_type {
                     let (items, _) = complete_symbol(self, prefix, Some(&elem_type), uri, snippets);
                     if items.is_empty() {
                         // Type name known (e.g. generic param `T`, `StateType`) but not
                         // indexed — show a single hint item so the user sees the inferred type.
-                        return (vec![CompletionItem {
-                            label: format!("{recv}: {elem_type}"),
-                            kind: Some(CompletionItemKind::TYPE_PARAMETER),
-                            detail: Some(format!("Inferred type: {elem_type}")),
-                            sort_text: Some("~hint".into()),
-                            ..Default::default()
-                        }], false);
+                        return (
+                            vec![CompletionItem {
+                                label: format!("{recv}: {elem_type}"),
+                                kind: Some(CompletionItemKind::TYPE_PARAMETER),
+                                detail: Some(format!("Inferred type: {elem_type}")),
+                                sort_text: Some("~hint".into()),
+                                ..Default::default()
+                            }],
+                            false,
+                        );
                     }
                     return (items, false);
                 }
@@ -456,10 +480,14 @@ impl Indexer {
             }
         }
 
-        let annotation_only = dot_recv.is_none()
-            && is_annotation_context(before, prefix);
+        let annotation_only = dot_recv.is_none() && is_annotation_context(before, prefix);
         let (mut items, hit_cap) = complete_symbol_with_context(
-            self, prefix, dot_recv.as_deref(), uri, snippets, annotation_only,
+            self,
+            prefix,
+            dot_recv.as_deref(),
+            uri,
+            snippets,
+            annotation_only,
         );
 
         // Add scope-aware lambda parameter names (bare-word completion only).
@@ -484,7 +512,10 @@ fn before_cursor(line: &str, utf16_col: u32) -> &str {
     let mut utf16 = 0usize;
     let mut byte_end = line.len();
     for (bi, ch) in line.char_indices() {
-        if utf16 >= target { byte_end = bi; break; }
+        if utf16 >= target {
+            byte_end = bi;
+            break;
+        }
         utf16 += ch.len_utf16();
     }
     &line[..byte_end]
@@ -505,15 +536,13 @@ fn split_prefix(before: &str) -> (&str, &str) {
 fn dot_receiver(before_prefix: &str) -> Option<String> {
     let before_dot = before_prefix.strip_suffix('.')?;
     let inner = last_ident_in(before_dot);
-    if inner.is_empty() { return None; }
+    if inner.is_empty() {
+        return None;
+    }
     let remaining = &before_dot[..before_dot.len() - inner.len()];
-    if remaining.ends_with('.')
-        && inner.starts_with_uppercase()
-    {
+    if remaining.ends_with('.') && inner.starts_with_uppercase() {
         let outer = last_ident_in(&remaining[..remaining.len() - 1]);
-        if !outer.is_empty()
-            && outer.starts_with_uppercase()
-        {
+        if !outer.is_empty() && outer.starts_with_uppercase() {
             return Some(format!("{outer}.{inner}"));
         }
     }
@@ -522,4 +551,6 @@ fn dot_receiver(before_prefix: &str) -> Option<String> {
 
 // ─── rg cross-file fallback ──────────────────────────────────────────────────
 
-#[cfg(test)] #[path = "indexer_tests.rs"] mod tests;
+#[cfg(test)]
+#[path = "indexer_tests.rs"]
+mod tests;

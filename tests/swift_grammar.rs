@@ -106,9 +106,9 @@ func topLevelFunction(param: String) -> Bool {
     let q = Query::new(&lang, defs_query).expect("Query should compile");
     let def_idx = q.capture_index_for_name("def").unwrap();
     let name_idx = q.capture_index_for_name("name").unwrap();
-    
+
     let mut cur = QueryCursor::new();
-    
+
     // Use BTreeMap dedup like Kotlin parser
     let mut best: std::collections::BTreeMap<(u32, u32), (usize, String, String)> =
         std::collections::BTreeMap::new();
@@ -118,19 +118,25 @@ func topLevelFunction(param: String) -> Bool {
         let mut def_text = String::new();
         let mut name_text = String::new();
         let mut name_pos = (0u32, 0u32);
-        
+
         for cap in m.captures {
             if cap.index == def_idx {
                 let t = cap.node.utf8_text(bytes).unwrap_or("?");
                 def_text = t[..t.len().min(60)].to_string();
             } else if cap.index == name_idx {
                 name_text = cap.node.utf8_text(bytes).unwrap_or("?").to_string();
-                name_pos = (cap.node.start_position().row as u32, cap.node.start_position().column as u32);
+                name_pos = (
+                    cap.node.start_position().row as u32,
+                    cap.node.start_position().column as u32,
+                );
             }
         }
-        
+
         if !name_text.is_empty() {
-            let is_better = best.get(&name_pos).map(|(ep, _, _)| pidx < *ep).unwrap_or(true);
+            let is_better = best
+                .get(&name_pos)
+                .map(|(ep, _, _)| pidx < *ep)
+                .unwrap_or(true);
             if is_better {
                 best.insert(name_pos, (pidx, name_text, def_text));
             }
@@ -139,26 +145,41 @@ func topLevelFunction(param: String) -> Bool {
             println!("  [init] pattern={pidx} def='{def_text}'");
         }
     }
-    
+
     let kind_names = [
-        "class", "struct", "enum", "extension", "protocol",
-        "func", "typealias", "proto_func", "init", "property",
-        "proto_property", "enum_entry",
+        "class",
+        "struct",
+        "enum",
+        "extension",
+        "protocol",
+        "func",
+        "typealias",
+        "proto_func",
+        "init",
+        "property",
+        "proto_property",
+        "enum_entry",
     ];
-    
+
     for ((row, col), (pidx, name, def)) in &best {
         let kind = kind_names.get(*pidx).unwrap_or(&"?");
         println!("  [{kind}] {name} @ {row}:{col}  def='{def}'");
     }
-    
+
     // Verify expected symbols
     let names: Vec<&str> = best.values().map(|(_, n, _)| n.as_str()).collect();
     assert!(names.contains(&"ViewController"), "missing ViewController");
-    assert!(names.contains(&"Point"), "missing Point (struct or extension)");
+    assert!(
+        names.contains(&"Point"),
+        "missing Point (struct or extension)"
+    );
     assert!(names.contains(&"Drawable"), "missing Drawable");
     assert!(names.contains(&"Direction"), "missing Direction");
     assert!(names.contains(&"StringArray"), "missing StringArray");
-    assert!(names.contains(&"topLevelFunction"), "missing topLevelFunction");
+    assert!(
+        names.contains(&"topLevelFunction"),
+        "missing topLevelFunction"
+    );
     assert!(names.contains(&"globalConst"), "missing globalConst");
     assert!(names.contains(&"globalVar"), "missing globalVar");
     assert!(names.contains(&"viewDidLoad"), "missing viewDidLoad");
@@ -205,5 +226,3 @@ import class CoreData.NSManagedObject
         }
     }
 }
-
-

@@ -1,16 +1,13 @@
 //! Tests for `indexer::scope` — cursor/scope resolution helpers.
 
-use tower_lsp::lsp_types::*;
+use super::extract_class_decl_name;
 use crate::indexer::Indexer;
 use crate::indexer::{
-    find_it_element_type,
-    find_named_lambda_param_type,
-    is_lambda_param,
-    line_has_lambda_param,
-    lambda_brace_pos_for_param,
+    find_it_element_type, find_named_lambda_param_type, is_lambda_param,
+    lambda_brace_pos_for_param, line_has_lambda_param,
 };
 use crate::queries::KIND_LAMBDA_LIT;
-use super::extract_class_decl_name;
+use tower_lsp::lsp_types::*;
 
 fn uri(path: &str) -> Url {
     Url::parse(&format!("file:///test{path}")).unwrap()
@@ -131,7 +128,7 @@ fn named_arg_not_equality() {
     let (u, idx) = indexed("/t.kt", "val r = x == foo");
     assert_eq!(
         idx.word_and_qualifier_at(&u, Position::new(0, 9)),
-        Some(("x".into(), None))  // plain word, no qualifier
+        Some(("x".into(), None)) // plain word, no qualifier
     );
 }
 
@@ -141,7 +138,7 @@ fn named_arg_assignment_not_arg() {
     let (u, idx) = indexed("/t.kt", "val x = someValue");
     assert_eq!(
         idx.word_and_qualifier_at(&u, Position::new(0, 4)),
-        Some(("x".into(), None))  // no enclosing `(` → no qualifier
+        Some(("x".into(), None)) // no enclosing `(` → no qualifier
     );
 }
 
@@ -205,8 +202,14 @@ fn named_arg_state_multiline_with_method_receiver() {
     let line1 = &src.lines().collect::<Vec<_>>()[1];
     let col = line1.find("onBottomSheetClose").unwrap() as u32;
     let result = idx.word_and_qualifier_at(&u, Position::new(1, col));
-    assert_eq!(result.as_ref().map(|(w, _)| w.as_str()), Some("onBottomSheetClose"));
-    assert_eq!(result.as_ref().and_then(|(_, q)| q.as_deref()), Some("BottomSheetState"));
+    assert_eq!(
+        result.as_ref().map(|(w, _)| w.as_str()),
+        Some("onBottomSheetClose")
+    );
+    assert_eq!(
+        result.as_ref().and_then(|(_, q)| q.as_deref()),
+        Some("BottomSheetState")
+    );
 }
 
 // ── it-completion ─────────────────────────────────────────────────────────
@@ -227,7 +230,10 @@ fn it_element_type_flow() {
     let src = "val events: Flow<Event> = emptyFlow()";
     let (u, idx) = indexed("/t.kt", src);
     let before = "events.collect { it.";
-    assert_eq!(find_it_element_type(before, &idx, &u).as_deref(), Some("Event"));
+    assert_eq!(
+        find_it_element_type(before, &idx, &u).as_deref(),
+        Some("Event")
+    );
 }
 
 #[test]
@@ -235,8 +241,8 @@ fn it_element_type_state_flow() {
     let src = "    private val _state: StateFlow<UiState>";
     let (u, idx) = indexed("/t.kt", src);
     let before = "_state.value.let { it."; // `value` is lowercase → chain, falls back
-    // _state itself is StateFlow, but we ask about `value` which isn't typed here.
-    // Just ensure no panic.
+                                           // _state itself is StateFlow, but we ask about `value` which isn't typed here.
+                                           // Just ensure no panic.
     let _ = find_it_element_type(before, &idx, &u);
 }
 
@@ -247,7 +253,10 @@ fn it_scope_fn_let() {
     let (u, idx) = indexed("/t.kt", src);
     let before = "user.let { it.";
     // User is not a collection, so returns the base type directly
-    assert_eq!(find_it_element_type(before, &idx, &u).as_deref(), Some("User"));
+    assert_eq!(
+        find_it_element_type(before, &idx, &u).as_deref(),
+        Some("User")
+    );
 }
 
 #[test]
@@ -269,13 +278,19 @@ fn it_element_type_with_call_args() {
     let (u, idx) = indexed("/t.kt", src);
     let before = "items.mapNotNull(::transform) { it.";
     // strip `(::transform)` → callee = `items.mapNotNull` → receiver = `items` → List<Order>
-    assert_eq!(find_it_element_type(before, &idx, &u).as_deref(), Some("Order"));
+    assert_eq!(
+        find_it_element_type(before, &idx, &u).as_deref(),
+        Some("Order")
+    );
 }
 
 #[test]
 fn it_unknown_var_returns_none() {
     let (u, idx) = indexed("/t.kt", "");
-    assert_eq!(find_it_element_type("unknown.forEach { it.", &idx, &u), None);
+    assert_eq!(
+        find_it_element_type("unknown.forEach { it.", &idx, &u),
+        None
+    );
 }
 
 // ── named lambda parameter type inference ─────────────────────────────────
@@ -315,8 +330,20 @@ fn named_lambda_param_scope_fn() {
 fn is_lambda_param_detects_same_line() {
     let src = "";
     let (u, idx) = indexed("/t.kt", src);
-    assert!(is_lambda_param("item", "items.forEach { item -> item.", &idx, &u, 0));
-    assert!(!is_lambda_param("item", "val item = something()", &idx, &u, 0));
+    assert!(is_lambda_param(
+        "item",
+        "items.forEach { item -> item.",
+        &idx,
+        &u,
+        0
+    ));
+    assert!(!is_lambda_param(
+        "item",
+        "val item = something()",
+        &idx,
+        &u,
+        0
+    ));
 }
 
 // ── enclosing_class_at ───────────────────────────────────────────────────
@@ -377,8 +404,14 @@ class Foo @Inject constructor(
 
 #[test]
 fn extract_class_decl_name_variants() {
-    assert_eq!(extract_class_decl_name("sealed interface Foo {"), Some("Foo".into()));
-    assert_eq!(extract_class_decl_name("data class Bar(val x: Int)"), Some("Bar".into()));
+    assert_eq!(
+        extract_class_decl_name("sealed interface Foo {"),
+        Some("Foo".into())
+    );
+    assert_eq!(
+        extract_class_decl_name("data class Bar(val x: Int)"),
+        Some("Bar".into())
+    );
     assert_eq!(extract_class_decl_name("object Baz"), Some("Baz".into()));
     assert_eq!(extract_class_decl_name("fun doSomething() {}"), None);
     assert_eq!(extract_class_decl_name("val x: Int = 0"), None);
@@ -394,8 +427,14 @@ fn multi_param_lambda_params_at() {
     // Simulate live_lines for lambda_params_at
     idx.set_live_lines(&u, src);
     let params = idx.lambda_params_at(&u, 1);
-    assert!(params.contains(&"a".to_string()), "expected a, got: {params:?}");
-    assert!(params.contains(&"b".to_string()), "expected b, got: {params:?}");
+    assert!(
+        params.contains(&"a".to_string()),
+        "expected a, got: {params:?}"
+    );
+    assert!(
+        params.contains(&"b".to_string()),
+        "expected b, got: {params:?}"
+    );
 }
 
 #[test]
@@ -409,10 +448,14 @@ fn lambda_params_at_excludes_sibling_lambda() {
     let (u, idx) = indexed("/t.kt", src);
     idx.set_live_lines(&u, src);
     let params = idx.lambda_params_at(&u, 1);
-    assert!(params.contains(&"resultState".to_string()),
-        "resultState should be in scope, got: {params:?}");
-    assert!(!params.contains(&"isRefresh".to_string()),
-        "isRefresh is a closed sibling — must NOT appear, got: {params:?}");
+    assert!(
+        params.contains(&"resultState".to_string()),
+        "resultState should be in scope, got: {params:?}"
+    );
+    assert!(
+        !params.contains(&"isRefresh".to_string()),
+        "isRefresh is a closed sibling — must NOT appear, got: {params:?}"
+    );
 }
 
 #[test]
@@ -426,12 +469,16 @@ fn lambda_params_at_col_inline_lambda() {
     idx.set_live_lines(&u, src);
     // Cursor on the second `loanId` (inside the setEvent call).
     // Column ~= position of second "loanId".
-    let col = src.rfind("loanId").unwrap();  // byte offset ≈ UTF-16 col for ASCII
+    let col = src.rfind("loanId").unwrap(); // byte offset ≈ UTF-16 col for ASCII
     let params = idx.lambda_params_at_col(&u, 0, col);
-    assert!(params.contains(&"loanId".to_string()),
-        "loanId should be in scope (col-aware), got: {params:?}");
-    assert!(params.contains(&"isWustenrot".to_string()),
-        "isWustenrot should be in scope (col-aware), got: {params:?}");
+    assert!(
+        params.contains(&"loanId".to_string()),
+        "loanId should be in scope (col-aware), got: {params:?}"
+    );
+    assert!(
+        params.contains(&"isWustenrot".to_string()),
+        "isWustenrot should be in scope (col-aware), got: {params:?}"
+    );
 }
 
 #[test]
@@ -439,19 +486,28 @@ fn find_named_param_on_line_with_multiple_arrows() {
     // `resultState` is the SECOND lambda on the same line — the first `->` belongs
     // to `{ isRefresh -> ... }`.  `line_has_lambda_param` must scan all arrows.
     let line = "reloadableProduct(ProductKey.FAMILY, { isRefresh -> getFamilyAccount(isRefresh) }) { resultState ->";
-    assert!(line_has_lambda_param(line, "resultState"),
-        "must find resultState even when isRefresh arrow comes first");
-    assert!(line_has_lambda_param(line, "isRefresh"),
-        "must still find isRefresh");
-    assert!(!line_has_lambda_param(line, "other"),
-        "must NOT find unknown name");
+    assert!(
+        line_has_lambda_param(line, "resultState"),
+        "must find resultState even when isRefresh arrow comes first"
+    );
+    assert!(
+        line_has_lambda_param(line, "isRefresh"),
+        "must still find isRefresh"
+    );
+    assert!(
+        !line_has_lambda_param(line, "other"),
+        "must NOT find unknown name"
+    );
 
     let brace = lambda_brace_pos_for_param(line, "resultState");
     assert!(brace.is_some(), "must find brace for resultState");
     // The brace for resultState is the LAST `{` on the line.
     let last_brace = line.rfind('{').unwrap();
-    assert_eq!(brace.unwrap(), last_brace,
-        "brace pos should be the last {{ on the line");
+    assert_eq!(
+        brace.unwrap(),
+        last_brace,
+        "brace pos should be the last {{ on the line"
+    );
 }
 
 #[test]
@@ -460,8 +516,20 @@ fn multi_param_lambda_is_detected() {
     let (u, idx) = indexed("/t.kt", src);
     idx.set_live_lines(&u, src);
     // Both `a` and `b` should be recognised as lambda params
-    assert!(is_lambda_param("a", "items.zip(other) { a, b ->", &idx, &u, 0));
-    assert!(is_lambda_param("b", "items.zip(other) { a, b ->", &idx, &u, 0));
+    assert!(is_lambda_param(
+        "a",
+        "items.zip(other) { a, b ->",
+        &idx,
+        &u,
+        0
+    ));
+    assert!(is_lambda_param(
+        "b",
+        "items.zip(other) { a, b ->",
+        &idx,
+        &u,
+        0
+    ));
 }
 
 // ── CST fast-path coverage ───────────────────────────────────────────────
@@ -498,7 +566,8 @@ fn enclosing_class_cst_declaration_line_returns_none() {
 
 #[test]
 fn enclosing_class_cst_nested() {
-    let src = "class Outer {\n    sealed class Inner {\n        data object Loading : Inner\n    }\n}";
+    let src =
+        "class Outer {\n    sealed class Inner {\n        data object Loading : Inner\n    }\n}";
     let (u, idx) = indexed_with_live("/Outer.kt", src);
     // Line 2 = "        data object Loading..." → innermost enclosing = Inner
     assert_eq!(idx.enclosing_class_at(&u, 2), Some("Inner".into()));
@@ -510,8 +579,10 @@ fn lambda_params_at_col_cst_collects_named() {
     let (u, idx) = indexed_with_live("/t.kt", src);
     // Cursor on line 1, inside the lambda body
     let params = idx.lambda_params_at_col(&u, 1, 4);
-    assert!(params.contains(&"item".to_string()),
-        "CST path must collect 'item', got: {params:?}");
+    assert!(
+        params.contains(&"item".to_string()),
+        "CST path must collect 'item', got: {params:?}"
+    );
 }
 
 #[test]
@@ -519,8 +590,14 @@ fn lambda_params_at_col_cst_multi_param() {
     let src = "items.zip(other) { a, b ->\n    a.id\n}";
     let (u, idx) = indexed_with_live("/t.kt", src);
     let params = idx.lambda_params_at_col(&u, 1, 4);
-    assert!(params.contains(&"a".to_string()), "must find 'a', got: {params:?}");
-    assert!(params.contains(&"b".to_string()), "must find 'b', got: {params:?}");
+    assert!(
+        params.contains(&"a".to_string()),
+        "must find 'a', got: {params:?}"
+    );
+    assert!(
+        params.contains(&"b".to_string()),
+        "must find 'b', got: {params:?}"
+    );
 }
 
 #[test]
@@ -529,20 +606,26 @@ fn lambda_params_at_col_cst_excludes_it() {
     let src = "items.forEach {\n    it.id\n}";
     let (u, idx) = indexed_with_live("/t.kt", src);
     let params = idx.lambda_params_at_col(&u, 1, 4);
-    assert!(!params.contains(&"it".to_string()),
-        "'it' must never appear in named params, got: {params:?}");
+    assert!(
+        !params.contains(&"it".to_string()),
+        "'it' must never appear in named params, got: {params:?}"
+    );
 }
 
 // ── collect_lambda_param_names ───────────────────────────────────────────────
 
 fn parse_kotlin_scope(src: &str) -> tree_sitter::Tree {
     let mut parser = tree_sitter::Parser::new();
-    parser.set_language(&tree_sitter_kotlin::language()).unwrap();
+    parser
+        .set_language(&tree_sitter_kotlin::language())
+        .unwrap();
     parser.parse(src, None).unwrap()
 }
 
 fn find_node_scope<'a>(node: tree_sitter::Node<'a>, kind: &str) -> Option<tree_sitter::Node<'a>> {
-    if node.kind() == kind { return Some(node); }
+    if node.kind() == kind {
+        return Some(node);
+    }
     for i in 0..node.child_count() {
         if let Some(n) = node.child(i).and_then(|c| find_node_scope(c, kind)) {
             return Some(n);
@@ -558,8 +641,11 @@ fn collect_lambda_param_names_named() {
     let tree = parse_kotlin_scope(src);
     let lambda = find_node_scope(tree.root_node(), KIND_LAMBDA_LIT).unwrap();
     let names = super::collect_lambda_param_names(lambda, bytes, &[]);
-    assert_eq!(names, vec!["item".to_string()],
-        "should collect 'item', got: {names:?}");
+    assert_eq!(
+        names,
+        vec!["item".to_string()],
+        "should collect 'item', got: {names:?}"
+    );
 }
 
 #[test]
@@ -579,6 +665,12 @@ fn collect_lambda_param_names_multi() {
     let tree = parse_kotlin_scope(src);
     let lambda = find_node_scope(tree.root_node(), KIND_LAMBDA_LIT).unwrap();
     let names = super::collect_lambda_param_names(lambda, bytes, &[]);
-    assert!(names.contains(&"a".to_string()), "should contain 'a', got: {names:?}");
-    assert!(names.contains(&"b".to_string()), "should contain 'b', got: {names:?}");
+    assert!(
+        names.contains(&"a".to_string()),
+        "should contain 'a', got: {names:?}"
+    );
+    assert!(
+        names.contains(&"b".to_string()),
+        "should contain 'b', got: {names:?}"
+    );
 }
