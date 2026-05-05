@@ -41,7 +41,7 @@ impl Backend {
         if ctx.qualifier.is_none() {
             if let Some(ref rt) = ctx.contextual {
                 let kw = if crate::Language::from_path(uri.path()).is_swift() { "let" } else { "val" };
-                let subst = build_subst_map(self.indexer.as_ref(), uri.as_str(), position.line);
+                let subst = crate::indexer::resolution::build_subst_map(self.indexer.as_ref(), uri.as_str(), position.line);
                 let type_name = if subst.is_empty() {
                     rt.raw.clone()
                 } else {
