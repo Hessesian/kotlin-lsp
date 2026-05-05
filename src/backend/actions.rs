@@ -205,7 +205,7 @@ impl Backend {
         let cursor_word = line_text.word_at_utf16_col(range.start.character as usize);
         let is_kotlin = crate::Language::from_path(uri.path()).is_kotlin();
 
-        if let Some(a) = build_import_alias_action(&trimmed, uri, range, is_kotlin) {
+        if let Some(a) = build_import_alias_action(&line_text, &trimmed, uri, range, is_kotlin) {
             actions.push(a);
         }
 
@@ -293,6 +293,7 @@ fn build_introduce_variable(
 
 /// Builds the "Add import alias" action for an import line (Kotlin only).
 fn build_import_alias_action(
+    line_text: &str,
     trimmed: &str,
     uri: &Url,
     range: Range,
@@ -311,14 +312,9 @@ fn build_import_alias_action(
     }
 
     let ln = range.start.line;
-    // col at the end of the line (append alias there)
-    let col: u32 = {
-        // Reconstruct the actual import line length from trimmed — we don't have raw line_text here,
-        // so we use the raw line from the range end if available, but trimmed gives us the content.
-        // Since trimmed is the trim of line_text and we only need the utf16 length to append,
-        // we just use trimmed length (the trailing whitespace doesn't matter for append).
-        trimmed.chars().map(|c| c.len_utf16() as u32).sum()
-    };
+    // Use the full (unstripped) line for the column so that indented import lines
+    // (uncommon but valid) get the alias appended at the correct position.
+    let col: u32 = line_text.chars().map(|c| c.len_utf16() as u32).sum();
     let mut changes = std::collections::HashMap::new();
     changes.insert(
         uri.clone(),

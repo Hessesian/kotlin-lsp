@@ -1366,3 +1366,20 @@ fn method_call_rhs_regular_method() {
     assert_eq!(entry.unwrap().2, "service");
     assert_eq!(entry.unwrap().3, "getDetail");
 }
+
+// ── lambda-after-closing-paren regression ────────────────────────────────────
+
+/// Regression: tree-sitter-kotlin must parse a trailing lambda after a
+/// multi-line argument list without ERROR / MISSING nodes.
+/// Pattern: `foo(\n  a = 1,\n) { value -> value }`
+#[test]
+fn lambda_after_multiline_args_no_parse_error() {
+    let data = parse_kotlin(
+        "fun test() {\n    val x = foo(\n        a = 1,\n        b = 2,\n    ) { value -> value }\n}",
+    );
+    assert!(
+        data.syntax_errors.is_empty(),
+        "trailing lambda after multi-line args must not produce parse errors, got: {:?}",
+        data.syntax_errors
+    );
+}

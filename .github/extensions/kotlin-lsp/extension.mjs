@@ -143,7 +143,7 @@ const session = await joinSession({
         properties: {
           pattern: { type: "string", description: "Regex pattern to search for" },
           path: { type: "string", description: "File or directory to search. Defaults to cwd." },
-          glob: { type: "string", description: "Glob filter (e.g. '*.kt'). Defaults to '*.{kt,java}'." },
+          glob: { type: "string", description: "Glob filter (e.g. '*.kt'). Defaults to '*.{kt,kts,java}'." },
           reason: {
             type: "string",
             description: "Why LSP can't help (e.g. 'extension function', 'LSP returned empty', 'free-text search', 'generated code')",
@@ -154,7 +154,7 @@ const session = await joinSession({
       handler: async (args) => {
         const pattern = asString(args.pattern);
         const cwd = args.path || process.cwd();
-        const glob = args.glob || "*.{kt,java}";
+        const glob = args.glob || "*.{kt,kts,java}";
         const rgArgs = [
           "--line-number", "--no-heading", "--color", "never",
           "--glob", glob,
