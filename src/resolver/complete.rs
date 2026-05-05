@@ -385,16 +385,12 @@ pub(crate) fn complete_dot(
     // Walk the inheritance hierarchy to include members from parent classes/interfaces.
     // Tracks "file_uri#TypeName" to prevent cycles; seed with the direct type.
     let mut visited = vec![format!("{}#{}", file_uri, rt.leaf)];
-    collect_inherited_members(
+    InheritanceWalker {
         idx,
-        &file_uri,
-        &rt.leaf,
-        from_uri,
-        &mut visited,
-        0,
-        &mut items,
+        calling_uri: from_uri,
         snippets,
-    );
+    }
+    .collect(&file_uri, &rt.leaf, &mut visited, 0, &mut items);
 
     // Deduplicate by label: direct members win over inherited ones (they come first).
     let mut seen_labels = std::collections::HashSet::new();
@@ -430,88 +426,83 @@ pub(crate) fn complete_dot(
 ///
 /// `visited` tracks `"file_uri#TypeName"` pairs to prevent infinite cycles.
 /// Only non-private members are added (matching `complete_dot` behaviour).
-fn collect_inherited_members(
-    idx: &Indexer,
-    file_uri: &str,
-    type_name: &str,
-    calling_uri: &Url,
-    visited: &mut Vec<String>,
-    depth: u8,
-    out: &mut Vec<CompletionItem>,
+struct InheritanceWalker<'a> {
+    idx: &'a Indexer,
+    calling_uri: &'a Url,
     snippets: bool,
-) {
-    const MAX_DEPTH: u8 = 4;
-    if depth >= MAX_DEPTH {
-        return;
-    }
+}
 
-    // Find the class's declaration line, then fetch its supertype names.
-    let supers: Vec<String> = {
-        let data = match idx.files.get(file_uri) {
-            Some(d) => d,
-            None => return,
-        };
-        let class_line = data
-            .symbols
-            .iter()
-            .find(|s| s.name == type_name)
-            .map(|s| s.start_line());
-        match class_line {
-            Some(line) => data
-                .supers
-                .iter()
-                .filter(|(l, _, _)| *l == line)
-                .map(|(_, n, _)| n.clone())
-                .collect(),
-            // Fallback if type not found: walk all supers in file.
-            None => data.supers.iter().map(|(_, n, _)| n.clone()).collect(),
+impl<'a> InheritanceWalker<'a> {
+    fn collect(
+        &self,
+        file_uri: &str,
+        type_name: &str,
+        visited: &mut Vec<String>,
+        depth: u8,
+        out: &mut Vec<CompletionItem>,
+    ) {
+        const MAX_DEPTH: u8 = 4;
+        if depth >= MAX_DEPTH {
+            return;
         }
-    };
 
-    let type_url = match Url::parse(file_uri) {
-        Ok(u) => u,
-        Err(_) => return,
-    };
-
-    for super_name in supers {
-        let super_locs = resolve_symbol_inner(idx, &super_name, &type_url, false);
-        for loc in &super_locs {
-            let key = format!("{}#{}", loc.uri.as_str(), super_name);
-            if visited.contains(&key) {
-                continue;
+        let supers: Vec<String> = {
+            let data = match self.idx.files.get(file_uri) {
+                Some(d) => d,
+                None => return,
+            };
+            let class_line = data
+                .symbols
+                .iter()
+                .find(|s| s.name == type_name)
+                .map(|s| s.start_line());
+            match class_line {
+                Some(line) => data
+                    .supers
+                    .iter()
+                    .filter(|(l, _, _)| *l == line)
+                    .map(|(_, n, _)| n.clone())
+                    .collect(),
+                None => data.supers.iter().map(|(_, n, _)| n.clone()).collect(),
             }
-            visited.push(key);
+        };
 
-            let mut inherited = symbols_from_nested_type(
-                idx,
-                loc.uri.as_str(),
-                &super_name,
-                Some(calling_uri.as_str()),
-            );
-            inherited.retain(|i| {
-                i.sort_text
-                    .as_deref()
-                    .map(|s| !s.starts_with("prv:") && !s.starts_with("prt:"))
-                    .unwrap_or(true)
-            });
-            if !snippets {
-                for item in &mut inherited {
-                    item.insert_text = None;
-                    item.insert_text_format = None;
+        let type_url = match Url::parse(file_uri) {
+            Ok(u) => u,
+            Err(_) => return,
+        };
+
+        for super_name in supers {
+            let super_locs = resolve_symbol_inner(self.idx, &super_name, &type_url, false);
+            for loc in &super_locs {
+                let key = format!("{}#{}", loc.uri.as_str(), super_name);
+                if visited.contains(&key) {
+                    continue;
                 }
-            }
-            out.extend(inherited);
+                visited.push(key);
 
-            collect_inherited_members(
-                idx,
-                loc.uri.as_str(),
-                &super_name,
-                calling_uri,
-                visited,
-                depth + 1,
-                out,
-                snippets,
-            );
+                let mut inherited = symbols_from_nested_type(
+                    self.idx,
+                    loc.uri.as_str(),
+                    &super_name,
+                    Some(self.calling_uri.as_str()),
+                );
+                inherited.retain(|i| {
+                    i.sort_text
+                        .as_deref()
+                        .map(|s| !s.starts_with("prv:") && !s.starts_with("prt:"))
+                        .unwrap_or(true)
+                });
+                if !self.snippets {
+                    for item in &mut inherited {
+                        item.insert_text = None;
+                        item.insert_text_format = None;
+                    }
+                }
+                out.extend(inherited);
+
+                self.collect(loc.uri.as_str(), &super_name, visited, depth + 1, out);
+            }
         }
     }
 }
