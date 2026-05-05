@@ -173,6 +173,40 @@ pub fn build_subst_map<I: IndexRead>(index: &I, uri: &str, cursor_line: u32) -> 
     build_enclosing_class_subst_impl(index, uri, cursor_line)
 }
 
+/// Apply cross-file type-parameter substitution to a signature string.
+///
+/// Equivalent to the old `Indexer::type_subst_sig` but works over `IndexRead`
+/// so it can be used from `resolver/complete.rs` without depending on `Indexer`.
+pub(crate) fn cross_file_type_subst<I: IndexRead>(
+    index: &I,
+    sym_uri: &str,
+    sym_line: u32,
+    calling_uri: &str,
+    sig: &str,
+) -> String {
+    let subst = build_type_param_subst_impl(index, sym_uri, sym_line, calling_uri, None);
+    if subst.is_empty() { sig.to_owned() } else { super::apply_type_subst(sig, &subst) }
+}
+
+/// Extract the simple type name from a property detail string.
+/// E.g. `"private val foo: DashboardProductsReducer by lazy"` → `"DashboardProductsReducer"`
+/// E.g. `"val x: List<String>"` → `"List"`
+pub(crate) fn extract_property_type_name(detail: &str) -> &str {
+    let colon_pos = match detail.find(':') {
+        Some(p) => p,
+        None => return "",
+    };
+    let after_colon = detail[colon_pos + 1..].trim_start();
+    let end = after_colon
+        .find(|c: char| !c.is_alphanumeric() && c != '_')
+        .unwrap_or(after_colon.len());
+    let name = &after_colon[..end];
+    if name.is_empty() || !name.chars().next().unwrap_or(' ').is_uppercase() {
+        return "";
+    }
+    name
+}
+
 // ─── Pure Data Transformation Functions ──────────────────────────────────
 
 /// Extract canonical signature respecting caller intent.
@@ -431,7 +465,7 @@ fn build_enclosing_class_subst_impl<I: IndexRead>(
         if sym.selection_range.start.line <= class_line { continue; }
         if sym.selection_range.start.line > class_end_line { continue; }
         if !matches!(sym.kind, SymbolKind::FIELD | SymbolKind::PROPERTY) { continue; }
-        let type_name = super::lookup::extract_property_type_name(&sym.detail);
+        let type_name = extract_property_type_name(&sym.detail);
         if type_name.is_empty() { continue; }
         let Some(locs) = index.get_definitions(type_name) else { continue };
         let Some(loc) = locs.into_iter().next() else { continue };
@@ -969,5 +1003,99 @@ mod tests {
         let sett = result_sett.expect("should resolve reduce");
         assert!(sett.signature.contains("SettEvent"), "sett: {}", sett.signature);
         assert!(sett.signature.contains("SettState"), "sett: {}", sett.signature);
+    }
+
+    // ── enrich_at_line (completion resolve) ──────────────────────────────────
+
+    #[test]
+    fn enrich_at_line_returns_detail_for_completion_resolve() {
+        let uri = "file:///Foo.kt";
+        let mut sym = make_sym("add", SymbolKind::FUNCTION, 0, 0);
+        sym.detail = "fun add(a: Int, b: Int): Int".to_owned();
+
+        let data = Arc::new(crate::types::FileData {
+            symbols: vec![sym],
+            ..Default::default()
+        });
+        let mut files = HashMap::new();
+        files.insert(uri.to_owned(), data);
+        let idx = RealTestIndex {
+            files,
+            definitions: HashMap::new(),
+        };
+
+        let result = enrich_at_line(
+            &idx,
+            uri,
+            0,    // line
+            0,    // col
+            SubstitutionContext::None,
+            &ResolveOptions::completion(),
+        );
+        assert!(result.is_some(), "enrich_at_line should return Some for documented function");
+        let info = result.unwrap();
+        assert!(!info.signature.is_empty(), "signature should not be empty");
+        assert_eq!(info.signature, "fun add(a: Int, b: Int): Int");
+        // doc should be empty by default for completion() options
+        assert_eq!(info.doc, "");
+    }
+
+    #[test]
+    fn enrich_at_line_falls_back_to_line_only_match_for_completion() {
+        let uri = "file:///Bar.kt";
+        let sym = make_sym("multiply", SymbolKind::FUNCTION, 0, 0);
+        let data = Arc::new(crate::types::FileData {
+            symbols: vec![sym],
+            ..Default::default()
+        });
+        let mut files = HashMap::new();
+        files.insert(uri.to_owned(), data);
+        let idx = RealTestIndex {
+            files,
+            definitions: HashMap::new(),
+        };
+
+        // Query with col=5, but symbol is at col=0: should fall back to line-only match
+        let result = enrich_at_line(
+            &idx,
+            uri,
+            0,    // line (matches)
+            5,    // col (doesn't match, but fallback should find it)
+            SubstitutionContext::None,
+            &ResolveOptions::completion(),
+        );
+        assert!(result.is_some(), "enrich_at_line should fall back to line-only match");
+        assert_eq!(result.unwrap().kind, SymbolKind::FUNCTION);
+    }
+
+    #[test]
+    fn enrich_at_line_exact_position_match_preferred() {
+        // Verify that exact col match takes precedence over line-only match
+        let uri = "file:///Baz.kt";
+        let sym1 = make_sym_col("first", SymbolKind::FUNCTION, 0, 0, 5);
+        let sym2 = make_sym_col("second", SymbolKind::FUNCTION, 0, 7, 13);
+
+        let data = Arc::new(crate::types::FileData {
+            symbols: vec![sym1, sym2],
+            ..Default::default()
+        });
+        let mut files = HashMap::new();
+        files.insert(uri.to_owned(), data);
+        let idx = RealTestIndex {
+            files,
+            definitions: HashMap::new(),
+        };
+
+        // Query at col=8 (within "second"): should match second, not first
+        let result = enrich_at_line(
+            &idx,
+            uri,
+            0,
+            8,
+            SubstitutionContext::None,
+            &ResolveOptions::completion(),
+        );
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().name, "second", "should prefer exact position match");
     }
 }

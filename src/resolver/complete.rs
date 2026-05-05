@@ -413,7 +413,7 @@ fn completion_item_for_nested_symbol(
     let detail_raw = if s.detail.is_empty() { None } else { Some(s.detail.clone()) };
     let detail = detail_raw.map(|d| {
         if let Some(cu) = calling_uri {
-            idx.type_subst_sig(uri_str, s.selection_range.start.line, cu, &d)
+            crate::indexer::resolution::cross_file_type_subst(idx, uri_str, s.selection_range.start.line, cu, &d)
         } else {
             d
         }
