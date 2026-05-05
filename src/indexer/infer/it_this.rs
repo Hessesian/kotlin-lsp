@@ -52,6 +52,8 @@ const LAMBDA_PARAM_SCAN_BACK_LINES: usize = 40;
 
 /// Lines to scan backward for `{ param_name ->` in the single-line completion path
 /// (from `find_named_lambda_param_type`).
+const LAMBDA_PARAM_SCAN_BACK: usize = 20;
+
 /// Selects which implicit lambda parameter is being inferred.
 ///
 /// Replaces the `for_this: bool` flag in `find_it_element_type_in_lines_impl`
@@ -63,8 +65,6 @@ enum LambdaParamKind {
     /// Infer the type of `this` (the receiver in a receiver lambda).
     This,
 }
-
-const LAMBDA_PARAM_SCAN_BACK: usize = 20;
 
 /// Lines to scan backward when searching for the enclosing lambda opener
 /// in the text-fallback path of `find_it_element_type_in_lines_impl`.

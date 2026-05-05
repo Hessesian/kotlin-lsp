@@ -330,7 +330,7 @@ impl<'a> SuperWalker<'a> {
             let super_locs = resolve_symbol_inner(self.idx, &super_name, from_uri, false);
             for super_loc in &super_locs {
                 let uri_str = super_loc.uri.as_str();
-                if visited.contains(&uri_str.to_owned()) {
+                if visited.iter().any(|s| s == uri_str) {
                     continue;
                 }
                 visited.push(uri_str.to_owned());
