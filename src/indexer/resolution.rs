@@ -135,13 +135,13 @@ pub fn enrich_at_line<I: IndexRead>(
         .find(|s| {
             s.selection_range.start.line == line
                 && s.selection_range.start.character <= col
-                && col <= s.selection_range.end.character
+                && col < s.selection_range.end.character
         })
         .or_else(|| data.symbols.iter().find(|s| s.selection_range.start.line == line))?;
 
     let uri = Url::parse(uri_str).ok()?;
-    let location = Location { uri, range: sym.range };
-    enrich_symbol(index, &data, &location, &sym.name.clone(), subst_ctx, options)
+    let location = Location { uri, range: sym.selection_range };
+    enrich_symbol(index, &data, &location, &sym.name, subst_ctx, options)
 }
 
 /// Resolve contextual receiver information (it/this).
@@ -716,6 +716,85 @@ mod tests {
         let subst = build_subst_map(&idx, child_uri, 10);
         assert_eq!(subst.get("Event").map(|s| s.as_str()), Some("DashEvent"));
         assert_eq!(subst.get("State").map(|s| s.as_str()), Some("DashState"));
+    }
+
+    // ── enrich_at_line tests ──────────────────────────────────────────────────
+
+    fn make_sym_col(name: &str, kind: SymbolKind, line: u32, col_start: u32, col_end: u32) -> SymbolEntry {
+        use crate::types::Visibility;
+        use tower_lsp::lsp_types::{Position, Range};
+        SymbolEntry {
+            name: name.to_owned(),
+            kind,
+            visibility: Visibility::Public,
+            range: Range {
+                start: Position { line, character: col_start },
+                end:   Position { line, character: col_end },
+            },
+            selection_range: Range {
+                start: Position { line, character: col_start },
+                end:   Position { line, character: col_end },
+            },
+            detail: format!("fun {}()", name),
+            type_params: Vec::new(),
+            extension_receiver: String::new(),
+        }
+    }
+
+    /// Two overloads on different lines: enrich_at_line selects the right one by line.
+    #[test]
+    fn enrich_at_line_picks_by_line() {
+        let file_uri = "file:///overloads.kt";
+        let sym_a = make_sym_col("process", SymbolKind::FUNCTION, 0, 4, 11);
+        let sym_b = make_sym_col("process", SymbolKind::FUNCTION, 5, 4, 11);
+
+        let file_data = Arc::new(crate::types::FileData {
+            symbols: vec![sym_a, sym_b],
+            lines: std::sync::Arc::new(vec![
+                "fun process() {}".to_owned(),
+                String::new(), String::new(), String::new(), String::new(),
+                "fun process() {}".to_owned(),
+            ]),
+            ..Default::default()
+        });
+        let mut files = HashMap::new();
+        files.insert(file_uri.to_owned(), file_data);
+        let idx = RealTestIndex { files, definitions: HashMap::new() };
+
+        // Picking line 0 returns the first symbol; line 5 returns the second.
+        let res0 = enrich_at_line(&idx, file_uri, 0, 6, SubstitutionContext::None, &ResolveOptions::hover());
+        assert!(res0.is_some(), "should find symbol on line 0");
+
+        let res5 = enrich_at_line(&idx, file_uri, 5, 6, SubstitutionContext::None, &ResolveOptions::hover());
+        assert!(res5.is_some(), "should find symbol on line 5");
+
+        // Both have the same name but came from different symbol entries.
+        assert_eq!(res0.unwrap().location.range.start.line, 0);
+        assert_eq!(res5.unwrap().location.range.start.line, 5);
+    }
+
+    /// Column outside any symbol on the line → falls back to first sym on that line.
+    #[test]
+    fn enrich_at_line_col_fallback() {
+        let file_uri = "file:///fb.kt";
+        let sym = make_sym_col("fetch", SymbolKind::FUNCTION, 2, 4, 9);
+
+        let file_data = Arc::new(crate::types::FileData {
+            symbols: vec![sym],
+            lines: std::sync::Arc::new(vec![
+                String::new(), String::new(),
+                "fun fetch() {}".to_owned(),
+            ]),
+            ..Default::default()
+        });
+        let mut files = HashMap::new();
+        files.insert(file_uri.to_owned(), file_data);
+        let idx = RealTestIndex { files, definitions: HashMap::new() };
+
+        // col 99 is far outside [4,9) — should still resolve via fallback.
+        let res = enrich_at_line(&idx, file_uri, 2, 99, SubstitutionContext::None, &ResolveOptions::hover());
+        assert!(res.is_some(), "fallback should work when col misses");
+        assert_eq!(res.unwrap().name, "fetch");
     }
 
     // ── resolve_symbol_info end-to-end tests ─────────────────────────────────
