@@ -6,8 +6,21 @@ use tower_lsp::lsp_types::*;
 
 fn locs_to_response(locs: Vec<Location>) -> GotoDefinitionResponse {
     match locs.len() {
-        1 => GotoDefinitionResponse::Scalar(locs.into_iter().next().unwrap()),
+        1 => GotoDefinitionResponse::Scalar(
+            locs.into_iter().next().expect("len == 1 by match arm"),
+        ),
         _ => GotoDefinitionResponse::Array(locs),
+    }
+}
+
+/// Converts a possibly-empty location list into an optional LSP response.
+fn locs_to_opt_response(locs: Vec<Location>) -> Option<GotoDefinitionResponse> {
+    match locs.len() {
+        0 => None,
+        1 => Some(GotoDefinitionResponse::Scalar(
+            locs.into_iter().next().expect("len == 1 by match arm"),
+        )),
+        _ => Some(GotoDefinitionResponse::Array(locs)),
     }
 }
 
@@ -83,12 +96,7 @@ impl Backend {
             .indexer
             .find_definition_qualified(&ctx.word, ctx.qualifier.as_deref(), uri);
         if !locs.is_empty() {
-            return Ok(match locs.len() {
-                1 => Some(GotoDefinitionResponse::Scalar(
-                    locs.into_iter().next().unwrap(),
-                )),
-                _ => Some(GotoDefinitionResponse::Array(locs)),
-            });
+            return Ok(locs_to_opt_response(locs));
         }
 
         // Index miss (symbol not indexed or indexing in progress) → rg fallback.
@@ -109,13 +117,7 @@ impl Backend {
         })
         .await
         .unwrap_or_default();
-        Ok(match rg_locs.len() {
-            0 => None,
-            1 => Some(GotoDefinitionResponse::Scalar(
-                rg_locs.into_iter().next().unwrap(),
-            )),
-            _ => Some(GotoDefinitionResponse::Array(rg_locs)),
-        })
+        Ok(locs_to_opt_response(rg_locs))
     }
 
     pub(super) async fn goto_implementation_impl(
@@ -162,12 +164,7 @@ impl Backend {
             .unwrap_or_default();
             if !rg_impls.is_empty() {
                 // Return early with rg results.
-                return Ok(match rg_impls.len() {
-                    1 => Some(GotoDefinitionResponse::Scalar(
-                        rg_impls.into_iter().next().unwrap(),
-                    )),
-                    _ => Some(GotoDefinitionResponse::Array(rg_impls)),
-                });
+                return Ok(locs_to_opt_response(rg_impls));
             }
         }
 
@@ -207,13 +204,7 @@ impl Backend {
             }
         }
 
-        Ok(match locs.len() {
-            0 => None,
-            1 => Some(GotoDefinitionResponse::Scalar(
-                locs.into_iter().next().unwrap(),
-            )),
-            _ => Some(GotoDefinitionResponse::Array(locs)),
-        })
+        Ok(locs_to_opt_response(locs))
     }
 
     /// Collect the parent class names for the class enclosing `row` in `uri`.

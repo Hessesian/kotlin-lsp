@@ -283,14 +283,17 @@ fn discover_workspace_paths(
     cache: &Option<super::cache::IndexCache>,
     matcher_ref: Option<&IgnoreMatcher>,
 ) -> DiscoveredPaths {
-    let warm_start = cache.as_ref().map(|c| c.complete_scan).unwrap_or(false);
-    let mut paths = if warm_start {
-        warm_discover_files(root, cache.as_ref().unwrap(), matcher_ref)
+    let mut paths = if let Some(cache) = cache.as_ref().filter(|c| c.complete_scan) {
+        warm_discover_files(root, cache, matcher_ref)
     } else {
         find_source_files(root, matcher_ref)
     };
     let total = paths.len();
-    let effective_max = if warm_start { MAX_FILES_UNLIMITED } else { max };
+    let effective_max = if cache.as_ref().is_some_and(|c| c.complete_scan) {
+        MAX_FILES_UNLIMITED
+    } else {
+        max
+    };
 
     paths.sort_by_key(|p| p.components().count());
     let paths: Vec<_> = paths.into_iter().take(effective_max).collect();
@@ -646,7 +649,7 @@ async fn parse_work_item(
         }
     };
 
-    let _permit = sem.acquire().await.unwrap();
+    let _permit = sem.acquire().await.expect("parse semaphore closed unexpectedly");
     let t0 = std::time::Instant::now();
     let uri_clone = uri.clone();
     let parse_result = match tokio::task::spawn_blocking(move || {
