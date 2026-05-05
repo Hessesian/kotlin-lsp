@@ -78,7 +78,7 @@ mod tests {
     fn rename_two_occurrences_same_line() {
         let src = "val x = foo + foo\n";
         let ls = lines(src);
-        let edits = rename_in_scope(&ls, "foo", "bar", (0, 0));
+        let edits = rename_in_scope(&ls, "foo", "bar", (0, 0), false);
         assert_eq!(edits.len(), 2, "expected 2 edits, got: {edits:?}");
         // Sorted descending: second occurrence first
         assert!(
@@ -93,7 +93,7 @@ mod tests {
     fn rename_three_occurrences_same_line() {
         let src = "foo(foo, foo)\n";
         let ls = lines(src);
-        let edits = rename_in_scope(&ls, "foo", "baz", (0, 0));
+        let edits = rename_in_scope(&ls, "foo", "baz", (0, 0), false);
         assert_eq!(edits.len(), 3, "expected 3 edits, got: {edits:?}");
         // Strictly descending columns
         assert!(col(&edits, 0).0 > col(&edits, 1).0);
@@ -108,7 +108,7 @@ mod tests {
         let src = "fun go() {\n    val a = foo\n    foo.bar()\n    return foo\n}\n";
         let ls = lines(src);
         let scope = (0, ls.len().saturating_sub(1));
-        let edits = rename_in_scope(&ls, "foo", "qux", scope);
+        let edits = rename_in_scope(&ls, "foo", "qux", scope, false);
         assert_eq!(edits.len(), 3, "expected 3 edits, got: {edits:?}");
         // Sorted descending: last line first
         assert!(edits[0].range.start.line > edits[1].range.start.line);
@@ -121,7 +121,7 @@ mod tests {
         let src = "fun go() {\n    foo(foo)\n    foo.x\n    y(foo)\n}\n";
         let ls = lines(src);
         let scope = (0, ls.len().saturating_sub(1));
-        let edits = rename_in_scope(&ls, "foo", "replaced", scope);
+        let edits = rename_in_scope(&ls, "foo", "replaced", scope, false);
         assert_eq!(edits.len(), 4, "expected 4 edits, got: {edits:?}");
         // All replaced correctly
         for e in &edits {
@@ -138,7 +138,7 @@ mod tests {
         // `fooBar` must NOT be renamed when renaming `foo`
         let src = "val fooBar = foo\n";
         let ls = lines(src);
-        let edits = rename_in_scope(&ls, "foo", "bar", (0, 0));
+        let edits = rename_in_scope(&ls, "foo", "bar", (0, 0), false);
         assert_eq!(
             edits.len(),
             1,
@@ -151,7 +151,7 @@ mod tests {
     fn rename_at_line_start_and_end() {
         let src = "foo val foo\n";
         let ls = lines(src);
-        let edits = rename_in_scope(&ls, "foo", "x", (0, 0));
+        let edits = rename_in_scope(&ls, "foo", "x", (0, 0), false);
         assert_eq!(edits.len(), 2);
         // end occurrence first (descending)
         assert_eq!(edits[0].range.start.character, 8);
@@ -163,7 +163,7 @@ mod tests {
         // ASCII-only: char index == UTF-16 index
         let src = "val foo = foo\n";
         let ls = lines(src);
-        let edits = rename_in_scope(&ls, "foo", "renamed", (0, 0));
+        let edits = rename_in_scope(&ls, "foo", "renamed", (0, 0), false);
         // `val foo` at col 4..7; trailing `foo` at col 10..13
         let cols: Vec<(u32, u32)> = edits
             .iter()
@@ -173,7 +173,45 @@ mod tests {
         assert!(cols.contains(&(4, 7)), "leading foo not found: {cols:?}");
     }
 
-    // ── enclosing_scope ───────────────────────────────────────────────────────
+    #[test]
+    fn rename_skip_dotted_excludes_method_call() {
+        // Regression: renaming local var `syncWith` must NOT touch `.syncWith()` call.
+        let src = "val syncWith = repo.syncWith(arg)\nsyncWith.toString()\n";
+        let ls = lines(src);
+        let edits = rename_in_scope(&ls, "syncWith", "renamed", (0, 1), true);
+        // Should rename: `val syncWith` on line 0, `syncWith.toString()` on line 1.
+        // Should NOT rename: `.syncWith(arg)` on line 0 (preceded by '.').
+        assert_eq!(
+            edits.len(),
+            2,
+            "expected 2 edits (var decl + var ref), got: {edits:?}"
+        );
+        // The dotted method call on line 0 should be absent.
+        for e in &edits {
+            if e.range.start.line == 0 {
+                // Only the declaration at col 4 should be renamed, not col 20 (.syncWith)
+                assert_eq!(
+                    e.range.start.character, 4,
+                    "only var declaration should be renamed on line 0, got col {}: {e:?}",
+                    e.range.start.character
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rename_no_skip_dotted_includes_method_call() {
+        // When skip_dotted=false (renaming a method), .syncWith() calls ARE included.
+        let src = "val syncWith = repo.syncWith(arg)\nsyncWith.toString()\n";
+        let ls = lines(src);
+        let edits = rename_in_scope(&ls, "syncWith", "renamed", (0, 1), false);
+        // All 3 occurrences should be renamed.
+        assert_eq!(
+            edits.len(),
+            3,
+            "expected 3 edits (decl + dotted call + var ref), got: {edits:?}"
+        );
+    }
 
     #[test]
     fn enclosing_scope_simple_function() {

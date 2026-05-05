@@ -1,9 +1,73 @@
 use super::actions::is_non_call_keyword;
 use super::helpers::resolve_references_scope;
 use super::Backend;
+use crate::indexer::live_tree::utf16_col_to_byte;
+use crate::queries::{
+    KIND_FUN_DECL, KIND_METHOD_DECL, KIND_NAV_EXPR, KIND_PROP_DECL, KIND_VAR_DECL,
+};
 use crate::StrExt;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
+
+/// Return `true` when the CST node at `pos` belongs to a function/method
+/// declaration or a navigation expression (member access). Returns `false`
+/// for property/variable declarations, parameters, and unknown contexts.
+///
+/// Used to decide whether dotted member-access occurrences of the same name
+/// should be included in a rename (method) or skipped (local variable).
+fn cst_cursor_is_method(indexer: &crate::indexer::Indexer, uri: &Url, pos: Position) -> bool {
+    use tree_sitter::Point;
+
+    let doc = match indexer.live_doc(uri) {
+        Some(d) => d,
+        None => return false,
+    };
+    let full_text = match std::str::from_utf8(&doc.bytes) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let line_idx = pos.line as usize;
+    let line_text = match full_text.lines().nth(line_idx) {
+        Some(l) => l,
+        None => return false,
+    };
+    let byte_col = utf16_col_to_byte(line_text, pos.character as usize);
+    let point = Point {
+        row: line_idx,
+        column: byte_col,
+    };
+    let start_node = match doc
+        .tree
+        .root_node()
+        .descendant_for_point_range(point, point)
+    {
+        Some(n) => n,
+        None => return false,
+    };
+
+    // Walk up the ancestor chain looking for the first structurally significant node.
+    let mut cur = start_node;
+    loop {
+        let kind = cur.kind();
+        match kind {
+            // These indicate we're inside a variable / property binding → not a method.
+            KIND_PROP_DECL | KIND_VAR_DECL | "multi_variable_declaration" => return false,
+            // These indicate a method/function context → treat as method.
+            KIND_FUN_DECL | KIND_METHOD_DECL | "anonymous_function" => return true,
+            // A navigation expression means the identifier is a qualified member access.
+            KIND_NAV_EXPR => return true,
+            // Stop at top-level scope boundaries without a verdict.
+            "source_file" | "class_body" | "object_declaration" | "companion_object" => {
+                return false
+            }
+            _ => {}
+        }
+        match cur.parent() {
+            Some(p) => cur = p,
+            None => return false,
+        }
+    }
+}
 
 /// Replace all whole-word occurrences of `word` in `lines` with `replacement`.
 /// Returns the full new file content as a single string (lines joined with `\n`).
@@ -88,11 +152,16 @@ pub(super) fn enclosing_scope(lines: &[String], cursor_line: usize) -> (usize, u
 
 /// Return TextEdits replacing all whole-word occurrences of `word` with `new_name`
 /// within `lines[scope.0..=scope.1]`, in reverse order (safe for sequential apply).
+///
+/// When `skip_dotted` is `true`, occurrences immediately preceded by `.` are
+/// skipped. This avoids renaming same-named method calls when the user is
+/// renaming a local variable (e.g. `val syncWith` vs `.syncWith()`).
 pub(super) fn rename_in_scope(
     lines: &[String],
     word: &str,
     new_name: &str,
     scope: (usize, usize),
+    skip_dotted: bool,
 ) -> Vec<TextEdit> {
     let wchars: Vec<char> = word.chars().collect();
     let wlen = wchars.len();
@@ -128,6 +197,12 @@ pub(super) fn rename_in_scope(
                 let after_ok = end_idx >= chars.len()
                     || !(chars[end_idx].is_alphanumeric() || chars[end_idx] == '_');
                 if before_ok && after_ok {
+                    // When renaming a local variable, skip member-access occurrences
+                    // (those preceded by '.') to avoid conflating with same-named methods.
+                    if skip_dotted && j > 0 && chars[j - 1] == '.' {
+                        j = end_idx;
+                        continue;
+                    }
                     let start_utf16 = char_to_utf16[j];
                     let end_utf16 = char_to_utf16[end_idx];
                     edits.push(TextEdit {
@@ -194,7 +269,18 @@ impl Backend {
                 None => return Ok(None),
             };
             let scope = enclosing_scope(&lines, pos.line as usize);
-            let mut file_edits = rename_in_scope(&lines, &name, new_name, scope);
+
+            // Determine whether the cursor is on a local variable (not a method).
+            // Use the CST to walk up from the identifier node and check the ancestor kind:
+            // - navigation_expression → method call site
+            // - function_declaration / method_declaration → method declaration
+            // - property_declaration / variable_declaration → local variable
+            let is_method = cst_cursor_is_method(&self.indexer, uri, pos);
+            // Skip dotted member-access occurrences when renaming a local variable to
+            // avoid conflating `val syncWith` with `.syncWith()` method calls.
+            let skip_dotted = !is_method;
+
+            let mut file_edits = rename_in_scope(&lines, &name, new_name, scope, skip_dotted);
             if file_edits.is_empty() {
                 return Ok(None);
             }
@@ -310,7 +396,7 @@ impl Backend {
             let lines = lines.to_vec();
 
             let scope = (0, lines.len().saturating_sub(1));
-            let edits = rename_in_scope(&lines, &name, new_name, scope);
+            let edits = rename_in_scope(&lines, &name, new_name, scope, false);
 
             if !edits.is_empty() {
                 let mut edits = edits;
@@ -327,5 +413,79 @@ impl Backend {
             document_changes: None,
             change_annotations: None,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cst_cursor_is_method;
+    use crate::indexer::Indexer;
+    use tower_lsp::lsp_types::{Position, Url};
+
+    fn make_indexer_with(src: &str) -> (Indexer, Url) {
+        let idx = Indexer::new();
+        let uri = Url::parse("file:///tmp/test.kt").unwrap();
+        idx.store_live_tree(&uri, src);
+        (idx, uri)
+    }
+
+    #[test]
+    fn cst_var_declaration_is_not_method() {
+        let src = "val syncWith = repo.syncWith(Arg())\n";
+        let (idx, uri) = make_indexer_with(src);
+        // Cursor on `syncWith` at col 4 (the variable declaration)
+        let pos = Position {
+            line: 0,
+            character: 4,
+        };
+        assert!(
+            !cst_cursor_is_method(&idx, &uri, pos),
+            "val decl should not be method"
+        );
+    }
+
+    #[test]
+    fn cst_nav_expr_member_access_is_method() {
+        let src = "val syncWith = repo.syncWith(Arg())\n";
+        let (idx, uri) = make_indexer_with(src);
+        // Cursor on `syncWith` in `.syncWith(` — after 'repo.' → col 20
+        let pos = Position {
+            line: 0,
+            character: 20,
+        };
+        assert!(
+            cst_cursor_is_method(&idx, &uri, pos),
+            "navigation_expression should be method"
+        );
+    }
+
+    #[test]
+    fn cst_function_declaration_is_method() {
+        let src = "fun syncWith(arg: Arg): Result {\n    return Result()\n}\n";
+        let (idx, uri) = make_indexer_with(src);
+        // Cursor on `syncWith` at col 4
+        let pos = Position {
+            line: 0,
+            character: 4,
+        };
+        assert!(
+            cst_cursor_is_method(&idx, &uri, pos),
+            "fun declaration should be method"
+        );
+    }
+
+    #[test]
+    fn cst_var_reference_not_method() {
+        let src = "fun go() {\n    val x = 1\n    x.toString()\n}\n";
+        let (idx, uri) = make_indexer_with(src);
+        // Cursor on `x` at line 1, col 8 (in `val x = 1`)
+        let pos = Position {
+            line: 1,
+            character: 8,
+        };
+        assert!(
+            !cst_cursor_is_method(&idx, &uri, pos),
+            "var decl should not be method"
+        );
     }
 }
