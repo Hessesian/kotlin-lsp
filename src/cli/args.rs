@@ -44,9 +44,16 @@ impl CliArgs {
         let first = match args.next().map_err(|e| e.to_string())? {
             None => return Ok(None), // no args → LSP stdio mode
             Some(lexopt::Arg::Value(v)) => v,
+            Some(lexopt::Arg::Short('h') | lexopt::Arg::Long("help")) => {
+                print_help();
+                std::process::exit(0);
+            }
+            Some(lexopt::Arg::Short('V') | lexopt::Arg::Long("version")) => {
+                print_version();
+                std::process::exit(0);
+            }
             Some(lexopt::Arg::Short(_) | lexopt::Arg::Long(_)) => {
-                // Flag before subcommand → not a CLI invocation, return None
-                // so main.rs handles it as LSP flags.
+                // Other flag before subcommand → LSP mode
                 return Ok(None);
             }
         };
@@ -71,6 +78,14 @@ impl CliArgs {
                 Some(lexopt::Arg::Long("root")) => {
                     let val = args.value().map_err(|e| e.to_string())?;
                     root = Some(PathBuf::from(val.to_string_lossy().as_ref()));
+                }
+                Some(lexopt::Arg::Short('h') | lexopt::Arg::Long("help")) => {
+                    print_help();
+                    std::process::exit(0);
+                }
+                Some(lexopt::Arg::Short('V') | lexopt::Arg::Long("version")) => {
+                    print_version();
+                    std::process::exit(0);
                 }
                 Some(lexopt::Arg::Value(v)) => positionals.push(v.to_string_lossy().into_owned()),
                 Some(lexopt::Arg::Short(c)) => {
@@ -125,4 +140,39 @@ impl CliArgs {
             root,
         }))
     }
+}
+
+fn print_version() {
+    println!("kotlin-lsp {}", env!("CARGO_PKG_VERSION"));
+}
+
+fn print_help() {
+    println!(
+        "kotlin-lsp {} — Kotlin/Java symbol navigation
+
+USAGE:
+    kotlin-lsp <SUBCOMMAND> [OPTIONS] [ARGS]
+    kotlin-lsp                            # start LSP server (stdio)
+
+SUBCOMMANDS:
+    find  <name>              Find declarations of a symbol
+    refs  <name>              Find all references to a symbol
+    hover <file> <line> <col> Show type/doc info at a position
+    index                     Build and cache the workspace index
+
+OPTIONS:
+    --fast          Use rg/fd only; never load index (default when no cache)
+    --smart         Require index; build it if missing
+    --json          Output results as JSON array
+    --root <dir>    Workspace root (default: nearest .git dir or cwd)
+    -h, --help      Print this help
+    -V, --version   Print version
+
+EXAMPLES:
+    kotlin-lsp find MyViewModel
+    kotlin-lsp refs --fast MyViewModel --root ./android
+    kotlin-lsp hover src/Foo.kt 42 10 --json
+    kotlin-lsp index --root ./android",
+        env!("CARGO_PKG_VERSION")
+    );
 }
