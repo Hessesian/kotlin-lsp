@@ -10,6 +10,7 @@ use super::{
     find_this_element_type_in_lines, is_inside_receiver_lambda, lambda_brace_pos_for_param,
     line_has_lambda_param, Indexer,
 };
+use crate::indexer::live_tree::utf16_col_to_byte;
 use crate::indexer::NodeExt;
 use crate::queries::{
     KIND_CLASS_DECL, KIND_COMPANION_OBJ, KIND_INTERFACE_DECL, KIND_LAMBDA_LIT, KIND_OBJECT_DECL,
@@ -607,19 +608,8 @@ fn line_before_cursor(
     if line_index != cursor_line {
         return line;
     }
-    let byte_end = utf16_prefix_byte_end(line, cursor_col);
+    let byte_end = utf16_col_to_byte(line, cursor_col);
     &line[..byte_end]
-}
-
-fn utf16_prefix_byte_end(line: &str, cursor_col: usize) -> usize {
-    let mut utf16 = 0usize;
-    for (byte_index, ch) in line.char_indices() {
-        if utf16 >= cursor_col {
-            return byte_index;
-        }
-        utf16 += ch.len_utf16();
-    }
-    line.len()
 }
 
 #[derive(Default)]
