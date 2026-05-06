@@ -10,7 +10,7 @@ use crate::indexer::resolution::{
 };
 use crate::indexer::NodeExt;
 use crate::inlay_hints::compute_inlay_hints;
-use crate::queries::KIND_VALUE_ARG;
+use crate::queries::{KIND_CALL_EXPR, KIND_LAMBDA_LIT, KIND_VALUE_ARG};
 use crate::StrExt;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
@@ -625,8 +625,8 @@ fn cst_call_info(pos: Position, indexer: &crate::indexer::Indexer, uri: &Url) ->
     let mut cur = start_node;
     let call_expr = loop {
         match cur.kind() {
-            "call_expression" => break Some(cur),
-            "lambda_literal" => break None,
+            KIND_CALL_EXPR => break Some(cur),
+            KIND_LAMBDA_LIT => break None,
             _ => match cur.parent() {
                 Some(p) => cur = p,
                 None => break None,

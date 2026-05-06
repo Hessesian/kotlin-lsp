@@ -3,10 +3,11 @@
 //! These methods are lightweight convenience wrappers around tree-sitter node
 //! traversal; their bodies were extracted from the free functions they replace.
 use crate::queries::{
-    KIND_CALL_EXPR, KIND_CALL_SUFFIX, KIND_IDENTIFIER, KIND_LAMBDA_LIT, KIND_LAMBDA_PARAMS,
-    KIND_NAV_EXPR, KIND_NAV_SUFFIX, KIND_SCOPED_TYPE_IDENT, KIND_SIMPLE_IDENT, KIND_SOURCE_FILE,
-    KIND_TYPE_ARGS, KIND_TYPE_IDENT, KIND_TYPE_LIST, KIND_TYPE_PARAM, KIND_TYPE_PARAMS,
-    KIND_USER_TYPE, KIND_VALUE_ARG, KIND_VALUE_ARGS, KIND_VAR_DECL,
+    KIND_CALL_EXPR, KIND_CALL_SUFFIX, KIND_CONSTRUCTOR_INVOCATION, KIND_EQ,
+    KIND_EXPLICIT_DELEGATION, KIND_IDENTIFIER, KIND_LAMBDA_LIT, KIND_LAMBDA_PARAMS, KIND_NAV_EXPR,
+    KIND_NAV_SUFFIX, KIND_SCOPED_TYPE_IDENT, KIND_SIMPLE_IDENT, KIND_SOURCE_FILE, KIND_TYPE_ARGS,
+    KIND_TYPE_IDENT, KIND_TYPE_LIST, KIND_TYPE_PARAM, KIND_TYPE_PARAMS, KIND_USER_TYPE,
+    KIND_VALUE_ARG, KIND_VALUE_ARGS, KIND_VAR_DECL,
 };
 use crate::StrExt;
 use tree_sitter::Node;
@@ -151,7 +152,7 @@ impl<'a> NodeExt<'a> for Node<'a> {
         let count = self.child_count();
         for i in 0..count.saturating_sub(1) {
             let (c, next) = (self.child(i)?, self.child(i + 1)?);
-            if c.kind() == KIND_SIMPLE_IDENT && next.kind() == "=" {
+            if c.kind() == KIND_SIMPLE_IDENT && next.kind() == KIND_EQ {
                 return c.utf8_text_owned(bytes);
             }
         }
@@ -450,7 +451,7 @@ impl<'a> NodeExt<'a> for Node<'a> {
         let mut cur = self.walk();
         for child in self.children(&mut cur) {
             let kind = child.kind();
-            if kind == "constructor_invocation" || kind == "explicit_delegation" {
+            if kind == KIND_CONSTRUCTOR_INVOCATION || kind == KIND_EXPLICIT_DELEGATION {
                 if let Some(ut) = child.first_child_of_kind(KIND_USER_TYPE) {
                     return ut
                         .user_type_name(bytes)

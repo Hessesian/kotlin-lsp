@@ -6,15 +6,17 @@ use tree_sitter::{Node, Parser, Query, QueryCursor};
 
 use crate::indexer::NodeExt;
 use crate::queries::{
-    self, KIND_CALLABLE_REF, KIND_CALL_EXPR, KIND_CALL_SUFFIX, KIND_CLASS_DECL, KIND_CTOR_DECL,
-    KIND_DELEGATION_SPEC, KIND_ENUM_DECL, KIND_EXTENDS_INTERFACES, KIND_FIELD_DECL, KIND_FUN_DECL,
-    KIND_IDENTIFIER, KIND_IMPORT_DECL, KIND_IMPORT_HEADER, KIND_INHERITANCE_SPEC,
-    KIND_INHERITANCE_SPECS, KIND_INTERFACE_DECL, KIND_LAMBDA_LIT, KIND_METHOD_DECL, KIND_MODIFIERS,
-    KIND_MOD_FINAL, KIND_MOD_STATIC, KIND_NAV_EXPR, KIND_OBJECT_DECL, KIND_PACKAGE_DECL,
-    KIND_PROP_DECL, KIND_PROP_DELEGATE, KIND_PROTOCOL_DECL, KIND_RECORD_DECL, KIND_SCOPED_IDENT,
-    KIND_SIMPLE_IDENT, KIND_STATEMENTS, KIND_SUPERCLASS, KIND_SUPER_INTERFACES, KIND_TYPE_IDENT,
-    KIND_USER_TYPE, KIND_VALUE_ARG, KIND_VALUE_ARGS, KIND_VAR_DECL, KIND_VAR_DECLARATOR,
-    KOTLIN_DEFINITIONS, SWIFT_DEFINITIONS,
+    self, KIND_ANNOTATION_TYPE_DECL, KIND_CALLABLE_REF, KIND_CALL_EXPR, KIND_CALL_SUFFIX,
+    KIND_CLASS_DECL, KIND_CTOR_DECL, KIND_DELEGATION_SPEC, KIND_ENUM_CONSTANT, KIND_ENUM_DECL,
+    KIND_EQ, KIND_EXTENDS_INTERFACES, KIND_FIELD_DECL, KIND_FUN, KIND_FUN_DECL, KIND_IDENTIFIER,
+    KIND_IMPORT_ALIAS, KIND_IMPORT_DECL, KIND_IMPORT_HEADER, KIND_IMPORT_LIST,
+    KIND_INHERITANCE_SPEC, KIND_INHERITANCE_SPECS, KIND_INTERFACE_DECL, KIND_LAMBDA_LIT,
+    KIND_METHOD_DECL, KIND_MODIFIERS, KIND_MOD_FINAL, KIND_MOD_STATIC, KIND_NAV_EXPR,
+    KIND_OBJECT_DECL, KIND_PACKAGE_DECL, KIND_PACKAGE_HEADER, KIND_PROP_DECL, KIND_PROP_DELEGATE,
+    KIND_PROTOCOL_DECL, KIND_RECORD_DECL, KIND_SCOPED_IDENT, KIND_SIMPLE_IDENT, KIND_STATEMENTS,
+    KIND_SUPERCLASS, KIND_SUPER_INTERFACES, KIND_TYPE_IDENT, KIND_USER_TYPE, KIND_VALUE_ARG,
+    KIND_VALUE_ARGS, KIND_VAR_DECL, KIND_VAR_DECLARATOR, KIND_WILDCARD_IMPORT, KOTLIN_DEFINITIONS,
+    SWIFT_DEFINITIONS,
 };
 use crate::StrExt;
 
@@ -438,13 +440,13 @@ fn is_fun_interface_error(node: &Node, bytes: &[u8]) -> bool {
     let mut cur = node.walk();
     for child in node.children(&mut cur) {
         match child.kind() {
-            "fun" => has_fun = true,
-            "user_type" => {
+            KIND_FUN => has_fun = true,
+            KIND_USER_TYPE => {
                 if child.utf8_text(bytes).unwrap_or("") == "interface" {
                     has_interface = true;
                 }
             }
-            "simple_identifier" => has_name = true,
+            KIND_SIMPLE_IDENT => has_name = true,
             _ => {
                 // Variance case: `fun interface Foo<in A, out B>` produces a nested
                 // ERROR child that swallows `fun`, `interface`, and the name together:
@@ -454,13 +456,13 @@ fn is_fun_interface_error(node: &Node, bytes: &[u8]) -> bool {
                     let mut ec = child.walk();
                     for gc in child.children(&mut ec) {
                         match gc.kind() {
-                            "fun" => has_fun = true,
-                            "user_type" => {
+                            KIND_FUN => has_fun = true,
+                            KIND_USER_TYPE => {
                                 if gc.utf8_text(bytes).unwrap_or("") == "interface" {
                                     has_interface = true;
                                 }
                             }
-                            "simple_identifier" => has_name = true,
+                            KIND_SIMPLE_IDENT => has_name = true,
                             _ => {}
                         }
                     }
@@ -890,13 +892,13 @@ fn extract_package_and_imports(root: tree_sitter::Node, bytes: &[u8], data: &mut
     let mut cur = root.walk();
     for node in root.children(&mut cur) {
         match node.kind() {
-            "package_header" => {
+            KIND_PACKAGE_HEADER => {
                 // (package_header "package" (identifier ...))
                 if let Some(child) = node.first_child_of_kind(KIND_IDENTIFIER) {
                     data.package = child.utf8_text_owned(bytes);
                 }
             }
-            "import_list" => {
+            KIND_IMPORT_LIST => {
                 for header in node.children_of_kind(KIND_IMPORT_HEADER) {
                     parse_import_header(&header, bytes, data);
                 }
@@ -917,13 +919,13 @@ fn parse_import_header(header: &tree_sitter::Node, bytes: &[u8], data: &mut File
             k if k == KIND_IDENTIFIER => {
                 path_text = child.utf8_text_owned(bytes);
             }
-            "import_alias" => {
+            KIND_IMPORT_ALIAS => {
                 // (import_alias "as" (type_identifier))
                 alias_text = child
                     .first_child_of_kind(KIND_TYPE_IDENT)
                     .and_then(|c| c.utf8_text_owned(bytes));
             }
-            "wildcard_import" => {
+            KIND_WILDCARD_IMPORT => {
                 is_star = true;
             }
             _ => {}
@@ -1160,7 +1162,7 @@ fn find_rhs_node(prop: Node) -> Option<Node> {
         if saw_eq && child.is_named() {
             return Some(child);
         }
-        if !child.is_named() && child.kind() == "=" {
+        if !child.is_named() && child.kind() == KIND_EQ {
             saw_eq = true;
         }
     }
@@ -1498,11 +1500,11 @@ impl crate::types::FileData {
             KIND_CLASS_DECL => self.push_named(node, bytes, SymbolKind::CLASS),
             KIND_RECORD_DECL => self.push_named(node, bytes, SymbolKind::STRUCT),
             KIND_INTERFACE_DECL => self.push_named(node, bytes, SymbolKind::INTERFACE),
-            "annotation_type_declaration" => self.push_named(node, bytes, SymbolKind::INTERFACE),
+            KIND_ANNOTATION_TYPE_DECL => self.push_named(node, bytes, SymbolKind::INTERFACE),
             KIND_ENUM_DECL => self.push_named(node, bytes, SymbolKind::ENUM),
             KIND_METHOD_DECL => self.push_named(node, bytes, SymbolKind::METHOD),
             KIND_CTOR_DECL => self.push_named(node, bytes, SymbolKind::CONSTRUCTOR),
-            "enum_constant" => self.push_named(node, bytes, SymbolKind::ENUM_MEMBER),
+            KIND_ENUM_CONSTANT => self.push_named(node, bytes, SymbolKind::ENUM_MEMBER),
             KIND_FIELD_DECL => self.push_field_declaration(node, bytes),
             KIND_IMPORT_DECL => self.push_java_import(node, bytes),
             _ => {}

@@ -18,6 +18,7 @@
 //! Stdlib packages (`kotlin.*`, `java.*`, `android.*`, `androidx.*`) are skipped because
 //! their sources aren't present in the project tree.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::process::Command;
 
@@ -26,7 +27,7 @@ use tower_lsp::lsp_types::{Location, Range, TextEdit, Url};
 use crate::indexer::Indexer;
 use crate::parser::parse_by_extension;
 use crate::rg::{build_rg_pattern, parse_rg_line, rg_find_definition};
-use crate::types::ImportEntry;
+use crate::types::{CallerContext, FileData, ImportEntry};
 use crate::LinesExt;
 use crate::StrExt;
 
@@ -60,6 +61,126 @@ pub(crate) use infer::{
 // Internal imports from submodules used in this file.
 use find::{find_local_declaration, find_name_in_uri, find_name_in_uri_after_line};
 use infer::{infer_field_type, infer_variable_type};
+
+/// Return `FileData` for `uri` — from the live index if indexed, otherwise parse from disk.
+/// Returns `None` if the file is not indexed and not readable from disk.
+pub(crate) fn ensure_file_data(idx: &Indexer, uri: &Url) -> Option<FileData> {
+    if let Some(file_data) = idx.files.get(uri.as_str()) {
+        return Some(file_data.value().as_ref().clone());
+    }
+
+    let path = uri.to_file_path().ok()?;
+    let content = std::fs::read_to_string(path).ok()?;
+    Some(parse_by_extension(uri.path(), &content))
+}
+
+/// Walk the class hierarchy starting from `start_class`, collecting items at each level.
+/// `T` is what the visitor produces per symbol. `max_depth` prevents infinite loops.
+pub(crate) fn walk_hierarchy<'a, T, F>(
+    idx: &'a Indexer,
+    start_class: &str,
+    start_uri: &str,
+    caller: CallerContext<'a>,
+    max_depth: usize,
+    collect: F,
+) -> Vec<T>
+where
+    F: Fn(&Indexer, &str, &str, CallerContext<'_>) -> Vec<T>,
+{
+    let mut walker = HierarchyWalker {
+        idx,
+        caller,
+        max_depth,
+        collect,
+        visited: HashSet::from([start_class.to_owned()]),
+        items: Vec::new(),
+    };
+    walker.recurse(start_class, start_uri, 0);
+    walker.items
+}
+
+struct HierarchyWalker<'a, T, F>
+where
+    F: Fn(&Indexer, &str, &str, CallerContext<'_>) -> Vec<T>,
+{
+    idx: &'a Indexer,
+    caller: CallerContext<'a>,
+    max_depth: usize,
+    collect: F,
+    visited: HashSet<String>,
+    items: Vec<T>,
+}
+
+impl<'a, T, F> HierarchyWalker<'a, T, F>
+where
+    F: Fn(&Indexer, &str, &str, CallerContext<'_>) -> Vec<T>,
+{
+    fn recurse(&mut self, class_name: &str, class_uri: &str, depth: usize) {
+        if depth >= self.max_depth {
+            return;
+        }
+
+        for (super_name, super_uri) in supertype_targets(self.idx, class_name, class_uri) {
+            if !self.visited.insert(super_name.clone()) {
+                continue;
+            }
+            self.items.extend((self.collect)(
+                self.idx,
+                &super_name,
+                &super_uri,
+                self.caller,
+            ));
+            self.recurse(&super_name, &super_uri, depth + 1);
+        }
+    }
+}
+
+fn supertype_targets(idx: &Indexer, class_name: &str, class_uri: &str) -> Vec<(String, String)> {
+    let Ok(uri) = Url::parse(class_uri) else {
+        return vec![];
+    };
+    let Some(file_data) = ensure_file_data(idx, &uri) else {
+        return vec![];
+    };
+
+    super_names_for_class(&file_data, class_name)
+        .into_iter()
+        .flat_map(|super_name| {
+            resolve_symbol_inner(idx, &super_name, &uri, false)
+                .into_iter()
+                .map(move |loc| (super_name.clone(), loc.uri.to_string()))
+        })
+        .collect()
+}
+
+fn super_names_for_class(file_data: &FileData, class_name: &str) -> Vec<String> {
+    if class_name.is_empty() {
+        return file_data
+            .supers
+            .iter()
+            .map(|(_, name, _)| name.clone())
+            .collect();
+    }
+
+    let class_line = file_data
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == class_name)
+        .map(|symbol| symbol.selection_start());
+    match class_line {
+        Some(line) => file_data
+            .supers
+            .iter()
+            .filter(|(super_line, _, _)| *super_line == line)
+            .map(|(_, name, _)| name.clone())
+            .collect(),
+        None => file_data
+            .supers
+            .iter()
+            .map(|(_, name, _)| name.clone())
+            .collect(),
+    }
+}
 
 // ─── auto-import helpers ──────────────────────────────────────────────────────
 
@@ -276,8 +397,7 @@ pub(crate) fn resolve_symbol_inner(
 
     // 4.5 ── superclass / interface hierarchy ─────────────────────────────────
     if with_hierarchy {
-        let mut visited: Vec<String> = Vec::new();
-        let inherited = resolve_from_class_hierarchy(idx, name, from_uri, 0, &mut visited);
+        let inherited = resolve_from_class_hierarchy(idx, name, from_uri);
         if !inherited.is_empty() {
             return inherited;
         }
@@ -374,14 +494,12 @@ fn resolve_qualified(idx: &Indexer, name: &str, qualifier: &str, from_uri: &Url)
         if !locs.is_empty() {
             return locs;
         }
-        let mut visited = vec![];
-        return resolve_from_class_hierarchy(idx, name, from_uri, 0, &mut visited);
+        return resolve_from_class_hierarchy(idx, name, from_uri);
     }
 
     // ── `super.member` — search superclass hierarchy only ────────────────────
     if root == "super" {
-        let mut visited = vec![];
-        return resolve_from_class_hierarchy(idx, name, from_uri, 0, &mut visited);
+        return resolve_from_class_hierarchy(idx, name, from_uri);
     }
 
     if root.starts_with_uppercase() {
@@ -462,8 +580,7 @@ fn resolve_qualified(idx: &Indexer, name: &str, qualifier: &str, from_uri: &Url)
     let Ok(parsed_uri) = Url::parse(resolved_uri) else {
         return vec![];
     };
-    let mut visited = vec![];
-    resolve_from_class_hierarchy(idx, name, &parsed_uri, 0, &mut visited)
+    resolve_from_class_hierarchy(idx, name, &parsed_uri)
 }
 
 /// Step 1 — symbols defined in the same source file.
@@ -835,60 +952,15 @@ fn resolve_star_imports(idx: &Indexer, name: &str, uri: &Url) -> Vec<Location> {
 /// 2. Resolve each supertype through the normal chain (imports, same-package…).
 /// 3. Search the resolved file's symbol table for `name`.
 /// 4. Recurse into that file's own supertypes (depth-limited, cycle-safe).
-fn resolve_from_class_hierarchy(
-    idx: &Indexer,
-    name: &str,
-    from_uri: &Url,
-    depth: u8,
-    visited: &mut Vec<String>,
-) -> Vec<Location> {
-    const MAX_DEPTH: u8 = 4;
-    if depth >= MAX_DEPTH {
-        return vec![];
-    }
-
-    let key = from_uri.as_str().to_owned();
-    if visited.contains(&key) {
-        return vec![];
-    }
-    visited.push(key);
-
-    let supers: Vec<String> = if let Some(f) = idx.files.get(from_uri.as_str()) {
-        f.supers.iter().map(|(_, n, _)| n.clone()).collect()
-    } else {
-        // File not indexed yet — parse on demand so hierarchy walk works
-        // even before background indexing reaches this file.
-        let path = from_uri.to_file_path().ok();
-        let content = path.and_then(|p| std::fs::read_to_string(p).ok());
-        match content {
-            Some(c) => parse_by_extension(from_uri.path(), &c)
-                .supers
-                .iter()
-                .map(|(_, n, _)| n.clone())
-                .collect(),
-            None => return vec![],
-        }
-    };
-
-    for super_name in supers {
-        // Locate the supertype's file via steps 1-4+5 only — NOT step 4.5.
-        // Using the full resolve_symbol here would re-enter this function with
-        // a fresh visited-set, causing infinite recursion.
-        let super_locs = resolve_symbol_inner(idx, &super_name, from_uri, false);
-        for super_loc in &super_locs {
-            let locs = find_name_in_uri(idx, name, super_loc.uri.as_str());
-            if !locs.is_empty() {
-                return locs;
-            }
-
-            // Recurse into the supertype's own hierarchy.
-            let locs = resolve_from_class_hierarchy(idx, name, &super_loc.uri, depth + 1, visited);
-            if !locs.is_empty() {
-                return locs;
-            }
-        }
-    }
-    vec![]
+fn resolve_from_class_hierarchy(idx: &Indexer, name: &str, from_uri: &Url) -> Vec<Location> {
+    walk_hierarchy(
+        idx,
+        "",
+        from_uri.as_str(),
+        CallerContext::default(),
+        4,
+        |index, _, class_uri, _| find_name_in_uri(index, name, class_uri),
+    )
 }
 
 /// `rg` scoped to the directory that would contain `package` sources.

@@ -5,14 +5,14 @@
 
 use tower_lsp::lsp_types::Url;
 
-use crate::StrExt;
-use crate::indexer::NodeExt;
 use crate::indexer::infer::sig::{
     find_fun_signature_full, nth_fun_param_type_str, split_params_at_depth_zero,
 };
-use crate::indexer::{Indexer, find_enclosing_call_name, is_id_char};
-use crate::queries::KIND_CALL_EXPR;
+use crate::indexer::NodeExt;
+use crate::indexer::{find_enclosing_call_name, is_id_char, Indexer};
+use crate::queries::{KIND_CALL_EXPR, KIND_LAMBDA_LIT, KIND_VALUE_ARG};
 use crate::types::CursorPos;
+use crate::StrExt;
 
 // ─── Type-directed call-argument inference ────────────────────────────────────
 
@@ -372,7 +372,11 @@ pub(crate) fn extract_first_arg(call_expr: &str) -> Option<&str> {
         prev = ch;
     }
     let arg = rest[..end].trim();
-    if arg.is_empty() { None } else { Some(arg) }
+    if arg.is_empty() {
+        None
+    } else {
+        Some(arg)
+    }
 }
 
 // ─── CST helpers for call-argument type inference ────────────────────────────
@@ -410,8 +414,8 @@ fn cst_call_arg_type(pos: CursorPos, idx: &Indexer, uri: &Url) -> Option<String>
     let mut cur = start_node;
     let value_arg = loop {
         match cur.kind() {
-            "value_argument" => break Some(cur),
-            "lambda_literal" => break None,
+            KIND_VALUE_ARG => break Some(cur),
+            KIND_LAMBDA_LIT => break None,
             _ => match cur.parent() {
                 Some(p) => cur = p,
                 None => break None,
@@ -440,7 +444,11 @@ fn cst_call_arg_type(pos: CursorPos, idx: &Indexer, uri: &Url) -> Option<String>
     }?;
 
     let base = param_type.trim().ident_prefix();
-    if base.is_empty() { None } else { Some(base) }
+    if base.is_empty() {
+        None
+    } else {
+        Some(base)
+    }
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

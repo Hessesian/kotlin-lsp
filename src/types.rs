@@ -52,6 +52,14 @@ pub(crate) struct CursorPos {
     pub utf16_col: usize,
 }
 
+/// The caller's position context, used for visibility filtering and type-param substitution.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct CallerContext<'a> {
+    pub uri: Option<&'a str>,
+    pub cursor_line: Option<u32>,
+}
+
 /// Kotlin/Java visibility of a declared symbol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub(crate) enum Visibility {

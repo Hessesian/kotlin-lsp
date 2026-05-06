@@ -17,7 +17,10 @@ use crate::indexer::apply_type_subst;
 use crate::indexer::live_tree::{lang_for_path, parse_live};
 use crate::indexer::Indexer;
 use crate::indexer::NodeExt;
-use crate::queries::{KIND_CALL_EXPR, KIND_LAMBDA_PARAMS, KIND_VAR_DECL};
+use crate::queries::{
+    KIND_CALL_EXPR, KIND_COLON, KIND_EQ, KIND_LAMBDA_LIT, KIND_LAMBDA_PARAMS, KIND_PROP_DECL,
+    KIND_SIMPLE_IDENT, KIND_THIS_EXPR, KIND_VAR_DECL,
+};
 use crate::resolver::{infer_receiver_type, ReceiverKind};
 use crate::StrExt;
 
@@ -121,10 +124,10 @@ fn cst_hints(
         }
 
         match node.kind() {
-            "lambda_literal" => {
+            KIND_LAMBDA_LIT => {
                 hint_lambda(&ctx, &node, &mut hints);
             }
-            "simple_identifier" => {
+            KIND_SIMPLE_IDENT => {
                 if node.utf8_text(bytes) == Ok("it") {
                     let pos = ts_pos_to_lsp(node.start_position(), &starts, bytes);
                     if in_range(pos.line, range) {
@@ -142,7 +145,7 @@ fn cst_hints(
                     }
                 }
             }
-            "this_expression" => {
+            KIND_THIS_EXPR => {
                 let pos = ts_pos_to_lsp(node.start_position(), &starts, bytes);
                 if in_range(pos.line, range) {
                     let kind = ReceiverKind::Contextual {
@@ -158,7 +161,7 @@ fn cst_hints(
                     }
                 }
             }
-            "property_declaration" => {
+            KIND_PROP_DECL => {
                 hint_property(&ctx, &node, &mut hints);
             }
             _ => {}
@@ -212,10 +215,10 @@ fn hint_lambda(ctx: &HintCtx<'_>, node: &tree_sitter::Node<'_>, hints: &mut Vec<
             let mut name_node = None;
             for pchild in param.children(&mut vc) {
                 match pchild.kind() {
-                    "simple_identifier" if name_node.is_none() => {
+                    KIND_SIMPLE_IDENT if name_node.is_none() => {
                         name_node = Some(pchild);
                     }
-                    ":" => {
+                    KIND_COLON => {
                         has_type = true;
                         break;
                     }
@@ -287,10 +290,10 @@ fn hint_property(ctx: &HintCtx<'_>, node: &tree_sitter::Node<'_>, hints: &mut Ve
     let mut name_node = None;
     for child in vd.children(&mut vc) {
         match child.kind() {
-            "simple_identifier" if name_node.is_none() => {
+            KIND_SIMPLE_IDENT if name_node.is_none() => {
                 name_node = Some(child);
             }
-            ":" => {
+            KIND_COLON => {
                 has_type = true;
                 break;
             }
@@ -306,7 +309,7 @@ fn hint_property(ctx: &HintCtx<'_>, node: &tree_sitter::Node<'_>, hints: &mut Ve
     let mut init_node = None;
     let mut past_eq = false;
     for child in node.children(&mut nc2) {
-        if child.kind() == "=" {
+        if child.kind() == KIND_EQ {
             past_eq = true;
             continue;
         }
