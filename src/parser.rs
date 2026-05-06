@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::sync::OnceLock;
+use std::thread::LocalKey;
 
 use tower_lsp::lsp_types::{Position, Range, SymbolKind};
 use tree_sitter::{Node, Parser, Query, QueryCursor};
@@ -113,162 +114,147 @@ thread_local! {
 
 // ─── public entry points ────────────────────────────────────────────────────
 
-pub(crate) fn parse_kotlin(content: &str) -> FileData {
-    let lines = std::sync::Arc::new(content.lines().map(str::to_owned).collect());
-    let mut data = FileData {
-        lines,
+fn new_file_data(content: &str) -> FileData {
+    FileData {
+        lines: std::sync::Arc::new(content.lines().map(str::to_owned).collect()),
         ..Default::default()
-    };
+    }
+}
 
-    let Some(tree) = KOTLIN_PARSER.with(|p| p.borrow_mut().parse(content, None)) else {
+fn with_parsed_tree(
+    content: &str,
+    parser_key: &'static LocalKey<RefCell<Parser>>,
+    visit: impl FnOnce(&mut FileData, tree_sitter::Tree, &[u8]),
+) -> FileData {
+    let mut data = new_file_data(content);
+    let Some(tree) = parser_key.with(|p| p.borrow_mut().parse(content, None)) else {
         return data;
     };
-
-    let bytes = content.as_bytes();
-    let root = tree.root_node();
-
-    // ── definitions ──────────────────────────────────────────────────────────
-    let Some(qc) = kotlin_def_query() else {
-        return data;
-    };
-    let mut cur = QueryCursor::new();
-    let matches: Vec<MatchEntry> = cur
-        .matches(&qc.query, root, bytes)
-        .map(|m| map_def_captures(&m, qc.def_idx, qc.name_idx, bytes))
-        .collect();
-
-    // Deduplicate: multiple patterns can fire on the same node
-    // (e.g. enum class matches both pattern 0 "enum" AND pattern 2 "class").
-    let best = dedup_matches(&matches);
-    push_def_symbols(
-        best,
-        queries::def_pattern_meta,
-        visibility_at_line,
-        &data.lines,
-        &mut data.symbols,
-    );
-
-    // ── package + imports (manual tree walk — avoids query overlap issues) ────
-    data.extract_package_and_imports(root, bytes);
-
-    // ── fun interface (tree-sitter parses these as ERROR + lambda_literal) ───
-    data.extract_fun_interfaces(root, bytes);
-
-    // ── supertype relationships (delegation specifiers) ──────────────────────
-    data.extract_supers_kotlin(root, bytes);
-
-    // ── rhs-type and method-call-rhs inference (unannotated properties) ──────
-    data.extract_rhs_types_kotlin(root, bytes);
-
-    // ── declared_names: scan lines once for `ident:` patterns ───────────────
-    data.declared_names = extract_declared_names(&data.lines);
-
-    // ── syntax errors (ERROR / MISSING nodes) ────────────────────────────────
-    data.syntax_errors = collect_syntax_errors(root, bytes);
-
+    visit(&mut data, tree, content.as_bytes());
     data
+}
+
+fn finalize_parse(data: &mut FileData, root: Node, bytes: &[u8]) {
+    data.declared_names = extract_declared_names(&data.lines);
+    data.syntax_errors = collect_syntax_errors(root, bytes);
+}
+
+pub(crate) fn parse_kotlin(content: &str) -> FileData {
+    with_parsed_tree(content, &KOTLIN_PARSER, |data, tree, bytes| {
+        let root = tree.root_node();
+
+        // ── definitions ──────────────────────────────────────────────────────
+        let Some(qc) = kotlin_def_query() else {
+            return;
+        };
+        let mut cur = QueryCursor::new();
+        let matches: Vec<MatchEntry> = cur
+            .matches(&qc.query, root, bytes)
+            .map(|m| map_def_captures(&m, qc.def_idx, qc.name_idx, bytes))
+            .collect();
+
+        // Deduplicate: multiple patterns can fire on the same node
+        // (e.g. enum class matches both pattern 0 "enum" AND pattern 2 "class").
+        let best = dedup_matches(&matches);
+        push_def_symbols(
+            best,
+            queries::def_pattern_meta,
+            visibility_at_line,
+            &data.lines,
+            &mut data.symbols,
+        );
+
+        // ── package + imports (manual tree walk — avoids query overlap issues) ──
+        data.extract_package_and_imports(root, bytes);
+
+        // ── fun interface (tree-sitter parses these as ERROR + lambda_literal) ─
+        data.extract_fun_interfaces(root, bytes);
+
+        // ── supertype relationships (delegation specifiers) ────────────────────
+        data.extract_supers_kotlin(root, bytes);
+
+        // ── rhs-type and method-call-rhs inference (unannotated properties) ────
+        data.extract_rhs_types_kotlin(root, bytes);
+
+        finalize_parse(data, root, bytes);
+    })
 }
 
 pub(crate) fn parse_java(content: &str) -> FileData {
-    let lines = std::sync::Arc::new(content.lines().map(str::to_owned).collect());
-    let mut data = FileData {
-        lines,
-        ..Default::default()
-    };
-
-    let Some(tree) = JAVA_PARSER.with(|p| p.borrow_mut().parse(content, None)) else {
-        return data;
-    };
-
-    let bytes = content.as_bytes();
-    let mut queue = vec![tree.root_node()];
-    while let Some(node) = queue.pop() {
-        data.extract_java(&node, bytes);
-        data.extract_supers_java(&node, bytes);
-        let mut cur = node.walk();
-        for child in node.children(&mut cur) {
-            queue.push(child);
+    with_parsed_tree(content, &JAVA_PARSER, |data, tree, bytes| {
+        let root = tree.root_node();
+        let mut queue = vec![root];
+        while let Some(node) = queue.pop() {
+            data.extract_java(&node, bytes);
+            data.extract_supers_java(&node, bytes);
+            let mut cur = node.walk();
+            for child in node.children(&mut cur) {
+                queue.push(child);
+            }
         }
-    }
-    data.declared_names = extract_declared_names(&data.lines);
-    data.syntax_errors = collect_syntax_errors(tree.root_node(), bytes);
-    data
+        finalize_parse(data, root, bytes);
+    })
 }
 
 pub(crate) fn parse_swift(content: &str) -> FileData {
-    let lines = std::sync::Arc::new(content.lines().map(str::to_owned).collect());
-    let mut data = FileData {
-        lines,
-        ..Default::default()
-    };
+    with_parsed_tree(content, &SWIFT_PARSER, |data, tree, bytes| {
+        let root = tree.root_node();
 
-    let Some(tree) = SWIFT_PARSER.with(|p| p.borrow_mut().parse(content, None)) else {
-        return data;
-    };
-
-    let bytes = content.as_bytes();
-    let root = tree.root_node();
-
-    // ── definitions ──────────────────────────────────────────────────────────
-    let Some(qc) = swift_def_query() else {
-        return data;
-    };
-    let def_idx = qc.def_idx;
-    let name_idx = qc.name_idx;
-    let mut cur = QueryCursor::new();
-    let matches: Vec<MatchEntry> = cur
-        .matches(&qc.query, root, bytes)
-        .map(|m| {
-            let (pidx, slot) = map_def_captures(&m, def_idx, name_idx, bytes);
-            if pidx == queries::SWIFT_INIT_PATTERN_IDX && slot[0].is_none() {
-                // init_declaration — no @name, synthesize "init"; type_params from @def node.
-                let def_cap = m.captures.iter().find(|cap| cap.index == def_idx);
-                if let Some(cap) = def_cap {
-                    let dr = ts_to_lsp(cap.node.range());
-                    let sel = Range::new(
-                        Position::new(dr.start.line, dr.start.character),
-                        Position::new(
-                            dr.start.line,
-                            dr.start.character + queries::SWIFT_INIT_NAME.len() as u32,
-                        ),
-                    );
-                    let type_params = cap.node.extract_type_params(bytes);
-                    return (
-                        pidx,
-                        [
-                            Some((queries::SWIFT_INIT_NAME.to_owned(), dr, sel, type_params)),
-                            None,
-                        ],
-                    );
+        // ── definitions ──────────────────────────────────────────────────────
+        let Some(qc) = swift_def_query() else {
+            return;
+        };
+        let def_idx = qc.def_idx;
+        let name_idx = qc.name_idx;
+        let mut cur = QueryCursor::new();
+        let matches: Vec<MatchEntry> = cur
+            .matches(&qc.query, root, bytes)
+            .map(|m| {
+                let (pidx, slot) = map_def_captures(&m, def_idx, name_idx, bytes);
+                if pidx == queries::SWIFT_INIT_PATTERN_IDX && slot[0].is_none() {
+                    // init_declaration — no @name, synthesize "init"; type_params from @def node.
+                    let def_cap = m.captures.iter().find(|cap| cap.index == def_idx);
+                    if let Some(cap) = def_cap {
+                        let dr = ts_to_lsp(cap.node.range());
+                        let sel = Range::new(
+                            Position::new(dr.start.line, dr.start.character),
+                            Position::new(
+                                dr.start.line,
+                                dr.start.character + queries::SWIFT_INIT_NAME.len() as u32,
+                            ),
+                        );
+                        let type_params = cap.node.extract_type_params(bytes);
+                        return (
+                            pidx,
+                            [
+                                Some((queries::SWIFT_INIT_NAME.to_owned(), dr, sel, type_params)),
+                                None,
+                            ],
+                        );
+                    }
                 }
-            }
-            (pidx, slot)
-        })
-        .collect();
+                (pidx, slot)
+            })
+            .collect();
 
-    // Deduplicate: use same BTreeMap strategy as Kotlin parser.
-    let best = dedup_matches(&matches);
-    push_def_symbols(
-        best,
-        queries::swift_def_pattern_meta,
-        swift_visibility_at_line,
-        &data.lines,
-        &mut data.symbols,
-    );
+        // Deduplicate: use same BTreeMap strategy as Kotlin parser.
+        let best = dedup_matches(&matches);
+        push_def_symbols(
+            best,
+            queries::swift_def_pattern_meta,
+            swift_visibility_at_line,
+            &data.lines,
+            &mut data.symbols,
+        );
 
-    // ── imports (manual tree walk — Swift imports are simpler) ────────────────
-    data.extract_swift_imports(root, bytes);
+        // ── imports (manual tree walk — Swift imports are simpler) ────────────
+        data.extract_swift_imports(root, bytes);
 
-    // ── supertype relationships (inheritance specifiers) ──────────────────────
-    data.extract_supers_swift(root, bytes);
+        // ── supertype relationships (inheritance specifiers) ──────────────────
+        data.extract_supers_swift(root, bytes);
 
-    // ── declared_names ───────────────────────────────────────────────────────
-    data.declared_names = extract_declared_names(&data.lines);
-
-    // ── syntax errors ────────────────────────────────────────────────────────
-    data.syntax_errors = collect_syntax_errors(root, bytes);
-
-    data
+        finalize_parse(data, root, bytes);
+    })
 }
 
 /// Dispatch to the correct parser based on file extension.

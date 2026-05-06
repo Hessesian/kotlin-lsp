@@ -232,30 +232,9 @@ pub(crate) fn rg_find_definition(
         None => std::borrow::Cow::Owned(std::env::current_dir().unwrap_or_default()),
     };
 
-    let mut cmd = Command::new("rg");
-    cmd.args([
-        "--no-heading",
-        "--with-filename",
-        "--line-number",
-        "--column",
-        // NOTE: rg has no --absolute-path flag; absolute output comes from
-        // passing an absolute search root as the positional argument.
-    ]);
-    for ext in SOURCE_EXTENSIONS {
-        cmd.args(["--glob", &format!("*.{ext}")]);
-    }
-    cmd.args(["-e", &pattern]);
-    cmd.arg(search_root.as_ref());
-
-    let out = match cmd.output() {
-        Ok(o) if o.status.success() => o,
-        _ => return vec![],
-    };
-
-    let locs: Vec<Location> = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|l| parse_rg_line_with_content_rooted(l, &search_root).map(|(loc, _)| loc))
-        .collect();
+    let locs = RgSearch::rooted(search_root.as_ref())
+        .with_pattern(pattern)
+        .locations();
 
     if let Some(m) = matcher {
         m.filter_locs(locs)
@@ -273,6 +252,144 @@ pub(crate) struct RgSearchRequest<'a> {
     include_decl: bool,
     from_uri: &'a Url,
     decl_files: &'a [String],
+}
+
+enum RgTarget<'a> {
+    Root(&'a Path),
+    Files(&'a [String]),
+}
+
+struct RgSearch<'a> {
+    parse_root: &'a Path,
+    target: RgTarget<'a>,
+    patterns: Vec<String>,
+    word_regexp: bool,
+    list_files: bool,
+}
+
+impl<'a> RgSearch<'a> {
+    fn rooted(root: &'a Path) -> Self {
+        Self {
+            parse_root: root,
+            target: RgTarget::Root(root),
+            patterns: Vec::new(),
+            word_regexp: false,
+            list_files: false,
+        }
+    }
+
+    fn files(files: &'a [String]) -> Self {
+        Self {
+            parse_root: Path::new("/"),
+            target: RgTarget::Files(files),
+            patterns: Vec::new(),
+            word_regexp: false,
+            list_files: false,
+        }
+    }
+
+    fn with_pattern(mut self, pattern: impl Into<String>) -> Self {
+        self.patterns.push(pattern.into());
+        self
+    }
+
+    fn with_patterns<I, S>(mut self, patterns: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.patterns.extend(patterns.into_iter().map(Into::into));
+        self
+    }
+
+    fn word_regexp(mut self) -> Self {
+        self.word_regexp = true;
+        self
+    }
+
+    fn list_files(mut self) -> Self {
+        self.list_files = true;
+        self
+    }
+
+    fn build_command(&self) -> Command {
+        let mut command = Command::new("rg");
+        if self.list_files {
+            command.arg("-l");
+        } else {
+            command.args([
+                "--no-heading",
+                "--with-filename",
+                "--line-number",
+                "--column",
+            ]);
+        }
+        if self.word_regexp {
+            command.arg("--word-regexp");
+        }
+        for ext in SOURCE_EXTENSIONS {
+            command.args(["--glob", &format!("*.{ext}")]);
+        }
+        for pattern in &self.patterns {
+            command.args(["-e", pattern]);
+        }
+        match &self.target {
+            RgTarget::Root(root) => {
+                command.arg(root);
+            }
+            RgTarget::Files(files) => {
+                command.arg("--");
+                command.args(*files);
+            }
+        }
+        command
+    }
+
+    fn output(&self) -> Option<std::process::Output> {
+        let mut command = self.build_command();
+        match command.output() {
+            Ok(output) if output.status.success() && !output.stdout.is_empty() => Some(output),
+            _ => None,
+        }
+    }
+
+    fn locations_with_content(&self) -> Vec<(Location, String)> {
+        let Some(output) = self.output() else {
+            return vec![];
+        };
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| parse_rg_line_with_content_rooted(line, self.parse_root))
+            .collect()
+    }
+
+    fn locations(&self) -> Vec<Location> {
+        self.locations_with_content()
+            .into_iter()
+            .map(|(location, _)| location)
+            .collect()
+    }
+
+    fn files_with_matches(&self) -> Vec<String> {
+        let Some(output) = self.output() else {
+            return vec![];
+        };
+        let root = match &self.target {
+            RgTarget::Root(root) => *root,
+            RgTarget::Files(_) => return vec![],
+        };
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(|line| {
+                let path = Path::new(line);
+                if path.is_absolute() {
+                    line.to_owned()
+                } else {
+                    root.join(line).to_string_lossy().into_owned()
+                }
+            })
+            .collect()
+    }
 }
 
 impl<'a> RgSearchRequest<'a> {
@@ -338,27 +455,6 @@ fn build_rg_patterns(request: &RgSearchRequest<'_>) -> Vec<String> {
     }
 }
 
-fn build_rg_command(request: &RgSearchRequest<'_>, patterns: &[String]) -> Command {
-    let mut command = Command::new("rg");
-    command.args([
-        "--no-heading",
-        "--with-filename",
-        "--line-number",
-        "--column",
-    ]);
-    if request.parent_class.is_none() && request.declared_pkg.is_none() {
-        command.arg("--word-regexp");
-    }
-    for ext in SOURCE_EXTENSIONS {
-        command.args(["--glob", &format!("*.{ext}")]);
-    }
-    for pattern in patterns {
-        command.args(["-e", pattern.as_str()]);
-    }
-    command.arg(request.search_root.as_ref());
-    command
-}
-
 fn should_skip_reference(loc: &Location, content: &str, request: &RgSearchRequest<'_>) -> bool {
     let trimmed = content.trim_start();
     if trimmed.starts_with("import ") || trimmed.starts_with("package ") {
@@ -376,23 +472,19 @@ fn should_skip_reference(loc: &Location, content: &str, request: &RgSearchReques
     false
 }
 
-fn parse_rg_output(output: &[u8], request: &RgSearchRequest<'_>) -> Vec<Location> {
-    String::from_utf8_lossy(output)
-        .lines()
-        .filter_map(|line| parse_rg_line_with_content_rooted(line, request.search_root.as_ref()))
+fn run_rg_search(request: &RgSearchRequest<'_>, patterns: &[String]) -> Vec<Location> {
+    let mut search =
+        RgSearch::rooted(request.search_root.as_ref()).with_patterns(patterns.iter().cloned());
+    if request.parent_class.is_none() && request.declared_pkg.is_none() {
+        search = search.word_regexp();
+    }
+    search
+        .locations_with_content()
+        .into_iter()
         .filter_map(|(loc, content)| {
             (!should_skip_reference(&loc, &content, request)).then_some(loc)
         })
         .collect()
-}
-
-fn run_rg_search(request: &RgSearchRequest<'_>, patterns: &[String]) -> Vec<Location> {
-    let mut command = build_rg_command(request, patterns);
-    let output = match command.output() {
-        Ok(output) if output.status.success() && !output.stdout.is_empty() => output,
-        _ => return vec![],
-    };
-    parse_rg_output(&output.stdout, request)
 }
 
 fn filter_candidate_files(
@@ -541,26 +633,10 @@ pub(crate) fn rg_find_implementors(
         None => return vec![],
     };
     // Search for the name in source files.
-    let mut cmd = Command::new("rg");
-    cmd.args([
-        "--no-heading",
-        "--with-filename",
-        "--line-number",
-        "--column",
-        "-e",
-        &safe,
-    ]);
-    for ext in SOURCE_EXTENSIONS {
-        cmd.args(["--glob", &format!("*.{ext}")]);
-    }
-    cmd.arg(root);
-    let out = match cmd.output() {
-        Ok(o) if !o.stdout.is_empty() => o,
-        _ => return vec![],
-    };
-    let locs: Vec<Location> = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|l| parse_rg_line_with_content_rooted(l, root))
+    let locs: Vec<Location> = RgSearch::rooted(root)
+        .with_pattern(safe)
+        .locations_with_content()
+        .into_iter()
         .filter_map(|(loc, content)| {
             let line = content.trim();
             // Heuristics: declaration-like lines
@@ -633,27 +709,10 @@ pub(crate) fn regex_escape(s: &str) -> String {
 
 /// Run `rg -l` to get the list of files matching a pattern.
 fn rg_files_with_matches(pattern: &str, root: &Path) -> Vec<String> {
-    let mut cmd = Command::new("rg");
-    cmd.arg("-l");
-    for ext in SOURCE_EXTENSIONS {
-        cmd.args(["--glob", &format!("*.{ext}")]);
-    }
-    cmd.args(["-e", pattern]).arg(root);
-    let out = match cmd.output() {
-        Ok(o) if !o.stdout.is_empty() => o,
-        _ => return vec![],
-    };
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .map(|l| {
-            let p = std::path::Path::new(l);
-            if p.is_absolute() {
-                l.to_owned()
-            } else {
-                root.join(l).to_string_lossy().into_owned()
-            }
-        })
-        .collect()
+    RgSearch::rooted(root)
+        .list_files()
+        .with_pattern(pattern.to_owned())
+        .files_with_matches()
 }
 
 /// Run `rg --word-regexp NAME` restricted to specific files.
@@ -661,28 +720,10 @@ fn rg_word_in_files(safe_name: &str, files: &[String]) -> Vec<(Location, String)
     if files.is_empty() {
         return vec![];
     }
-    let out = match Command::new("rg")
-        .args([
-            "--no-heading",
-            "--with-filename",
-            "--line-number",
-            "--column",
-            "--word-regexp",
-            "-e",
-            safe_name,
-            "--",
-        ])
-        .args(files)
-        .output()
-    {
-        Ok(o) if !o.stdout.is_empty() => o,
-        _ => return vec![],
-    };
-    // Files passed to rg_word_in_files are already absolute (from rg_files_with_matches).
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|l| parse_rg_line_with_content_rooted(l, std::path::Path::new("/")))
-        .collect()
+    RgSearch::files(files)
+        .word_regexp()
+        .with_pattern(safe_name.to_owned())
+        .locations_with_content()
 }
 
 fn parse_rg_line_with_content_rooted(line: &str, root: &Path) -> Option<(Location, String)> {

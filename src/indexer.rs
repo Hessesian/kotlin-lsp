@@ -24,8 +24,9 @@ pub(crate) mod resolution;
 pub(crate) use self::infer::{
     collect_all_fun_params_texts,
     collect_params_from_line,
-    // sig.rs
     collect_signature,
+    cst_call_info,
+    cst_cursor_is_local_var,
     extract_first_arg,
     extract_named_arg_name,
     // args.rs
@@ -50,6 +51,8 @@ pub(crate) use self::infer::{
     line_has_lambda_param,
     nth_fun_param_type_str,
     strip_trailing_call_args,
+    // sig.rs
+    CallInfo,
 };
 
 mod cache;
@@ -314,6 +317,51 @@ impl Indexer {
             return Some(live.clone());
         }
         self.files.get(uri).map(|f| f.lines.clone())
+    }
+
+    pub(crate) fn live_lines_for(&self, uri: &Url) -> Option<Arc<Vec<String>>> {
+        self.live_lines
+            .get(uri.as_str())
+            .map(|lines| Arc::clone(lines.value()))
+    }
+
+    pub(crate) fn file_data(&self, uri: &Url) -> Option<Arc<FileData>> {
+        self.files
+            .get(uri.as_str())
+            .map(|data| Arc::clone(data.value()))
+    }
+
+    pub(crate) fn definition_locations(&self, name: &str) -> Vec<Location> {
+        self.definitions
+            .get(name)
+            .map(|locations| locations.clone())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn subtype_locations(&self, name: &str) -> Vec<Location> {
+        self.subtypes
+            .get(name)
+            .map(|locations| locations.clone())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn indexed_files(&self) -> Vec<(String, Arc<FileData>)> {
+        self.files
+            .iter()
+            .map(|entry| (entry.key().clone(), Arc::clone(entry.value())))
+            .collect()
+    }
+
+    pub(crate) fn is_library_uri(&self, uri: &Url) -> bool {
+        self.library_uris.contains(uri.as_str())
+    }
+
+    pub(crate) fn remove_live_lines(&self, uri: &Url) {
+        self.live_lines.remove(uri.as_str());
+    }
+
+    pub(crate) fn remove_indexed_file(&self, uri: &Url) {
+        self.files.remove(uri.as_str());
     }
 
     // ─── completion helpers (methods on Indexer) ─────────────────────────────
