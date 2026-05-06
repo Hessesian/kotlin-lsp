@@ -175,7 +175,7 @@ impl Backend {
         let parent2 = parent_class.clone();
         let decl2 = declared_pkg.clone();
         let mut locs = tokio::task::spawn_blocking(move || {
-            crate::rg::rg_find_references(
+            let request = crate::rg::RgSearchRequest::new(
                 &name2,
                 parent2.as_deref(),
                 decl2.as_deref(),
@@ -183,8 +183,8 @@ impl Backend {
                 include_decl,
                 &uri_clone,
                 &decl_files,
-                matcher.as_deref(),
-            )
+            );
+            crate::rg::rg_find_references(&request, matcher.as_deref())
         })
         .await
         .unwrap_or_default();

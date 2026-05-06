@@ -264,6 +264,236 @@ pub(crate) fn rg_find_definition(
     }
 }
 
+/// Request parameters for a ripgrep reference search.
+pub(crate) struct RgSearchRequest<'a> {
+    name: &'a str,
+    parent_class: Option<&'a str>,
+    declared_pkg: Option<&'a str>,
+    search_root: std::borrow::Cow<'a, Path>,
+    include_decl: bool,
+    from_uri: &'a Url,
+    decl_files: &'a [String],
+}
+
+impl<'a> RgSearchRequest<'a> {
+    pub(crate) fn new(
+        name: &'a str,
+        parent_class: Option<&'a str>,
+        declared_pkg: Option<&'a str>,
+        root: Option<&'a Path>,
+        include_decl: bool,
+        from_uri: &'a Url,
+        decl_files: &'a [String],
+    ) -> Self {
+        let search_root = match root {
+            Some(root) => std::borrow::Cow::Borrowed(root),
+            None => std::borrow::Cow::Owned(std::env::current_dir().unwrap_or_default()),
+        };
+        Self {
+            name,
+            parent_class,
+            declared_pkg,
+            search_root,
+            include_decl,
+            from_uri,
+            decl_files,
+        }
+    }
+}
+
+const REFERENCE_DECLARATION_KEYWORDS: &[&str] = &[
+    "class ",
+    "interface ",
+    "object ",
+    "fun ",
+    "val ",
+    "var ",
+    "typealias ",
+    "enum class ",
+    "enum ",
+    "struct ",
+    "protocol ",
+    "func ",
+    "let ",
+    "extension ",
+];
+
+fn build_rg_patterns(request: &RgSearchRequest<'_>) -> Vec<String> {
+    let safe_name = regex_escape(request.name);
+    if let Some(parent_class) = request.parent_class {
+        let safe_parent = regex_escape(parent_class);
+        let qualified_pattern = format!(r"\b{}\.\b{}\b", safe_parent, safe_name);
+        let direct_import_pattern =
+            format!(r"import[^\n]*\b{}\.(?:{}\b|\*)", safe_parent, safe_name);
+        vec![qualified_pattern, direct_import_pattern, safe_name]
+    } else if let Some(declared_pkg) = request.declared_pkg {
+        let safe_package = regex_escape(declared_pkg);
+        let import_pattern = format!(
+            r"import[^\n]*\b{safe_package}\b[^\n]*\b{safe_name}\b|import[^\n]*\b{safe_package}\b\.\*"
+        );
+        let package_pattern = format!(r"^\s*package\s+{safe_package}\s*$");
+        vec![import_pattern, package_pattern, safe_name]
+    } else {
+        vec![safe_name]
+    }
+}
+
+fn build_rg_command(request: &RgSearchRequest<'_>, patterns: &[String]) -> Command {
+    let mut command = Command::new("rg");
+    command.args([
+        "--no-heading",
+        "--with-filename",
+        "--line-number",
+        "--column",
+    ]);
+    if request.parent_class.is_none() && request.declared_pkg.is_none() {
+        command.arg("--word-regexp");
+    }
+    for ext in SOURCE_EXTENSIONS {
+        command.args(["--glob", &format!("*.{ext}")]);
+    }
+    for pattern in patterns {
+        command.args(["-e", pattern.as_str()]);
+    }
+    command.arg(request.search_root.as_ref());
+    command
+}
+
+fn should_skip_reference(loc: &Location, content: &str, request: &RgSearchRequest<'_>) -> bool {
+    let trimmed = content.trim_start();
+    if trimmed.starts_with("import ") || trimmed.starts_with("package ") {
+        return true;
+    }
+    if !request.include_decl {
+        let is_declaration = REFERENCE_DECLARATION_KEYWORDS
+            .iter()
+            .any(|keyword| content.contains(keyword))
+            && loc.uri.as_str() == request.from_uri.as_str();
+        if is_declaration {
+            return true;
+        }
+    }
+    false
+}
+
+fn parse_rg_output(output: &[u8], request: &RgSearchRequest<'_>) -> Vec<Location> {
+    String::from_utf8_lossy(output)
+        .lines()
+        .filter_map(|line| parse_rg_line_with_content_rooted(line, request.search_root.as_ref()))
+        .filter_map(|(loc, content)| {
+            (!should_skip_reference(&loc, &content, request)).then_some(loc)
+        })
+        .collect()
+}
+
+fn run_rg_search(request: &RgSearchRequest<'_>, patterns: &[String]) -> Vec<Location> {
+    let mut command = build_rg_command(request, patterns);
+    let output = match command.output() {
+        Ok(output) if output.status.success() && !output.stdout.is_empty() => output,
+        _ => return vec![],
+    };
+    parse_rg_output(&output.stdout, request)
+}
+
+fn filter_candidate_files(
+    candidate_files: Vec<String>,
+    matcher: Option<&IgnoreMatcher>,
+) -> Vec<String> {
+    match matcher {
+        Some(matcher) => matcher.filter_file_strings(candidate_files),
+        None => candidate_files,
+    }
+}
+
+fn extend_unique_files(files: &mut Vec<String>, new_files: Vec<String>) {
+    for file in new_files {
+        if !files.contains(&file) {
+            files.push(file);
+        }
+    }
+}
+
+fn merge_decl_files(candidate_files: &mut Vec<String>, decl_files: &[String]) {
+    let mut existing: std::collections::HashSet<String> = candidate_files.iter().cloned().collect();
+    for decl_file in decl_files {
+        if existing.insert(decl_file.clone()) {
+            candidate_files.push(decl_file.clone());
+        }
+    }
+}
+
+fn append_unique_reference_hits(
+    locations: &mut Vec<Location>,
+    hits: Vec<(Location, String)>,
+    request: &RgSearchRequest<'_>,
+) {
+    let mut seen: std::collections::HashSet<(String, u32, u32)> = locations
+        .iter()
+        .map(|location| {
+            (
+                location.uri.to_string(),
+                location.range.start.line,
+                location.range.start.character,
+            )
+        })
+        .collect();
+
+    for (location, content) in hits {
+        if should_skip_reference(&location, &content, request) {
+            continue;
+        }
+
+        let key = (
+            location.uri.to_string(),
+            location.range.start.line,
+            location.range.start.character,
+        );
+        if seen.insert(key) {
+            locations.push(location);
+        }
+    }
+}
+
+fn parent_scoped_reference_locations(
+    request: &RgSearchRequest<'_>,
+    patterns: &[String],
+    matcher: Option<&IgnoreMatcher>,
+) -> Vec<Location> {
+    let mut locations = run_rg_search(request, &patterns[..1]);
+    let mut candidate_files = filter_candidate_files(
+        rg_files_with_matches(&patterns[1], request.search_root.as_ref()),
+        matcher,
+    );
+    merge_decl_files(&mut candidate_files, request.decl_files);
+    if !candidate_files.is_empty() {
+        let bare_hits = rg_word_in_files(&patterns[2], &candidate_files);
+        append_unique_reference_hits(&mut locations, bare_hits, request);
+    }
+    locations
+}
+
+fn package_scoped_reference_locations(
+    request: &RgSearchRequest<'_>,
+    patterns: &[String],
+    matcher: Option<&IgnoreMatcher>,
+) -> Vec<Location> {
+    let mut candidate_files = rg_files_with_matches(&patterns[0], request.search_root.as_ref());
+    extend_unique_files(
+        &mut candidate_files,
+        rg_files_with_matches(&patterns[1], request.search_root.as_ref()),
+    );
+    let candidate_files = filter_candidate_files(candidate_files, matcher);
+    if candidate_files.is_empty() {
+        return vec![];
+    }
+    rg_word_in_files(&patterns[2], &candidate_files)
+        .into_iter()
+        .filter_map(|(location, content)| {
+            (!should_skip_reference(&location, &content, request)).then_some(location)
+        })
+        .collect()
+}
+
 /// Run `rg` to find all *usages* of `name` in the project.
 ///
 /// Uses `--word-regexp` so only whole-word matches are returned.
@@ -273,204 +503,21 @@ pub(crate) fn rg_find_definition(
 /// `include_decl` is false (the definition is already known).
 ///
 /// Results in directories matched by `matcher` are filtered out.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn rg_find_references(
-    name: &str,
-    parent_class: Option<&str>,
-    declared_pkg: Option<&str>,
-    root: Option<&Path>,
-    include_decl: bool,
-    from_uri: &Url,
-    // Absolute file paths where `name` is declared — always included in bare-word
-    // search so the declaration site itself is never missed (it uses bare `Name`,
-    // not the qualified `Parent.Name` form that Pass A searches for).
-    decl_files: &[String],
+    request: &RgSearchRequest<'_>,
     matcher: Option<&IgnoreMatcher>,
 ) -> Vec<Location> {
-    let search_root: std::borrow::Cow<Path> = match root {
-        Some(r) => std::borrow::Cow::Borrowed(r),
-        None => std::borrow::Cow::Owned(std::env::current_dir().unwrap_or_default()),
-    };
-
-    let safe_name: String = regex_escape(name);
-    let decl_kws = [
-        "class ",
-        "interface ",
-        "object ",
-        "fun ",
-        "val ",
-        "var ",
-        "typealias ",
-        "enum class ",
-        "enum ",
-        // Swift
-        "struct ",
-        "protocol ",
-        "func ",
-        "let ",
-        "extension ",
-    ];
-
-    let filter = |(loc, content): (Location, String)| -> Option<Location> {
-        let trimmed = content.trim_start();
-        // Import and package lines are never real references.
-        if trimmed.starts_with("import ") || trimmed.starts_with("package ") {
-            return None;
-        }
-        if !include_decl {
-            let is_decl = decl_kws.iter().any(|kw| content.contains(kw))
-                && loc.uri.as_str() == from_uri.as_str();
-            if is_decl {
-                return None;
-            }
-        }
-        Some(loc)
-    };
-
-    let result = if let Some(parent) = parent_class {
-        // ── Scoped references: parent class is known ──────────────────────────
-        //
-        // Pass A: qualified form `ParentClass.Name` — works in any file.
-        let safe_parent = regex_escape(parent);
-        let qualified_pat = format!(r"\b{}\.\b{}\b", safe_parent, safe_name);
-        let mut locs: Vec<Location> = rg_raw(&qualified_pat, &search_root)
-            .into_iter()
-            .filter_map(filter)
-            .collect();
-
-        // Pass B: bare `Name` restricted to files that directly import the inner
-        // class itself (`import …ParentClass.Name` or `import …ParentClass.*`)
-        // OR are in the same package.
-        //
-        // NOTE: we intentionally do NOT match files that only import the parent
-        // class itself (`import …ParentClass`) — those files use the qualified
-        // form `ParentClass.Name` which is already captured by Pass A, and
-        // including them causes massive false-positive counts (e.g. every
-        // ViewModel importing another ViewModel that also has a sealed `Effect`).
-        //
-        // Step B1 — files with explicit inner-class import.
-        // Pattern must match the parent and name as ADJACENT dot-segments:
-        //   import …ParentClass.Name   or   import …ParentClass.*
-        // NOT files that merely mention both words (e.g. OtherContract.State).
-        let direct_import_pat = format!(r"import[^\n]*\b{}\.(?:{}\b|\*)", safe_parent, safe_name);
-        let candidate_files = rg_files_with_matches(&direct_import_pat, &search_root);
-        // Filter candidate files against ignore patterns before searching them.
-        let candidate_files = match matcher {
-            Some(m) => m.filter_file_strings(candidate_files),
-            None => candidate_files,
-        };
-
-        // Step B2 — files in the same package as the parent class declaration.
-        // NOTE: for inner classes, same-package files use the QUALIFIED form
-        // `ParentClass.Name` which is already caught by Pass A. Adding them to
-        // the bare-name search causes false positives (e.g. AbilitiesSectionViewModel
-        // in the same package has its own `State`). So we skip same-package here.
-
-        // Merge candidate file sets.
-        // Always include declaration files so the declaration site itself is
-        // never missed (it uses bare `Name`, not the qualified `Parent.Name` form).
-        let mut all_files: Vec<String> = candidate_files;
-        // Build new entries first (borrows all_files), then extend after the borrow ends.
-        let new_decl: Vec<&String> = {
-            let existing: std::collections::HashSet<&str> =
-                all_files.iter().map(|s| s.as_str()).collect();
-            decl_files
-                .iter()
-                .filter(|f| !existing.contains(f.as_str()))
-                .collect()
-        };
-        for f in new_decl {
-            all_files.push(f.clone());
-        }
-
-        if !all_files.is_empty() {
-            let bare_hits = rg_word_in_files(&safe_name, &all_files);
-            // Deduplicate against the qualified hits using a HashSet for O(1) lookup.
-            let seen: std::collections::HashSet<(String, u32, u32)> = locs
-                .iter()
-                .map(|l| {
-                    (
-                        l.uri.to_string(),
-                        l.range.start.line,
-                        l.range.start.character,
-                    )
-                })
-                .collect();
-            for (loc, content) in bare_hits {
-                if let Some(loc) = filter((loc, content)) {
-                    let key = (
-                        loc.uri.to_string(),
-                        loc.range.start.line,
-                        loc.range.start.character,
-                    );
-                    if !seen.contains(&key) {
-                        locs.push(loc);
-                    }
-                }
-            }
-        }
-
-        locs
-    } else if let Some(dpkg) = declared_pkg {
-        // ── Top-level symbol with known declared package ──────────────────────
-        // Only search files that import `declared_pkg.Name` or `declared_pkg.*`
-        // or are in the same package. This avoids the "13000 matches for Effect"
-        // problem where every ViewModel has an inner class with the same name.
-        let safe_pkg = regex_escape(dpkg);
-        let import_pat = format!(
-            r"import[^\n]*\b{safe_pkg}\b[^\n]*\b{safe_name}\b|import[^\n]*\b{safe_pkg}\b\.\*"
-        );
-        let pkg_pat = format!(r"^\s*package\s+{safe_pkg}\s*$");
-
-        let mut candidate_files = rg_files_with_matches(&import_pat, &search_root);
-        for f in rg_files_with_matches(&pkg_pat, &search_root) {
-            if !candidate_files.contains(&f) {
-                candidate_files.push(f);
-            }
-        }
-        // Filter candidate files against ignore patterns before searching them.
-        let candidate_files = match matcher {
-            Some(m) => m.filter_file_strings(candidate_files),
-            None => candidate_files,
-        };
-
-        if candidate_files.is_empty() {
-            return vec![];
-        }
-        rg_word_in_files(&safe_name, &candidate_files)
-            .into_iter()
-            .filter_map(filter)
-            .collect()
+    let patterns = build_rg_patterns(request);
+    let result = if request.parent_class.is_some() {
+        parent_scoped_reference_locations(request, &patterns, matcher)
+    } else if request.declared_pkg.is_some() {
+        package_scoped_reference_locations(request, &patterns, matcher)
     } else {
-        // ── Fully unscoped: lowercase / unknown symbol ────────────────────────
-        let mut cmd = Command::new("rg");
-        cmd.args([
-            "--no-heading",
-            "--with-filename",
-            "--line-number",
-            "--column",
-            "--word-regexp",
-        ]);
-        for ext in SOURCE_EXTENSIONS {
-            cmd.args(["--glob", &format!("*.{ext}")]);
-        }
-        cmd.args(["-e", &safe_name]);
-        cmd.arg(search_root.as_ref());
-
-        let out = match cmd.output() {
-            Ok(o) if !o.stdout.is_empty() => o,
-            _ => return vec![],
-        };
-
-        String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .filter_map(|l| parse_rg_line_with_content_rooted(l, &search_root))
-            .filter_map(filter)
-            .collect()
+        run_rg_search(request, &patterns)
     };
 
-    if let Some(m) = matcher {
-        m.filter_locs(result)
+    if let Some(matcher) = matcher {
+        matcher.filter_locs(result)
     } else {
         result
     }
@@ -581,29 +628,6 @@ pub(crate) fn regex_escape(s: &str) -> String {
                 vec!['\\', c]
             }
         })
-        .collect()
-}
-
-/// Run rg with a regex pattern; return `(Location, line_content)` pairs.
-fn rg_raw(pattern: &str, root: &Path) -> Vec<(Location, String)> {
-    let mut cmd = Command::new("rg");
-    cmd.args([
-        "--no-heading",
-        "--with-filename",
-        "--line-number",
-        "--column",
-    ]);
-    for ext in SOURCE_EXTENSIONS {
-        cmd.args(["--glob", &format!("*.{ext}")]);
-    }
-    cmd.args(["-e", pattern]).arg(root);
-    let out = match cmd.output() {
-        Ok(o) if !o.stdout.is_empty() => o,
-        _ => return vec![],
-    };
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|l| parse_rg_line_with_content_rooted(l, root))
         .collect()
 }
 

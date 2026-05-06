@@ -151,6 +151,16 @@ fn render_block_doc(raw_lines: &[&str]) -> String {
     format_doc_tags(&joined)
 }
 
+#[derive(Default)]
+struct ParsedDocTags {
+    description: Vec<String>,
+    params: Vec<(String, String)>,
+    returns: Option<String>,
+    throws: Vec<(String, String)>,
+    see: Vec<String>,
+    since: Option<String>,
+}
+
 /// Convert KDoc/Javadoc tags to readable Markdown.
 ///
 /// - `@param name desc`   → `**Parameters**\n- \`name\` desc`
@@ -163,127 +173,148 @@ fn render_block_doc(raw_lines: &[&str]) -> String {
 /// - `{@link T}` (Java)   → `` `T` ``
 /// - Suppressed: `@suppress`, `@hide`, `@internal`
 fn format_doc_tags(text: &str) -> String {
-    // Split on Javadoc/KDoc tag boundaries (lines starting with @).
-    // We need to preserve multi-line tag bodies.
-    let mut description: Vec<String> = Vec::new();
-    let mut params: Vec<(String, String)> = Vec::new();
-    let mut returns: Option<String> = None;
-    let mut throws: Vec<(String, String)> = Vec::new();
-    let mut see: Vec<String> = Vec::new();
-    let mut since: Option<String> = None;
+    render_doc_markdown(&parse_doc_tags(text)).trim().to_owned()
+}
 
-    // Accumulate current tag body across newlines.
-    let mut cur_tag: Option<String> = None;
-    let mut cur_body: Vec<String> = Vec::new();
-
-    let flush = |cur_tag: &Option<String>,
-                 cur_body: &Vec<String>,
-                 params: &mut Vec<(String, String)>,
-                 returns: &mut Option<String>,
-                 throws: &mut Vec<(String, String)>,
-                 see: &mut Vec<String>,
-                 since: &mut Option<String>| {
-        let body = cur_body.join(" ").trim().to_owned();
-        if let Some(tag) = cur_tag {
-            match tag.as_str() {
-                "param" | "property" => {
-                    let (name, rest) = split_first_word(&body);
-                    params.push((name.to_owned(), rest.trim().to_owned()));
-                }
-                "return" | "returns" => *returns = Some(body),
-                "throws" | "exception" => {
-                    let (name, rest) = split_first_word(&body);
-                    throws.push((name.to_owned(), rest.trim().to_owned()));
-                }
-                "see" => see.push(body),
-                "since" => *since = Some(body),
-                _ => {} // suppress, hide, internal, author, etc.
-            }
-        }
-    };
+fn parse_doc_tags(text: &str) -> ParsedDocTags {
+    let mut parsed = ParsedDocTags::default();
+    let mut current_tag: Option<String> = None;
+    let mut current_body: Vec<String> = Vec::new();
 
     for line in text.lines() {
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix('@') {
-            // Flush previous tag
-            flush(
-                &cur_tag,
-                &cur_body,
-                &mut params,
-                &mut returns,
-                &mut throws,
-                &mut see,
-                &mut since,
-            );
-            cur_body.clear();
+            flush_doc_tag(current_tag.as_deref(), &current_body, &mut parsed);
+            current_body.clear();
 
             let (tag, body) = split_first_word(rest);
-            cur_tag = Some(tag.to_lowercase());
+            current_tag = Some(tag.to_lowercase());
             if !body.is_empty() {
-                cur_body.push(body.trim().to_owned());
+                current_body.push(body.trim().to_owned());
             }
-        } else if cur_tag.is_some() {
+        } else if current_tag.is_some() {
             if !trimmed.is_empty() {
-                cur_body.push(trimmed.to_owned());
+                current_body.push(trimmed.to_owned());
             }
         } else {
-            description.push(trimmed.to_owned());
+            parsed.description.push(trimmed.to_owned());
         }
     }
-    flush(
-        &cur_tag,
-        &cur_body,
-        &mut params,
-        &mut returns,
-        &mut throws,
-        &mut see,
-        &mut since,
+
+    flush_doc_tag(current_tag.as_deref(), &current_body, &mut parsed);
+    parsed
+}
+
+fn flush_doc_tag(current_tag: Option<&str>, current_body: &[String], parsed: &mut ParsedDocTags) {
+    let body = current_body.join(" ").trim().to_owned();
+    if let Some(tag) = current_tag {
+        match tag {
+            "param" | "property" => {
+                let (name, rest) = split_first_word(&body);
+                parsed
+                    .params
+                    .push((name.to_owned(), rest.trim().to_owned()));
+            }
+            "return" | "returns" => parsed.returns = Some(body),
+            "throws" | "exception" => {
+                let (type_name, rest) = split_first_word(&body);
+                parsed
+                    .throws
+                    .push((type_name.to_owned(), rest.trim().to_owned()));
+            }
+            "see" => parsed.see.push(body),
+            "since" => parsed.since = Some(body),
+            _ => {}
+        }
+    }
+}
+
+fn render_doc_markdown(parsed: &ParsedDocTags) -> String {
+    let description = parsed.description.join("\n");
+    let mut markdown = inline_doc_markup(description.trim());
+
+    append_markdown_section(&mut markdown, format_param_section(&parsed.params));
+    append_markdown_section(
+        &mut markdown,
+        parsed.returns.as_deref().map(format_return_tag),
     );
+    append_markdown_section(&mut markdown, format_throws_section(&parsed.throws));
+    append_markdown_section(&mut markdown, format_see_section(&parsed.see));
+    append_markdown_section(&mut markdown, parsed.since.as_deref().map(format_since_tag));
 
-    // Reassemble as Markdown.
-    let mut md = description.join("\n").trim().to_owned();
+    markdown
+}
 
-    // Inline substitutions (KDoc links + Java {@code} / {@link})
-    md = inline_doc_markup(&md);
+fn append_markdown_section(markdown: &mut String, section: Option<String>) {
+    if let Some(section) = section {
+        markdown.push_str("\n\n");
+        markdown.push_str(&section);
+    }
+}
 
-    if !params.is_empty() {
-        md.push_str("\n\n**Parameters**");
-        for (name, desc) in &params {
-            let desc = inline_doc_markup(desc);
-            if desc.is_empty() {
-                md.push_str(&format!("\n- `{name}`"));
-            } else {
-                md.push_str(&format!("\n- `{name}` — {desc}"));
-            }
-        }
-    }
-    if let Some(ret) = returns {
-        md.push_str(&format!("\n\n**Returns** {}", inline_doc_markup(&ret)));
-    }
-    if !throws.is_empty() {
-        md.push_str("\n\n**Throws**");
-        for (ty, desc) in &throws {
-            let desc = inline_doc_markup(desc);
-            if desc.is_empty() {
-                md.push_str(&format!("\n- `{ty}`"));
-            } else {
-                md.push_str(&format!("\n- `{ty}` — {desc}"));
-            }
-        }
-    }
-    if !see.is_empty() {
-        let refs = see
-            .iter()
-            .map(|s| format!("`{}`", s.trim()))
-            .collect::<Vec<_>>()
-            .join(", ");
-        md.push_str(&format!("\n\n**See also:** {refs}"));
-    }
-    if let Some(s) = since {
-        md.push_str(&format!("\n\n**Since:** {s}"));
+fn format_param_section(params: &[(String, String)]) -> Option<String> {
+    if params.is_empty() {
+        return None;
     }
 
-    md.trim().to_owned()
+    let mut section = String::from("**Parameters**");
+    for (name, body) in params {
+        section.push('\n');
+        section.push_str(&format_param_tag(name, body));
+    }
+    Some(section)
+}
+
+fn format_param_tag(name: &str, body: &str) -> String {
+    let description = inline_doc_markup(body);
+    if description.is_empty() {
+        format!("- `{name}`")
+    } else {
+        format!("- `{name}` — {description}")
+    }
+}
+
+fn format_return_tag(body: &str) -> String {
+    format!("**Returns** {}", inline_doc_markup(body))
+}
+
+fn format_throws_section(throws: &[(String, String)]) -> Option<String> {
+    if throws.is_empty() {
+        return None;
+    }
+
+    let mut section = String::from("**Throws**");
+    for (type_name, body) in throws {
+        section.push('\n');
+        section.push_str(&format_throws_tag(type_name, body));
+    }
+    Some(section)
+}
+
+fn format_throws_tag(type_name: &str, body: &str) -> String {
+    let description = inline_doc_markup(body);
+    if description.is_empty() {
+        format!("- `{type_name}`")
+    } else {
+        format!("- `{type_name}` — {description}")
+    }
+}
+
+fn format_see_section(see: &[String]) -> Option<String> {
+    if see.is_empty() {
+        return None;
+    }
+
+    let refs = see
+        .iter()
+        .map(|value| format!("`{}`", value.trim()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!("**See also:** {refs}"))
+}
+
+fn format_since_tag(body: &str) -> String {
+    format!("**Since:** {body}")
 }
 
 /// Apply inline markup substitutions.
