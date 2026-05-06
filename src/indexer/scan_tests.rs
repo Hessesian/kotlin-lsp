@@ -165,7 +165,9 @@ async fn queued_reindex_executes_after_first_scan_completes_issue_scan() {
     idx.indexing_in_progress.store(true, Ordering::Release);
 
     // A concurrent scan request queues itself and returns immediately (aborted).
-    Arc::clone(&idx).index_workspace(&workspace, Arc::new(NoopReporter)).await;
+    Arc::clone(&idx)
+        .index_workspace(&workspace, Arc::new(NoopReporter))
+        .await;
 
     assert!(
         idx.pending_reindex.load(Ordering::Acquire),
@@ -180,7 +182,9 @@ async fn queued_reindex_executes_after_first_scan_completes_issue_scan() {
     idx.indexing_in_progress.store(false, Ordering::Release);
 
     // Drain the queue — this should run the queued reindex.
-    Arc::clone(&idx).run_pending_reindex(Arc::new(NoopReporter)).await;
+    Arc::clone(&idx)
+        .run_pending_reindex(Arc::new(NoopReporter))
+        .await;
 
     assert!(
         !idx.pending_reindex.load(Ordering::Acquire),
@@ -208,7 +212,9 @@ async fn index_workspace_skips_second_concurrent_run_issue_scan() {
     let idx = Arc::new(Indexer::new());
     idx.indexing_in_progress.store(true, Ordering::Release);
 
-    Arc::clone(&idx).index_workspace(&workspace, Arc::new(NoopReporter)).await;
+    Arc::clone(&idx)
+        .index_workspace(&workspace, Arc::new(NoopReporter))
+        .await;
 
     // indexing_in_progress was already true → impl returned early WITHOUT creating
     // the guard, so the flag was NOT cleared. The flag stays true.

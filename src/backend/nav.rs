@@ -6,9 +6,9 @@ use tower_lsp::lsp_types::*;
 
 fn locs_to_response(locs: Vec<Location>) -> GotoDefinitionResponse {
     match locs.len() {
-        1 => GotoDefinitionResponse::Scalar(
-            locs.into_iter().next().expect("len == 1 by match arm"),
-        ),
+        1 => {
+            GotoDefinitionResponse::Scalar(locs.into_iter().next().expect("len == 1 by match arm"))
+        }
         _ => GotoDefinitionResponse::Array(locs),
     }
 }

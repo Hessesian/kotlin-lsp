@@ -1656,7 +1656,7 @@ fn cross_file_type_subst_multi_class_same_file() {
     // Regression test: when multiple classes in one file extend the same generic base
     // with different type args, completion must pick the correct substitution based on
     // which class the caller is in (via cursor_line).
-    let mut idx = Indexer::new();
+    let idx = Indexer::new();
 
     let base_uri = Url::parse("file:///a/Base.kt").unwrap();
     idx.index_content(

@@ -254,8 +254,8 @@ fun theAnswer(): Int = 42
     let result = enrich_at_line(
         &idx,
         u.as_str(),
-        1,  // identifier line
-        4,  // col within "theAnswer"
+        1, // identifier line
+        4, // col within "theAnswer"
         SubstitutionContext::None,
         &ResolveOptions {
             allow_rg: false,

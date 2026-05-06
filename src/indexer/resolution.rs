@@ -113,7 +113,8 @@ pub(crate) trait IndexRead {
 
     /// Trigger on-demand indexing for a file if needed (production hook).
     /// Default impl does nothing; test stubs don't need on-demand indexing.
-    /// Production Indexer ensures the file is indexed before returning from get_file_data().
+    /// Callers that need on-demand indexing must call `ensure_indexed_on_demand()`
+    /// before `get_file_data()` (as `build_type_param_subst_impl` does).
     fn ensure_indexed_on_demand(&self, _uri: &str) {}
 }
 

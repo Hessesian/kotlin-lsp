@@ -71,7 +71,11 @@ impl Indexer {
     /// If `name` is declared as an inner/nested class, return the name of its
     /// enclosing class at the declaration site in `preferred_uri` (if found there),
     /// otherwise the first definition site.
-    pub(crate) fn declared_parent_class_of(&self, name: &str, preferred_uri: &Url) -> Option<String> {
+    pub(crate) fn declared_parent_class_of(
+        &self,
+        name: &str,
+        preferred_uri: &Url,
+    ) -> Option<String> {
         let locs = self.definitions.get(name)?;
         // Try declaration in the preferred (current) file first.
         for loc in locs.iter() {

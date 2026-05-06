@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::resolver::complete_symbol;
 use tower_lsp::lsp_types::{Position, SymbolKind};
@@ -303,10 +302,17 @@ fn multiline_class_selection_vs_range() {
     let data = parse_kotlin(src);
     let s = sym(&data, "MyClass").unwrap();
     // identifier is on line 1
-    assert_eq!(s.selection_start(), 1, "selection_start() should be the identifier line");
+    assert_eq!(
+        s.selection_start(),
+        1,
+        "selection_start() should be the identifier line"
+    );
     assert_eq!(s.selection_range.start.character, 6);
     // declaration starts on line 0 (annotation)
-    assert_eq!(s.range.start.line, 0, "range should cover the annotation line");
+    assert_eq!(
+        s.range.start.line, 0,
+        "range should cover the annotation line"
+    );
 }
 
 // ── deduplication ────────────────────────────────────────────────────────

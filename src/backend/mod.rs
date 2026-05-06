@@ -382,7 +382,8 @@ impl LanguageServer for Backend {
             let client = self.client.clone();
             idx.reset_index_state();
             tokio::spawn(async move {
-                idx.index_workspace(&root, Arc::new(LspProgressReporter(client))).await;
+                idx.index_workspace(&root, Arc::new(LspProgressReporter(client)))
+                    .await;
             });
             self.client
                 .show_message(MessageType::INFO, "kotlin-lsp: reindexing workspace…")
