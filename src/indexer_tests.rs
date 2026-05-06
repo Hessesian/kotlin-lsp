@@ -456,9 +456,7 @@ fn find_last_dot_at_depth_zero_test() {
 fn trailing_lambda_method_it_not_confused_by_arg_dot() {
     // `reloadableProduct(ProductKey.FAMILY) { it }` — trailing lambda,
     // but the arg `ProductKey.FAMILY` has a dot. Should still resolve via Case B.
-    let src = concat!(
-        "fun reloadableProduct(key: ProductKey, map: (ResultState<T>) -> StatefulModel) {}\n",
-    );
+    let src = "fun reloadableProduct(key: ProductKey, map: (ResultState<T>) -> StatefulModel) {}\n";
     let (u, idx) = indexed("/t.kt", src);
     // After strip_trailing_call_args: "reloadableProduct"
     let before = "reloadableProduct(ProductKey.FAMILY) ";
@@ -557,7 +555,6 @@ fn this_in_run_resolves_to_receiver_type() {
     // `user.run { this.name }` — `this` should infer as `User`
     let src = "val user: User = User()\nuser.run { this.name }";
     let (u, idx) = indexed("/t.kt", src);
-    let col = "user.run { ".len() as u32;
     // `before_brace` via lambda_receiver_type_from_context
     let before = "user.run ";
     let result = lambda_receiver_type_from_context(before, &idx, &u);
@@ -952,6 +949,7 @@ fn loan_reducer_src() -> &'static str {
     )
 }
 
+#[allow(non_snake_case)]
 #[test]
 fn loan_reducer_map_it_resolves_to_T() {
     let (u, idx) = indexed("/LoanReducer.kt", loan_reducer_src());
@@ -975,6 +973,7 @@ fn loan_reducer_reload_action_no_it() {
     );
 }
 
+#[allow(non_snake_case)]
 #[test]
 fn loan_reducer_collect_bottomsheetstate_resolves_to_T() {
     let (u, idx) = indexed("/LoanReducer.kt", loan_reducer_src());
@@ -1555,7 +1554,7 @@ requireNotNull(repo.permanentAddressSetup().permanentAddress)
 
 // ─── Pure function tests ──────────────────────────────────────────────────
 
-fn make_result(uri_str: &str, pkg: &str, sym_name: &str, content: &str) -> FileIndexResult {
+fn make_result(uri_str: &str, pkg: &str, _sym_name: &str, content: &str) -> FileIndexResult {
     let u = Url::parse(uri_str).unwrap();
     let mut result = Indexer::parse_file(&u, content);
     // Ensure package is set for qualified-key tests.
@@ -1625,8 +1624,10 @@ fn file_contributions_qualified_stem_same_as_sym_no_alias() {
 fn stale_keys_includes_both_qualified_aliases() {
     use crate::types::FileData;
     let uri = Url::parse("file:///pkg/Foo.kt").unwrap();
-    let mut data = FileData::default();
-    data.package = Some("com.example".to_string());
+    let mut data = FileData {
+        package: Some("com.example".to_string()),
+        ..FileData::default()
+    };
     let sym = crate::types::SymbolEntry {
         name: "Bar".to_string(),
         kind: tower_lsp::lsp_types::SymbolKind::CLASS,
@@ -1657,8 +1658,10 @@ fn stale_keys_includes_both_qualified_aliases() {
 fn stale_keys_stem_equals_sym_no_alias() {
     use crate::types::FileData;
     let uri = Url::parse("file:///pkg/Foo.kt").unwrap();
-    let mut data = FileData::default();
-    data.package = Some("com.example".to_string());
+    let mut data = FileData {
+        package: Some("com.example".to_string()),
+        ..FileData::default()
+    };
     let sym = crate::types::SymbolEntry {
         name: "Foo".to_string(),
         kind: tower_lsp::lsp_types::SymbolKind::CLASS,

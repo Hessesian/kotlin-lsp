@@ -1,6 +1,6 @@
 use super::*;
 use crate::resolver::complete_symbol;
-use tower_lsp::lsp_types::{Position, SymbolKind};
+use tower_lsp::lsp_types::SymbolKind;
 
 fn uri(path: &str) -> tower_lsp::lsp_types::Url {
     tower_lsp::lsp_types::Url::parse(&format!("file:///test{path}")).unwrap()
@@ -472,8 +472,8 @@ fn dot_completion_hides_private() {
         "package com.pkg\nclass VM(\n  private val repo: Repo\n) {}",
     );
 
-    let (items, _) = idx.completions(&vm_uri, tower_lsp::lsp_types::Position::new(2, 24), true); // after "private val repo: Repo"
-                                                                                                 // Trigger a dot completion manually through resolver
+    let _ = idx.completions(&vm_uri, tower_lsp::lsp_types::Position::new(2, 24), true); // after "private val repo: Repo"
+                                                                                            // Trigger a dot completion manually through resolver
     let (items, _) = complete_symbol(&idx, "", Some("repo"), &vm_uri, true, None);
     let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
     assert!(labels.contains(&"findAll"), "findAll missing: {labels:?}");

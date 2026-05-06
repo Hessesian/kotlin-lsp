@@ -1,7 +1,6 @@
 /// Shared test helpers for indexer sub-modules.
 ///
 /// Compiled only in `#[cfg(test)]` mode.
-
 /// Global mutex serialising tests that mutate `XDG_CACHE_HOME`.
 /// All tests in any `indexer::*` sub-module that touch this env var
 /// must acquire this lock to avoid races when tests run in parallel.

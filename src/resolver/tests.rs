@@ -152,7 +152,7 @@ fn resolve_does_not_cross_packages_without_import() {
     idx.index_content(&b_uri, "package com.example.pkg2"); // no import
 
     // rg might find it; test that same-package step doesn't leak
-    let locs: Vec<_> = resolve_symbol(&idx, "A", None, &b_uri)
+    let _locs: Vec<_> = resolve_symbol(&idx, "A", None, &b_uri)
         .into_iter()
         .filter(|l| l.uri == a_uri)
         .collect();
@@ -1033,7 +1033,7 @@ fn goto_def_on_named_lambda_param_resolves_to_declaration_line() {
 
 #[test]
 fn dot_complete_does_not_leak_top_level_fns() {
-    let mut idx = Indexer::new();
+    let idx = Indexer::new();
     let uri = Url::parse("file:///a/Keys.kt").unwrap();
     idx.index_content(&uri, "package a\n\nobject ProductKey {\n    val CARD = \"card\"\n    val LOAN = \"loan\"\n    fun fromString(s: String) = s\n}\n\nfun topLevelHelper() {}\n");
 
@@ -1094,7 +1094,7 @@ fn dot_complete_includes_inherited_members() {
 
 #[test]
 fn complete_bare_local_before_same_pkg() {
-    let mut idx = Indexer::new();
+    let idx = Indexer::new();
     let local_uri = Url::parse("file:///pkg/a/Local.kt").unwrap();
     let other_uri = Url::parse("file:///pkg/a/Other.kt").unwrap();
     // local file has "localFoo"

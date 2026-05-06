@@ -17,12 +17,14 @@ use crate::indexer::test_helpers::with_xdg_cache;
 #[test]
 fn cache_entry_to_file_result_supertypes_extracted() {
     let u = uri("/Cat.kt");
-    let mut data = FileData::default();
-    data.lines = Arc::new(vec![
-        "class Cat : IAnimal {".into(),
-        "    fun meow() {}".into(),
-        "}".into(),
-    ]);
+    let mut data = FileData {
+        lines: Arc::new(vec![
+            "class Cat : IAnimal {".into(),
+            "    fun meow() {}".into(),
+            "}".into(),
+        ]),
+        ..FileData::default()
+    };
     data.symbols.push(SymbolEntry {
         name: "Cat".into(),
         kind: SymbolKind::CLASS,
@@ -54,8 +56,10 @@ fn cache_entry_to_file_result_supertypes_extracted() {
 #[test]
 fn cache_entry_to_file_result_preserves_hash() {
     let u = uri("/Foo.kt");
-    let mut data = FileData::default();
-    data.lines = Arc::new(vec!["class Foo".into()]);
+    let mut data = FileData {
+        lines: Arc::new(vec!["class Foo".into()]),
+        ..FileData::default()
+    };
     data.symbols.push(SymbolEntry {
         name: "Foo".into(),
         kind: SymbolKind::CLASS,

@@ -457,8 +457,6 @@ fn resolve_symbol_info_applies_precomputed_subst() {
 /// args, `CrossFile { cursor_line }` must pick the right class for substitution.
 #[test]
 fn crossfile_cursor_line_disambiguates_multiple_callers() {
-    use crate::types::Visibility;
-
     let base_uri = "file:///base.kt";
     let caller_uri = "file:///caller.kt";
 

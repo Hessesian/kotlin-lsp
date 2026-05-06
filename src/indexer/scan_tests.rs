@@ -113,6 +113,7 @@ fn indexing_guard_clears_flag_on_drop_issue_scan() {
 
 // ─── index_workspace_full ────────────────────────────────────────────────────
 
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn index_workspace_full_indexes_kt_files_issue_scan() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -146,6 +147,7 @@ async fn index_workspace_full_indexes_kt_files_issue_scan() {
 
 // ─── queued reindex ───────────────────────────────────────────────────────────
 
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn queued_reindex_executes_after_first_scan_completes_issue_scan() {
     use std::sync::atomic::Ordering;
