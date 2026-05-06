@@ -261,23 +261,54 @@ separate logical phases inside a function, that's a signal the function should b
 - Exception: a single clarifying comment on a non-obvious line is fine; what's banned is
   using comments as section dividers to compensate for a function doing too many things.
 
-### 5. No `unwrap()` or `expect()` in production code
+### 6. Long names signal missing structs or traits; avoid abbreviations
+
+**No abbreviations.** `sym` → `symbol`, `idx` → `index`, `uri_str` → `uri` (or a newtype).
+Short names save keystrokes and lose meaning. The compiler remembers the type; the reader
+does not.
+
+**A long function name signals a missing struct.** If you find yourself writing
+`resolve_symbol_with_fallback_and_type_args(uri, name, container, type_args, fallback)`,
+the parameters want to be a struct:
+
+```rust
+struct SymbolQuery { uri: Url, name: String, container: String, type_args: Vec<String> }
+fn resolve_symbol(query: &SymbolQuery) -> Option<SymbolEntry> { … }
+```
+
+The function name shrinks because the struct name carries the context.
+
+**A confusing function signature signals a missing trait.** If callers must read the body
+to understand what a function does, extract the behaviour into a named trait. The trait name
+and method name together should make the call site self-documenting:
+
+```rust
+// Unclear: what does `index` do here?
+fn enrich(index: &Indexer, pos: CursorPos) -> Option<String>
+
+// Clear: the trait name declares the contract
+fn enrich<R: SymbolResolver>(resolver: &R, pos: CursorPos) -> Option<String>
+```
+
+Use traits to clarify *what role* a parameter plays, not just *what type* it is.
+
+### 7. No `unwrap()` or `expect()` in production code
 
 Use `?`, `if let`, `match`, or log-and-return patterns. Exception: `#[cfg(test)]` code may
 use `unwrap()` / `expect()`.
 
-### 6. Test-only code must be gated
+### 8. Test-only code must be gated
 
 Functions, imports, or types that are only used in tests must be annotated `#[cfg(test)]`.
 Do not leave production code with dead-code warnings suppressed via `#[allow(dead_code)]`
 without a comment explaining why the gate can't be used instead.
 
-### 7. Cache version bump on schema changes
+### 9. Cache version bump on schema changes
 
 If `SymbolEntry` gains or loses fields, bump `CACHE_VERSION` in `src/indexer/cache.rs`.
 New fields must carry `#[serde(default)]` so old cache files still deserialize.
 
-### 8. Minimal visibility
+### 10. Minimal visibility
 
 Default to module-private (`fn`, `struct`). Widen to `pub(crate)` only when a sibling module
 requires it; widen to `pub` only for items that form part of the external API surface.
