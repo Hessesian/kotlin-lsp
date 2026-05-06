@@ -173,8 +173,8 @@ impl Backend {
 
     fn resolve_workspace_root(params: &InitializeParams) -> Option<PathBuf> {
         Self::workspace_root_from_environment()
-            .or_else(|| Self::workspace_root_from_client(params))
             .or_else(Self::workspace_root_from_config)
+            .or_else(|| Self::workspace_root_from_client(params))
     }
 
     fn workspace_root_from_environment() -> Option<PathBuf> {
