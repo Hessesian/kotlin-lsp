@@ -74,6 +74,23 @@ function runShell(cmd, timeout = 8000) {
 }
 
 const WORKSPACE_CONFIG = path.join(os.homedir(), ".config", "kotlin-lsp", "workspace");
+const STATUS_PATH = path.join(os.homedir(), ".cache", "kotlin-lsp", "status.json");
+
+/**
+ * Kill only the kotlin-lsp process managed by Copilot CLI.
+ * Reads the PID from status.json (written by the server on every index).
+ * Falls back to a no-op with a descriptive message if PID is unknown.
+ */
+async function killCopilotServer() {
+  try {
+    const s = JSON.parse(await fs.readFile(STATUS_PATH, "utf8"));
+    if (s.pid) {
+      await runShell(`kill ${s.pid} 2>/dev/null || true`);
+      return `Killed PID ${s.pid}.`;
+    }
+  } catch { /* status.json missing or no pid field */ }
+  return "No running server found (will auto-start on next LSP call).";
+}
 
 // ── rg helper for tools ──────────────────────────────────────────────
 
@@ -192,10 +209,10 @@ const session = await joinSession({
           lines.push("Active workspace: (status.json not found — server not started yet)");
         }
 
-        // 2. Config override (if set, this wins over rootUri at startup)
+        // 2. Config override (KOTLIN_LSP_PREFER_CONFIG_ROOT=1 must be set in lsp-config.json)
         try {
           const override_ = (await fs.readFile(WORKSPACE_CONFIG, "utf8")).trim();
-          lines.push(`Config override:  ${override_}`);
+          if (override_) lines.push(`Config override:  ${override_}`);
         } catch { /* not set */ }
 
         // 3. Server process
@@ -211,8 +228,9 @@ const session = await joinSession({
     {
       name: "kotlin_lsp_set_workspace",
       description: [
-        "Switch kotlin-lsp to a different workspace directory.",
-        "Writes the path to ~/.config/kotlin-lsp/workspace and kills the current server process.",
+        "Switch the Copilot CLI kotlin-lsp instance to a different workspace directory.",
+        "Writes the path to ~/.config/kotlin-lsp/workspace and kills only the Copilot-managed",
+        "server process — editor LSP instances are not affected.",
         "The server will auto-restart on next LSP tool call and re-index the new workspace.",
         "Always call this (not manual config edits) when switching between projects.",
       ].join(" "),
@@ -239,20 +257,12 @@ const session = await joinSession({
           return `Error: '${workspacePath}' does not exist.`;
         }
 
-        // Write config
+        // Write workspace config (safe: no hot-reload side effects)
         await fs.mkdir(path.dirname(WORKSPACE_CONFIG), { recursive: true });
         await fs.writeFile(WORKSPACE_CONFIG, workspacePath + "\n", "utf8");
 
-        // Kill server
-        const { stdout: pids } = await runShell("pgrep -x kotlin-lsp 2>/dev/null || true");
-        const pidList = pids.trim().split("\n").filter(Boolean);
-        for (const pid of pidList) {
-          await runShell(`kill ${pid} 2>/dev/null || true`);
-        }
-
-        const killed = pidList.length > 0
-          ? `Killed PID ${pidList.join(", ")}.`
-          : "No running server found (will auto-start on next LSP call).";
+        // Kill only the Copilot-managed server (PID from status.json)
+        const killed = await killCopilotServer();
 
         return [
           `Workspace set to: ${workspacePath}`,

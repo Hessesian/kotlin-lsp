@@ -172,9 +172,18 @@ impl Backend {
     }
 
     fn resolve_workspace_root(params: &InitializeParams) -> Option<PathBuf> {
-        Self::workspace_root_from_environment()
-            .or_else(Self::workspace_root_from_config)
-            .or_else(|| Self::workspace_root_from_client(params))
+        if std::env::var("KOTLIN_LSP_PREFER_CONFIG_ROOT").is_ok() {
+            // Copilot CLI mode: config file overrides client rootUri so
+            // kotlin_lsp_set_workspace works correctly.
+            Self::workspace_root_from_environment()
+                .or_else(Self::workspace_root_from_config)
+                .or_else(|| Self::workspace_root_from_client(params))
+        } else {
+            // Editor mode: always honour the client's rootUri.
+            Self::workspace_root_from_environment()
+                .or_else(|| Self::workspace_root_from_client(params))
+                .or_else(Self::workspace_root_from_config)
+        }
     }
 
     fn workspace_root_from_environment() -> Option<PathBuf> {

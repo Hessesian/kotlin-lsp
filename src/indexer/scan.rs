@@ -449,8 +449,9 @@ fn write_indexing_started_status(root: &Path, summary: &ProgressSummary) {
         .unwrap_or(0);
     let root_escaped = serde_json::to_string(&root.to_string_lossy().as_ref()).unwrap_or_default();
     let (parse_count, cache_hits) = (summary.parse_count, summary.cache_hits);
+    let pid = std::process::id();
     write_status_file(&format!(
-        r#"{{"phase":"indexing","workspace":{root_escaped},"indexed":0,"total":{parse_count},"cache_hits":{cache_hits},"symbols":0,"started_at":{started_unix},"elapsed_secs":0,"estimated_total_secs":null}}"#
+        r#"{{"phase":"indexing","workspace":{root_escaped},"indexed":0,"total":{parse_count},"cache_hits":{cache_hits},"symbols":0,"started_at":{started_unix},"elapsed_secs":0,"estimated_total_secs":null,"pid":{pid}}}"#
     ));
 }
 
@@ -462,8 +463,9 @@ fn write_indexing_done_status(
     elapsed: u64,
 ) {
     let root_escaped = serde_json::to_string(&root.to_string_lossy().as_ref()).unwrap_or_default();
+    let pid = std::process::id();
     write_status_file(&format!(
-        r#"{{"phase":"done","workspace":{root_escaped},"indexed":{files_parsed},"total":{actually_indexed},"cache_hits":{cache_hits},"symbols":{symbols},"elapsed_secs":{elapsed},"estimated_total_secs":null}}"#,
+        r#"{{"phase":"done","workspace":{root_escaped},"indexed":{files_parsed},"total":{actually_indexed},"cache_hits":{cache_hits},"symbols":{symbols},"elapsed_secs":{elapsed},"estimated_total_secs":null,"pid":{pid}}}"#,
         actually_indexed = files_parsed + cache_hits,
     ));
 }
