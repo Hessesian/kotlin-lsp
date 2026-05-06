@@ -408,3 +408,6 @@ pub(crate) const KIND_MODIFIERS: &str = "modifiers";
 // ─── Java structural node kinds ───────────────────────────────────────────────
 pub(crate) const KIND_SCOPED_TYPE_IDENT: &str = "scoped_type_identifier";
 pub(crate) const KIND_VAR_DECLARATOR: &str = "variable_declarator";
+// Java modifier keywords appear as their own leaf node kinds in the Java grammar.
+pub(crate) const KIND_MOD_STATIC: &str = "static";
+pub(crate) const KIND_MOD_FINAL: &str = "final";
