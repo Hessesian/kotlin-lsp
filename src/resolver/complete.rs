@@ -709,8 +709,8 @@ fn vis_tag(vis: Visibility) -> &'static str {
 /// key and is handled manually by `complete_bare` so per-FQN import edits
 /// are preserved correctly.
 struct BareCompleter {
-    pub items: Vec<CompletionItem>,
-    pub seen: std::collections::HashSet<String>,
+    items: Vec<CompletionItem>,
+    seen: std::collections::HashSet<String>,
     lowercase_mode: bool,
     uppercase_mode: bool,
     camel_mode: bool,
@@ -817,6 +817,283 @@ impl BareCompleter {
     }
 }
 
+struct CurrentFileCompletionContext {
+    imports: Vec<crate::types::ImportEntry>,
+    package_name: String,
+    lines: Arc<Vec<String>>,
+    is_java: bool,
+}
+
+impl CurrentFileCompletionContext {
+    fn from_indexer(indexer: &Indexer, from_uri: &Url) -> Self {
+        let is_java = crate::Language::from_path(from_uri.as_str()).is_java();
+        let live_lines = indexer
+            .live_lines
+            .get(from_uri.as_str())
+            .map(|lines| lines.clone());
+        let (imports, package_name, lines) = indexer
+            .files
+            .get(from_uri.as_str())
+            .map(|file| {
+                let lines = live_lines.clone().unwrap_or_else(|| file.lines.clone());
+                let imports = if live_lines.is_some() {
+                    lines.parse_imports()
+                } else {
+                    file.imports.clone()
+                };
+                (imports, file.package.clone().unwrap_or_default(), lines)
+            })
+            .unwrap_or_else(|| {
+                let lines = live_lines.clone().unwrap_or_default();
+                let imports = lines.parse_imports();
+                (imports, String::new(), lines)
+            });
+
+        Self {
+            imports,
+            package_name,
+            lines,
+            is_java,
+        }
+    }
+
+    fn needs_import(&self, fully_qualified_name: &str) -> bool {
+        let qualifier = fully_qualified_name
+            .rsplit_once('.')
+            .map(|(qualifier, _)| qualifier)
+            .unwrap_or_default();
+
+        !already_imported(fully_qualified_name, &self.imports)
+            && !self
+                .imports
+                .iter()
+                .any(|import_entry| import_entry.is_star && import_entry.full_path == qualifier)
+            && qualifier != self.package_name
+    }
+}
+
+struct BareCompletionWalk<'a> {
+    indexer: &'a Indexer,
+    prefix: &'a str,
+    from_uri: &'a Url,
+    completer: BareCompleter,
+}
+
+impl<'a> BareCompletionWalk<'a> {
+    fn new(
+        indexer: &'a Indexer,
+        prefix: &'a str,
+        from_uri: &'a Url,
+        snippets: bool,
+        annotation_only: bool,
+    ) -> Self {
+        Self {
+            indexer,
+            prefix,
+            from_uri,
+            completer: BareCompleter::new(prefix, snippets, annotation_only),
+        }
+    }
+
+    fn collect_local_file(&mut self) {
+        let Some(file) = self.indexer.files.get(self.from_uri.as_str()) else {
+            return;
+        };
+
+        for symbol in &file.symbols {
+            self.completer.add(
+                &symbol.name,
+                symbol_kind_to_completion(symbol.kind),
+                0,
+                self.prefix,
+                &symbol.detail,
+                Some(serde_json::json!({"u": self.from_uri.as_str(), "l": symbol.selection_start(), "c": symbol.selection_range.start.character})),
+            );
+        }
+
+        if self.completer.lowercase_mode {
+            for declared_name in &file.declared_names {
+                self.completer.add(
+                    declared_name,
+                    CompletionItemKind::VARIABLE,
+                    0,
+                    self.prefix,
+                    "",
+                    None,
+                );
+            }
+        }
+    }
+
+    fn collect_same_package(&mut self) {
+        let Some(package_name) = self.current_package_name() else {
+            return;
+        };
+        let Some(package_uris) = self.indexer.packages.get(&package_name) else {
+            return;
+        };
+
+        for package_uri in package_uris.iter() {
+            if package_uri == self.from_uri.as_str() {
+                continue;
+            }
+            let Some(file) = self.indexer.files.get(package_uri.as_str()) else {
+                continue;
+            };
+            for symbol in &file.symbols {
+                self.completer.add(
+                    &symbol.name,
+                    symbol_kind_to_completion(symbol.kind),
+                    1,
+                    self.prefix,
+                    &symbol.detail,
+                    Some(serde_json::json!({"u": package_uri.as_str(), "l": symbol.selection_start(), "c": symbol.selection_range.start.character})),
+                );
+            }
+        }
+    }
+
+    fn current_package_name(&self) -> Option<String> {
+        self.indexer
+            .files
+            .get(self.from_uri.as_str())
+            .and_then(|file| file.package.clone())
+            .filter(|package_name| !package_name.is_empty())
+    }
+
+    fn collect_cross_package(&mut self) {
+        if self.completer.lowercase_mode || self.prefix.len() < MIN_CASE_INSENSITIVE_PREFIX {
+            return;
+        }
+
+        let current_context =
+            CurrentFileCompletionContext::from_indexer(self.indexer, self.from_uri);
+        let Ok(cache) = self.indexer.bare_name_cache.read() else {
+            return;
+        };
+
+        for bare_name in cache.iter() {
+            self.add_cross_package_name(bare_name, &current_context);
+        }
+    }
+
+    fn add_cross_package_name(
+        &mut self,
+        bare_name: &str,
+        current_context: &CurrentFileCompletionContext,
+    ) {
+        if bare_name.starts_with_lowercase() {
+            return;
+        }
+        if self.completer.camel_mode && is_screaming_snake(bare_name) {
+            return;
+        }
+        let Some(score) = self.cross_package_score(bare_name) else {
+            return;
+        };
+        if self.completer.seen.contains(bare_name) {
+            return;
+        }
+
+        let fully_qualified_names = fqns_for_name(self.indexer, bare_name);
+        if fully_qualified_names.is_empty() {
+            self.add_cross_package_name_without_imports(bare_name, score);
+            return;
+        }
+
+        for fully_qualified_name in &fully_qualified_names {
+            self.add_cross_package_symbol(bare_name, fully_qualified_name, score, current_context);
+        }
+    }
+
+    fn cross_package_score(&self, bare_name: &str) -> Option<u8> {
+        match match_score(bare_name, self.prefix) {
+            Some(score) if score <= 1 => Some(score),
+            _ => None,
+        }
+    }
+
+    fn add_cross_package_name_without_imports(&mut self, bare_name: &str, score: u8) {
+        if !self.completer.seen.insert(bare_name.to_string()) {
+            return;
+        }
+
+        self.completer.items.push(CompletionItem {
+            label: bare_name.to_string(),
+            kind: Some(CompletionItemKind::CLASS),
+            filter_text: Some(bare_name.to_string()),
+            sort_text: Some(format!("2{}:{}", score, bare_name.to_lowercase())),
+            ..Default::default()
+        });
+    }
+
+    fn add_cross_package_symbol(
+        &mut self,
+        bare_name: &str,
+        fully_qualified_name: &str,
+        score: u8,
+        current_context: &CurrentFileCompletionContext,
+    ) {
+        let item_key = format!("{}:{}", bare_name, fully_qualified_name);
+        if !self.completer.seen.insert(item_key) {
+            return;
+        }
+
+        let qualifier = fully_qualified_name
+            .rsplit_once('.')
+            .map(|(qualifier, _)| qualifier)
+            .unwrap_or_default();
+        let needs_import = current_context.needs_import(fully_qualified_name);
+        let additional_text_edits = needs_import.then(|| {
+            vec![current_context
+                .lines
+                .make_import_edit(fully_qualified_name, current_context.is_java)]
+        });
+        let detail = needs_import.then(|| qualifier.to_string());
+
+        self.completer.items.push(CompletionItem {
+            label: bare_name.to_string(),
+            kind: Some(CompletionItemKind::CLASS),
+            filter_text: Some(bare_name.to_string()),
+            sort_text: Some(format!("2{}:{}", score, bare_name.to_lowercase())),
+            detail,
+            additional_text_edits,
+            ..Default::default()
+        });
+    }
+
+    fn collect_stdlib(&mut self) {
+        for mut item in bare_completions(self.completer.snippets) {
+            let label = item.label.clone();
+            if self.completer.lowercase_mode && label.starts_with_uppercase() {
+                continue;
+            }
+            if self.completer.camel_mode && is_screaming_snake(&label) {
+                continue;
+            }
+            let score = match match_score(&label, self.prefix) {
+                Some(score) if score <= 2 => score,
+                _ => continue,
+            };
+            if self.completer.seen.insert(label.clone()) {
+                item.filter_text = Some(label.clone());
+                item.sort_text = Some(format!("3{}:{}", score, label.to_lowercase()));
+                self.completer.items.push(item);
+            }
+        }
+    }
+
+    fn finish(mut self) -> (Vec<CompletionItem>, bool) {
+        self.completer
+            .items
+            .sort_by(|left, right| left.sort_text.cmp(&right.sort_text));
+
+        let hit_cap = self.completer.items.len() > COMPLETION_CAP;
+        self.completer.items.truncate(COMPLETION_CAP);
+        (self.completer.items, hit_cap)
+    }
+}
+
 /// Bare-word completion: match-scored across local file + same-package + index.
 ///
 /// Case heuristic:
@@ -834,190 +1111,13 @@ pub(crate) fn complete_bare(
     snippets: bool,
     annotation_only: bool,
 ) -> (Vec<CompletionItem>, bool) {
-    let mut bc = BareCompleter::new(prefix, snippets, annotation_only);
-    // `src_tier` encodes symbol origin (0=same file, 1=same pkg, 2=cross-pkg, 3=stdlib).
-    // Full sort_text: "{src_tier}{match_score}:{name_lower}" so that
-    //   same-file exact match ("000:column") beats same-file acronym ("001:columnbutton")
-    //   which beats same-pkg exact ("010:column"), etc.
-
-    // 1. Local file symbols — src_tier 0, substring fallback only for short prefixes.
-    if let Some(f) = idx.files.get(from_uri.as_str()) {
-        for sym in &f.symbols {
-            bc.add(
-                &sym.name,
-                symbol_kind_to_completion(sym.kind),
-                0,
-                prefix,
-                &sym.detail,
-                Some(serde_json::json!({"u": from_uri.as_str(), "l": sym.selection_start(), "c": sym.selection_range.start.character})),
-            );
-        }
-        if bc.lowercase_mode {
-            for name in &f.declared_names {
-                bc.add(name, CompletionItemKind::VARIABLE, 0, prefix, "", None);
-            }
-        }
-    }
-
-    // 2. Same-package symbols — src_tier 1, substring fallback only for short prefixes.
-    let pkg = idx
-        .files
-        .get(from_uri.as_str())
-        .and_then(|f| f.package.clone())
-        .unwrap_or_default();
-    if !pkg.is_empty() {
-        if let Some(uris) = idx.packages.get(&pkg) {
-            for uri_str in uris.iter() {
-                if uri_str == from_uri.as_str() {
-                    continue;
-                }
-                if let Some(f) = idx.files.get(uri_str.as_str()) {
-                    for sym in &f.symbols {
-                        bc.add(
-                            &sym.name,
-                            symbol_kind_to_completion(sym.kind),
-                            1,
-                            prefix,
-                            &sym.detail,
-                            Some(serde_json::json!({"u": uri_str.as_str(), "l": sym.selection_start(), "c": sym.selection_range.start.character})),
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    // 3. Cross-package symbols — src_tier 2, uppercase mode only, prefix ≥ 2 chars,
-    //    prefix/acronym matches only (max_score=1) — no substring flood.
-    // Emits one CompletionItem per distinct FQN, with additionalTextEdits for auto-import.
-    // NOTE: tier-2 uses "name:fqn" as dedup key (not just name) so each FQN gets its
-    // own import edit. bc.seen is accessed directly to preserve that invariant.
-    if !bc.lowercase_mode && prefix.len() >= MIN_CASE_INSENSITIVE_PREFIX {
-        let is_java = crate::Language::from_path(from_uri.as_str()).is_java();
-        // Prefer live_lines (updated on every keystroke) over the indexed snapshot so that
-        // import deduplication and insertion position are based on the current buffer state.
-        let live = idx.live_lines.get(from_uri.as_str()).map(|ll| ll.clone());
-        let (cur_imports, cur_pkg, cur_lines) = idx
-            .files
-            .get(from_uri.as_str())
-            .map(|f| {
-                let lines = live.clone().unwrap_or_else(|| f.lines.clone());
-                // Re-scan live lines for imports so we don't use a stale snapshot.
-                let imports = if live.is_some() {
-                    lines.parse_imports()
-                } else {
-                    f.imports.clone()
-                };
-                (imports, f.package.clone().unwrap_or_default(), lines)
-            })
-            .unwrap_or_else(|| {
-                let lines = live.clone().unwrap_or_default();
-                let imports = lines.parse_imports();
-                (imports, String::new(), lines)
-            });
-
-        if let Ok(cache) = idx.bare_name_cache.read() {
-            for name in cache.iter() {
-                // Case gate + match quality gate (prefix or acronym only).
-                if name.starts_with_lowercase() {
-                    continue;
-                }
-                if bc.camel_mode && is_screaming_snake(name) {
-                    continue;
-                }
-                let score = match match_score(name, prefix) {
-                    Some(s) if s <= 1 => s,
-                    _ => continue,
-                };
-
-                // Already visible via tier-0 or tier-1 — skip, no import needed.
-                if bc.seen.contains(name.as_str()) {
-                    continue;
-                }
-
-                let fqns = fqns_for_name(idx, name);
-
-                if fqns.is_empty() {
-                    if bc.seen.insert(name.clone()) {
-                        bc.items.push(CompletionItem {
-                            label: name.clone(),
-                            kind: Some(CompletionItemKind::CLASS),
-                            filter_text: Some(name.clone()),
-                            sort_text: Some(format!("2{}:{}", score, name.to_lowercase())),
-                            ..Default::default()
-                        });
-                    }
-                    continue;
-                }
-
-                for fqn in &fqns {
-                    let pkg_of_fqn = match fqn.rfind('.') {
-                        Some(i) => &fqn[..i],
-                        None => "",
-                    };
-
-                    let needs_import = !already_imported(fqn, &cur_imports)
-                        && !cur_imports
-                            .iter()
-                            .any(|imp| imp.is_star && imp.full_path == pkg_of_fqn)
-                        && pkg_of_fqn != cur_pkg;
-
-                    let item_key = format!("{}:{}", name, fqn);
-                    if !bc.seen.insert(item_key) {
-                        continue;
-                    }
-
-                    let import_edit = if needs_import {
-                        Some(vec![cur_lines.make_import_edit(fqn, is_java)])
-                    } else {
-                        None
-                    };
-                    let detail = if needs_import {
-                        Some(pkg_of_fqn.to_string())
-                    } else {
-                        None
-                    };
-
-                    bc.items.push(CompletionItem {
-                        label: name.clone(),
-                        kind: Some(CompletionItemKind::CLASS),
-                        filter_text: Some(name.clone()),
-                        sort_text: Some(format!("2{}:{}", score, name.to_lowercase())),
-                        detail,
-                        additional_text_edits: import_edit,
-                        ..Default::default()
-                    });
-                }
-            }
-        }
-    }
-
-    // 4. Stdlib top-level / scope functions — src_tier 3.
-    for mut item in bare_completions(snippets) {
-        let label = item.label.clone();
-        if bc.lowercase_mode && label.starts_with_uppercase() {
-            continue;
-        }
-        if bc.camel_mode && is_screaming_snake(&label) {
-            continue;
-        }
-        let score = match match_score(&label, prefix) {
-            Some(s) if s <= 2 => s,
-            _ => continue,
-        };
-        if bc.seen.insert(label.clone()) {
-            item.filter_text = Some(label.clone());
-            item.sort_text = Some(format!("3{}:{}", score, label.to_lowercase()));
-            bc.items.push(item);
-        }
-    }
-
-    // Sort by computed sort_text so the best matches are first even before capping.
-    bc.items.sort_by(|a, b| a.sort_text.cmp(&b.sort_text));
-
-    let hit_cap = bc.items.len() > COMPLETION_CAP;
-    bc.items.truncate(COMPLETION_CAP);
-    (bc.items, hit_cap)
+    let mut completion_walk =
+        BareCompletionWalk::new(idx, prefix, from_uri, snippets, annotation_only);
+    completion_walk.collect_local_file();
+    completion_walk.collect_same_package();
+    completion_walk.collect_cross_package();
+    completion_walk.collect_stdlib();
+    completion_walk.finish()
 }
 
 /// Collect all symbols from a file URI as completion items.

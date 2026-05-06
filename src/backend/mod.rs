@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -105,6 +106,25 @@ pub(crate) struct Backend {
     pub(super) snippet_support: Arc<AtomicBool>,
 }
 
+#[derive(Clone)]
+struct OpenedDocumentContext {
+    uri: Url,
+    text: String,
+    opened_file_path: Option<PathBuf>,
+}
+
+impl OpenedDocumentContext {
+    fn from_open_params(params: DidOpenTextDocumentParams) -> Self {
+        let uri = params.text_document.uri;
+        let opened_file_path = uri.to_file_path().ok();
+        Self {
+            uri,
+            text: params.text_document.text,
+            opened_file_path,
+        }
+    }
+}
+
 impl Backend {
     pub(crate) fn new(client: Client) -> Self {
         Self {
@@ -132,6 +152,351 @@ impl Backend {
         } else {
             locs
         }
+    }
+
+    fn detect_snippet_support(params: &InitializeParams) -> bool {
+        params
+            .capabilities
+            .text_document
+            .as_ref()
+            .and_then(|text_document| text_document.completion.as_ref())
+            .and_then(|completion| completion.completion_item.as_ref())
+            .and_then(|completion_item| completion_item.snippet_support)
+            .unwrap_or(false)
+    }
+
+    fn resolve_workspace_root(params: &InitializeParams) -> Option<PathBuf> {
+        Self::workspace_root_from_environment()
+            .or_else(|| Self::workspace_root_from_client(params))
+            .or_else(Self::workspace_root_from_config)
+    }
+
+    fn workspace_root_from_environment() -> Option<PathBuf> {
+        std::env::var("KOTLIN_LSP_WORKSPACE_ROOT")
+            .ok()
+            .map(PathBuf::from)
+            .filter(|workspace_root| workspace_root.is_dir())
+    }
+
+    fn workspace_root_from_client(params: &InitializeParams) -> Option<PathBuf> {
+        Self::initialize_root_uri(params)
+            .and_then(|root_uri| root_uri.to_file_path().ok())
+            .filter(|workspace_root| workspace_root.is_dir())
+            .map(|workspace_root| Self::walk_up_to_git_root(&workspace_root))
+    }
+
+    fn initialize_root_uri(params: &InitializeParams) -> Option<Url> {
+        params.root_uri.clone().or_else(|| {
+            params
+                .workspace_folders
+                .as_deref()
+                .and_then(|workspace_folders| workspace_folders.first())
+                .map(|workspace_folder| workspace_folder.uri.clone())
+        })
+    }
+
+    fn walk_up_to_git_root(workspace_root: &Path) -> PathBuf {
+        let mut current_directory = workspace_root;
+        loop {
+            if current_directory.join(".git").exists() {
+                return current_directory.to_path_buf();
+            }
+            match current_directory.parent() {
+                Some(parent_directory) => current_directory = parent_directory,
+                None => return workspace_root.to_path_buf(),
+            }
+        }
+    }
+
+    fn workspace_root_from_config() -> Option<PathBuf> {
+        let home_directory = std::env::var("HOME")
+            .ok()
+            .unwrap_or_else(|| "/tmp".to_string());
+        let config_file = Path::new(&home_directory).join(".config/kotlin-lsp/workspace");
+        std::fs::read_to_string(config_file)
+            .ok()
+            .map(|workspace_root| PathBuf::from(workspace_root.trim()))
+            .filter(|workspace_root| workspace_root.is_dir())
+    }
+
+    fn configure_initialized_workspace(
+        &self,
+        params: &InitializeParams,
+        workspace_root: &Path,
+        workspace_pinned: bool,
+    ) {
+        self.set_workspace_root(workspace_root.to_path_buf());
+        if workspace_pinned {
+            self.indexer.workspace_pinned.store(true, Ordering::Relaxed);
+        }
+        self.apply_initialization_options(params.initialization_options.as_ref(), workspace_root);
+        self.spawn_workspace_indexing(workspace_root.to_path_buf(), Vec::new());
+    }
+
+    fn apply_initialization_options(
+        &self,
+        initialization_options: Option<&serde_json::Value>,
+        workspace_root: &Path,
+    ) {
+        if let Some(ignore_patterns) =
+            Self::collect_indexing_option_strings(initialization_options, "ignorePatterns")
+        {
+            log::info!("ignorePatterns: {:?}", ignore_patterns);
+            match self.indexer.ignore_matcher.write() {
+                Ok(mut ignore_matcher) => {
+                    *ignore_matcher = Some(Arc::new(IgnoreMatcher::new(
+                        ignore_patterns,
+                        workspace_root,
+                    )));
+                }
+                Err(error) => {
+                    log::warn!("Failed to update ignore matcher: {error}");
+                }
+            }
+        }
+
+        if let Some(source_paths) =
+            Self::collect_indexing_option_strings(initialization_options, "sourcePaths")
+        {
+            log::info!("sourcePaths: {:?}", source_paths);
+            match self.indexer.source_paths_raw.write() {
+                Ok(mut source_paths_raw) => {
+                    *source_paths_raw = source_paths;
+                }
+                Err(error) => {
+                    log::warn!("Failed to update source paths: {error}");
+                }
+            }
+        }
+    }
+
+    fn collect_indexing_option_strings(
+        initialization_options: Option<&serde_json::Value>,
+        option_name: &str,
+    ) -> Option<Vec<String>> {
+        let option_values = initialization_options?
+            .get("indexingOptions")?
+            .get(option_name)?
+            .as_array()?;
+        let collected_values: Vec<String> = option_values
+            .iter()
+            .filter_map(|value| value.as_str().map(str::to_owned))
+            .collect();
+        (!collected_values.is_empty()).then_some(collected_values)
+    }
+
+    fn set_workspace_root(&self, workspace_root: PathBuf) {
+        match self.indexer.workspace_root.write() {
+            Ok(mut current_workspace_root) => {
+                *current_workspace_root = Some(workspace_root);
+            }
+            Err(error) => {
+                log::warn!("Failed to update workspace root: {error}");
+            }
+        }
+    }
+
+    fn current_workspace_root(&self) -> Option<PathBuf> {
+        match self.indexer.workspace_root.read() {
+            Ok(current_workspace_root) => current_workspace_root.clone(),
+            Err(error) => {
+                log::warn!("Failed to read workspace root: {error}");
+                None
+            }
+        }
+    }
+
+    fn spawn_workspace_indexing(&self, workspace_root: PathBuf, prioritized_paths: Vec<PathBuf>) {
+        let indexer = Arc::clone(&self.indexer);
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            indexer
+                .index_workspace_prioritized(
+                    &workspace_root,
+                    prioritized_paths,
+                    Arc::new(LspProgressReporter(client)),
+                )
+                .await;
+        });
+    }
+
+    fn detect_workspace_root_switch(
+        &self,
+        workspace_pinned: bool,
+        opened_file_path: Option<&Path>,
+    ) -> Option<PathBuf> {
+        if workspace_pinned {
+            return None;
+        }
+
+        let opened_file_path = opened_file_path?;
+        let candidate_workspace_root = Self::auto_detect_workspace_root(opened_file_path)?;
+        self.should_switch_workspace_root(opened_file_path, &candidate_workspace_root)
+            .then_some(candidate_workspace_root)
+    }
+
+    fn auto_detect_workspace_root(opened_file_path: &Path) -> Option<PathBuf> {
+        let strong_markers = [
+            "build.gradle",
+            "settings.gradle",
+            "build.gradle.kts",
+            "Cargo.toml",
+            "pom.xml",
+            "settings.gradle.kts",
+        ];
+        let weak_markers = ["Package.swift"];
+        let mut current_directory = opened_file_path.parent().map(Path::to_path_buf);
+        let mut nearest_strong_marker_root: Option<PathBuf> = None;
+        let mut git_root: Option<PathBuf> = None;
+        let mut nearest_weak_marker_root: Option<PathBuf> = None;
+
+        while let Some(directory) = current_directory {
+            if nearest_strong_marker_root.is_none()
+                && strong_markers
+                    .iter()
+                    .any(|marker| directory.join(marker).exists())
+            {
+                nearest_strong_marker_root = Some(directory.clone());
+            }
+            if directory.join(".git").exists() {
+                git_root = Some(directory.clone());
+                break;
+            }
+            if nearest_weak_marker_root.is_none()
+                && weak_markers
+                    .iter()
+                    .any(|marker| directory.join(marker).exists())
+            {
+                nearest_weak_marker_root = Some(directory.clone());
+            }
+            current_directory = directory.parent().map(Path::to_path_buf);
+        }
+
+        nearest_strong_marker_root
+            .or(git_root)
+            .or(nearest_weak_marker_root)
+            .or_else(|| opened_file_path.parent().map(Path::to_path_buf))
+    }
+
+    fn should_switch_workspace_root(
+        &self,
+        opened_file_path: &Path,
+        candidate_workspace_root: &Path,
+    ) -> bool {
+        let candidate_workspace_root = Self::canonicalize_or_clone(candidate_workspace_root);
+        match self.current_workspace_root() {
+            None => true,
+            Some(current_workspace_root) => {
+                let current_workspace_root = Self::canonicalize_or_clone(&current_workspace_root);
+                let opened_file_path = Self::canonicalize_or_clone(opened_file_path);
+                !opened_file_path.starts_with(&current_workspace_root)
+                    && candidate_workspace_root != current_workspace_root
+            }
+        }
+    }
+
+    fn canonicalize_or_clone(path: &Path) -> PathBuf {
+        std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    }
+
+    fn switch_workspace_root_for_opened_document(
+        &self,
+        workspace_root: PathBuf,
+        opened_file_path: Option<PathBuf>,
+    ) {
+        self.set_workspace_root(workspace_root.clone());
+        self.indexer.workspace_pinned.store(true, Ordering::Relaxed);
+        self.indexer.root_generation.fetch_add(1, Ordering::SeqCst);
+        self.indexer.reset_index_state();
+        log::info!(
+            "Auto-detected workspace root (now pinned): {}",
+            workspace_root.display()
+        );
+        self.spawn_workspace_indexing(workspace_root, opened_file_path.into_iter().collect());
+    }
+
+    fn is_outside_pinned_workspace_root(
+        &self,
+        workspace_pinned: bool,
+        opened_file_path: Option<&Path>,
+    ) -> bool {
+        if !workspace_pinned {
+            return false;
+        }
+
+        match (opened_file_path, self.current_workspace_root()) {
+            (Some(opened_file_path), Some(current_workspace_root)) => {
+                let opened_file_path = Self::canonicalize_or_clone(opened_file_path);
+                let current_workspace_root =
+                    Self::canonicalize_or_clone(current_workspace_root.as_path());
+                !opened_file_path.starts_with(&current_workspace_root)
+            }
+            _ => false,
+        }
+    }
+
+    async fn store_live_document_state(&self, opened_document: &OpenedDocumentContext) {
+        self.indexer
+            .set_live_lines(&opened_document.uri, &opened_document.text);
+
+        let indexer = Arc::clone(&self.indexer);
+        let uri = opened_document.uri.clone();
+        let text = opened_document.text.clone();
+        let _ = tokio::task::spawn_blocking(move || indexer.store_live_tree(&uri, &text)).await;
+    }
+
+    fn spawn_outside_root_document_indexing(&self, opened_document: OpenedDocumentContext) {
+        let indexer = Arc::clone(&self.indexer);
+        let semaphore = indexer.parse_sem();
+        tokio::task::spawn(async move {
+            if let Ok(permit) = semaphore.acquire_owned().await {
+                let uri = opened_document.uri;
+                let text = opened_document.text;
+                let _ = tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    indexer.index_content(&uri, &text);
+                })
+                .await;
+            }
+        });
+    }
+
+    fn spawn_open_document_indexing(&self, opened_document: OpenedDocumentContext) {
+        let indexer = Arc::clone(&self.indexer);
+        let semaphore = indexer.parse_sem();
+        let client = self.client.clone();
+        let cached_indexer = Arc::clone(&self.indexer);
+        tokio::task::spawn(async move {
+            let uri = opened_document.uri;
+            let text = opened_document.text;
+            let uri_for_diagnostics = uri.clone();
+            let Ok(permit) = semaphore.acquire_owned().await else {
+                return;
+            };
+            let result = tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                let data = indexer.index_content(&uri, &text);
+                Arc::clone(&indexer).prewarm_completion_cache(&uri);
+                data
+            })
+            .await;
+
+            let diagnostics = match result {
+                Ok(Some(indexed_file_data)) => syntax_diagnostics(&indexed_file_data.syntax_errors),
+                Ok(None) => {
+                    let uri_string = uri_for_diagnostics.to_string();
+                    cached_indexer
+                        .files
+                        .get(&uri_string)
+                        .map(|file_data| syntax_diagnostics(&file_data.syntax_errors))
+                        .unwrap_or_default()
+                }
+                Err(_) => Vec::new(),
+            };
+            client
+                .publish_diagnostics(uri_for_diagnostics, diagnostics, None)
+                .await;
+        });
     }
 }
 
@@ -189,136 +554,15 @@ impl LanguageServer for Backend {
     // ── lifecycle ────────────────────────────────────────────────────────────
 
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
-        // Detect snippet support from client capabilities.
-        let supports_snippets = params
-            .capabilities
-            .text_document
-            .as_ref()
-            .and_then(|td| td.completion.as_ref())
-            .and_then(|c| c.completion_item.as_ref())
-            .and_then(|ci| ci.snippet_support)
-            .unwrap_or(false);
+        let supports_snippets = Self::detect_snippet_support(&params);
         self.snippet_support
             .store(supports_snippets, Ordering::Relaxed);
         log::info!("client snippet support: {supports_snippets}");
 
-        // Accept either rootUri or the first workspaceFolder.
-        let root_uri = params.root_uri.or_else(|| {
-            params
-                .workspace_folders
-                .as_deref()
-                .and_then(|f| f.first())
-                .map(|f| f.uri.clone())
-        });
-
-        // Priority:
-        //   1. KOTLIN_LSP_WORKSPACE_ROOT env var  — explicit override, always wins
-        //   2. LSP client rootUri / workspaceFolders — editor knows best when present
-        //   3. ~/.config/kotlin-lsp/workspace file — fallback for clients that send no root
-        //      (e.g. Copilot CLI agentic use)
-        let env_override = std::env::var("KOTLIN_LSP_WORKSPACE_ROOT")
-            .ok()
-            .map(std::path::PathBuf::from)
-            .filter(|p| p.is_dir());
-
-        let client_root = root_uri
-            .as_ref()
-            .and_then(|uri| uri.to_file_path().ok())
-            .filter(|p| p.is_dir())
-            .map(|p| {
-                // Walk up to the nearest .git root so that opening a sub-module
-                // (e.g. ios/Modules/ScenesCommon) still indexes the whole repo.
-                // This is critical for cross-module go-to-definition.
-                let mut cur = p.as_path();
-                loop {
-                    if cur.join(".git").exists() {
-                        return cur.to_path_buf();
-                    }
-                    match cur.parent() {
-                        Some(p) => cur = p,
-                        None => return p.clone(),
-                    }
-                }
-            });
-
-        let config_fallback = || -> Option<std::path::PathBuf> {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-            let config_file = std::path::Path::new(&home).join(".config/kotlin-lsp/workspace");
-            std::fs::read_to_string(&config_file)
-                .ok()
-                .map(|s| std::path::PathBuf::from(s.trim()))
-                .filter(|p| p.is_dir())
-        };
-
-        // Any resolved workspace root — env var, client rootUri, or config file — pins the
-        // workspace and disables did_open auto-detection.  Without pinning, opening a file from
-        // a second project in the same editor session triggers a spurious root switch that aborts
-        // the in-progress workspace index and discards half its results.
-        // Pure auto-detection (no config at all) still works: workspace_pinned stays false until
-        // did_open fires and a root is detected for the first time.
-        let resolved_root = env_override.or(client_root).or_else(config_fallback);
-        let workspace_pinned = resolved_root.is_some();
-
-        if let Some(path) = resolved_root {
-            // Set workspace_root immediately so rg/fd calls work even before
-            // indexing finishes (the background task can be slow on large projects).
-            *self.indexer.workspace_root.write().unwrap() = Some(path.clone());
-            if workspace_pinned {
-                // Explicitly configured — prevent did_open auto-detection from overriding.
-                self.indexer
-                    .workspace_pinned
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
-            }
-
-            // Parse ignore patterns from initializationOptions.indexingOptions.ignorePatterns.
-            if let Some(opts) = params.initialization_options.as_ref() {
-                if let Some(patterns) = opts
-                    .get("indexingOptions")
-                    .and_then(|o| o.get("ignorePatterns"))
-                    .and_then(|v| v.as_array())
-                {
-                    let pats: Vec<String> = patterns
-                        .iter()
-                        .filter_map(|v| v.as_str().map(str::to_owned))
-                        .collect();
-                    if !pats.is_empty() {
-                        log::info!("ignorePatterns: {:?}", pats);
-                        *self.indexer.ignore_matcher.write().unwrap() =
-                            Some(std::sync::Arc::new(IgnoreMatcher::new(pats, &path)));
-                    }
-                }
-
-                // Parse sourcePaths — extra directories to index for hover/definition/autocomplete.
-                // Stored as raw strings; resolved against workspace root when indexing starts.
-                if let Some(source_paths) = opts
-                    .get("indexingOptions")
-                    .and_then(|o| o.get("sourcePaths"))
-                    .and_then(|v| v.as_array())
-                {
-                    let paths_raw: Vec<String> = source_paths
-                        .iter()
-                        .filter_map(|v| v.as_str().map(str::to_owned))
-                        .collect();
-                    if !paths_raw.is_empty() {
-                        log::info!("sourcePaths: {:?}", paths_raw);
-                        *self.indexer.source_paths_raw.write().unwrap() = paths_raw;
-                    }
-                }
-            }
-
-            let indexer = Arc::clone(&self.indexer);
-            let client = self.client.clone();
-            // Background task — server is usable before indexing finishes.
-            tokio::spawn(async move {
-                // No specific open-file priorities at initialize.
-                indexer
-                    .index_workspace_prioritized(
-                        &path,
-                        Vec::new(),
-                        Arc::new(LspProgressReporter(client)),
-                    )
-                    .await;
-            });
+        let resolved_workspace_root = Self::resolve_workspace_root(&params);
+        let workspace_pinned = resolved_workspace_root.is_some();
+        if let Some(workspace_root) = resolved_workspace_root {
+            self.configure_initialized_workspace(&params, &workspace_root, workspace_pinned);
         }
 
         Ok(InitializeResult {
@@ -460,202 +704,38 @@ impl LanguageServer for Backend {
     // ── document sync ────────────────────────────────────────────────────────
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
-        let uri = params.text_document.uri;
-        let text = params.text_document.text;
+        let opened_document = OpenedDocumentContext::from_open_params(params);
+        let workspace_pinned = self.indexer.workspace_pinned.load(Ordering::Relaxed);
 
-        // Keep the opened file path (if available) so prioritized indexing can seed it.
-        let opened_path_opt = uri.to_file_path().ok();
-
-        // Auto-detect workspace root from the opened file when workspace is not yet pinned
-        // (i.e. no explicit env var / config file override was set at initialize).
-        // Marker tiers (highest → lowest priority):
-        //   1. Strong project markers (build.gradle.kts, settings.gradle, pom.xml, Cargo.toml)
-        //      — typically appear exactly once at the project root. Nearest wins over .git.
-        //   2. .git — repo root; wins over weak markers like Package.swift.
-        //   3. Weak markers (Package.swift) — present at every Swift module; last resort.
-        //
-        // This correctly handles mono-repos where .git is at the parent of a subproject
-        // (e.g. Moneta/.git with Moneta/android/settings.gradle.kts) and Swift mono-repos
-        // where ios/.git is the right root but ios/Modules/*/Package.swift should be ignored.
-        let pinned = self
-            .indexer
-            .workspace_pinned
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let mut need_root_switch: Option<std::path::PathBuf> = None;
-
-        if !pinned {
-            if let Some(ref path) = opened_path_opt {
-                let strong_markers = [
-                    "build.gradle",
-                    "settings.gradle",
-                    "build.gradle.kts",
-                    "Cargo.toml",
-                    "pom.xml",
-                    "settings.gradle.kts",
-                ];
-                let weak_markers = ["Package.swift"];
-                let mut cur = path.parent().map(|p| p.to_path_buf());
-                let mut nearest_strong: Option<std::path::PathBuf> = None;
-                let mut git_root: Option<std::path::PathBuf> = None;
-                let mut nearest_weak: Option<std::path::PathBuf> = None;
-                while let Some(ref dir) = cur {
-                    if nearest_strong.is_none()
-                        && strong_markers.iter().any(|m| dir.join(m).exists())
-                    {
-                        nearest_strong = Some(dir.clone());
-                    }
-                    if dir.join(".git").exists() {
-                        git_root = Some(dir.clone());
-                        break;
-                    }
-                    if nearest_weak.is_none() && weak_markers.iter().any(|m| dir.join(m).exists()) {
-                        nearest_weak = Some(dir.clone());
-                    }
-                    cur = dir.parent().map(|p| p.to_path_buf());
-                }
-                let found = nearest_strong.or(git_root).or(nearest_weak);
-                let chosen = found.or_else(|| path.parent().map(|p| p.to_path_buf()));
-                if let Some(candidate_root) = chosen {
-                    let current_root = self.indexer.workspace_root.read().unwrap().clone();
-                    let cand_canon = std::fs::canonicalize(&candidate_root)
-                        .unwrap_or_else(|_| candidate_root.clone());
-                    let should_switch = match current_root {
-                        None => true,
-                        Some(ref r) => {
-                            let cur_canon = std::fs::canonicalize(r).unwrap_or_else(|_| r.clone());
-                            let path_canon =
-                                std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
-                            !path_canon.starts_with(&cur_canon) && cand_canon != cur_canon
-                        }
-                    };
-                    if should_switch {
-                        need_root_switch = Some(candidate_root);
-                    }
-                }
-            }
-        }
-
-        if let Some(root) = need_root_switch {
-            *self.indexer.workspace_root.write().unwrap() = Some(root.clone());
-            // Pin the workspace after the first auto-detection so that opening a file
-            // from a second project later in the same session doesn't switch again.
-            self.indexer
-                .workspace_pinned
-                .store(true, std::sync::atomic::Ordering::Relaxed);
-            self.indexer
-                .root_generation
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            self.indexer.reset_index_state();
-            log::info!(
-                "Auto-detected workspace root (now pinned): {}",
-                root.display()
+        if let Some(workspace_root) = self.detect_workspace_root_switch(
+            workspace_pinned,
+            opened_document.opened_file_path.as_deref(),
+        ) {
+            self.switch_workspace_root_for_opened_document(
+                workspace_root,
+                opened_document.opened_file_path.clone(),
             );
-            let idx = Arc::clone(&self.indexer);
-            let client = self.client.clone();
-            let root2 = root.clone();
-            let opened = opened_path_opt.clone();
-            tokio::spawn(async move {
-                let reporter = Arc::new(LspProgressReporter(client));
-                if let Some(op) = opened {
-                    idx.index_workspace_prioritized(&root2, vec![op], reporter)
-                        .await;
-                } else {
-                    idx.index_workspace_prioritized(&root2, Vec::new(), reporter)
-                        .await;
-                }
-            });
         }
 
-        // For files outside the current workspace root (e.g. agent opened a file from
-        // another project): still index the file itself so hover/go-to-def work on it,
-        // but skip workspace-wide re-indexing to avoid polluting workspaceSymbol results.
-        let outside_root = pinned && {
-            matches!(
-                (opened_path_opt.as_ref(), self.indexer.workspace_root.read().unwrap().clone()),
-                (Some(path), Some(root)) if {
-                    // Use canonical paths to avoid symlink/path-form mismatches
-                    // (consistent with the root-switch guard above).
-                    let canon_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
-                    let canon_root = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
-                    !canon_path.starts_with(&canon_root)
-                }
-            )
-        };
-        if outside_root {
+        if self.is_outside_pinned_workspace_root(
+            workspace_pinned,
+            opened_document.opened_file_path.as_deref(),
+        ) {
             log::info!(
                 "Outside-root file — indexing content only: {}",
-                opened_path_opt
+                opened_document
+                    .opened_file_path
                     .as_deref()
-                    .map(|p| p.display().to_string())
+                    .map(|path| path.display().to_string())
                     .unwrap_or_default()
             );
-            self.indexer.set_live_lines(&uri, &text);
-            {
-                let idx2 = Arc::clone(&self.indexer);
-                let uri2 = uri.clone();
-                let text2 = text.clone();
-                let _ =
-                    tokio::task::spawn_blocking(move || idx2.store_live_tree(&uri2, &text2)).await;
-            }
-            // Index just this file so hover/go-to-def work, then return.
-            let idx = Arc::clone(&self.indexer);
-            let sem = idx.parse_sem();
-            tokio::task::spawn(async move {
-                if let Ok(permit) = sem.acquire_owned().await {
-                    tokio::task::spawn_blocking(move || {
-                        let _permit = permit;
-                        idx.index_content(&uri, &text);
-                    })
-                    .await
-                    .ok();
-                }
-            });
+            self.store_live_document_state(&opened_document).await;
+            self.spawn_outside_root_document_indexing(opened_document);
             return;
         }
 
-        // Set live_lines immediately so completion can read the current file content
-        // even before the async index_content task finishes.
-        self.indexer.set_live_lines(&uri, &text);
-        {
-            let idx2 = Arc::clone(&self.indexer);
-            let uri2 = uri.clone();
-            let text2 = text.clone();
-            let _ = tokio::task::spawn_blocking(move || idx2.store_live_tree(&uri2, &text2)).await;
-        }
-
-        let idx = Arc::clone(&self.indexer);
-        let sem = idx.parse_sem();
-        let client = self.client.clone();
-        let idx2 = Arc::clone(&self.indexer);
-        tokio::task::spawn(async move {
-            let uri2 = uri.clone();
-            let Ok(permit) = sem.acquire_owned().await else {
-                return;
-            };
-            let result = tokio::task::spawn_blocking(move || {
-                let _permit = permit;
-                let data = idx.index_content(&uri, &text);
-                // Pre-warm completion cache for all types referenced in this file.
-                Arc::clone(&idx).prewarm_completion_cache(&uri);
-                data
-            })
-            .await;
-
-            // Publish diagnostics from syntax errors (or clear if hash-skipped).
-            let diags = match result {
-                Ok(Some(data)) => syntax_diagnostics(&data.syntax_errors),
-                Ok(None) => {
-                    // Hash-skipped — read cached errors.
-                    let uri_str = uri2.to_string();
-                    idx2.files
-                        .get(&uri_str)
-                        .map(|fd| syntax_diagnostics(&fd.syntax_errors))
-                        .unwrap_or_default()
-                }
-                Err(_) => Vec::new(),
-            };
-            client.publish_diagnostics(uri2, diags, None).await;
-        });
+        self.store_live_document_state(&opened_document).await;
+        self.spawn_open_document_indexing(opened_document);
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
