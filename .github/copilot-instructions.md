@@ -308,7 +308,25 @@ without a comment explaining why the gate can't be used instead.
 If `SymbolEntry` gains or loses fields, bump `CACHE_VERSION` in `src/indexer/cache.rs`.
 New fields must carry `#[serde(default)]` so old cache files still deserialize.
 
-### 10. Minimal visibility
+### 10. Tests live in companion `*_tests.rs` files, not inline
+
+Never write a `mod tests { … }` block inside a source file. Instead:
+
+1. Create `src/foo_tests.rs` (next to `src/foo.rs`) with the test content.
+2. In `src/foo.rs`, add only the three-line stub:
+
+```rust
+#[cfg(test)]
+#[path = "foo_tests.rs"]
+mod tests;
+```
+
+This keeps production code free of test noise. The only `#[cfg(test)]` allowed
+directly in a source file is the stub above, plus `#[cfg(test)]` gates on helper
+items (e.g. test-only trait impls or constructors) that must live alongside the
+type they support.
+
+### 11. Minimal visibility
 
 Default to module-private (`fn`, `struct`). Widen to `pub(crate)` only when a sibling module
 requires it; widen to `pub` only for items that form part of the external API surface.
