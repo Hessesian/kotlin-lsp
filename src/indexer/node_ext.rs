@@ -3,9 +3,10 @@
 //! These methods are lightweight convenience wrappers around tree-sitter node
 //! traversal; their bodies were extracted from the free functions they replace.
 use crate::queries::{
-    KIND_IDENTIFIER, KIND_LAMBDA_PARAMS, KIND_SIMPLE_IDENT, KIND_TYPE_ARGS, KIND_TYPE_IDENT,
-    KIND_TYPE_LIST, KIND_TYPE_PARAM, KIND_TYPE_PARAMS, KIND_USER_TYPE, KIND_VALUE_ARG,
-    KIND_VALUE_ARGS,
+    KIND_CALL_SUFFIX, KIND_IDENTIFIER, KIND_LAMBDA_PARAMS, KIND_NAV_EXPR, KIND_NAV_SUFFIX,
+    KIND_SCOPED_TYPE_IDENT, KIND_SIMPLE_IDENT, KIND_TYPE_ARGS, KIND_TYPE_IDENT, KIND_TYPE_LIST,
+    KIND_TYPE_PARAM, KIND_TYPE_PARAMS, KIND_USER_TYPE, KIND_VALUE_ARG, KIND_VALUE_ARGS,
+    KIND_VAR_DECL,
 };
 use crate::StrExt;
 use tree_sitter::Node;
@@ -162,7 +163,7 @@ impl<'a> NodeExt<'a> for Node<'a> {
             if child.kind() == KIND_VALUE_ARGS {
                 return Some(child);
             }
-            if child.kind() == "call_suffix" {
+            if child.kind() == KIND_CALL_SUFFIX {
                 let mut w2 = child.walk();
                 for gc in child.children(&mut w2) {
                     if gc.kind() == KIND_VALUE_ARGS {
@@ -181,7 +182,7 @@ impl<'a> NodeExt<'a> for Node<'a> {
 
         (0..lp.child_count())
             .filter_map(|i| lp.child(i))
-            .filter(|c| c.kind() == "variable_declaration")
+            .filter(|c| c.kind() == KIND_VAR_DECL)
             .any(|vd| {
                 let Some(si) = vd.child(0).filter(|n| n.kind() == KIND_SIMPLE_IDENT) else {
                     return false;
@@ -200,7 +201,7 @@ impl<'a> NodeExt<'a> for Node<'a> {
 
         (0..lp.child_count())
             .filter_map(|i| lp.child(i))
-            .filter(|c| c.kind() == "variable_declaration")
+            .filter(|c| c.kind() == KIND_VAR_DECL)
             .filter_map(|vd| {
                 let si = vd.child(0).filter(|n| n.kind() == KIND_SIMPLE_IDENT)?;
                 si.utf8_text_owned(bytes)
@@ -226,7 +227,7 @@ impl<'a> NodeExt<'a> for Node<'a> {
             if let Some(child) = self.child(i) {
                 if matches!(
                     child.kind(),
-                    "type_identifier" | "simple_identifier" | "identifier"
+                    k if k == KIND_TYPE_IDENT || k == KIND_SIMPLE_IDENT || k == KIND_IDENTIFIER
                 ) {
                     if let Some(s) = child.utf8_text_owned(bytes) {
                         if s.starts_with_uppercase() {
@@ -242,28 +243,23 @@ impl<'a> NodeExt<'a> for Node<'a> {
     fn call_fn_and_qualifier(self, bytes: &[u8]) -> Option<(String, Option<String>)> {
         let callee = self.child(0)?;
         match callee.kind() {
-            "simple_identifier" | "type_identifier" => {
+            k if k == KIND_SIMPLE_IDENT || k == KIND_TYPE_IDENT => {
                 let name = callee.utf8_text_owned(bytes)?;
                 Some((name, None))
             }
-            "navigation_expression" => {
+            k if k == KIND_NAV_EXPR => {
                 let mut walker = callee.walk();
                 let mut qualifier_opt: Option<String> = None;
                 let mut fn_name_opt: Option<String> = None;
                 for child in callee.children(&mut walker) {
-                    match child.kind() {
-                        "simple_identifier" | "type_identifier" => {
-                            qualifier_opt = child.utf8_text_owned(bytes);
-                        }
-                        "navigation_suffix" => {
-                            fn_name_opt = (0..child.child_count())
-                                .filter_map(|i| child.child(i))
-                                .find(|c| {
-                                    c.kind() == KIND_SIMPLE_IDENT || c.kind() == KIND_TYPE_IDENT
-                                })
-                                .and_then(|c| c.utf8_text_owned(bytes));
-                        }
-                        _ => {}
+                    let ck = child.kind();
+                    if ck == KIND_SIMPLE_IDENT || ck == KIND_TYPE_IDENT {
+                        qualifier_opt = child.utf8_text_owned(bytes);
+                    } else if ck == KIND_NAV_SUFFIX {
+                        fn_name_opt = (0..child.child_count())
+                            .filter_map(|i| child.child(i))
+                            .find(|c| c.kind() == KIND_SIMPLE_IDENT || c.kind() == KIND_TYPE_IDENT)
+                            .and_then(|c| c.utf8_text_owned(bytes));
                     }
                 }
                 Some((fn_name_opt?, qualifier_opt))
@@ -289,7 +285,7 @@ impl<'a> NodeExt<'a> for Node<'a> {
                 KIND_TYPE_IDENT => {
                     return n.utf8_text_owned(bytes);
                 }
-                "scoped_type_identifier" => {
+                KIND_SCOPED_TYPE_IDENT => {
                     // Collect all identifier/type_identifier segments while skipping
                     // type_arguments children (handles `Outer<String>.Inner` correctly).
                     let mut segments = Vec::new();
@@ -507,154 +503,5 @@ fn collect_user_type_segments(node: Node<'_>, bytes: &[u8], segments: &mut Vec<S
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-mod tests {
-    use super::NodeExt;
-    use crate::queries::{KIND_CALL_EXPR, KIND_LAMBDA_LIT, KIND_VALUE_ARG, KIND_VALUE_ARGS};
-
-    fn parse_kotlin(src: &str) -> (tree_sitter::Tree, Vec<u8>) {
-        let mut parser = tree_sitter::Parser::new();
-        parser
-            .set_language(&tree_sitter_kotlin::language())
-            .unwrap();
-        let bytes = src.as_bytes().to_vec();
-        let tree = parser.parse(src, None).unwrap();
-        (tree, bytes)
-    }
-
-    fn find_node_kind<'a>(
-        node: tree_sitter::Node<'a>,
-        kind: &str,
-    ) -> Option<tree_sitter::Node<'a>> {
-        if node.kind() == kind {
-            return Some(node);
-        }
-        for i in 0..node.child_count() {
-            if let Some(n) = node.child(i).and_then(|c| find_node_kind(c, kind)) {
-                return Some(n);
-            }
-        }
-        None
-    }
-
-    #[test]
-    fn call_fn_name_simple() {
-        let (tree, bytes) = parse_kotlin("val x = foo(1)");
-        let call = find_node_kind(tree.root_node(), KIND_CALL_EXPR).unwrap();
-        assert_eq!(call.call_fn_name(&bytes), Some("foo".to_string()));
-    }
-
-    #[test]
-    fn call_fn_name_navigation() {
-        // In tree-sitter-kotlin, `obj.bar` is:
-        //   navigation_expression
-        //     simple_identifier: obj
-        //     navigation_suffix: .bar  ← `bar` is nested here
-        // `call_fn_name` should return the member name "bar", not the receiver "obj".
-        let (tree, bytes) = parse_kotlin("val x = obj.bar(1)");
-        let call = find_node_kind(tree.root_node(), KIND_CALL_EXPR).unwrap();
-        assert_eq!(call.call_fn_name(&bytes), Some("bar".to_string()));
-    }
-
-    #[test]
-    fn value_arg_position_first_and_second() {
-        let (tree, bytes) = parse_kotlin("foo(a, b)");
-        let _ = bytes; // not needed for position
-        let call = find_node_kind(tree.root_node(), KIND_CALL_EXPR).unwrap();
-        let value_args_node = find_node_kind(call, KIND_VALUE_ARGS).unwrap();
-        let mut args = vec![];
-        for i in 0..value_args_node.child_count() {
-            if let Some(c) = value_args_node.child(i) {
-                if c.kind() == KIND_VALUE_ARG {
-                    args.push(c);
-                }
-            }
-        }
-        assert_eq!(args.len(), 2);
-        assert_eq!(
-            args[0].value_arg_position(),
-            0,
-            "first arg position should be 0"
-        );
-        assert_eq!(
-            args[1].value_arg_position(),
-            1,
-            "second arg position should be 1"
-        );
-    }
-
-    #[test]
-    fn has_lambda_named_params_true_for_named() {
-        let (tree, bytes) = parse_kotlin("val x = foo { item -> item }");
-        let lambda = find_node_kind(tree.root_node(), KIND_LAMBDA_LIT).unwrap();
-        assert!(
-            lambda.has_lambda_named_params(&bytes),
-            "param named `item` should yield true"
-        );
-    }
-
-    #[test]
-    fn has_lambda_named_params_false_for_no_params() {
-        let (tree, bytes) = parse_kotlin("val x = items.map { it.name }");
-        let lambda = find_node_kind(tree.root_node(), KIND_LAMBDA_LIT).unwrap();
-        assert!(
-            !lambda.has_lambda_named_params(&bytes),
-            "no lambda_parameters child should yield false"
-        );
-    }
-
-    #[test]
-    fn collect_lambda_param_names_collects_named() {
-        let (tree, bytes) = parse_kotlin("val x = items.map { item -> item.foo }");
-        let lambda = find_node_kind(tree.root_node(), KIND_LAMBDA_LIT).unwrap();
-        let names = lambda.collect_lambda_param_names(&bytes, &[]);
-        assert_eq!(names, vec!["item".to_string()]);
-    }
-
-    #[test]
-    fn named_arg_label_present() {
-        let (tree, bytes) = parse_kotlin("foo(bar = 1)");
-        let call = find_node_kind(tree.root_node(), KIND_CALL_EXPR).unwrap();
-        let va = find_node_kind(call, KIND_VALUE_ARG).unwrap();
-        assert_eq!(va.named_arg_label(&bytes), Some("bar".to_string()));
-    }
-
-    #[test]
-    fn named_arg_label_absent() {
-        let (tree, bytes) = parse_kotlin("foo(1)");
-        let call = find_node_kind(tree.root_node(), KIND_CALL_EXPR).unwrap();
-        let va = find_node_kind(call, KIND_VALUE_ARG).unwrap();
-        assert_eq!(va.named_arg_label(&bytes), None);
-    }
-
-    #[test]
-    fn call_fn_and_qualifier_simple_call() {
-        let (tree, bytes) = parse_kotlin("val x = foo(1)");
-        let call = find_node_kind(tree.root_node(), KIND_CALL_EXPR).unwrap();
-        assert_eq!(
-            call.call_fn_and_qualifier(&bytes),
-            Some(("foo".to_string(), None))
-        );
-    }
-
-    #[test]
-    fn call_fn_and_qualifier_navigation_call() {
-        let (tree, bytes) = parse_kotlin("val x = obj.bar(1)");
-        let call = find_node_kind(tree.root_node(), KIND_CALL_EXPR).unwrap();
-        assert_eq!(
-            call.call_fn_and_qualifier(&bytes),
-            Some(("bar".to_string(), Some("obj".to_string())))
-        );
-    }
-
-    #[test]
-    fn call_fn_name_delegates_to_and_qualifier() {
-        // call_fn_name is now implemented via call_fn_and_qualifier —
-        // verify both return the same name for navigation and simple calls.
-        let (tree, bytes) = parse_kotlin("val x = obj.bar(1)");
-        let call = find_node_kind(tree.root_node(), KIND_CALL_EXPR).unwrap();
-        let via_and_qualifier = call.call_fn_and_qualifier(&bytes).map(|(n, _)| n);
-        let via_name = call.call_fn_name(&bytes);
-        assert_eq!(via_name, via_and_qualifier);
-        assert_eq!(via_name, Some("bar".to_string()));
-    }
-}
+#[path = "node_ext_tests.rs"]
+mod tests;

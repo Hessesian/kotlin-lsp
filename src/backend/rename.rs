@@ -1,9 +1,197 @@
 use super::actions::is_non_call_keyword;
 use super::helpers::resolve_references_scope;
 use super::Backend;
+use crate::indexer::live_tree::utf16_col_to_byte;
+use crate::queries::{
+    KIND_ANON_FUN, KIND_CLASS_BODY, KIND_COMPANION_OBJ, KIND_FUN_DECL, KIND_LAMBDA_LIT,
+    KIND_METHOD_DECL, KIND_MULTI_VAR_DECL, KIND_NAV_EXPR, KIND_OBJECT_DECL, KIND_PROP_DECL,
+    KIND_SOURCE_FILE, KIND_VAR_DECL,
+};
 use crate::StrExt;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
+
+/// Return `true` when the cursor is on a local variable declaration — i.e. a
+/// `property_declaration` / `variable_declaration` whose nearest scope-boundary
+/// ancestor is a function/lambda body rather than a class body or source file.
+///
+/// This is used to decide whether to skip dotted occurrences during rename:
+/// - local var `val syncWith` inside a function → `skip_dotted = true`
+///   (avoid renaming `.syncWith()` method calls)
+/// - class property `val myProp` → `skip_dotted = false`
+///   (must rename `this.myProp` / `obj.myProp` accesses)
+/// - navigation expression (`.method()`) → `skip_dotted = false`
+/// - function declaration → `skip_dotted = false`
+fn cst_cursor_is_local_var(indexer: &crate::indexer::Indexer, uri: &Url, pos: Position) -> bool {
+    use tree_sitter::Point;
+
+    let doc = match indexer.live_doc(uri) {
+        Some(d) => d,
+        None => return false,
+    };
+    let full_text = match std::str::from_utf8(&doc.bytes) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let line_idx = pos.line as usize;
+    let line_text = match full_text.lines().nth(line_idx) {
+        Some(l) => l,
+        None => return false,
+    };
+    let byte_col = utf16_col_to_byte(line_text, pos.character as usize);
+    let point = Point {
+        row: line_idx,
+        column: byte_col,
+    };
+    let start_node = match doc
+        .tree
+        .root_node()
+        .descendant_for_point_range(point, point)
+    {
+        Some(n) => n,
+        None => return false,
+    };
+
+    // Track whether we've entered a property/variable declaration binding.
+    let mut in_binding = false;
+    let mut cur = start_node;
+    loop {
+        let kind = cur.kind();
+        match kind {
+            // Entering a property/variable binding — continue walking up.
+            KIND_PROP_DECL | KIND_VAR_DECL | KIND_MULTI_VAR_DECL => {
+                in_binding = true;
+            }
+            // Inside a binding and hit a function/lambda boundary → local variable.
+            KIND_FUN_DECL | KIND_METHOD_DECL | KIND_ANON_FUN | KIND_LAMBDA_LIT
+                if in_binding =>
+            {
+                return true
+            }
+            // Function/method/lambda without being in a binding → not a local var.
+            KIND_FUN_DECL | KIND_METHOD_DECL | KIND_ANON_FUN | KIND_LAMBDA_LIT => return false,
+            // Navigation expression → member access, not a local var.
+            KIND_NAV_EXPR => return false,
+            // Class body, companion object, or source file reached while in a binding
+            // → class-level or top-level property, NOT a local var.
+            KIND_CLASS_BODY | KIND_OBJECT_DECL | KIND_COMPANION_OBJ | KIND_SOURCE_FILE
+                if in_binding =>
+            {
+                return false
+            }
+            // Scope boundary without being in a binding → not applicable.
+            KIND_CLASS_BODY | KIND_OBJECT_DECL | KIND_COMPANION_OBJ | KIND_SOURCE_FILE => {
+                return false
+            }
+            _ => {}
+        }
+        match cur.parent() {
+            Some(p) => cur = p,
+            None => return false,
+        }
+    }
+}
+
+/// Return `true` when the file index (within `scope`) contains a `val`/`var`
+/// declaration of `name` that is itself a local variable.
+///
+/// Complements `cst_cursor_is_local_var` for the *reference* case: when the
+/// cursor is on a reference the CST parent chain never contains a
+/// `property_declaration`, so `cst_cursor_is_local_var(cursor_pos)` returns
+/// false. This function recovers the declaration from the index and applies the
+/// same CST check on its `selection_range`, so both declaration and reference
+/// sites produce the correct `skip_dotted` result.
+///
+/// Class-level properties are naturally excluded: they are declared outside the
+/// function's `scope` window and therefore never matched by the line filter.
+fn any_local_var_decl_in_scope(
+    indexer: &crate::indexer::Indexer,
+    uri: &Url,
+    name: &str,
+    scope: (usize, usize),
+) -> bool {
+    use tower_lsp::lsp_types::SymbolKind;
+
+    let file = match indexer.files.get(uri.as_str()) {
+        Some(f) => f,
+        None => return false,
+    };
+    file.symbols
+        .iter()
+        .filter(|s| {
+            matches!(s.kind, SymbolKind::PROPERTY | SymbolKind::VARIABLE | SymbolKind::CONSTANT)
+                && s.name == name
+                && (s.selection_range.start.line as usize) >= scope.0
+                && (s.selection_range.start.line as usize) <= scope.1
+        })
+        .any(|s| {
+            let decl_pos = Position {
+                line: s.selection_range.start.line,
+                character: s.selection_range.start.character,
+            };
+            cst_cursor_is_local_var(indexer, uri, decl_pos)
+        })
+}
+
+#[cfg(test)]
+/// declaration or a navigation expression (member access). Returns `false`
+/// for property/variable declarations, parameters, and unknown contexts.
+///
+/// Used as a secondary check to detect method call sites (nav expressions)
+/// that are not in the file's own symbol index.
+fn cst_cursor_is_method(indexer: &crate::indexer::Indexer, uri: &Url, pos: Position) -> bool {
+    use tree_sitter::Point;
+
+    let doc = match indexer.live_doc(uri) {
+        Some(d) => d,
+        None => return false,
+    };
+    let full_text = match std::str::from_utf8(&doc.bytes) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let line_idx = pos.line as usize;
+    let line_text = match full_text.lines().nth(line_idx) {
+        Some(l) => l,
+        None => return false,
+    };
+    let byte_col = utf16_col_to_byte(line_text, pos.character as usize);
+    let point = Point {
+        row: line_idx,
+        column: byte_col,
+    };
+    let start_node = match doc
+        .tree
+        .root_node()
+        .descendant_for_point_range(point, point)
+    {
+        Some(n) => n,
+        None => return false,
+    };
+
+    // Walk up the ancestor chain looking for the first structurally significant node.
+    let mut cur = start_node;
+    loop {
+        let kind = cur.kind();
+        match kind {
+            // These indicate we're inside a variable / property binding → not a method.
+            KIND_PROP_DECL | KIND_VAR_DECL | KIND_MULTI_VAR_DECL => return false,
+            // These indicate a method/function context → treat as method.
+            KIND_FUN_DECL | KIND_METHOD_DECL | KIND_ANON_FUN => return true,
+            // A navigation expression means the identifier is a qualified member access.
+            KIND_NAV_EXPR => return true,
+            // Stop at top-level scope boundaries without a verdict.
+            KIND_SOURCE_FILE | KIND_CLASS_BODY | KIND_OBJECT_DECL | KIND_COMPANION_OBJ => {
+                return false
+            }
+            _ => {}
+        }
+        match cur.parent() {
+            Some(p) => cur = p,
+            None => return false,
+        }
+    }
+}
 
 /// Replace all whole-word occurrences of `word` in `lines` with `replacement`.
 /// Returns the full new file content as a single string (lines joined with `\n`).
@@ -88,11 +276,16 @@ pub(super) fn enclosing_scope(lines: &[String], cursor_line: usize) -> (usize, u
 
 /// Return TextEdits replacing all whole-word occurrences of `word` with `new_name`
 /// within `lines[scope.0..=scope.1]`, in reverse order (safe for sequential apply).
+///
+/// When `skip_dotted` is `true`, occurrences immediately preceded by `.` are
+/// skipped. This avoids renaming same-named method calls when the user is
+/// renaming a local variable (e.g. `val syncWith` vs `.syncWith()`).
 pub(super) fn rename_in_scope(
     lines: &[String],
     word: &str,
     new_name: &str,
     scope: (usize, usize),
+    skip_dotted: bool,
 ) -> Vec<TextEdit> {
     let wchars: Vec<char> = word.chars().collect();
     let wlen = wchars.len();
@@ -128,6 +321,12 @@ pub(super) fn rename_in_scope(
                 let after_ok = end_idx >= chars.len()
                     || !(chars[end_idx].is_alphanumeric() || chars[end_idx] == '_');
                 if before_ok && after_ok {
+                    // When renaming a local variable, skip member-access occurrences
+                    // (those preceded by '.') to avoid conflating with same-named methods.
+                    if skip_dotted && j > 0 && chars[j - 1] == '.' {
+                        j = end_idx;
+                        continue;
+                    }
                     let start_utf16 = char_to_utf16[j];
                     let end_utf16 = char_to_utf16[end_idx];
                     edits.push(TextEdit {
@@ -194,7 +393,18 @@ impl Backend {
                 None => return Ok(None),
             };
             let scope = enclosing_scope(&lines, pos.line as usize);
-            let mut file_edits = rename_in_scope(&lines, &name, new_name, scope);
+
+            // `skip_dotted = true` only for local variables — a `val`/`var` whose
+            // nearest scope ancestor is a function body (not a class body or source file).
+            // Class properties, top-level vals, and method call sites all need dotted
+            // accesses included so that `this.myProp` / `obj.myProp` are also renamed.
+            //
+            // Check both the cursor position (declaration case) and the file index
+            // (reference case: cursor on a reference, not the declaration itself).
+            let skip_dotted = cst_cursor_is_local_var(&self.indexer, uri, pos)
+                || any_local_var_decl_in_scope(&self.indexer, uri, &name, scope);
+
+            let mut file_edits = rename_in_scope(&lines, &name, new_name, scope, skip_dotted);
             if file_edits.is_empty() {
                 return Ok(None);
             }
@@ -310,7 +520,7 @@ impl Backend {
             let lines = lines.to_vec();
 
             let scope = (0, lines.len().saturating_sub(1));
-            let edits = rename_in_scope(&lines, &name, new_name, scope);
+            let edits = rename_in_scope(&lines, &name, new_name, scope, false);
 
             if !edits.is_empty() {
                 let mut edits = edits;
@@ -329,3 +539,7 @@ impl Backend {
         }))
     }
 }
+
+#[cfg(test)]
+#[path = "rename_tests.rs"]
+mod tests;

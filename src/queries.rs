@@ -390,5 +390,24 @@ pub(crate) const KIND_TYPE_ARGS: &str = "type_arguments";
 pub(crate) const KIND_PROP_DECL: &str = "property_declaration";
 pub(crate) const KIND_PROP_DELEGATE: &str = "property_delegate";
 pub(crate) const KIND_VAR_DECL: &str = "variable_declaration";
+pub(crate) const KIND_MULTI_VAR_DECL: &str = "multi_variable_declaration";
 pub(crate) const KIND_NAV_EXPR: &str = "navigation_expression";
+pub(crate) const KIND_NAV_SUFFIX: &str = "navigation_suffix";
 pub(crate) const KIND_CALL_SUFFIX: &str = "call_suffix";
+pub(crate) const KIND_CALLABLE_REF: &str = "callable_reference";
+
+// ─── Kotlin structural / scope node kinds ─────────────────────────────────────
+pub(crate) const KIND_SOURCE_FILE: &str = "source_file";
+pub(crate) const KIND_CLASS_BODY: &str = "class_body";
+pub(crate) const KIND_COMPANION_OBJ: &str = "companion_object";
+pub(crate) const KIND_ANON_FUN: &str = "anonymous_function";
+pub(crate) const KIND_STATEMENTS: &str = "statements";
+pub(crate) const KIND_IMPORT_HEADER: &str = "import_header";
+pub(crate) const KIND_MODIFIERS: &str = "modifiers";
+
+// ─── Java structural node kinds ───────────────────────────────────────────────
+pub(crate) const KIND_SCOPED_TYPE_IDENT: &str = "scoped_type_identifier";
+pub(crate) const KIND_VAR_DECLARATOR: &str = "variable_declarator";
+// Java modifier keywords appear as their own leaf node kinds in the Java grammar.
+pub(crate) const KIND_MOD_STATIC: &str = "static";
+pub(crate) const KIND_MOD_FINAL: &str = "final";

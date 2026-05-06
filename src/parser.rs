@@ -6,13 +6,15 @@ use tree_sitter::{Node, Parser, Query, QueryCursor};
 
 use crate::indexer::NodeExt;
 use crate::queries::{
-    self, KIND_CALL_EXPR, KIND_CALL_SUFFIX, KIND_CLASS_DECL, KIND_CTOR_DECL, KIND_DELEGATION_SPEC,
-    KIND_ENUM_DECL, KIND_EXTENDS_INTERFACES, KIND_FIELD_DECL, KIND_FUN_DECL, KIND_IDENTIFIER,
-    KIND_IMPORT_DECL, KIND_INHERITANCE_SPEC, KIND_INTERFACE_DECL, KIND_LAMBDA_LIT,
-    KIND_METHOD_DECL, KIND_NAV_EXPR, KIND_OBJECT_DECL, KIND_PACKAGE_DECL, KIND_PROP_DECL,
+    self, KIND_CALLABLE_REF, KIND_CALL_EXPR, KIND_CALL_SUFFIX, KIND_CLASS_DECL, KIND_CTOR_DECL,
+    KIND_DELEGATION_SPEC, KIND_ENUM_DECL, KIND_EXTENDS_INTERFACES, KIND_FIELD_DECL, KIND_FUN_DECL,
+    KIND_IDENTIFIER, KIND_IMPORT_DECL, KIND_IMPORT_HEADER, KIND_INHERITANCE_SPEC,
+    KIND_INTERFACE_DECL, KIND_LAMBDA_LIT, KIND_METHOD_DECL, KIND_MODIFIERS, KIND_MOD_FINAL,
+    KIND_MOD_STATIC, KIND_NAV_EXPR, KIND_OBJECT_DECL, KIND_PACKAGE_DECL, KIND_PROP_DECL,
     KIND_PROP_DELEGATE, KIND_PROTOCOL_DECL, KIND_RECORD_DECL, KIND_SCOPED_IDENT, KIND_SIMPLE_IDENT,
-    KIND_SUPERCLASS, KIND_SUPER_INTERFACES, KIND_TYPE_IDENT, KIND_USER_TYPE, KIND_VAR_DECL,
-    KOTLIN_DEFINITIONS, SWIFT_DEFINITIONS,
+    KIND_STATEMENTS, KIND_SUPERCLASS, KIND_SUPER_INTERFACES, KIND_TYPE_IDENT, KIND_USER_TYPE,
+    KIND_VALUE_ARG, KIND_VALUE_ARGS, KIND_VAR_DECL, KIND_VAR_DECLARATOR, KOTLIN_DEFINITIONS,
+    SWIFT_DEFINITIONS,
 };
 use crate::StrExt;
 
@@ -383,7 +385,7 @@ fn first_identifier(node: &Node, bytes: &[u8]) -> Option<(String, Range)> {
     for child in node.children(&mut cur) {
         if matches!(
             child.kind(),
-            "type_identifier" | "simple_identifier" | "identifier"
+            k if k == KIND_TYPE_IDENT || k == KIND_SIMPLE_IDENT || k == KIND_IDENTIFIER
         ) {
             if let Ok(t) = child.utf8_text(bytes) {
                 if !t.is_empty()
@@ -512,7 +514,7 @@ fn is_chained_call_assignment_error(node: &Node, bytes: &[u8]) -> bool {
     }
     matches!(
         children[pos - 1].kind(),
-        "statements" | "navigation_expression" | "call_expression"
+        k if k == KIND_STATEMENTS || k == KIND_NAV_EXPR || k == KIND_CALL_EXPR
     )
 }
 
@@ -895,7 +897,7 @@ fn extract_package_and_imports(root: tree_sitter::Node, bytes: &[u8], data: &mut
                 }
             }
             "import_list" => {
-                for header in node.children_of_kind("import_header") {
+                for header in node.children_of_kind(KIND_IMPORT_HEADER) {
                     parse_import_header(&header, bytes, data);
                 }
             }
@@ -912,7 +914,7 @@ fn parse_import_header(header: &tree_sitter::Node, bytes: &[u8], data: &mut File
     let mut cur = header.walk();
     for child in header.children(&mut cur) {
         match child.kind() {
-            "identifier" => {
+            k if k == KIND_IDENTIFIER => {
                 path_text = child.utf8_text_owned(bytes);
             }
             "import_alias" => {
@@ -1016,7 +1018,7 @@ fn swift_import_path<'a>(node: tree_sitter::Node<'a>, bytes: &'a [u8]) -> Option
 fn extract_swift_imports(root: tree_sitter::Node, bytes: &[u8], data: &mut FileData) {
     let mut cur = root.walk();
     for node in root.children(&mut cur) {
-        if node.kind() == "import_declaration" {
+        if node.kind() == KIND_IMPORT_DECL {
             if let Some(txt) = swift_import_path(node, bytes) {
                 let local = txt.last_segment();
                 data.imports.push(ImportEntry {
@@ -1245,18 +1247,18 @@ fn extract_type_arg_from_call_suffix(call: Node, bytes: &[u8]) -> Option<String>
 /// lookup cannot resolve the return type.
 fn extract_class_literal_arg_type(call: Node, bytes: &[u8]) -> Option<String> {
     let call_suffix = call.first_child_of_kind(KIND_CALL_SUFFIX)?;
-    let value_args = call_suffix.first_child_of_kind("value_arguments")?;
-    let first_arg = value_args.first_child_of_kind("value_argument")?;
+    let value_args = call_suffix.first_child_of_kind(KIND_VALUE_ARGS)?;
+    let first_arg = value_args.first_child_of_kind(KIND_VALUE_ARG)?;
     let arg_expr = first_arg.named_child(0)?;
 
     // Argument may be: `callable_reference` (X::class) or
     // `navigation_expression` (X::class.java)
-    let callable_ref = if arg_expr.kind() == "callable_reference" {
+    let callable_ref = if arg_expr.kind() == KIND_CALLABLE_REF {
         arg_expr
     } else if arg_expr.kind() == KIND_NAV_EXPR {
         // X::class.java — first named child should be the callable_reference
         let inner = arg_expr.named_child(0)?;
-        if inner.kind() != "callable_reference" {
+        if inner.kind() != KIND_CALLABLE_REF {
             return None;
         }
         inner
@@ -1266,7 +1268,7 @@ fn extract_class_literal_arg_type(call: Node, bytes: &[u8]) -> Option<String> {
 
     // callable_reference children: type_identifier "::" "class"
     let type_node = callable_ref.named_child(0)?;
-    if type_node.kind() != "type_identifier" {
+    if type_node.kind() != KIND_TYPE_IDENT {
         return None;
     }
     let name = type_node.utf8_text_owned(bytes)?;
@@ -1291,7 +1293,7 @@ fn extract_lazy_type(delegate: Node, bytes: &[u8]) -> Option<String> {
 
     let call_suffix = call.first_child_of_kind(KIND_CALL_SUFFIX)?;
     let lambda_lit = find_lambda_literal(call_suffix)?;
-    let statements = lambda_lit.first_child_of_kind("statements")?;
+    let statements = lambda_lit.first_child_of_kind(KIND_STATEMENTS)?;
 
     // Only handle the single-statement form to avoid false positives.
     if statements.named_child_count() != 1 {
@@ -1468,7 +1470,7 @@ impl crate::types::FileData {
             KIND_PACKAGE_DECL => {
                 let mut cur = node.walk();
                 for child in node.children(&mut cur) {
-                    if matches!(child.kind(), "scoped_identifier" | "identifier") {
+                    if matches!(child.kind(), k if k == KIND_SCOPED_IDENT || k == KIND_IDENTIFIER) {
                         if let Ok(txt) = child.utf8_text(bytes) {
                             self.package = Some(txt.to_owned());
                         }
@@ -1512,15 +1514,17 @@ impl crate::types::FileData {
     }
 
     fn push_field_declaration(&mut self, node: &Node, bytes: &[u8]) {
-        let kind = if node.first_child_of_kind("modifiers").is_some_and(|mods| {
-            let found_kinds: Vec<&str> = (0..mods.child_count())
-                .filter_map(|i| mods.child(i))
-                .map(|c| c.kind())
-                .collect();
-            ["static", "final"]
-                .iter()
-                .all(|&req| found_kinds.contains(&req))
-        }) {
+        let kind = if node
+            .first_child_of_kind(KIND_MODIFIERS)
+            .is_some_and(|mods| {
+                let found_kinds: Vec<&str> = (0..mods.child_count())
+                    .filter_map(|i| mods.child(i))
+                    .map(|c| c.kind())
+                    .collect();
+                [KIND_MOD_STATIC, KIND_MOD_FINAL]
+                    .iter()
+                    .all(|&req| found_kinds.contains(&req))
+            }) {
             SymbolKind::CONSTANT
         } else {
             SymbolKind::FIELD
@@ -1528,7 +1532,7 @@ impl crate::types::FileData {
         let nr = ts_to_lsp(node.range());
         let vis = visibility_at_line(&self.lines, node.range().start_point.row);
         let detail = extract_detail(&self.lines, nr.start.line, nr.end.line);
-        for child in node.children_of_kind("variable_declarator") {
+        for child in node.children_of_kind(KIND_VAR_DECLARATOR) {
             if let Some((name, sel)) = first_identifier(&child, bytes) {
                 self.symbols.push(SymbolEntry {
                     name,
