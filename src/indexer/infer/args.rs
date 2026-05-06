@@ -39,130 +39,169 @@ pub(crate) fn find_as_call_arg_type(
     idx: &Indexer,
     uri: &Url,
 ) -> Option<String> {
-    let line = lines.get(pos.line)?;
-    // Slice the line up to (but not including) the cursor position.
-    let before_cursor = {
-        let byte_end = crate::indexer::live_tree::utf16_col_to_byte(line, pos.utf16_col);
-        &line[..byte_end]
-    };
-    let col = before_cursor.chars().count();
+    let (before_cursor, cursor_column) = line_prefix_before_cursor(lines, pos)?;
 
-    // ── CST fast path ────────────────────────────────────────────────────────
-    // Walk from the cursor node upward to find the enclosing `value_argument`,
-    // then up to `call_expression`.  O(depth) vs the O(lines × chars) text scan.
     if let Some(result) = cst_call_arg_type(pos, idx, uri) {
         return Some(result);
     }
 
-    // ── Named arg: `param = ` just before cursor ─────────────────────────────
-    let s = before_cursor.trim_end();
-    if let Some(s) = s.strip_suffix('=') {
-        if !s.ends_with(|c: char| "!<>=".contains(c)) {
-            let s = s.trim_end();
-            let ident_start = s
-                .rfind(|c: char| !c.is_alphanumeric() && c != '_')
-                .map(|i| i + 1)
-                .unwrap_or(0);
-            let named_arg = &s[ident_start..];
-            if !named_arg.is_empty()
-                && named_arg
-                    .chars()
-                    .next()
-                    .map(|c| !c.is_uppercase())
-                    .unwrap_or(false)
-            {
-                let preceding = s[..ident_start].trim_end().chars().last();
-                if matches!(preceding, Some('(') | Some(',')) {
-                    if let Some(fn_full) = find_enclosing_call_name(lines, pos.line, col) {
-                        if let Some(fn_name) =
-                            fn_full.split('.').next_back().filter(|n| !n.is_empty())
-                        {
-                            if let Some(sig) = find_fun_signature_full(fn_name, idx, uri) {
-                                if let Some(param_type) =
-                                    find_named_param_type_in_sig(&sig, named_arg)
-                                {
-                                    let base = param_type.trim().ident_prefix();
-                                    if !base.is_empty() {
-                                        return Some(base);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    if let Some(result) =
+        find_named_call_arg_type(lines, pos.line, cursor_column, idx, uri, before_cursor)
+    {
+        return Some(result);
     }
 
-    // ── Positional arg: `fn(a, keyword)` ────────────────────────────────────
-    // Scan backward tracking paren/bracket depth; count top-level commas to
-    // determine which argument position the cursor is in.
-    //
-    // Also track brace depth: if we encounter an unmatched `{` going backward,
-    // the cursor is inside a nested lambda body — NOT directly a function arg.
-    // Stop immediately so we don't mis-infer the outer function's param type.
+    find_positional_call_arg_type(lines, pos.line, cursor_column, idx, uri)
+}
+
+struct CallContext {
+    function_name: String,
+    argument_position: usize,
+}
+
+fn line_prefix_before_cursor(lines: &[String], pos: CursorPos) -> Option<(&str, usize)> {
+    let line = lines.get(pos.line)?;
+    let byte_end = crate::indexer::live_tree::utf16_col_to_byte(line, pos.utf16_col);
+    let before_cursor = &line[..byte_end];
+    Some((before_cursor, before_cursor.chars().count()))
+}
+
+fn find_named_call_arg_type(
+    lines: &[String],
+    cursor_line: usize,
+    cursor_column: usize,
+    idx: &Indexer,
+    uri: &Url,
+    before_cursor: &str,
+) -> Option<String> {
+    let before_assignment = before_cursor.trim_end().strip_suffix('=')?;
+    if before_assignment.ends_with(|ch: char| "!<>=".contains(ch)) {
+        return None;
+    }
+
+    let before_assignment = before_assignment.trim_end();
+    let identifier_start = before_assignment
+        .rfind(|ch: char| !ch.is_alphanumeric() && ch != '_')
+        .map_or(0, |index| index + 1);
+    let named_argument = &before_assignment[identifier_start..];
+    if named_argument.is_empty() || named_argument.chars().next().is_none_or(char::is_uppercase) {
+        return None;
+    }
+
+    let preceding_char = before_assignment[..identifier_start]
+        .trim_end()
+        .chars()
+        .last();
+    if !matches!(preceding_char, Some('(') | Some(',')) {
+        return None;
+    }
+
+    let full_name = find_enclosing_call_name(lines, cursor_line, cursor_column)?;
+    let function_name = full_name
+        .split('.')
+        .next_back()
+        .filter(|name| !name.is_empty())?;
+    let signature = find_fun_signature_full(function_name, idx, uri)?;
+    let parameter_type = find_named_param_type_in_sig(&signature, named_argument)?;
+    normalize_parameter_base_type(&parameter_type)
+}
+
+fn find_positional_call_arg_type(
+    lines: &[String],
+    cursor_line: usize,
+    cursor_column: usize,
+    idx: &Indexer,
+    uri: &Url,
+) -> Option<String> {
+    let call_context = find_call_context(lines, cursor_line, cursor_column)?;
+    let signature = find_fun_signature_full(&call_context.function_name, idx, uri)?;
+    let parameter_type = nth_fun_param_type_str(&signature, call_context.argument_position)?;
+    normalize_parameter_base_type(&parameter_type)
+}
+
+fn find_call_context(
+    lines: &[String],
+    cursor_line: usize,
+    cursor_column: usize,
+) -> Option<CallContext> {
     let mut depth: i32 = 0;
     let mut brace_depth: i32 = 0;
-    let mut arg_pos: usize = 0;
-    let scan_start = pos.line.saturating_sub(ARG_SCAN_BACK_LINES);
+    let mut argument_position: usize = 0;
+    let scan_start = cursor_line.saturating_sub(ARG_SCAN_BACK_LINES);
 
-    for ln in (scan_start..=pos.line).rev() {
-        let chars: Vec<char> = lines[ln].chars().collect();
-        let scan_to = if ln == pos.line {
-            col.min(chars.len())
+    for line_index in (scan_start..=cursor_line).rev() {
+        let chars: Vec<char> = lines[line_index].chars().collect();
+        let scan_to = if line_index == cursor_line {
+            cursor_column.min(chars.len())
         } else {
             chars.len()
         };
 
-        for i in (0..scan_to).rev() {
-            match chars[i] {
-                // Skip string interpolation `${`: treat `{` preceded by `$` as neutral.
-                '{' if i > 0 && chars[i - 1] == '$' => {}
+        for column_index in (0..scan_to).rev() {
+            match chars[column_index] {
+                '{' if column_index > 0 && chars[column_index - 1] == '$' => {}
                 '}' => brace_depth += 1,
                 '{' => {
                     brace_depth -= 1;
                     if brace_depth < 0 {
-                        // Cursor is inside a lambda body — do not match the outer call.
                         return None;
                     }
                 }
                 ')' | ']' => depth += 1,
-                // `>` going backward = entering a generic block; guard against `->`.
-                '>' if i == 0 || chars[i - 1] != '-' => depth += 1,
+                '>' if column_index == 0 || chars[column_index - 1] != '-' => depth += 1,
                 '(' | '[' => {
                     depth -= 1;
                     if depth < 0 {
-                        if i == 0 {
-                            return None;
-                        }
-                        // Extract function name (possibly dotted) before `(`.
-                        let mut end = i;
-                        while end > 0 && (is_id_char(chars[end - 1]) || chars[end - 1] == '.') {
-                            end -= 1;
-                        }
-                        if end >= i {
-                            return None;
-                        }
-                        let full_name: String = chars[end..i].iter().collect();
-                        let fn_name = full_name
-                            .trim_matches('.')
-                            .split('.')
-                            .next_back()
-                            .filter(|n| !n.is_empty())?;
-                        let sig = find_fun_signature_full(fn_name, idx, uri)?;
-                        let param_type = nth_fun_param_type_str(&sig, arg_pos)?;
-                        let base = param_type.trim().ident_prefix();
-                        return if base.is_empty() { None } else { Some(base) };
+                        let function_name = extract_called_function_name(&chars, column_index)?;
+                        return Some(CallContext {
+                            function_name,
+                            argument_position,
+                        });
                     }
                 }
-                // `<` going backward = leaving a generic block; only close if inside one.
                 '<' if depth > 0 => depth -= 1,
-                ',' if depth == 0 => arg_pos += 1,
+                ',' if depth == 0 => argument_position += 1,
                 _ => {}
             }
         }
     }
+
     None
+}
+
+fn extract_called_function_name(chars: &[char], opening_paren_index: usize) -> Option<String> {
+    if opening_paren_index == 0 {
+        return None;
+    }
+
+    let mut identifier_start = opening_paren_index;
+    while identifier_start > 0
+        && (is_id_char(chars[identifier_start - 1]) || chars[identifier_start - 1] == '.')
+    {
+        identifier_start -= 1;
+    }
+    if identifier_start >= opening_paren_index {
+        return None;
+    }
+
+    let full_name: String = chars[identifier_start..opening_paren_index]
+        .iter()
+        .collect();
+    full_name
+        .trim_matches('.')
+        .split('.')
+        .next_back()
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+}
+
+fn normalize_parameter_base_type(parameter_type: &str) -> Option<String> {
+    let base_type = parameter_type.trim().ident_prefix();
+    if base_type.is_empty() {
+        None
+    } else {
+        Some(base_type.to_owned())
+    }
 }
 
 // ─── Named-arg helpers ────────────────────────────────────────────────────────

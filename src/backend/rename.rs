@@ -63,10 +63,8 @@ fn cst_cursor_is_local_var(indexer: &crate::indexer::Indexer, uri: &Url, pos: Po
                 in_binding = true;
             }
             // Inside a binding and hit a function/lambda boundary → local variable.
-            KIND_FUN_DECL | KIND_METHOD_DECL | KIND_ANON_FUN | KIND_LAMBDA_LIT
-                if in_binding =>
-            {
-                return true
+            KIND_FUN_DECL | KIND_METHOD_DECL | KIND_ANON_FUN | KIND_LAMBDA_LIT if in_binding => {
+                return true;
             }
             // Function/method/lambda without being in a binding → not a local var.
             KIND_FUN_DECL | KIND_METHOD_DECL | KIND_ANON_FUN | KIND_LAMBDA_LIT => return false,
@@ -77,11 +75,11 @@ fn cst_cursor_is_local_var(indexer: &crate::indexer::Indexer, uri: &Url, pos: Po
             KIND_CLASS_BODY | KIND_OBJECT_DECL | KIND_COMPANION_OBJ | KIND_SOURCE_FILE
                 if in_binding =>
             {
-                return false
+                return false;
             }
             // Scope boundary without being in a binding → not applicable.
             KIND_CLASS_BODY | KIND_OBJECT_DECL | KIND_COMPANION_OBJ | KIND_SOURCE_FILE => {
-                return false
+                return false;
             }
             _ => {}
         }
@@ -119,8 +117,10 @@ fn any_local_var_decl_in_scope(
     file.symbols
         .iter()
         .filter(|s| {
-            matches!(s.kind, SymbolKind::PROPERTY | SymbolKind::VARIABLE | SymbolKind::CONSTANT)
-                && s.name == name
+            matches!(
+                s.kind,
+                SymbolKind::PROPERTY | SymbolKind::VARIABLE | SymbolKind::CONSTANT
+            ) && s.name == name
                 && (s.selection_range.start.line as usize) >= scope.0
                 && (s.selection_range.start.line as usize) <= scope.1
         })
@@ -182,7 +182,7 @@ fn cst_cursor_is_method(indexer: &crate::indexer::Indexer, uri: &Url, pos: Posit
             KIND_NAV_EXPR => return true,
             // Stop at top-level scope boundaries without a verdict.
             KIND_SOURCE_FILE | KIND_CLASS_BODY | KIND_OBJECT_DECL | KIND_COMPANION_OBJ => {
-                return false
+                return false;
             }
             _ => {}
         }
@@ -349,7 +349,179 @@ pub(super) fn rename_in_scope(
     edits
 }
 
+struct RenameCursorSymbol {
+    name: String,
+    parent_class: Option<String>,
+    declared_package: Option<String>,
+    scope_limited_to_current_file: bool,
+}
+
 impl Backend {
+    fn resolve_cursor_symbol(&self, uri: &Url, pos: Position) -> Option<RenameCursorSymbol> {
+        let name = self.indexer.word_at(uri, pos)?;
+        let (parent_class, declared_package, scope_limited_to_current_file) =
+            if name.starts_with_uppercase() {
+                let (parent_class, declared_package) =
+                    resolve_references_scope(&self.indexer, uri, pos.line, &name);
+                (parent_class, declared_package, false)
+            } else {
+                (None, None, true)
+            };
+
+        Some(RenameCursorSymbol {
+            name,
+            parent_class,
+            declared_package,
+            scope_limited_to_current_file,
+        })
+    }
+
+    fn rename_local_symbol(
+        &self,
+        uri: &Url,
+        pos: Position,
+        name: &str,
+        new_name: &str,
+    ) -> Option<WorkspaceEdit> {
+        let lines = self.indexer.lines_for(uri)?;
+        let scope = enclosing_scope(&lines, pos.line as usize);
+        let skip_dotted = cst_cursor_is_local_var(&self.indexer, uri, pos)
+            || any_local_var_decl_in_scope(&self.indexer, uri, name, scope);
+        let mut file_edits = rename_in_scope(&lines, name, new_name, scope, skip_dotted);
+        if file_edits.is_empty() {
+            return None;
+        }
+        file_edits.sort_by(|a, b| b.range.start.cmp(&a.range.start));
+
+        let mut changes = std::collections::HashMap::new();
+        changes.insert(uri.clone(), file_edits);
+        Some(WorkspaceEdit {
+            changes: Some(changes),
+            document_changes: None,
+            change_annotations: None,
+        })
+    }
+
+    fn definition_files_for_rename(&self, name: &str, parent_class: Option<&str>) -> Vec<String> {
+        self.indexer
+            .definitions
+            .get(name)
+            .map(|locations| {
+                locations
+                    .iter()
+                    .filter(|location| {
+                        parent_class.is_none_or(|parent| {
+                            self.indexer
+                                .enclosing_class_at(&location.uri, location.range.start.line)
+                                .as_deref()
+                                == Some(parent)
+                        })
+                    })
+                    .filter_map(|location| location.uri.to_file_path().ok())
+                    .filter_map(|path| path.to_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    async fn collect_reference_locations(
+        &self,
+        uri: &Url,
+        rename_target: &RenameCursorSymbol,
+    ) -> Vec<Location> {
+        let decl_files = self.definition_files_for_rename(
+            &rename_target.name,
+            rename_target.parent_class.as_deref(),
+        );
+        let root = self.indexer.workspace_root.read().unwrap().clone();
+        let matcher = self.indexer.ignore_matcher.read().unwrap().clone();
+        let uri_clone = uri.clone();
+        let name = rename_target.name.clone();
+        let parent_class = rename_target.parent_class.clone();
+        let declared_package = rename_target.declared_package.clone();
+        let mut reference_locations = tokio::task::spawn_blocking(move || {
+            crate::rg::rg_find_references(
+                &name,
+                parent_class.as_deref(),
+                declared_package.as_deref(),
+                root.as_deref(),
+                true,
+                &uri_clone,
+                &decl_files,
+                matcher.as_deref(),
+            )
+        })
+        .await
+        .unwrap_or_default();
+
+        let library_uris = &self.indexer.library_uris;
+        if !library_uris.is_empty() {
+            reference_locations.retain(|location| !library_uris.contains(location.uri.as_str()));
+        }
+        reference_locations
+    }
+
+    fn reference_candidate_files(
+        &self,
+        current_uri: &Url,
+        reference_locations: &[Location],
+    ) -> Vec<Url> {
+        let mut files = vec![current_uri.clone()];
+        for location in reference_locations {
+            if !files.contains(&location.uri) {
+                files.push(location.uri.clone());
+            }
+        }
+        eprintln!(
+            "[rename] rg found {} locs across {} files",
+            reference_locations.len(),
+            files.len()
+        );
+        files
+    }
+
+    fn rename_lines_for_file(&self, file_uri: &Url) -> Option<Vec<String>> {
+        if let Some(lines) = self.indexer.lines_for(file_uri) {
+            return Some(lines.as_slice().to_vec());
+        }
+
+        let path = file_uri.to_file_path().ok()?;
+        let content = std::fs::read_to_string(path).ok()?;
+        Some(content.lines().map(str::to_owned).collect())
+    }
+
+    fn build_workspace_edit(
+        &self,
+        file_uris: &[Url],
+        name: &str,
+        new_name: &str,
+    ) -> Option<WorkspaceEdit> {
+        let mut changes = std::collections::HashMap::new();
+
+        for file_uri in file_uris {
+            let Some(lines) = self.rename_lines_for_file(file_uri) else {
+                continue;
+            };
+            let scope = (0, lines.len().saturating_sub(1));
+            let mut edits = rename_in_scope(&lines, name, new_name, scope, false);
+            if edits.is_empty() {
+                continue;
+            }
+            edits.sort_by(|a, b| b.range.start.cmp(&a.range.start));
+            changes.insert(file_uri.clone(), edits);
+        }
+
+        if changes.is_empty() {
+            None
+        } else {
+            Some(WorkspaceEdit {
+                changes: Some(changes),
+                document_changes: None,
+                change_annotations: None,
+            })
+        }
+    }
+
     pub(super) async fn prepare_rename_impl(
         &self,
         params: TextDocumentPositionParams,
@@ -378,165 +550,21 @@ impl Backend {
         let pos = params.text_document_position.position;
         let new_name = &params.new_name;
 
-        let name = match self.indexer.word_at(uri, pos) {
-            Some(w) => w,
-            None => return Ok(None),
+        let Some(rename_target) = self.resolve_cursor_symbol(uri, pos) else {
+            return Ok(None);
         };
 
-        // ── Resolve scoping (delegates to the shared helper used by findReferences) ─
-        let (parent_class, declared_pkg) = if name.starts_with_uppercase() {
-            resolve_references_scope(&self.indexer, uri, pos.line, &name)
-        } else {
-            // Lowercase symbol — limit to enclosing scope in current file only.
-            let lines = match self.indexer.lines_for(uri) {
-                Some(l) => l,
-                None => return Ok(None),
-            };
-            let scope = enclosing_scope(&lines, pos.line as usize);
-
-            // `skip_dotted = true` only for local variables — a `val`/`var` whose
-            // nearest scope ancestor is a function body (not a class body or source file).
-            // Class properties, top-level vals, and method call sites all need dotted
-            // accesses included so that `this.myProp` / `obj.myProp` are also renamed.
-            //
-            // Check both the cursor position (declaration case) and the file index
-            // (reference case: cursor on a reference, not the declaration itself).
-            let skip_dotted = cst_cursor_is_local_var(&self.indexer, uri, pos)
-                || any_local_var_decl_in_scope(&self.indexer, uri, &name, scope);
-
-            let mut file_edits = rename_in_scope(&lines, &name, new_name, scope, skip_dotted);
-            if file_edits.is_empty() {
-                return Ok(None);
-            }
-            file_edits.sort_by(|a, b| b.range.start.cmp(&a.range.start));
-            let mut changes = std::collections::HashMap::new();
-            changes.insert(uri.clone(), file_edits);
-            return Ok(Some(WorkspaceEdit {
-                changes: Some(changes),
-                document_changes: None,
-                change_annotations: None,
-            }));
-        };
-
-        let decl_files: Vec<String> = self
-            .indexer
-            .definitions
-            .get(&name)
-            .map(|locs| {
-                locs.iter()
-                    .filter(|l| {
-                        if let Some(ref parent) = parent_class {
-                            self.indexer
-                                .enclosing_class_at(&l.uri, l.range.start.line)
-                                .as_deref()
-                                == Some(parent.as_str())
-                        } else {
-                            true
-                        }
-                    })
-                    .filter_map(|l| l.uri.to_file_path().ok())
-                    .filter_map(|p| p.to_str().map(|s| s.to_owned()))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        // ── Find all reference locations (off-thread, same as references handler) ──
-        let root = self.indexer.workspace_root.read().unwrap().clone();
-        let matcher = self.indexer.ignore_matcher.read().unwrap().clone();
-        let uri_clone = uri.clone();
-        let name2 = name.clone();
-        let parent2 = parent_class.clone();
-        let decl2 = declared_pkg.clone();
-        // include_declaration=true so we also rename the declaration site
-        let ref_locs = tokio::task::spawn_blocking(move || {
-            crate::rg::rg_find_references(
-                &name2,
-                parent2.as_deref(),
-                decl2.as_deref(),
-                root.as_deref(),
-                true,
-                &uri_clone,
-                &decl_files,
-                matcher.as_deref(),
-            )
-        })
-        .await
-        .unwrap_or_default();
-
-        // Filter out library-source locations — library files are read-only (not user code).
-        let mut ref_locs = ref_locs;
-        let lib = &self.indexer.library_uris;
-        if !lib.is_empty() {
-            ref_locs.retain(|loc| !lib.contains(loc.uri.as_str()));
+        if rename_target.scope_limited_to_current_file {
+            return Ok(self.rename_local_symbol(uri, pos, &rename_target.name, new_name));
         }
 
-        if ref_locs.is_empty() {
+        let reference_locations = self.collect_reference_locations(uri, &rename_target).await;
+        if reference_locations.is_empty() {
             return Ok(None);
         }
 
-        // ── Collect unique files that have references ───────────────────────
-        // Always include current file (may have unsaved content rg can't see).
-        let mut files: Vec<Url> = vec![uri.clone()];
-        for loc in &ref_locs {
-            if !files.contains(&loc.uri) {
-                files.push(loc.uri.clone());
-            }
-        }
-        eprintln!(
-            "[rename] rg found {} locs across {} files",
-            ref_locs.len(),
-            files.len()
-        );
-
-        // ── Build TextEdits per file using rename_in_scope ──────────────────
-        // We do NOT use rg location columns directly because Pass A uses a
-        // qualified pattern (ParentClass.Name) so the match column points to
-        // ParentClass, not Name. Instead we use rg_find_references only to
-        // identify which files need editing, then do precise word replacement.
-        let mut changes: std::collections::HashMap<Url, Vec<TextEdit>> =
-            std::collections::HashMap::new();
-
-        for file_uri in &files {
-            // Prefer in-memory lines (open buffer with unsaved edits), then fall
-            // back to reading from disk so we can rename closed files too.
-            let mem_lines = self.indexer.lines_for(file_uri);
-            let disk_lines: Vec<String>;
-            let lines: &[String] = match mem_lines {
-                Some(ref arc) => arc.as_slice(),
-                None => {
-                    let path = match file_uri.to_file_path() {
-                        Ok(p) => p,
-                        Err(_) => continue,
-                    };
-                    match std::fs::read_to_string(&path) {
-                        Ok(content) => {
-                            disk_lines = content.lines().map(|l| l.to_owned()).collect();
-                            &disk_lines
-                        }
-                        Err(_) => continue,
-                    }
-                }
-            };
-            let lines = lines.to_vec();
-
-            let scope = (0, lines.len().saturating_sub(1));
-            let edits = rename_in_scope(&lines, &name, new_name, scope, false);
-
-            if !edits.is_empty() {
-                let mut edits = edits;
-                edits.sort_by(|a, b| b.range.start.cmp(&a.range.start));
-                changes.insert(file_uri.clone(), edits);
-            }
-        }
-
-        if changes.is_empty() {
-            return Ok(None);
-        }
-        Ok(Some(WorkspaceEdit {
-            changes: Some(changes),
-            document_changes: None,
-            change_annotations: None,
-        }))
+        let files = self.reference_candidate_files(uri, &reference_locations);
+        Ok(self.build_workspace_edit(&files, &rename_target.name, new_name))
     }
 }
 
