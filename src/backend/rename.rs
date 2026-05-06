@@ -11,12 +11,89 @@ use crate::StrExt;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 
+/// Return `true` when the cursor is on a local variable declaration — i.e. a
+/// `property_declaration` / `variable_declaration` whose nearest scope-boundary
+/// ancestor is a function/lambda body rather than a class body or source file.
+///
+/// This is used to decide whether to skip dotted occurrences during rename:
+/// - local var `val syncWith` inside a function → `skip_dotted = true`
+///   (avoid renaming `.syncWith()` method calls)
+/// - class property `val myProp` → `skip_dotted = false`
+///   (must rename `this.myProp` / `obj.myProp` accesses)
+/// - navigation expression (`.method()`) → `skip_dotted = false`
+/// - function declaration → `skip_dotted = false`
+fn cst_cursor_is_local_var(indexer: &crate::indexer::Indexer, uri: &Url, pos: Position) -> bool {
+    use tree_sitter::Point;
+
+    let doc = match indexer.live_doc(uri) {
+        Some(d) => d,
+        None => return false,
+    };
+    let full_text = match std::str::from_utf8(&doc.bytes) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let line_idx = pos.line as usize;
+    let line_text = match full_text.lines().nth(line_idx) {
+        Some(l) => l,
+        None => return false,
+    };
+    let byte_col = utf16_col_to_byte(line_text, pos.character as usize);
+    let point = Point {
+        row: line_idx,
+        column: byte_col,
+    };
+    let start_node = match doc
+        .tree
+        .root_node()
+        .descendant_for_point_range(point, point)
+    {
+        Some(n) => n,
+        None => return false,
+    };
+
+    // Track whether we've entered a property/variable declaration binding.
+    let mut in_binding = false;
+    let mut cur = start_node;
+    loop {
+        let kind = cur.kind();
+        match kind {
+            // Entering a property/variable binding — continue walking up.
+            KIND_PROP_DECL | KIND_VAR_DECL | KIND_MULTI_VAR_DECL => {
+                in_binding = true;
+            }
+            // Inside a binding and hit a function boundary → local variable.
+            KIND_FUN_DECL | KIND_METHOD_DECL | KIND_ANON_FUN if in_binding => return true,
+            // Function/method declaration without being in a binding → not a local var.
+            KIND_FUN_DECL | KIND_METHOD_DECL | KIND_ANON_FUN => return false,
+            // Navigation expression → member access, not a local var.
+            KIND_NAV_EXPR => return false,
+            // Class body, companion object, or source file reached while in a binding
+            // → class-level or top-level property, NOT a local var.
+            KIND_CLASS_BODY | KIND_OBJECT_DECL | KIND_COMPANION_OBJ | KIND_SOURCE_FILE
+                if in_binding =>
+            {
+                return false
+            }
+            // Scope boundary without being in a binding → not applicable.
+            KIND_CLASS_BODY | KIND_OBJECT_DECL | KIND_COMPANION_OBJ | KIND_SOURCE_FILE => {
+                return false
+            }
+            _ => {}
+        }
+        match cur.parent() {
+            Some(p) => cur = p,
+            None => return false,
+        }
+    }
+}
+
 /// Return `true` when the CST node at `pos` belongs to a function/method
 /// declaration or a navigation expression (member access). Returns `false`
 /// for property/variable declarations, parameters, and unknown contexts.
 ///
-/// Used to decide whether dotted member-access occurrences of the same name
-/// should be included in a rename (method) or skipped (local variable).
+/// Used as a secondary check to detect method call sites (nav expressions)
+/// that are not in the file's own symbol index.
 fn cst_cursor_is_method(indexer: &crate::indexer::Indexer, uri: &Url, pos: Position) -> bool {
     use tree_sitter::Point;
 
@@ -272,15 +349,11 @@ impl Backend {
             };
             let scope = enclosing_scope(&lines, pos.line as usize);
 
-            // Determine whether the cursor is on a local variable (not a method).
-            // Use the CST to walk up from the identifier node and check the ancestor kind:
-            // - navigation_expression → method call site
-            // - function_declaration / method_declaration → method declaration
-            // - property_declaration / variable_declaration → local variable
-            let is_method = cst_cursor_is_method(&self.indexer, uri, pos);
-            // Skip dotted member-access occurrences when renaming a local variable to
-            // avoid conflating `val syncWith` with `.syncWith()` method calls.
-            let skip_dotted = !is_method;
+            // `skip_dotted = true` only for local variables — a `val`/`var` whose
+            // nearest scope ancestor is a function body (not a class body or source file).
+            // Class properties, top-level vals, and method call sites all need dotted
+            // accesses included so that `this.myProp` / `obj.myProp` are also renamed.
+            let skip_dotted = cst_cursor_is_local_var(&self.indexer, uri, pos);
 
             let mut file_edits = rename_in_scope(&lines, &name, new_name, scope, skip_dotted);
             if file_edits.is_empty() {
@@ -420,13 +493,21 @@ impl Backend {
 
 #[cfg(test)]
 mod tests {
-    use super::cst_cursor_is_method;
+    use super::{cst_cursor_is_local_var, cst_cursor_is_method};
     use crate::indexer::Indexer;
     use tower_lsp::lsp_types::{Position, Url};
 
     fn make_indexer_with(src: &str) -> (Indexer, Url) {
         let idx = Indexer::new();
         let uri = Url::parse("file:///tmp/test.kt").unwrap();
+        idx.store_live_tree(&uri, src);
+        (idx, uri)
+    }
+
+    fn make_indexed(src: &str) -> (Indexer, Url) {
+        let idx = Indexer::new();
+        let uri = Url::parse("file:///tmp/test.kt").unwrap();
+        idx.index_content(&uri, src);
         idx.store_live_tree(&uri, src);
         (idx, uri)
     }
@@ -488,6 +569,38 @@ mod tests {
         assert!(
             !cst_cursor_is_method(&idx, &uri, pos),
             "var decl should not be method"
+        );
+    }
+
+    /// Local variable inside a function body → is local var (skip_dotted = true).
+    #[test]
+    fn local_var_inside_function_is_local() {
+        let src = "fun go() {\n    val localFoo = 1\n}\n";
+        let (idx, uri) = make_indexed(src);
+        // Cursor on `localFoo` at line 1, col 8
+        let pos = Position {
+            line: 1,
+            character: 8,
+        };
+        assert!(
+            cst_cursor_is_local_var(&idx, &uri, pos),
+            "val inside fun should be local var"
+        );
+    }
+
+    /// Class property → not a local var, dotted accesses should be renamed.
+    #[test]
+    fn class_property_is_not_local_var() {
+        let src = "class Foo {\n    val myProp: String = \"\"\n}\n";
+        let (idx, uri) = make_indexed(src);
+        // Cursor on `myProp` at line 1, col 8
+        let pos = Position {
+            line: 1,
+            character: 8,
+        };
+        assert!(
+            !cst_cursor_is_local_var(&idx, &uri, pos),
+            "class property should not be local var"
         );
     }
 }
