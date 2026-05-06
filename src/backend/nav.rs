@@ -103,14 +103,9 @@ impl Backend {
         // Use effective_rg_root so searches use the open file's project root
         // when workspace_root points to a different project (e.g. android vs ios).
         let file_path = uri.to_file_path().ok();
-        let (root_opt, matcher) = {
-            let wr = self.indexer.workspace_root.read().unwrap().clone();
-            let m = self.indexer.ignore_matcher.read().unwrap().clone();
-            (
-                crate::rg::effective_rg_root(wr.as_deref(), file_path.as_deref()),
-                m,
-            )
-        };
+        let (workspace_root, matcher) = self.rg_context().await;
+        let root_opt =
+            crate::rg::effective_rg_root(workspace_root.as_deref(), file_path.as_deref());
         let name_clone = ctx.word.clone();
         let rg_locs = tokio::task::spawn_blocking(move || {
             crate::rg::rg_find_definition(&name_clone, root_opt.as_deref(), matcher.as_deref())
@@ -144,14 +139,9 @@ impl Backend {
         // to find implementors quickly to avoid client timeouts in large projects.
         if locs.is_empty() {
             let file_path = uri.to_file_path().ok();
-            let (root_opt, matcher) = {
-                let wr = self.indexer.workspace_root.read().unwrap().clone();
-                let m = self.indexer.ignore_matcher.read().unwrap().clone();
-                (
-                    crate::rg::effective_rg_root(wr.as_deref(), file_path.as_deref()),
-                    m,
-                )
-            };
+            let (workspace_root, matcher) = self.rg_context().await;
+            let root_opt =
+                crate::rg::effective_rg_root(workspace_root.as_deref(), file_path.as_deref());
             let word_clone = word.clone();
             let rg_impls = tokio::task::spawn_blocking(move || {
                 crate::rg::rg_find_implementors(
@@ -250,14 +240,9 @@ impl Backend {
     pub(super) async fn rg_resolve(&self, uri: &Url, name: &str) -> Vec<Location> {
         let name_clone = name.to_string();
         let file_path = uri.to_file_path().ok();
-        let (root_opt, matcher) = {
-            let wr = self.indexer.workspace_root.read().unwrap().clone();
-            let m = self.indexer.ignore_matcher.read().unwrap().clone();
-            (
-                crate::rg::effective_rg_root(wr.as_deref(), file_path.as_deref()),
-                m,
-            )
-        };
+        let (workspace_root, matcher) = self.rg_context().await;
+        let root_opt =
+            crate::rg::effective_rg_root(workspace_root.as_deref(), file_path.as_deref());
         tokio::task::spawn_blocking(move || {
             crate::rg::rg_find_definition(&name_clone, root_opt.as_deref(), matcher.as_deref())
         })
