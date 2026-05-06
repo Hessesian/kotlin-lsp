@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.10.0
+
+- **CLI mode** — `kotlin-lsp find|refs|hover|index` subcommands: use kotlin-lsp as a standalone tool without an editor or daemon
+- **Auto mode** — uses cached index when available, falls back to fast rg/fd automatically (no flag needed)
+- **`--fast` flag** — pure rg/fd, zero startup cost; useful in scripts and CI
+- **`--smart` flag** — builds index if missing, uses full cross-file accuracy
+- **`--json` flag** — machine-readable output for piping/scripting
+- **`--root` flag** — workspace root override; defaults to nearest `.git` dir or cwd
+- **`--help` / `--version`** — standard CLI flags; work before or after subcommand
+- **Helpful errors** — `--find` (common mistake) prints `'find' is a subcommand, not a flag`
+
 ## 0.9.4
 
 - **Phase 12 refactoring complete** — replaced bool/tuple returns with named `struct`s for clarity (e.g., `ScanResult`, `NamedResult`); downgraded unreachable `pub` to `pub(crate)` across the binary crate; fixed bare `unwrap()` and double-ref anti-patterns; replaced blocking `std::fs::read_to_string` with `tokio::fs` in spawned tasks.
