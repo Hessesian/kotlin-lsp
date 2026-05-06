@@ -5,7 +5,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { joinSession } from "@github/copilot-sdk/extension";
 
-const README_PATH = ".github/extensions/kotlin-lsp/README.md";
+const SKILL_NAME = "kotlin-lsp";
+const SKILL_NUDGE = "Invoke the `kotlin-lsp` skill for full navigation guidance (use the skill tool with skill: \"kotlin-lsp\").";
 
 // ── Grep-overuse detection ────────────────────────────────────────────
 
@@ -36,7 +37,7 @@ const LSP_REMINDER = [
   "  • lsp incomingCalls / outgoingCalls — call graph",
   "grep/rg/glob is ONLY valid for: free-text/comment search, extension functions,",
   "generated code, Java interop, or when LSP returned empty for a known-good symbol.",
-  `Full guide: \`${README_PATH}\`.`,
+  SKILL_NUDGE,
 ].join("\n");
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -57,9 +58,9 @@ function normalizeToolArgs(rawToolArgs) {
 function denyMessage() {
   return [
     "Blocked: Kotlin/Java symbol lookup must use Kotlin LSP first.",
-    `Read \`${README_PATH}\` first.`,
     "Use Kotlin LSP symbol/navigation tools before grep/glob/bash search.",
     "Use grep/rg only for free-text search, extension functions, generated code, or Java interop cases where LSP cannot help.",
+    SKILL_NUDGE,
   ].join(" ");
 }
 
@@ -282,7 +283,7 @@ const session = await joinSession({
           "Use grep/rg only for free-text, generated code, extension functions, or Java interop fallback.",
           "Use `lsp goToImplementation` for interface implementors (transitive). Only use `kotlin_find_subtypes` if LSP returns empty.",
           "For extension functions, use `lsp workspaceSymbol` with dot-qualified query (e.g. 'StoreState.isReady').",
-          `Guide: \`${README_PATH}\`.`,
+          SKILL_NUDGE,
         ].join(" "),
       };
     },
