@@ -217,6 +217,9 @@ impl crate::indexer::infer::InferDeps for Indexer {
     fn find_fun_return_type(&self, fn_name: &str) -> Option<String> {
         crate::resolver::infer::find_fun_return_type_by_name(self, fn_name)
     }
+    fn live_doc(&self, uri: &Url) -> Option<Arc<LiveDoc>> {
+        self.live_doc(uri)
+    }
 }
 
 impl Indexer {
@@ -372,7 +375,16 @@ impl Indexer {
             }
             None
         } else {
-            find_named_lambda_param_type(before, recv, self, uri, cursor_line)
+            find_named_lambda_param_type(
+                before,
+                recv,
+                self,
+                uri,
+                CursorPos {
+                    line: cursor_line,
+                    utf16_col: cursor_col,
+                },
+            )
         }
     }
 
@@ -465,7 +477,7 @@ impl Indexer {
                         Some(&elem_type),
                         uri,
                         snippets,
-                        Some(position.line as u32),
+                        Some(position.line),
                     );
                     if items.is_empty() {
                         // Type name known (e.g. generic param `T`, `StateType`) but not
@@ -496,7 +508,7 @@ impl Indexer {
             uri,
             snippets,
             annotation_only,
-            Some(position.line as u32),
+            Some(position.line),
         );
 
         // Add scope-aware lambda parameter names (bare-word completion only).
