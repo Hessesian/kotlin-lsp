@@ -2,8 +2,9 @@ use std::sync::Arc;
 use tower_lsp::lsp_types::{Location, Url};
 
 use crate::indexer::Indexer;
-use crate::parser::parse_by_extension;
 use crate::LinesExt;
+
+use super::ensure_file_data;
 
 /// Search for `name` in a specific file identified by its URI string.
 ///
@@ -14,36 +15,17 @@ pub(crate) fn find_name_in_uri(idx: &Indexer, name: &str, file_uri: &str) -> Vec
         return vec![];
     };
 
-    // a) Indexed file – symbol table
-    if let Some(f) = idx.files.get(file_uri) {
-        if let Some(sym) = f.symbols.iter().find(|s| s.name == name) {
-            return vec![Location {
-                uri,
-                range: sym.selection_range,
-            }];
-        }
-        // b) Line scan for constructor params / un-indexed declarations
-        if let Some(range) = f.lines.find_declaration_range(name) {
-            return vec![Location { uri, range }];
-        }
+    let Some(file_data) = ensure_file_data(idx, &uri) else {
         return vec![];
+    };
+    if let Some(sym) = file_data.symbols.iter().find(|s| s.name == name) {
+        return vec![Location {
+            uri,
+            range: sym.selection_range,
+        }];
     }
-
-    // c) File not yet indexed — parse on demand using the correct parser
-    if let Ok(path) = uri.to_file_path() {
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            let file_data = parse_by_extension(file_uri, &content);
-            if let Some(sym) = file_data.symbols.iter().find(|s| s.name == name) {
-                return vec![Location {
-                    uri,
-                    range: sym.selection_range,
-                }];
-            }
-            let lines: Vec<String> = content.lines().map(String::from).collect();
-            if let Some(range) = lines.find_declaration_range(name) {
-                return vec![Location { uri, range }];
-            }
-        }
+    if let Some(range) = file_data.lines.find_declaration_range(name) {
+        return vec![Location { uri, range }];
     }
     vec![]
 }

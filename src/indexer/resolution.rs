@@ -7,7 +7,7 @@ use tower_lsp::lsp_types::{SymbolKind, Url};
 
 use crate::indexer::doc::extract_doc_comment;
 use crate::indexer::Location;
-use crate::types::{FileData, SymbolEntry};
+use crate::types::{CallerContext, FileData, SymbolEntry};
 use crate::LinesExt;
 
 /// Domain-level resolution result. Small, owned data suitable for LSP adapters.
@@ -203,8 +203,15 @@ pub(crate) fn cross_file_type_subst<I: IndexRead>(
     caller_cursor_line: Option<u32>,
     sig: &str,
 ) -> String {
-    let subst =
-        build_type_param_subst_impl(index, sym_uri, sym_line, calling_uri, caller_cursor_line);
+    let subst = build_type_param_subst_impl(
+        index,
+        sym_uri,
+        sym_line,
+        CallerContext {
+            uri: Some(calling_uri),
+            cursor_line: caller_cursor_line,
+        },
+    );
     if subst.is_empty() {
         sig.to_owned()
     } else {
@@ -383,8 +390,10 @@ fn build_subst_if_needed<I: IndexRead>(
             index,
             location.uri.as_str(),
             location.range.start.line,
-            calling_uri,
-            cursor_line,
+            CallerContext {
+                uri: Some(calling_uri),
+                cursor_line,
+            },
         ),
         SubstitutionContext::Precomputed(m) => m.clone(),
     }
@@ -397,52 +406,39 @@ fn build_type_param_subst_impl<I: IndexRead>(
     index: &I,
     sym_uri: &str,
     sym_line: u32,
-    calling_uri: &str,
-    caller_cursor_line: Option<u32>,
+    caller: CallerContext<'_>,
 ) -> HashMap<String, String> {
+    let Some(calling_uri) = caller.uri else {
+        return HashMap::new();
+    };
     if sym_uri == calling_uri {
         return HashMap::new();
     }
 
-    // Trigger on-demand indexing if the file hasn't been indexed yet.
     index.ensure_indexed_on_demand(sym_uri);
-
-    let sym_data = match index.get_file_data(sym_uri) {
-        Some(d) => d,
-        None => return HashMap::new(),
+    let Some(sym_data) = index.get_file_data(sym_uri) else {
+        return HashMap::new();
     };
-
-    let container_name = match sym_data.containing_class_at(sym_line) {
-        Some(n) => n,
-        None => return HashMap::new(),
+    let Some(container_name) = sym_data.containing_class_at(sym_line) else {
+        return HashMap::new();
     };
-
-    let container_sym = match sym_data.symbols.iter().find(|s| s.name == container_name) {
-        Some(s) => s,
-        None => return HashMap::new(),
+    let Some(container_sym) = sym_data.symbols.iter().find(|s| s.name == container_name) else {
+        return HashMap::new();
     };
-
-    let type_params = &container_sym.type_params;
-    if type_params.is_empty() {
+    if container_sym.type_params.is_empty() {
         return HashMap::new();
     }
 
-    // Trigger on-demand indexing for the calling file too.
     index.ensure_indexed_on_demand(calling_uri);
-
-    let calling_data = match index.get_file_data(calling_uri) {
-        Some(d) => d,
-        None => return HashMap::new(),
+    let Some(calling_data) = index.get_file_data(calling_uri) else {
+        return HashMap::new();
     };
 
-    // Use `caller_cursor_line` to identify the specific calling class — when multiple
-    // classes in the same file extend the same base with different type args,
-    // this ensures we pick the correct substitution for the caller.
-    // When `None`, the first class extending the base is used (e.g. for completion).
-    let calling_class_line = caller_cursor_line
+    let calling_class_line = caller
+        .cursor_line
         .and_then(|line| calling_data.containing_class_at(line))
         .and_then(|name| calling_data.symbols.iter().find(|s| s.name == name))
-        .map(|s| s.selection_start());
+        .map(SymbolEntry::selection_start);
 
     let type_args = calling_data
         .supers
@@ -453,15 +449,15 @@ fn build_type_param_subst_impl<I: IndexRead>(
         })
         .map(|(_, _, args)| args.clone())
         .unwrap_or_default();
-
     if type_args.is_empty() {
         return HashMap::new();
     }
 
-    type_params
+    container_sym
+        .type_params
         .iter()
         .zip(type_args.iter())
-        .map(|(k, v)| (k.clone(), v.clone()))
+        .map(|(key, value)| (key.clone(), value.clone()))
         .collect()
 }
 

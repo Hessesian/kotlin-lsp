@@ -5,12 +5,14 @@ use crate::indexer::Indexer;
 use crate::parser::parse_by_extension;
 use crate::stdlib::bare_completions;
 use crate::stdlib_tail::dot_completions_for_lang;
-use crate::types::{FileData, ImportEntry, SymbolEntry, Visibility};
+use crate::types::{CallerContext, FileData, ImportEntry, SymbolEntry, Visibility};
 use crate::LinesExt;
 use crate::StrExt;
 
 use super::infer::{infer_receiver_type, ReceiverKind, ReceiverType};
-use super::{already_imported, fqns_for_name, resolve_symbol_inner, resolve_symbol_no_rg};
+use super::{
+    already_imported, ensure_file_data, fqns_for_name, resolve_symbol_no_rg, walk_hierarchy,
+};
 
 // ─── match scoring ────────────────────────────────────────────────────────────
 
@@ -368,68 +370,20 @@ fn complete_super(idx: &Indexer, from_uri: &Url, snippets: bool) -> Vec<Completi
     if idx.files.get(from_uri.as_str()).is_none() {
         return vec![];
     }
-    let mut items: Vec<CompletionItem> = Vec::new();
-    let mut visited: Vec<String> = vec![from_uri.as_str().to_owned()];
-    SuperWalker { idx, snippets }.collect(from_uri, &mut visited, 0, &mut items);
-    // Filter out private/protected members — inaccessible even via super.
-    items.retain(|i| {
-        i.sort_text
-            .as_deref()
-            .map(|s| !s.starts_with("prv:") && !s.starts_with("prt:"))
-            .unwrap_or(true)
-    });
-    items.sort_by_key(|i| (kind_sort_rank(i.kind), i.label.clone()));
-    items.dedup_by_key(|i| i.label.clone());
+
+    let mut items = walk_hierarchy(
+        idx,
+        "",
+        from_uri.as_str(),
+        CallerContext::default(),
+        4,
+        |index, _, class_uri, _| symbols_from_uri_as_completions(index, class_uri),
+    );
+    filter_inaccessible_completion_items(&mut items);
+    strip_completion_snippets(&mut items, snippets);
+    items.sort_by_key(|item| (kind_sort_rank(item.kind), item.label.clone()));
+    items.dedup_by_key(|item| item.label.clone());
     items
-}
-
-/// Walks the supertype hierarchy from a given file URI, collecting completion items.
-///
-/// Visited keys are file URIs (not type-qualified) — this is a file-oriented
-/// walk, distinct from [`InheritanceWalker`] which is type-oriented.
-struct SuperWalker<'a> {
-    idx: &'a Indexer,
-    snippets: bool,
-}
-
-impl<'a> SuperWalker<'a> {
-    fn collect(
-        &self,
-        from_uri: &Url,
-        visited: &mut Vec<String>,
-        depth: u8,
-        out: &mut Vec<CompletionItem>,
-    ) {
-        const MAX_DEPTH: u8 = 4;
-        if depth >= MAX_DEPTH {
-            return;
-        }
-
-        let supers: Vec<String> = match self.idx.files.get(from_uri.as_str()) {
-            Some(f) => f.supers.iter().map(|(_, n, _)| n.clone()).collect(),
-            None => return,
-        };
-
-        for super_name in supers {
-            let super_locs = resolve_symbol_inner(self.idx, &super_name, from_uri, false);
-            for super_loc in &super_locs {
-                let uri_str = super_loc.uri.as_str();
-                if visited.iter().any(|s| s == uri_str) {
-                    continue;
-                }
-                visited.push(uri_str.to_owned());
-                let mut new_items = symbols_from_uri_as_completions(self.idx, uri_str);
-                if !self.snippets {
-                    for item in &mut new_items {
-                        item.insert_text = None;
-                        item.insert_text_format = None;
-                    }
-                }
-                out.extend(new_items);
-                self.collect(&super_loc.uri, visited, depth + 1, out);
-            }
-        }
-    }
 }
 
 /// Dot-completion: return all members of the receiver's inferred type,
@@ -515,8 +469,10 @@ fn direct_dot_completion_items(
         idx,
         &context.file_uri,
         &context.receiver_type.leaf,
-        Some(from_uri.as_str()),
-        cursor_line,
+        CallerContext {
+            uri: Some(from_uri.as_str()),
+            cursor_line,
+        },
     )
 }
 
@@ -528,23 +484,25 @@ fn collect_inherited_dot_completion_items(
     cursor_line: Option<u32>,
     items: &mut Vec<CompletionItem>,
 ) {
-    let mut visited = vec![format!(
-        "{}#{}",
-        context.file_uri, context.receiver_type.leaf
-    )];
-    InheritanceWalker {
-        idx,
-        calling_uri: from_uri,
-        snippets,
+    let caller = CallerContext {
+        uri: Some(from_uri.as_str()),
         cursor_line,
-    }
-    .collect(
-        &context.file_uri,
+    };
+    let inherited = walk_hierarchy(
+        idx,
         &context.receiver_type.leaf,
-        &mut visited,
-        0,
-        items,
+        &context.file_uri,
+        caller,
+        4,
+        |index, class_name, class_uri, hierarchy_caller| {
+            let mut nested =
+                symbols_from_nested_type(index, class_uri, class_name, hierarchy_caller);
+            filter_inaccessible_completion_items(&mut nested);
+            strip_completion_snippets(&mut nested, snippets);
+            nested
+        },
     );
+    items.extend(inherited);
 }
 
 fn filter_inaccessible_completion_items(items: &mut Vec<CompletionItem>) {
@@ -594,94 +552,6 @@ fn append_dot_tail_completions(
     }
 }
 
-/// Recursively collect members from parent classes/interfaces of `type_name`
-/// (defined in `file_uri`) and append them to `out`.
-///
-/// `visited` tracks `"file_uri#TypeName"` pairs to prevent infinite cycles.
-/// Only non-private members are added (matching `complete_dot` behaviour).
-struct InheritanceWalker<'a> {
-    idx: &'a Indexer,
-    calling_uri: &'a Url,
-    snippets: bool,
-    cursor_line: Option<u32>,
-}
-
-impl<'a> InheritanceWalker<'a> {
-    fn collect(
-        &self,
-        file_uri: &str,
-        type_name: &str,
-        visited: &mut Vec<String>,
-        depth: u8,
-        out: &mut Vec<CompletionItem>,
-    ) {
-        const MAX_DEPTH: u8 = 4;
-        if depth >= MAX_DEPTH {
-            return;
-        }
-
-        let supers: Vec<String> = {
-            let data = match self.idx.files.get(file_uri) {
-                Some(d) => d,
-                None => return,
-            };
-            let class_line = data
-                .symbols
-                .iter()
-                .find(|s| s.name == type_name)
-                .map(|s| s.selection_start());
-            match class_line {
-                Some(line) => data
-                    .supers
-                    .iter()
-                    .filter(|(l, _, _)| *l == line)
-                    .map(|(_, n, _)| n.clone())
-                    .collect(),
-                None => data.supers.iter().map(|(_, n, _)| n.clone()).collect(),
-            }
-        };
-
-        let type_url = match Url::parse(file_uri) {
-            Ok(u) => u,
-            Err(_) => return,
-        };
-
-        for super_name in supers {
-            let super_locs = resolve_symbol_inner(self.idx, &super_name, &type_url, false);
-            for loc in &super_locs {
-                let key = format!("{}#{}", loc.uri.as_str(), super_name);
-                if visited.contains(&key) {
-                    continue;
-                }
-                visited.push(key);
-
-                let mut inherited = symbols_from_nested_type(
-                    self.idx,
-                    loc.uri.as_str(),
-                    &super_name,
-                    Some(self.calling_uri.as_str()),
-                    self.cursor_line,
-                );
-                inherited.retain(|i| {
-                    i.sort_text
-                        .as_deref()
-                        .map(|s| !s.starts_with("prv:") && !s.starts_with("prt:"))
-                        .unwrap_or(true)
-                });
-                if !self.snippets {
-                    for item in &mut inherited {
-                        item.insert_text = None;
-                        item.insert_text_format = None;
-                    }
-                }
-                out.extend(inherited);
-
-                self.collect(loc.uri.as_str(), &super_name, visited, depth + 1, out);
-            }
-        }
-    }
-}
-
 /// Build a `CompletionItem` for a symbol found inside a nested type body.
 ///
 /// Functions/methods get a snippet `name($1)`; all other kinds are plain-text.
@@ -691,8 +561,7 @@ fn completion_item_for_nested_symbol(
     idx: &Indexer,
     s: &crate::types::SymbolEntry,
     uri_str: &str,
-    calling_uri: Option<&str>,
-    caller_cursor_line: Option<u32>,
+    caller: CallerContext<'_>,
 ) -> CompletionItem {
     let kind = symbol_kind_to_completion(s.kind);
     let is_fn = matches!(
@@ -705,23 +574,20 @@ fn completion_item_for_nested_symbol(
     } else {
         Some(s.detail.clone())
     };
-    let detail = detail_raw.map(|d| {
-        if let Some(cu) = calling_uri {
-            crate::indexer::resolution::cross_file_type_subst(
-                idx,
-                uri_str,
-                s.selection_start(),
-                cu,
-                caller_cursor_line,
-                &d,
-            )
-        } else {
-            d
-        }
+    let detail = detail_raw.map(|signature| match caller.uri {
+        Some(calling_uri) => crate::indexer::resolution::cross_file_type_subst(
+            idx,
+            uri_str,
+            s.selection_start(),
+            calling_uri,
+            caller.cursor_line,
+            &signature,
+        ),
+        None => signature,
     });
     let mut data = serde_json::json!({"u": uri_str, "l": s.selection_start(), "c": s.selection_range.start.character});
-    if let Some(cu) = calling_uri {
-        data["cu"] = serde_json::Value::String(cu.to_owned());
+    if let Some(calling_uri) = caller.uri {
+        data["cu"] = serde_json::Value::String(calling_uri.to_owned());
     }
     CompletionItem {
         label: s.name.clone(),
@@ -755,66 +621,38 @@ fn symbols_from_nested_type(
     idx: &Indexer,
     file_uri: &str,
     inner_name: &str,
-    calling_uri: Option<&str>,
-    cursor_line: Option<u32>,
+    caller: CallerContext<'_>,
 ) -> Vec<CompletionItem> {
-    // Try in-memory index first; fall back to on-demand disk parse.
-    let owned: crate::types::FileData;
-    let symbols_ref: &[crate::types::SymbolEntry] = if let Some(d) = idx.files.get(file_uri) {
-        // Clone symbols out of the DashMap guard so we can drop the guard.
-        owned = d.value().as_ref().clone();
-        &owned.symbols
-    } else {
-        // File not yet indexed — parse it on demand.
-        let url = match Url::parse(file_uri) {
-            Ok(u) => u,
-            Err(_) => return vec![],
-        };
-        let path = match url.to_file_path() {
-            Ok(p) => p,
-            Err(_) => return vec![],
-        };
-        let content = match std::fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(_) => return vec![],
-        };
-        owned = parse_by_extension(file_uri, &content);
-        &owned.symbols
+    let Ok(uri) = Url::parse(file_uri) else {
+        return vec![];
+    };
+    let Some(file_data) = ensure_file_data(idx, &uri) else {
+        return vec![];
+    };
+    let symbols = &file_data.symbols;
+
+    let Some(type_symbol) = symbols.iter().find(|symbol| symbol.name == inner_name) else {
+        return symbols
+            .iter()
+            .filter(|symbol| symbol.visibility != Visibility::Private)
+            .map(|symbol| completion_item_for_nested_symbol(idx, symbol, file_uri, caller))
+            .collect();
     };
 
-    // Find the type's declaration to get its body span.
-    let type_sym = match symbols_ref.iter().find(|s| s.name == inner_name) {
-        Some(s) => s,
-        None => {
-            // Unknown type — return all non-private symbols as a fallback.
-            return symbols_ref
-                .iter()
-                .filter(|s| s.visibility != Visibility::Private)
-                .map(|s| {
-                    completion_item_for_nested_symbol(idx, s, file_uri, calling_uri, cursor_line)
-                })
-                .collect();
-        }
-    };
-
-    let type_start = type_sym.range.start;
-    let type_end = type_sym.range.end;
-
-    // Collect symbols whose start position falls within the type's body span.
-    // Compare both line and character so one-line declarations like
-    // `class Foo { fun bar() {} }` still include same-line members.
-    symbols_ref
+    let type_start = type_symbol.range.start;
+    let type_end = type_symbol.range.end;
+    symbols
         .iter()
-        .filter(|s| {
-            let start = s.range.start;
+        .filter(|symbol| {
+            let start = symbol.range.start;
             let starts_after = start.line > type_start.line
                 || (start.line == type_start.line && start.character > type_start.character);
             let starts_before = start.line < type_end.line
                 || (start.line == type_end.line && start.character < type_end.character);
             starts_after && starts_before
         })
-        .filter(|s| s.visibility != Visibility::Private)
-        .map(|s| completion_item_for_nested_symbol(idx, s, file_uri, calling_uri, cursor_line))
+        .filter(|symbol| symbol.visibility != Visibility::Private)
+        .map(|symbol| completion_item_for_nested_symbol(idx, symbol, file_uri, caller))
         .collect()
 }
 

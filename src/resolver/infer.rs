@@ -4,6 +4,8 @@ use crate::indexer::Indexer;
 use crate::LinesExt;
 use crate::StrExt;
 
+use super::ensure_file_data;
+
 // ─── Receiver type resolution ─────────────────────────────────────────────────
 
 /// How the receiver expression should be resolved.
@@ -282,16 +284,9 @@ fn first_type_arg(s: &str) -> &str {
 /// Checks the in-memory index first (lines are cached); falls back to reading
 /// the file from disk when it isn't indexed yet.
 pub(crate) fn infer_field_type(idx: &Indexer, file_uri: &str, field_name: &str) -> Option<String> {
-    if let Some(data) = idx.files.get(file_uri) {
-        return data.lines.infer_type(field_name);
-    }
-    let path = tower_lsp::lsp_types::Url::parse(file_uri)
-        .ok()?
-        .to_file_path()
-        .ok()?;
-    let content = std::fs::read_to_string(&path).ok()?;
-    let lines: Vec<String> = content.lines().map(String::from).collect();
-    lines.infer_type(field_name)
+    let uri = tower_lsp::lsp_types::Url::parse(file_uri).ok()?;
+    let file_data = ensure_file_data(idx, &uri)?;
+    file_data.lines.infer_type(field_name)
 }
 
 /// Like `infer_field_type` but preserves generic parameters in the result.
