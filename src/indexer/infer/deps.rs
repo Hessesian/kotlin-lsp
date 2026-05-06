@@ -7,10 +7,10 @@
 //! - looking up a function's parameter signature
 //! - inferring a variable's declared type
 //!
-//! The trait intentionally excludes `mem_lines_for` and `live_doc`: those are
-//! needed by the higher-level orchestrators (`find_it_element_type_in_lines_impl`
-//! etc.) which already take `&Indexer`.  Move them into the trait only if those
-//! orchestrators are later pushed behind the seam.
+//! The trait intentionally excludes `mem_lines_for`; higher-level orchestrators
+//! already take the caller-provided lines directly. `live_doc` is included only as
+//! an optional CST hook for orchestration helpers; pure leaf helpers should keep
+//! working against the narrower lookup methods below.
 //!
 //! ## `fun_params_text` is not cheap
 //!
@@ -18,7 +18,11 @@
 //! `find_fun_signature_full`, which may perform on-demand rg indexing.
 //! Callers should not assume this is a pure in-memory lookup.
 
+use std::sync::Arc;
+
 use tower_lsp::lsp_types::Url;
+
+use crate::indexer::LiveDoc;
 
 /// Minimum dependency surface for pure lambda/type inference leaf functions.
 ///
@@ -60,6 +64,13 @@ pub(crate) trait InferDeps {
     fn find_field_type(&self, _class_name: &str, _field_name: &str) -> Option<String> {
         None
     }
+
+    /// Return the live CST document for `uri` when the file is currently open.
+    /// Higher-level orchestration helpers may use this to walk the tree and then
+    /// feed extracted context into the pure string helpers.
+    fn live_doc(&self, _uri: &Url) -> Option<Arc<LiveDoc>> {
+        None
+    }
 }
 
 // ─── Test stub ───────────────────────────────────────────────────────────────
@@ -82,7 +93,7 @@ pub(crate) struct TestDeps {
 
 #[cfg(test)]
 impl TestDeps {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         TestDeps {
             fun_sigs: std::collections::HashMap::new(),
             var_types: std::collections::HashMap::new(),
@@ -92,21 +103,21 @@ impl TestDeps {
     }
 
     /// Register `fn_name` → `params_text` for `uri`.
-    pub fn with_fun(mut self, uri: &str, fn_name: &str, params: &str) -> Self {
+    pub(crate) fn with_fun(mut self, uri: &str, fn_name: &str, params: &str) -> Self {
         self.fun_sigs
             .insert((uri.to_string(), fn_name.to_string()), params.to_string());
         self
     }
 
     /// Register `var_name` → `type_name` for `uri`.
-    pub fn with_var(mut self, uri: &str, var_name: &str, ty: &str) -> Self {
+    pub(crate) fn with_var(mut self, uri: &str, var_name: &str, ty: &str) -> Self {
         self.var_types
             .insert((uri.to_string(), var_name.to_string()), ty.to_string());
         self
     }
 
     /// Register `field_name` in `class_name` → raw type (with generics).
-    pub fn with_field(mut self, class_name: &str, field_name: &str, ty: &str) -> Self {
+    pub(crate) fn with_field(mut self, class_name: &str, field_name: &str, ty: &str) -> Self {
         self.field_types.insert(
             (class_name.to_string(), field_name.to_string()),
             ty.to_string(),
@@ -115,7 +126,7 @@ impl TestDeps {
     }
 
     /// Register `fn_name` → raw return type (with generics), for method-chain tests.
-    pub fn with_return(mut self, fn_name: &str, ty: &str) -> Self {
+    pub(crate) fn with_return(mut self, fn_name: &str, ty: &str) -> Self {
         self.return_types
             .insert(fn_name.to_string(), ty.to_string());
         self

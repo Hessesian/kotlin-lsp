@@ -37,7 +37,7 @@ use super::{
 };
 
 use crate::indexer::NodeExt;
-use crate::queries::{KIND_CALL_EXPR, KIND_CALL_SUFFIX, KIND_LAMBDA_LIT};
+use crate::queries::{KIND_CALL_SUFFIX, KIND_LAMBDA_LIT, KIND_VALUE_ARG};
 use crate::resolver::extract_collection_element_type;
 use crate::StrExt;
 
@@ -130,6 +130,16 @@ pub(crate) fn find_named_lambda_param_type_in_lines(
     idx: &Indexer,
     uri: &Url,
 ) -> Option<String> {
+    let pos = CursorPos {
+        line: cursor_line,
+        utf16_col: 0,
+    };
+    if let Some(doc) = idx.live_doc(uri) {
+        if let Some(result) = cst_named_lambda_param_type(pos, param_name, &doc, idx, uri) {
+            return Some(result);
+        }
+    }
+
     let scan_start = cursor_line.saturating_sub(LAMBDA_PARAM_SCAN_BACK_LINES);
     // Include cursor_line itself (different from completion path which is exclusive).
     for ln in (scan_start..=cursor_line).rev() {
@@ -164,17 +174,23 @@ pub(crate) fn find_named_lambda_param_type(
     param_name: &str,
     idx: &Indexer,
     uri: &Url,
-    cursor_line: usize,
+    pos: CursorPos,
 ) -> Option<String> {
+    if let Some(doc) = idx.live_doc(uri) {
+        if let Some(result) = cst_named_lambda_param_type(pos, param_name, &doc, idx, uri) {
+            return Some(result);
+        }
+    }
+
     let lines = idx.mem_lines_for(uri.as_str());
 
     // 1. Check same line first — covers `items.forEach { item -> item.`
     //    Also handles multi-param: `items.map { a, b -> a.`
-    if let Some((brace_pos, pos)) = find_lambda_brace_for_param(before_cursor, param_name) {
+    if let Some((brace_pos, param_pos)) = find_lambda_brace_for_param(before_cursor, param_name) {
         let before_brace = &before_cursor[..brace_pos];
         let result = lambda_receiver_type_from_context(before_brace, idx, uri).or_else(|| {
             lines.as_deref().and_then(|ls| {
-                lambda_receiver_type_named_arg_ml(before_brace, pos, ls, cursor_line, idx, uri)
+                lambda_receiver_type_named_arg_ml(before_brace, param_pos, ls, pos.line, idx, uri)
             })
         });
         if result.is_some() {
@@ -184,18 +200,19 @@ pub(crate) fn find_named_lambda_param_type(
 
     // 2. Scan backward through previous lines.
     let lines = lines?;
-    let scan_start = cursor_line.saturating_sub(LAMBDA_PARAM_SCAN_BACK);
-    for ln in (scan_start..cursor_line).rev() {
+    let scan_start = pos.line.saturating_sub(LAMBDA_PARAM_SCAN_BACK);
+    for ln in (scan_start..pos.line).rev() {
         let line = match lines.get(ln) {
             Some(l) => l,
             None => continue,
         };
-        let Some((brace_pos, pos)) = find_lambda_brace_for_param(line, param_name) else {
+        let Some((brace_pos, param_pos)) = find_lambda_brace_for_param(line, param_name) else {
             continue;
         };
         let before_brace = &line[..brace_pos];
-        let result = lambda_receiver_type_from_context(before_brace, idx, uri)
-            .or_else(|| lambda_receiver_type_named_arg_ml(before_brace, pos, &lines, ln, idx, uri));
+        let result = lambda_receiver_type_from_context(before_brace, idx, uri).or_else(|| {
+            lambda_receiver_type_named_arg_ml(before_brace, param_pos, &lines, ln, idx, uri)
+        });
         if result.is_some() {
             return result;
         }
@@ -384,6 +401,81 @@ pub(crate) fn lambda_receiver_type_from_context(
 
 // ─── private helpers ─────────────────────────────────────────────────────────
 
+fn cursor_node_at(
+    doc: &crate::indexer::live_tree::LiveDoc,
+    pos: CursorPos,
+) -> Option<tree_sitter::Node<'_>> {
+    use tree_sitter::Point;
+
+    let source = std::str::from_utf8(&doc.bytes).ok()?;
+    let line_text = source.lines().nth(pos.line).unwrap_or("");
+    let byte_col =
+        crate::indexer::live_tree::utf16_col_to_byte(line_text, pos.utf16_col).min(line_text.len());
+    let point = Point {
+        row: pos.line,
+        column: byte_col,
+    };
+    doc.tree.root_node().descendant_for_point_range(point, point)
+}
+
+fn lambda_before_brace_context(
+    lambda: tree_sitter::Node<'_>,
+    doc: &crate::indexer::live_tree::LiveDoc,
+) -> Option<(String, usize)> {
+    let brace_byte = lambda.start_byte();
+    let line_start = doc.bytes[..brace_byte]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let before_brace = std::str::from_utf8(&doc.bytes[line_start..brace_byte])
+        .ok()?
+        .trim_end()
+        .to_owned();
+    Some((before_brace, lambda.start_position().row))
+}
+
+fn cst_named_lambda_param_type(
+    pos: CursorPos,
+    param_name: &str,
+    doc: &crate::indexer::live_tree::LiveDoc,
+    idx: &Indexer,
+    uri: &Url,
+) -> Option<String> {
+    let mut cur = cursor_node_at(doc, pos)?;
+    while let Some(lambda) = cur.enclosing_lambda_literal() {
+        if let Some(param_pos) = lambda.lambda_param_position(param_name, &doc.bytes) {
+            return cst_lambda_param_type_via_call(doc, &lambda, idx, uri, param_pos);
+        }
+        let Some(parent) = lambda.parent() else {
+            break;
+        };
+        cur = parent;
+    }
+    None
+}
+
+fn cst_with_receiver_ctx(
+    call_expr: tree_sitter::Node<'_>,
+    bytes: &[u8],
+    deps: &impl InferDeps,
+    uri: &Url,
+) -> Option<ThisLambdaCtx> {
+    let recv_name = call_expr.first_value_argument_text(bytes)?;
+    if let Some(raw) = deps.find_var_type(&recv_name, uri) {
+        let base = raw.ident_prefix();
+        if !base.is_empty() {
+            return Some(ThisLambdaCtx::Resolved(base));
+        }
+    }
+    let base = recv_name.ident_prefix();
+    if base.starts_with_uppercase() {
+        Some(ThisLambdaCtx::Resolved(base))
+    } else {
+        Some(ThisLambdaCtx::Receiver)
+    }
+}
+
 /// Walk ancestors from `start_node` looking for a `lambda_literal` without
 /// named params, then infer the `it`/`this` type for that lambda.
 ///
@@ -400,20 +492,22 @@ fn cst_it_or_this_type(
     let mut cur = start_node;
     loop {
         if cur.kind() == KIND_LAMBDA_LIT && !cur.has_lambda_named_params(&doc.bytes) {
-            // Extract text of the lambda-opening line up to the `{`.
-            let brace_byte = cur.start_byte();
-            let line_start = doc.bytes[..brace_byte]
-                .iter()
-                .rposition(|&b| b == b'\n')
-                .map(|i| i + 1)
-                .unwrap_or(0);
-            let before_brace = std::str::from_utf8(&doc.bytes[line_start..brace_byte])
-                .unwrap_or("")
-                .trim_end();
-            let ln = cur.start_position().row;
+            let Some((before_brace, ln)) = lambda_before_brace_context(cur, doc) else {
+                let p = cur.parent()?;
+                cur = p;
+                continue;
+            };
 
             if kind == LambdaParamKind::This {
-                match classify_this_lambda_context(before_brace, idx, uri) {
+                let ctx = cur
+                    .enclosing_call_expression()
+                    .and_then(|call_expr| {
+                        (call_expr.call_fn_name(&doc.bytes).as_deref() == Some("with"))
+                            .then(|| cst_with_receiver_ctx(call_expr, &doc.bytes, idx, uri))
+                            .flatten()
+                    })
+                    .unwrap_or_else(|| classify_this_lambda_context(&before_brace, idx, uri));
+                match ctx {
                     ThisLambdaCtx::Resolved(t) => return Some(t),
                     // Receiver-lambda context but type not found: stop walking up.
                     // `this` here is the receiver, not an outer lambda's receiver.
@@ -427,11 +521,11 @@ fn cst_it_or_this_type(
                 // the enclosing function call and the lambda's argument
                 // position. Handles multi-line cases where the call site
                 // is on a different line than the lambda `{`.
-                let result = lambda_receiver_type_from_context(before_brace, idx, uri)
+                let result = lambda_receiver_type_from_context(&before_brace, idx, uri)
                     .or_else(|| {
-                        lambda_receiver_type_named_arg_ml(before_brace, 0, lines, ln, idx, uri)
+                        lambda_receiver_type_named_arg_ml(&before_brace, 0, lines, ln, idx, uri)
                     })
-                    .or_else(|| cst_lambda_param_type_via_call(doc, &cur, idx, uri));
+                    .or_else(|| cst_lambda_param_type_via_call(doc, &cur, idx, uri, 0));
                 if result.is_some() {
                     return result;
                 }
@@ -449,33 +543,14 @@ fn find_it_element_type_in_lines_impl(
     uri: &Url,
     kind: LambdaParamKind,
 ) -> Option<String> {
-    // ── CST fast path ────────────────────────────────────────────────────────
     if let Some(doc) = idx.live_doc(uri) {
-        use tree_sitter::Point;
-        let line_text = lines.get(pos.line).map(|s| s.as_str()).unwrap_or("");
-        let byte_col = crate::indexer::live_tree::utf16_col_to_byte(line_text, pos.utf16_col);
-        let point = Point {
-            row: pos.line,
-            column: byte_col,
-        };
-        if let Some(node) = doc
-            .tree
-            .root_node()
-            .descendant_for_point_range(point, point)
-        {
+        if let Some(node) = cursor_node_at(&doc, pos) {
             return cst_it_or_this_type(node, &doc, lines, kind, idx, uri);
         }
-        // Node not found for this position — fall through to text scan.
     }
 
-    // ── Text fallback ────────────────────────────────────────────────────────
-    // Scan right-to-left tracking brace depth.
-    // Convention: depth starts at 0. `}` increments, `{` decrements.
-    // When depth goes < 0, we've found the `{` that opens our enclosing lambda.
-    //
-    // IMPORTANT: On cursor_line, only scan characters *before* cursor_col.
-    // Characters to the right of the cursor (e.g., closing `}`) must not affect
-    // the depth; otherwise a balanced `{ it.name }` would never trigger depth < 0.
+    // Keep the text fallback for callers that provide indexed lines without a
+    // live CST document (tests, disk-backed hover/inlay-hint paths).
     let mut depth: i32 = 0;
     let scan_start = pos.line.saturating_sub(IT_SCAN_BACK_LINES);
 
@@ -484,9 +559,7 @@ fn find_it_element_type_in_lines_impl(
             Some(l) => l,
             None => continue,
         };
-        // On cursor_line restrict to chars at byte positions < cursor_col.
         let scan_slice: &str = if ln == pos.line {
-            // pos.utf16_col is a UTF-16 character offset (from LSP); convert to a byte boundary.
             let byte_end = crate::indexer::live_tree::utf16_col_to_byte(line, pos.utf16_col);
             &line[..byte_end]
         } else {
@@ -500,35 +573,21 @@ fn find_it_element_type_in_lines_impl(
                     depth -= 1;
                     if depth < 0 {
                         let before_brace = &scan_slice[..bi];
-                        // Skip string interpolation `${`.
                         if before_brace.ends_with('$') {
                             depth = 0;
                             continue;
                         }
-                        // Skip named-param lambdas `{ name -> }` or `{ a, b -> }` — that's not `it`.
-                        // Use depth-aware `->` detection to handle multi-param lambdas where
-                        // `rest` starts with `,` not `->` (e.g. `{ loanId, isWustenrot ->`).
                         let after_brace = scan_slice[bi + 1..].trim_start();
                         if has_named_params_not_it(after_brace) {
                             depth = 0;
                             continue;
                         }
                         if kind == LambdaParamKind::This {
-                            // `this` only gets a hint from receiver lambdas (`T.() -> R`).
                             return lambda_receiver_this_type_from_context(before_brace, idx, uri);
                         }
-                        let result = lambda_receiver_type_from_context(before_brace, idx, uri)
-                            .or_else(|| {
-                                lambda_receiver_type_named_arg_ml(
-                                    before_brace,
-                                    0,
-                                    lines,
-                                    ln,
-                                    idx,
-                                    uri,
-                                )
-                            });
-                        return result;
+                        return lambda_receiver_type_from_context(before_brace, idx, uri).or_else(
+                            || lambda_receiver_type_named_arg_ml(before_brace, 0, lines, ln, idx, uri),
+                        );
                     }
                 }
                 _ => {}
@@ -733,6 +792,27 @@ pub(crate) fn is_inside_receiver_lambda(
     deps: &impl InferDeps,
     uri: &Url,
 ) -> bool {
+    if let Some(doc) = deps.live_doc(uri) {
+        if let Some(mut cur) = cursor_node_at(&doc, pos) {
+            while let Some(lambda) = cur.enclosing_lambda_literal() {
+                if !lambda.has_lambda_named_params(&doc.bytes) {
+                    if let Some((before_brace, _)) = lambda_before_brace_context(lambda, &doc) {
+                        if !matches!(
+                            classify_this_lambda_context(&before_brace, deps, uri),
+                            ThisLambdaCtx::NotReceiver
+                        ) {
+                            return true;
+                        }
+                    }
+                }
+                let Some(parent) = lambda.parent() else {
+                    break;
+                };
+                cur = parent;
+            }
+        }
+    }
+
     let mut depth: i32 = 0;
     let scan_start = pos.line.saturating_sub(IT_SCAN_BACK_LINES);
 
@@ -850,15 +930,21 @@ fn lambda_receiver_type_named_arg_ml(
     lambda_type_nth_input(&param_type, lambda_param_pos)
 }
 
-/// CST structural fallback for `it` type: given a `lambda_literal` node, walk
-/// up the call tree to find the enclosing function call and the lambda's
-/// positional or named argument index, then return the first input type of
-/// that parameter.
-///
-/// This handles multi-line cases where the function call is on a different line
-/// than the lambda opening `{`, so the text-based `before_brace` approach cannot
-/// reach the function name.
+/// CST structural fallback for lambda params: given a `lambda_literal` node,
+/// walk up the call tree to find the enclosing function call and the lambda's
+/// parameter type, then pick the requested lambda input position.
 fn cst_lambda_param_type_via_call(
+    doc: &crate::indexer::live_tree::LiveDoc,
+    lambda: &tree_sitter::Node<'_>,
+    deps: &impl InferDeps,
+    uri: &Url,
+    param_pos: usize,
+) -> Option<String> {
+    let param_type = cst_lambda_call_param_type(doc, lambda, deps, uri)?;
+    lambda_type_nth_input(&param_type, param_pos)
+}
+
+fn cst_lambda_call_param_type(
     doc: &crate::indexer::live_tree::LiveDoc,
     lambda: &tree_sitter::Node<'_>,
     deps: &impl InferDeps,
@@ -866,46 +952,31 @@ fn cst_lambda_param_type_via_call(
 ) -> Option<String> {
     let bytes = &doc.bytes;
     let mut cur = *lambda;
+
     loop {
         let parent = cur.parent()?;
-        match parent.kind() {
-            "value_argument" => {
-                // Lambda is a parenthesised argument.
-                let mut node = parent;
-                let call_expr = loop {
-                    let p = node.parent()?;
-                    if p.kind() == KIND_CALL_EXPR {
-                        break p;
-                    }
-                    node = p;
-                };
-                let fn_name = call_expr.call_fn_name(bytes)?;
-                let sig = deps.find_fun_params_text(&fn_name, uri)?;
-                let param_type = if let Some(label) = parent.named_arg_label(bytes) {
-                    find_named_param_type_in_sig(&sig, &label)
-                } else {
-                    nth_fun_param_type_str(&sig, parent.value_arg_position())
-                }?;
-                return lambda_type_first_input(&param_type);
-            }
-            k if k == KIND_CALL_SUFFIX => {
-                // Trailing lambda: `fn(...) { it }` or `fn { it }`.
-                let call_expr = parent.parent()?;
-                if call_expr.kind() != KIND_CALL_EXPR {
-                    cur = parent;
-                    continue;
-                }
-                let fn_name = call_expr.call_fn_name(bytes)?;
-                let sig = deps.find_fun_params_text(&fn_name, uri)?;
-                let last_type = last_fun_param_type_str(&sig)?;
-                return lambda_type_first_input(&last_type);
-            }
-            // Stop at an enclosing lambda — its iteration in the outer loop will handle it.
-            "lambda_literal" => return None,
-            _ => {
-                cur = parent;
-            }
+        let kind = parent.kind();
+        if kind == KIND_VALUE_ARG {
+            let call_expr = parent.enclosing_call_expression()?;
+            let fn_name = call_expr.call_fn_name(bytes)?;
+            let sig = deps.find_fun_params_text(&fn_name, uri)?;
+            return if let Some(label) = parent.named_arg_label(bytes) {
+                find_named_param_type_in_sig(&sig, &label)
+            } else {
+                nth_fun_param_type_str(&sig, parent.value_arg_position())
+            };
         }
+        if kind == KIND_CALL_SUFFIX {
+            let call_expr = lambda.enclosing_call_expression()?;
+            let fn_name = call_expr.call_fn_name(bytes)?;
+            let sig = deps.find_fun_params_text(&fn_name, uri)?;
+            let last_type = last_fun_param_type_str(&sig)?;
+            return Some(last_type.to_owned());
+        }
+        if kind == KIND_LAMBDA_LIT {
+            return None;
+        }
+        cur = parent;
     }
 }
 

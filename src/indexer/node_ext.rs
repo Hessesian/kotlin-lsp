@@ -3,10 +3,10 @@
 //! These methods are lightweight convenience wrappers around tree-sitter node
 //! traversal; their bodies were extracted from the free functions they replace.
 use crate::queries::{
-    KIND_CALL_SUFFIX, KIND_IDENTIFIER, KIND_LAMBDA_PARAMS, KIND_NAV_EXPR, KIND_NAV_SUFFIX,
-    KIND_SCOPED_TYPE_IDENT, KIND_SIMPLE_IDENT, KIND_TYPE_ARGS, KIND_TYPE_IDENT, KIND_TYPE_LIST,
-    KIND_TYPE_PARAM, KIND_TYPE_PARAMS, KIND_USER_TYPE, KIND_VALUE_ARG, KIND_VALUE_ARGS,
-    KIND_VAR_DECL,
+    KIND_CALL_EXPR, KIND_CALL_SUFFIX, KIND_IDENTIFIER, KIND_LAMBDA_LIT, KIND_LAMBDA_PARAMS,
+    KIND_NAV_EXPR, KIND_NAV_SUFFIX, KIND_SCOPED_TYPE_IDENT, KIND_SIMPLE_IDENT, KIND_SOURCE_FILE,
+    KIND_TYPE_ARGS, KIND_TYPE_IDENT, KIND_TYPE_LIST, KIND_TYPE_PARAM, KIND_TYPE_PARAMS,
+    KIND_USER_TYPE, KIND_VALUE_ARG, KIND_VALUE_ARGS, KIND_VAR_DECL,
 };
 use crate::StrExt;
 use tree_sitter::Node;
@@ -44,9 +44,29 @@ pub(crate) trait NodeExt<'a>: Sized + Copy {
     /// that is neither `it` nor `_`.
     fn has_lambda_named_params(self, bytes: &[u8]) -> bool;
 
+    /// Extract parameter names from a `lambda_literal`'s `lambda_parameters` node.
+    /// Returns an empty vec for `{ it }` or `{ }`.
+    fn lambda_param_names(self, bytes: &[u8]) -> Vec<String>;
+
+    /// Return the 0-based position of `param_name` in this lambda's parameter list.
+    fn lambda_param_position(self, param_name: &str, bytes: &[u8]) -> Option<usize>;
+
     /// Collect named lambda parameter identifiers from a `lambda_literal` CST node.
     /// Skips `it`, `_`, uppercase-first (type refs), and deduplicates against `existing`.
     fn collect_lambda_param_names(self, bytes: &[u8], existing: &[String]) -> Vec<String>;
+
+    /// Walk up ancestors to find the nearest `call_expression`.
+    /// Returns `None` if a `lambda_literal` or source-file root is hit first.
+    fn enclosing_call_expression(self) -> Option<Node<'a>>;
+
+    /// Walk up ancestors to find the nearest `lambda_literal`.
+    fn enclosing_lambda_literal(self) -> Option<Node<'a>>;
+
+    /// Get the text of the first `value_argument` child of a `call_expression`.
+    fn first_value_argument_text(self, bytes: &[u8]) -> Option<String>;
+
+    /// For a `navigation_expression`, return `(receiver_text, member_name)`.
+    fn navigation_parts(self, bytes: &[u8]) -> Option<(String, String)>;
 
     /// Extract the type/class name from a CST class/interface/object/companion_object node.
     fn extract_type_name(self, bytes: &[u8]) -> Option<String>;
@@ -172,14 +192,20 @@ impl<'a> NodeExt<'a> for Node<'a> {
                 }
             }
         }
-        None
+        // Kotlin trailing-lambda pattern:
+        //   call_expression (outer)
+        //     call_expression (inner) ← has value_arguments
+        //     call_suffix             ← has lambda_literal only
+        // Walk into the first child call_expression one level deep.
+        self.child(0)
+            .filter(|c| c.kind() == KIND_CALL_EXPR)
+            .and_then(|inner| inner.find_value_arguments())
     }
 
     fn has_lambda_named_params(self, bytes: &[u8]) -> bool {
         let Some(lp) = self.first_child_of_kind(KIND_LAMBDA_PARAMS) else {
             return false;
         };
-
         (0..lp.child_count())
             .filter_map(|i| lp.child(i))
             .filter(|c| c.kind() == KIND_VAR_DECL)
@@ -194,18 +220,27 @@ impl<'a> NodeExt<'a> for Node<'a> {
             })
     }
 
-    fn collect_lambda_param_names(self, bytes: &[u8], existing: &[String]) -> Vec<String> {
+    fn lambda_param_names(self, bytes: &[u8]) -> Vec<String> {
         let Some(lp) = self.first_child_of_kind(KIND_LAMBDA_PARAMS) else {
             return Vec::new();
         };
 
-        (0..lp.child_count())
-            .filter_map(|i| lp.child(i))
-            .filter(|c| c.kind() == KIND_VAR_DECL)
-            .filter_map(|vd| {
-                let si = vd.child(0).filter(|n| n.kind() == KIND_SIMPLE_IDENT)?;
-                si.utf8_text_owned(bytes)
-            })
+        lp.children_of_kind(KIND_VAR_DECL)
+            .into_iter()
+            .filter_map(|vd| vd.first_child_of_kind(KIND_SIMPLE_IDENT))
+            .filter_map(|si| si.utf8_text_owned(bytes))
+            .collect()
+    }
+
+    fn lambda_param_position(self, param_name: &str, bytes: &[u8]) -> Option<usize> {
+        self.lambda_param_names(bytes)
+            .into_iter()
+            .position(|name| name == param_name)
+    }
+
+    fn collect_lambda_param_names(self, bytes: &[u8], existing: &[String]) -> Vec<String> {
+        self.lambda_param_names(bytes)
+            .into_iter()
             .filter(|name| {
                 name != "it"
                     && name != "_"
@@ -213,6 +248,61 @@ impl<'a> NodeExt<'a> for Node<'a> {
                     && !existing.contains(name)
             })
             .collect()
+    }
+
+    fn enclosing_call_expression(self) -> Option<Node<'a>> {
+        let mut cur = self.parent()?;
+        loop {
+            let kind = cur.kind();
+            if kind == KIND_CALL_EXPR {
+                return Some(cur);
+            }
+            if kind == KIND_LAMBDA_LIT || kind == KIND_SOURCE_FILE {
+                return None;
+            }
+            cur = cur.parent()?;
+        }
+    }
+
+    fn enclosing_lambda_literal(self) -> Option<Node<'a>> {
+        let mut cur = self;
+        loop {
+            let kind = cur.kind();
+            if kind == KIND_LAMBDA_LIT {
+                return Some(cur);
+            }
+            if kind == KIND_SOURCE_FILE {
+                return None;
+            }
+            cur = cur.parent()?;
+        }
+    }
+
+    fn first_value_argument_text(self, bytes: &[u8]) -> Option<String> {
+        let args = self.find_value_arguments()?;
+        (0..args.child_count())
+            .filter_map(|i| args.child(i))
+            .find(|c| c.kind() == KIND_VALUE_ARG)
+            .and_then(|arg| arg.utf8_text_owned(bytes))
+            .map(|t| t.trim().to_owned())
+            .filter(|t| !t.is_empty())
+    }
+
+    fn navigation_parts(self, bytes: &[u8]) -> Option<(String, String)> {
+        if self.kind() != KIND_NAV_EXPR {
+            return None;
+        }
+
+        let receiver = (0..self.child_count())
+            .filter_map(|i| self.child(i))
+            .find(|child| child.is_named() && child.kind() != KIND_NAV_SUFFIX)?
+            .utf8_text_owned(bytes)?;
+        let suffix = self.first_child_of_kind(KIND_NAV_SUFFIX)?;
+        let member = (0..suffix.child_count())
+            .filter_map(|i| suffix.child(i))
+            .find(|child| child.kind() == KIND_SIMPLE_IDENT || child.kind() == KIND_TYPE_IDENT)?
+            .utf8_text_owned(bytes)?;
+        Some((receiver, member))
     }
 
     fn extract_type_name(self, bytes: &[u8]) -> Option<String> {
@@ -248,21 +338,8 @@ impl<'a> NodeExt<'a> for Node<'a> {
                 Some((name, None))
             }
             k if k == KIND_NAV_EXPR => {
-                let mut walker = callee.walk();
-                let mut qualifier_opt: Option<String> = None;
-                let mut fn_name_opt: Option<String> = None;
-                for child in callee.children(&mut walker) {
-                    let ck = child.kind();
-                    if ck == KIND_SIMPLE_IDENT || ck == KIND_TYPE_IDENT {
-                        qualifier_opt = child.utf8_text_owned(bytes);
-                    } else if ck == KIND_NAV_SUFFIX {
-                        fn_name_opt = (0..child.child_count())
-                            .filter_map(|i| child.child(i))
-                            .find(|c| c.kind() == KIND_SIMPLE_IDENT || c.kind() == KIND_TYPE_IDENT)
-                            .and_then(|c| c.utf8_text_owned(bytes));
-                    }
-                }
-                Some((fn_name_opt?, qualifier_opt))
+                let (receiver, member) = callee.navigation_parts(bytes)?;
+                Some((member, Some(receiver)))
             }
             _ => None,
         }
