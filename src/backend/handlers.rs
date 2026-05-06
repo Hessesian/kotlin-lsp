@@ -28,210 +28,215 @@ impl Backend {
             return Ok(None);
         };
 
-        let make_hover = |md: String| Hover {
-            contents: HoverContents::Markup(MarkupContent {
-                kind: MarkupKind::Markdown,
-                value: md,
-            }),
-            range: None,
-        };
-
-        // Path 1: `it` / named lambda param — show inferred type + optional type detail.
-        if ctx.qualifier.is_none() {
-            if let Some(ref rt) = ctx.contextual {
-                let kw = if crate::Language::from_path(uri.path()).is_swift() {
-                    "let"
-                } else {
-                    "val"
-                };
-                let subst = crate::indexer::resolution::build_subst_map(
-                    self.indexer.as_ref(),
-                    uri.as_str(),
-                    position.line,
-                );
-                let type_name = if subst.is_empty() {
-                    rt.raw.clone()
-                } else {
-                    apply_type_subst(&rt.raw, &subst)
-                };
-                let leaf = type_name.rsplit('.').next().unwrap_or(type_name.as_str());
-                let type_sig_md = format!("{kw} {}: {type_name}", ctx.word);
-                // Resolve the type's own hover: import-aware, rg fallback, then stdlib.
-                let type_detail = resolve_symbol_info(
-                    self.indexer.as_ref(),
-                    leaf,
-                    None,
-                    uri,
-                    SubstitutionContext::CrossFile {
-                        calling_uri: uri.as_str(),
-                        cursor_line: Some(position.line),
-                    },
-                    &ResolveOptions::hover(),
-                )
-                .map(|i| format_symbol_hover(&i, uri.path()))
-                .or_else(|| crate::stdlib::hover(leaf));
-                let md = format_contextual_hover(&type_sig_md, uri.path(), type_detail.as_deref());
-                return Ok(Some(make_hover(md)));
-            }
-            // Lambda parameter with failed type inference — don't fall through to rg
-            // lookup (would show confusing hover for unrelated symbols).
-            if ctx.lambda_decl.is_some() {
-                return Ok(None);
-            }
+        if let Some(hover) = self.contextual_lambda_hover(&ctx, uri, position) {
+            return Ok(Some(hover));
+        }
+        if ctx.qualifier.is_none() && ctx.lambda_decl.is_some() {
+            return Ok(None);
+        }
+        if let Some(hover) = self.contextual_receiver_hover(&ctx, uri, position) {
+            return Ok(Some(hover));
         }
 
-        // Path 2: `this.field` / `it.field` — use the already-resolved contextual receiver
-        // so hover shows the member from the correct class.
+        Ok(self.regular_symbol_hover(&ctx, uri, position))
+    }
+
+    fn contextual_lambda_hover(
+        &self,
+        ctx: &CursorContext,
+        uri: &Url,
+        position: Position,
+    ) -> Option<Hover> {
         if ctx.qualifier.is_some() {
-            if let Some(ref rt) = ctx.contextual {
-                let locs = self.resolve_with_receiver_fallback(&ctx.word, rt, uri);
-                if let Some(loc) = locs.first() {
-                    let subst_ctx = SubstitutionContext::CrossFile {
-                        calling_uri: uri.as_str(),
-                        cursor_line: Some(position.line),
-                    };
-                    if let Some(info) = enrich_at_location(
-                        self.indexer.as_ref(),
-                        loc,
-                        &ctx.word,
-                        subst_ctx,
-                        &ResolveOptions::hover(),
-                    ) {
-                        return Ok(Some(make_hover(format_symbol_hover(&info, uri.path()))));
-                    }
-                }
-            }
+            return None;
         }
+        let receiver_type = ctx.contextual.as_ref()?;
+        let type_name = self.contextual_hover_type_name(receiver_type, uri, position.line);
+        let leaf = type_name.rsplit('.').next().unwrap_or(type_name.as_str());
+        let signature = format!("{} {}: {type_name}", hover_binding_keyword(uri), ctx.word);
+        let detail = self
+            .resolve_hover_markdown(leaf, None, uri, position.line)
+            .or_else(|| crate::stdlib::hover(leaf));
+        Some(make_markdown_hover(format_contextual_hover(
+            &signature,
+            uri.path(),
+            detail.as_deref(),
+        )))
+    }
 
-        // Path 3: regular symbol — import-aware resolution, rg fallback, then stdlib.
-        let subst_ctx = SubstitutionContext::CrossFile {
-            calling_uri: uri.as_str(),
-            cursor_line: Some(position.line),
-        };
-        let hover_md = resolve_symbol_info(
+    fn contextual_hover_type_name(
+        &self,
+        receiver_type: &crate::resolver::ReceiverType,
+        uri: &Url,
+        line: u32,
+    ) -> String {
+        let subst =
+            crate::indexer::resolution::build_subst_map(self.indexer.as_ref(), uri.as_str(), line);
+        if subst.is_empty() {
+            return receiver_type.raw.clone();
+        }
+        apply_type_subst(&receiver_type.raw, &subst)
+    }
+
+    fn contextual_receiver_hover(
+        &self,
+        ctx: &CursorContext,
+        uri: &Url,
+        position: Position,
+    ) -> Option<Hover> {
+        let receiver_type = ctx.contextual.as_ref()?;
+        ctx.qualifier.as_ref()?;
+        let location = self
+            .resolve_with_receiver_fallback(&ctx.word, receiver_type, uri)
+            .first()?
+            .clone();
+        let info = enrich_at_location(
             self.indexer.as_ref(),
+            &location,
             &ctx.word,
-            ctx.qualifier.as_deref(),
+            hover_substitution_context(uri, position.line),
+            &ResolveOptions::hover(),
+        )?;
+        Some(make_markdown_hover(format_symbol_hover(&info, uri.path())))
+    }
+
+    fn regular_symbol_hover(
+        &self,
+        ctx: &CursorContext,
+        uri: &Url,
+        position: Position,
+    ) -> Option<Hover> {
+        let markdown = self
+            .resolve_hover_markdown(&ctx.word, ctx.qualifier.as_deref(), uri, position.line)
+            .or_else(|| crate::stdlib::hover(&ctx.word))?;
+        Some(make_markdown_hover(markdown))
+    }
+
+    fn resolve_hover_markdown(
+        &self,
+        word: &str,
+        qualifier: Option<&str>,
+        uri: &Url,
+        line: u32,
+    ) -> Option<String> {
+        resolve_symbol_info(
+            self.indexer.as_ref(),
+            word,
+            qualifier,
             uri,
-            subst_ctx,
+            hover_substitution_context(uri, line),
             &ResolveOptions::hover(),
         )
-        .map(|i| format_symbol_hover(&i, uri.path()))
-        .or_else(|| crate::stdlib::hover(&ctx.word));
-
-        Ok(hover_md.map(make_hover))
+        .map(|info| format_symbol_hover(&info, uri.path()))
     }
 
     pub(super) async fn references_impl(
         &self,
         params: ReferenceParams,
     ) -> Result<Option<Vec<Location>>> {
-        let uri = &params.text_document_position.text_document.uri;
-        let pos = params.text_document_position.position;
-        let include_decl = params.context.include_declaration;
-
-        let (name, _qualifier) = match self.indexer.word_and_qualifier_at(uri, pos) {
-            Some(pair) => pair,
-            None => return Ok(None),
+        let Some(search) = self.reference_search(&params) else {
+            return Ok(None);
         };
 
-        // For uppercase symbols, determine parent_class and declared_pkg:
-        // - If cursor is ON the declaration of this symbol → use enclosing_class_at(cursor)
-        // - If cursor is on a REFERENCE → scan imports in current file to find which
-        //   specific class is meant (handles multiple `Effect` classes across files)
+        let mut locations = self.rg_reference_locations(&search).await;
+        self.filter_library_reference_locations(&mut locations);
+        self.add_current_file_reference_locations(&search.uri, &search.name, &mut locations);
+
+        Ok((!locations.is_empty()).then_some(locations))
+    }
+
+    fn reference_search(&self, params: &ReferenceParams) -> Option<ReferenceSearch> {
+        let uri = &params.text_document_position.text_document.uri;
+        let position = params.text_document_position.position;
+        let include_decl = params.context.include_declaration;
+        let (name, _) = self.indexer.word_and_qualifier_at(uri, position)?;
         let (parent_class, declared_pkg) =
-            resolve_references_scope(&self.indexer, uri, pos.line, &name);
-        // Collect declaration file paths — but only those where the enclosing class
-        // matches parent_class (if known).  Without this filter, every contract file
-        // that has `sealed interface Event` would be included, causing false positives
-        // for unrelated ViewModels in other packages.
-        let decl_files: Vec<String> = self
-            .indexer
+            resolve_references_scope(&self.indexer, uri, position.line, &name);
+        let decl_files = self.declaration_files_for_reference(&name, parent_class.as_deref());
+        Some(ReferenceSearch {
+            uri: uri.clone(),
+            name,
+            include_decl,
+            parent_class,
+            declared_pkg,
+            decl_files,
+        })
+    }
+
+    fn declaration_files_for_reference(
+        &self,
+        name: &str,
+        parent_class: Option<&str>,
+    ) -> Vec<String> {
+        self.indexer
             .definitions
-            .get(&name)
-            .map(|locs| {
-                locs.iter()
-                    .filter(|l| {
-                        if let Some(ref parent) = parent_class {
-                            self.indexer
-                                .enclosing_class_at(&l.uri, l.range.start.line)
-                                .as_deref()
-                                == Some(parent.as_str())
-                        } else {
-                            true
-                        }
+            .get(name)
+            .map(|locations| {
+                locations
+                    .iter()
+                    .filter(|location| {
+                        reference_matches_parent_class(&self.indexer, location, parent_class)
                     })
-                    .filter_map(|l| l.uri.to_file_path().ok())
-                    .filter_map(|p| p.to_str().map(|s| s.to_owned()))
+                    .filter_map(|location| location.uri.to_file_path().ok())
+                    .filter_map(|path| path.to_str().map(|path| path.to_owned()))
                     .collect()
             })
-            .unwrap_or_default();
+            .unwrap_or_default()
+    }
 
-        // Run rg off the async executor to avoid blocking the Tokio runtime.
-        let root = self.indexer.workspace_root.read().unwrap().clone();
-        let matcher = self.indexer.ignore_matcher.read().unwrap().clone();
-        let uri_clone = uri.clone();
-        let name2 = name.clone();
-        let parent2 = parent_class.clone();
-        let decl2 = declared_pkg.clone();
-        let mut locs = tokio::task::spawn_blocking(move || {
-            let request = crate::rg::RgSearchRequest::new(
-                &name2,
-                parent2.as_deref(),
-                decl2.as_deref(),
-                root.as_deref(),
-                include_decl,
-                &uri_clone,
-                &decl_files,
+    async fn rg_reference_locations(&self, search: &ReferenceSearch) -> Vec<Location> {
+        let workspace_root = self
+            .indexer
+            .workspace_root
+            .read()
+            .ok()
+            .and_then(|root| root.clone());
+        let ignore_matcher = self
+            .indexer
+            .ignore_matcher
+            .read()
+            .ok()
+            .and_then(|matcher| matcher.clone());
+        let request = search.clone();
+        tokio::task::spawn_blocking(move || {
+            let rg_request = crate::rg::RgSearchRequest::new(
+                &request.name,
+                request.parent_class.as_deref(),
+                request.declared_pkg.as_deref(),
+                workspace_root.as_deref(),
+                request.include_decl,
+                &request.uri,
+                &request.decl_files,
             );
-            crate::rg::rg_find_references(&request, matcher.as_deref())
+            crate::rg::rg_find_references(&rg_request, ignore_matcher.as_deref())
         })
         .await
-        .unwrap_or_default();
-        eprintln!("[refs] rg returned {} locs", locs.len());
+        .unwrap_or_default()
+    }
 
-        // Filter out library-source locations (from sourcePaths outside workspace root).
-        let lib = &self.indexer.library_uris;
-        if !lib.is_empty() {
-            locs.retain(|loc| !lib.contains(loc.uri.as_str()));
+    fn filter_library_reference_locations(&self, locations: &mut Vec<Location>) {
+        if self.indexer.library_uris.is_empty() {
+            return;
         }
+        locations.retain(|location| !self.indexer.library_uris.contains(location.uri.as_str()));
+    }
 
-        // Supplement with in-memory scan of the CURRENT file only.
-        // This catches unsaved content in the active buffer that rg cannot see on disk.
-        // We intentionally do NOT scan all files in memory because that would bypass the
-        // scoping logic (package / parent-class filtering) applied by rg_find_references.
-        let cur_uri_str = uri.as_str();
-        if let Some(data) = self.indexer.files.get(cur_uri_str) {
-            for (line_idx, line) in data.lines.iter().enumerate() {
-                let dup_line = locs
-                    .iter()
-                    .any(|l: &Location| l.uri == *uri && l.range.start.line == line_idx as u32);
-                if dup_line {
-                    continue;
-                }
-                for abs in word_byte_offsets(line, name.as_str()) {
-                    // Compute UTF-16 column (LSP units) for the match start.
-                    let col: u32 = line[..abs].chars().map(|c| c.len_utf16() as u32).sum();
-                    let col_end: u32 =
-                        col + name.chars().map(|c| c.len_utf16() as u32).sum::<u32>();
-                    let range = Range::new(
-                        Position::new(line_idx as u32, col),
-                        Position::new(line_idx as u32, col_end),
-                    );
-                    if !locs
-                        .iter()
-                        .any(|l: &Location| l.uri == *uri && l.range.start == range.start)
-                    {
-                        locs.push(Location {
-                            uri: uri.clone(),
-                            range,
-                        });
-                    }
-                }
+    fn add_current_file_reference_locations(
+        &self,
+        uri: &Url,
+        name: &str,
+        locations: &mut Vec<Location>,
+    ) {
+        let Some(data) = self.indexer.files.get(uri.as_str()) else {
+            return;
+        };
+        for (line_idx, line) in data.lines.iter().enumerate() {
+            let line_number = line_idx as u32;
+            if has_reference_line(locations, uri, line_number) {
+                continue;
             }
+            append_line_reference_locations(uri, name, line_number, line, locations);
         }
-
-        Ok(if locs.is_empty() { None } else { Some(locs) })
     }
 
     pub(super) async fn document_symbol_impl(
@@ -289,102 +294,59 @@ impl Backend {
         &self,
         params: WorkspaceSymbolParams,
     ) -> Result<Option<Vec<SymbolInformation>>> {
-        let query = params.query.to_lowercase();
-        let mut results: Vec<SymbolInformation> = Vec::new();
+        let query = WorkspaceSymbolQuery::new(params.query);
+        let mut results = self.collect_workspace_symbols(&query);
+        if results.is_empty() {
+            results = self.rg_workspace_symbols(&query).await;
+        }
+        Ok((!results.is_empty()).then_some(results))
+    }
 
-        // For dot-qualified queries like "StoreState.isReady", split into
-        // receiver qualifier and function name to match extension functions.
-        let (query_qualifier, query_name) = if let Some(dot) = query.rfind('.') {
-            (Some(&query[..dot]), &query[dot + 1..])
-        } else {
-            (None, query.as_str())
-        };
-
+    fn collect_workspace_symbols(&self, query: &WorkspaceSymbolQuery) -> Vec<SymbolInformation> {
+        let mut results = Vec::new();
         for entry in self.indexer.files.iter() {
-            let uri_str = entry.key();
-            let file_data = entry.value();
-            let uri = match Url::parse(uri_str) {
-                Ok(u) => u,
-                Err(_) => match Url::from_file_path(uri_str) {
-                    Ok(u) => u,
-                    Err(_) => continue,
-                },
+            let Some(uri) = workspace_symbol_uri(entry.key()) else {
+                continue;
             };
-            for sym in &file_data.symbols {
-                let name_lower = sym.name.to_lowercase();
-                let matches = if query.is_empty() {
-                    true
-                } else if let Some(qualifier) = query_qualifier {
-                    // Dot-qualified: name must match AND detail must contain
-                    // the receiver type (e.g. "fun StoreState.isReady()")
-                    name_lower.contains(query_name) && sym.detail.to_lowercase().contains(qualifier)
-                } else {
-                    name_lower.contains(&query)
-                };
-                if !matches {
-                    continue;
-                }
-                #[allow(deprecated)]
-                results.push(SymbolInformation {
-                    name: sym.name.clone(),
-                    kind: sym.kind,
-                    tags: None,
-                    deprecated: None,
-                    location: Location {
-                        uri: uri.clone(),
-                        range: sym.selection_range,
-                    },
-                    container_name: if sym.detail.is_empty() {
-                        None
-                    } else {
-                        Some(sym.detail.clone())
-                    },
-                });
-                if results.len() >= WORKSPACE_SYMBOL_CAP {
-                    break;
-                }
-            }
+            collect_matching_workspace_symbols(&uri, &entry.value().symbols, query, &mut results);
             if results.len() >= WORKSPACE_SYMBOL_CAP {
                 break;
             }
         }
+        results.sort_by(|left, right| left.name.cmp(&right.name));
+        results
+    }
 
-        results.sort_by(|a, b| a.name.cmp(&b.name));
-
-        // rg fallback when index is empty (indexing in progress or cold start).
-        if results.is_empty() && !query.is_empty() && query_qualifier.is_none() {
-            let root_opt = self.indexer.workspace_root.read().unwrap().clone();
-            let matcher = self.indexer.ignore_matcher.read().unwrap().clone();
-            let q = query.to_string();
-            let rg_locs = tokio::task::spawn_blocking(move || {
-                crate::rg::rg_find_definition(&q, root_opt.as_deref(), matcher.as_deref())
-            })
-            .await
-            .unwrap_or_default();
-            if !rg_locs.is_empty() {
-                let rg_syms: Vec<SymbolInformation> = rg_locs
-                    .into_iter()
-                    .map(|loc| {
-                        #[allow(deprecated)]
-                        SymbolInformation {
-                            name: query_name.to_string(),
-                            kind: tower_lsp::lsp_types::SymbolKind::FILE,
-                            tags: None,
-                            deprecated: None,
-                            location: loc,
-                            container_name: Some("rg fallback".to_string()),
-                        }
-                    })
-                    .collect();
-                return Ok(Some(rg_syms));
-            }
+    async fn rg_workspace_symbols(&self, query: &WorkspaceSymbolQuery) -> Vec<SymbolInformation> {
+        if !query.allows_rg_fallback() {
+            return vec![];
         }
-
-        Ok(if results.is_empty() {
-            None
-        } else {
-            Some(results)
+        let workspace_root = self
+            .indexer
+            .workspace_root
+            .read()
+            .ok()
+            .and_then(|root| root.clone());
+        let ignore_matcher = self
+            .indexer
+            .ignore_matcher
+            .read()
+            .ok()
+            .and_then(|matcher| matcher.clone());
+        let query_text = query.raw.clone();
+        let rg_locations = tokio::task::spawn_blocking(move || {
+            crate::rg::rg_find_definition(
+                &query_text,
+                workspace_root.as_deref(),
+                ignore_matcher.as_deref(),
+            )
         })
+        .await
+        .unwrap_or_default();
+        rg_locations
+            .into_iter()
+            .map(|location| rg_workspace_symbol(query.name.clone(), location))
+            .collect()
     }
 
     pub(super) async fn signature_help_impl(
@@ -860,6 +822,203 @@ fn text_call_info(lines: &[String], before: &str, line_idx: usize) -> Option<Cal
         qualifier: call_qualifier,
         active_param,
     })
+}
+
+#[derive(Clone)]
+struct WorkspaceSymbolQuery {
+    raw: String,
+    qualifier: Option<String>,
+    name: String,
+}
+
+impl WorkspaceSymbolQuery {
+    fn new(query: String) -> Self {
+        let raw = query.to_lowercase();
+        if let Some(dot) = raw.rfind('.') {
+            return Self {
+                qualifier: Some(raw[..dot].to_owned()),
+                name: raw[dot + 1..].to_owned(),
+                raw,
+            };
+        }
+        Self {
+            name: raw.clone(),
+            raw,
+            qualifier: None,
+        }
+    }
+
+    fn matches(&self, symbol: &crate::types::SymbolEntry) -> bool {
+        if self.raw.is_empty() {
+            return true;
+        }
+        let name = symbol.name.to_lowercase();
+        if let Some(qualifier) = self.qualifier.as_deref() {
+            return name.contains(&self.name) && symbol.detail.to_lowercase().contains(qualifier);
+        }
+        name.contains(&self.raw)
+    }
+
+    fn allows_rg_fallback(&self) -> bool {
+        !self.raw.is_empty() && self.qualifier.is_none()
+    }
+}
+
+fn workspace_symbol_uri(uri_str: &str) -> Option<Url> {
+    Url::parse(uri_str)
+        .ok()
+        .or_else(|| Url::from_file_path(uri_str).ok())
+}
+
+fn collect_matching_workspace_symbols(
+    uri: &Url,
+    symbols: &[crate::types::SymbolEntry],
+    query: &WorkspaceSymbolQuery,
+    results: &mut Vec<SymbolInformation>,
+) {
+    for symbol in symbols {
+        if !query.matches(symbol) {
+            continue;
+        }
+        results.push(workspace_symbol_information(uri, symbol));
+        if results.len() >= WORKSPACE_SYMBOL_CAP {
+            break;
+        }
+    }
+}
+
+fn workspace_symbol_information(
+    uri: &Url,
+    symbol: &crate::types::SymbolEntry,
+) -> SymbolInformation {
+    #[allow(deprecated)]
+    SymbolInformation {
+        name: symbol.name.clone(),
+        kind: symbol.kind,
+        tags: None,
+        deprecated: None,
+        location: Location {
+            uri: uri.clone(),
+            range: symbol.selection_range,
+        },
+        container_name: (!symbol.detail.is_empty()).then(|| symbol.detail.clone()),
+    }
+}
+
+fn rg_workspace_symbol(name: String, location: Location) -> SymbolInformation {
+    #[allow(deprecated)]
+    SymbolInformation {
+        name,
+        kind: tower_lsp::lsp_types::SymbolKind::FILE,
+        tags: None,
+        deprecated: None,
+        location,
+        container_name: Some("rg fallback".to_string()),
+    }
+}
+
+#[derive(Clone)]
+struct ReferenceSearch {
+    uri: Url,
+    name: String,
+    include_decl: bool,
+    parent_class: Option<String>,
+    declared_pkg: Option<String>,
+    decl_files: Vec<String>,
+}
+
+fn reference_matches_parent_class(
+    indexer: &crate::indexer::Indexer,
+    location: &Location,
+    parent_class: Option<&str>,
+) -> bool {
+    let Some(parent_class) = parent_class else {
+        return true;
+    };
+    indexer
+        .enclosing_class_at(&location.uri, location.range.start.line)
+        .as_deref()
+        == Some(parent_class)
+}
+
+fn has_reference_line(locations: &[Location], uri: &Url, line_number: u32) -> bool {
+    locations
+        .iter()
+        .any(|location| location.uri == *uri && location.range.start.line == line_number)
+}
+
+fn append_line_reference_locations(
+    uri: &Url,
+    name: &str,
+    line_number: u32,
+    line: &str,
+    locations: &mut Vec<Location>,
+) {
+    for location in line_reference_locations(uri, name, line_number, line) {
+        if has_reference_start(locations, &location) {
+            continue;
+        }
+        locations.push(location);
+    }
+}
+
+fn line_reference_locations(uri: &Url, name: &str, line_number: u32, line: &str) -> Vec<Location> {
+    word_byte_offsets(line, name)
+        .map(|offset| reference_location(uri, name, line_number, line, offset))
+        .collect()
+}
+
+fn reference_location(
+    uri: &Url,
+    name: &str,
+    line_number: u32,
+    line: &str,
+    offset: usize,
+) -> Location {
+    let start = utf16_column(&line[..offset]);
+    let end = start + utf16_column(name);
+    Location {
+        uri: uri.clone(),
+        range: Range::new(
+            Position::new(line_number, start),
+            Position::new(line_number, end),
+        ),
+    }
+}
+
+fn utf16_column(text: &str) -> u32 {
+    text.chars().map(|ch| ch.len_utf16() as u32).sum()
+}
+
+fn has_reference_start(locations: &[Location], candidate: &Location) -> bool {
+    locations.iter().any(|location| {
+        location.uri == candidate.uri && location.range.start == candidate.range.start
+    })
+}
+
+fn hover_binding_keyword(uri: &Url) -> &'static str {
+    if crate::Language::from_path(uri.path()).is_swift() {
+        "let"
+    } else {
+        "val"
+    }
+}
+
+fn hover_substitution_context(uri: &Url, line: u32) -> SubstitutionContext<'_> {
+    SubstitutionContext::CrossFile {
+        calling_uri: uri.as_str(),
+        cursor_line: Some(line),
+    }
+}
+
+fn make_markdown_hover(markdown: String) -> Hover {
+    Hover {
+        contents: HoverContents::Markup(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value: markdown,
+        }),
+        range: None,
+    }
 }
 
 /// Iterator over the byte offsets in `line` where `word` occurs as a whole

@@ -5,7 +5,7 @@ use crate::indexer::Indexer;
 use crate::parser::parse_by_extension;
 use crate::stdlib::bare_completions;
 use crate::stdlib_tail::dot_completions_for_lang;
-use crate::types::Visibility;
+use crate::types::{FileData, ImportEntry, SymbolEntry, Visibility};
 use crate::LinesExt;
 use crate::StrExt;
 
@@ -180,117 +180,188 @@ fn extension_fn_completions(
         return vec![];
     }
 
-    // Gather current imports + package once (to avoid repeating per symbol).
-    let is_java = false;
-    let live = idx.live_lines.get(from_uri.as_str()).map(|ll| ll.clone());
-    let (cur_imports, cur_pkg, cur_lines) = idx
-        .files
-        .get(from_uri.as_str())
-        .map(|f| {
-            let lines = live.clone().unwrap_or_else(|| f.lines.clone());
-            let imports = if live.is_some() {
-                lines.parse_imports()
-            } else {
-                f.imports.clone()
-            };
-            (imports, f.package.clone().unwrap_or_default(), lines)
-        })
-        .unwrap_or_else(|| {
-            let lines = live.clone().unwrap_or_default();
-            let imports = lines.parse_imports();
-            (imports, String::new(), lines)
-        });
-
-    let mut items = Vec::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let context = ExtensionCompletionContext::build(idx, from_uri);
+    let mut builder = ExtensionCompletionBuilder::new(&context, receiver_type, snippets);
 
     for file_entry in idx.files.iter() {
-        let file_uri_str = file_entry.key().clone();
-        let file = file_entry.value();
-        let is_same_file = file_uri_str == from_uri.as_str();
-        // Only look at Kotlin files — extension functions are a Kotlin feature.
-        if !crate::Language::from_path(&file_uri_str).is_kotlin() {
+        let file_uri_str = file_entry.key();
+        if !crate::Language::from_path(file_uri_str).is_kotlin() {
             continue;
         }
+        builder.add_file(file_uri_str, file_entry.value());
+    }
 
-        for sym in &file.symbols {
-            if sym.extension_receiver != receiver_type {
-                continue;
-            }
-            // Skip private/protected from other files — inaccessible across file boundaries.
-            // Same-file private/protected are fine.
-            if !is_same_file
-                && matches!(sym.visibility, Visibility::Private | Visibility::Protected)
-            {
-                continue;
-            }
+    builder.finish()
+}
 
-            let dedup_key = format!("{}:{}", sym.name, file_uri_str);
-            if !seen.insert(dedup_key) {
-                continue;
-            }
+struct ExtensionCompletionContext {
+    from_uri: String,
+    imports: Vec<ImportEntry>,
+    package_name: String,
+    lines: Arc<Vec<String>>,
+}
 
-            // Build FQN for auto-import: package.funcName
-            let pkg = file.package.as_deref().unwrap_or("");
-            let fqn = if pkg.is_empty() {
-                sym.name.clone()
-            } else {
-                format!("{pkg}.{}", sym.name)
+impl ExtensionCompletionContext {
+    fn build(idx: &Indexer, from_uri: &Url) -> Self {
+        let live_lines = idx
+            .live_lines
+            .get(from_uri.as_str())
+            .map(|lines| lines.clone());
+        let Some(file) = idx.files.get(from_uri.as_str()) else {
+            let lines = live_lines.clone().unwrap_or_default();
+            return Self {
+                from_uri: from_uri.as_str().to_owned(),
+                imports: lines.parse_imports(),
+                package_name: String::new(),
+                lines,
             };
+        };
 
-            let pkg_of_fqn = match fqn.rfind('.') {
-                Some(i) => &fqn[..i],
-                None => "",
-            };
-            let needs_import = !is_same_file
-                && !already_imported(&fqn, &cur_imports)
-                && !cur_imports
-                    .iter()
-                    .any(|imp| imp.is_star && imp.full_path == pkg_of_fqn)
-                && pkg_of_fqn != cur_pkg;
+        let lines = live_lines.clone().unwrap_or_else(|| file.lines.clone());
+        let imports = if live_lines.is_some() {
+            lines.parse_imports()
+        } else {
+            file.imports.clone()
+        };
+        Self {
+            from_uri: from_uri.as_str().to_owned(),
+            imports,
+            package_name: file.package.clone().unwrap_or_default(),
+            lines,
+        }
+    }
+}
 
-            let import_edit = if needs_import {
-                Some(vec![cur_lines.make_import_edit(&fqn, is_java)])
-            } else {
-                None
-            };
+struct ExtensionCompletionBuilder<'a> {
+    context: &'a ExtensionCompletionContext,
+    receiver_type: &'a str,
+    snippets: bool,
+    seen: std::collections::HashSet<String>,
+    items: Vec<CompletionItem>,
+}
 
-            let insert_text = if snippets {
-                Some(format!("{}($1)", sym.name))
-            } else {
-                None
-            };
-            let detail = if !sym.detail.is_empty() {
-                Some(sym.detail.clone())
-            } else if needs_import {
-                Some(pkg_of_fqn.to_string())
-            } else {
-                None
-            };
-
-            items.push(CompletionItem {
-                label: sym.name.clone(),
-                kind: Some(CompletionItemKind::FUNCTION),
-                insert_text,
-                insert_text_format: if snippets {
-                    Some(InsertTextFormat::SNIPPET)
-                } else {
-                    None
-                },
-                sort_text: Some(format!("01:ext:{}", sym.name)),
-                detail,
-                command: if snippets {
-                    Some(trigger_parameter_hints())
-                } else {
-                    None
-                },
-                additional_text_edits: import_edit,
-                ..Default::default()
-            });
+impl<'a> ExtensionCompletionBuilder<'a> {
+    fn new(
+        context: &'a ExtensionCompletionContext,
+        receiver_type: &'a str,
+        snippets: bool,
+    ) -> Self {
+        Self {
+            context,
+            receiver_type,
+            snippets,
+            seen: std::collections::HashSet::new(),
+            items: Vec::new(),
         }
     }
 
-    items
+    fn add_file(&mut self, file_uri_str: &str, file: &FileData) {
+        let is_same_file = file_uri_str == self.context.from_uri;
+        for symbol in &file.symbols {
+            if !self.is_candidate(symbol, is_same_file) {
+                continue;
+            }
+            if !self.record_symbol(file_uri_str, symbol) {
+                continue;
+            }
+            self.items.push(self.build_item(
+                symbol,
+                file.package.as_deref().unwrap_or(""),
+                is_same_file,
+            ));
+        }
+    }
+
+    fn is_candidate(&self, symbol: &SymbolEntry, is_same_file: bool) -> bool {
+        if symbol.extension_receiver != self.receiver_type {
+            return false;
+        }
+        is_same_file
+            || !matches!(
+                symbol.visibility,
+                Visibility::Private | Visibility::Protected
+            )
+    }
+
+    fn record_symbol(&mut self, file_uri_str: &str, symbol: &SymbolEntry) -> bool {
+        let key = format!("{}:{file_uri_str}", symbol.name);
+        self.seen.insert(key)
+    }
+
+    fn build_item(
+        &self,
+        symbol: &SymbolEntry,
+        package_name: &str,
+        is_same_file: bool,
+    ) -> CompletionItem {
+        let fqn = extension_symbol_fqn(package_name, &symbol.name);
+        let needs_import = self.needs_import(&fqn, is_same_file);
+        CompletionItem {
+            label: symbol.name.clone(),
+            kind: Some(CompletionItemKind::FUNCTION),
+            insert_text: self.insert_text(&symbol.name),
+            insert_text_format: self.insert_text_format(),
+            sort_text: Some(format!("01:ext:{}", symbol.name)),
+            detail: self.detail(symbol, &fqn, needs_import),
+            command: self.command(),
+            additional_text_edits: self.import_edit(&fqn, needs_import),
+            ..Default::default()
+        }
+    }
+
+    fn needs_import(&self, fqn: &str, is_same_file: bool) -> bool {
+        let package_name = package_of_fqn(fqn);
+        !is_same_file
+            && !already_imported(fqn, &self.context.imports)
+            && !self
+                .context
+                .imports
+                .iter()
+                .any(|entry| entry.is_star && entry.full_path == package_name)
+            && package_name != self.context.package_name
+    }
+
+    fn insert_text(&self, symbol_name: &str) -> Option<String> {
+        self.snippets.then(|| format!("{symbol_name}($1)"))
+    }
+
+    fn insert_text_format(&self) -> Option<InsertTextFormat> {
+        self.snippets.then_some(InsertTextFormat::SNIPPET)
+    }
+
+    fn command(&self) -> Option<tower_lsp::lsp_types::Command> {
+        self.snippets.then(trigger_parameter_hints)
+    }
+
+    fn import_edit(
+        &self,
+        fqn: &str,
+        needs_import: bool,
+    ) -> Option<Vec<tower_lsp::lsp_types::TextEdit>> {
+        needs_import.then(|| vec![self.context.lines.make_import_edit(fqn, false)])
+    }
+
+    fn detail(&self, symbol: &SymbolEntry, fqn: &str, needs_import: bool) -> Option<String> {
+        if !symbol.detail.is_empty() {
+            return Some(symbol.detail.clone());
+        }
+        needs_import.then(|| package_of_fqn(fqn).to_owned())
+    }
+
+    fn finish(self) -> Vec<CompletionItem> {
+        self.items
+    }
+}
+
+fn extension_symbol_fqn(package_name: &str, symbol_name: &str) -> String {
+    if package_name.is_empty() {
+        return symbol_name.to_owned();
+    }
+    format!("{package_name}.{symbol_name}")
+}
+
+fn package_of_fqn(fqn: &str) -> &str {
+    fqn.rfind('.').map(|idx| &fqn[..idx]).unwrap_or("")
 }
 
 fn complete_super(idx: &Indexer, from_uri: &Url, snippets: bool) -> Vec<CompletionItem> {
@@ -370,86 +441,157 @@ pub(crate) fn complete_dot(
     snippets: bool,
     cursor_line: Option<u32>,
 ) -> Vec<CompletionItem> {
-    // `super.` — collect all members from the parent class hierarchy.
     if receiver == "super" {
         return complete_super(idx, from_uri, snippets);
     }
 
-    // Infer and normalise the receiver's type.
-    let rt = match infer_receiver_type(idx, ReceiverKind::Variable(receiver), from_uri) {
-        Some(r) => r,
-        None => {
-            // Could be an uppercase class/object — look it up directly.
-            if receiver.starts_with_uppercase() {
-                ReceiverType::from_raw(receiver.to_string())
-            } else {
-                return vec![];
-            }
-        }
+    let Some(context) = dot_completion_context(idx, receiver, from_uri) else {
+        return vec![];
     };
 
-    // Resolve the outer type to its source file (no rg — per-keystroke path).
-    let file_uri = match resolve_symbol_no_rg(idx, &rt.outer, from_uri).first() {
-        Some(loc) => loc.uri.to_string(),
-        None => return vec![],
-    };
-
-    // For dotted types (e.g. `Outer.Inner`), show only the inner type's members.
-    // `rt.leaf` is the last segment, so it works for both plain and dotted types.
-    let mut items = symbols_from_nested_type(
+    let mut items = direct_dot_completion_items(idx, &context, from_uri, cursor_line);
+    filter_inaccessible_completion_items(&mut items);
+    collect_inherited_dot_completion_items(
         idx,
-        &file_uri,
-        &rt.leaf,
+        &context,
+        from_uri,
+        snippets,
+        cursor_line,
+        &mut items,
+    );
+    dedup_completion_labels(&mut items);
+    strip_completion_snippets(&mut items, snippets);
+    items.sort_by_key(|item| kind_sort_rank(item.kind));
+    append_dot_tail_completions(idx, &context.receiver_type, from_uri, snippets, &mut items);
+    items
+}
+
+struct DotCompletionContext {
+    receiver_type: ReceiverType,
+    file_uri: String,
+}
+
+fn dot_completion_context(
+    idx: &Indexer,
+    receiver: &str,
+    from_uri: &Url,
+) -> Option<DotCompletionContext> {
+    let receiver_type = resolve_dot_receiver_type(idx, receiver, from_uri)?;
+    let file_uri = resolve_dot_receiver_file(idx, &receiver_type.outer, from_uri)?;
+    Some(DotCompletionContext {
+        receiver_type,
+        file_uri,
+    })
+}
+
+fn resolve_dot_receiver_type(
+    idx: &Indexer,
+    receiver: &str,
+    from_uri: &Url,
+) -> Option<ReceiverType> {
+    infer_receiver_type(idx, ReceiverKind::Variable(receiver), from_uri).or_else(|| {
+        receiver
+            .starts_with_uppercase()
+            .then(|| ReceiverType::from_raw(receiver.to_string()))
+    })
+}
+
+fn resolve_dot_receiver_file(idx: &Indexer, outer_type: &str, from_uri: &Url) -> Option<String> {
+    Some(
+        resolve_symbol_no_rg(idx, outer_type, from_uri)
+            .first()?
+            .uri
+            .to_string(),
+    )
+}
+
+fn direct_dot_completion_items(
+    idx: &Indexer,
+    context: &DotCompletionContext,
+    from_uri: &Url,
+    cursor_line: Option<u32>,
+) -> Vec<CompletionItem> {
+    symbols_from_nested_type(
+        idx,
+        &context.file_uri,
+        &context.receiver_type.leaf,
         Some(from_uri.as_str()),
         cursor_line,
-    );
+    )
+}
 
-    // Filter out private/protected members — they are inaccessible from outside the class.
-    items.retain(|i| {
-        i.sort_text
-            .as_deref()
-            .map(|s| !s.starts_with("prv:") && !s.starts_with("prt:"))
-            .unwrap_or(true)
-    });
-
-    // Walk the inheritance hierarchy to include members from parent classes/interfaces.
-    // Tracks "file_uri#TypeName" to prevent cycles; seed with the direct type.
-    let mut visited = vec![format!("{}#{}", file_uri, rt.leaf)];
+fn collect_inherited_dot_completion_items(
+    idx: &Indexer,
+    context: &DotCompletionContext,
+    from_uri: &Url,
+    snippets: bool,
+    cursor_line: Option<u32>,
+    items: &mut Vec<CompletionItem>,
+) {
+    let mut visited = vec![format!(
+        "{}#{}",
+        context.file_uri, context.receiver_type.leaf
+    )];
     InheritanceWalker {
         idx,
         calling_uri: from_uri,
         snippets,
         cursor_line,
     }
-    .collect(&file_uri, &rt.leaf, &mut visited, 0, &mut items);
+    .collect(
+        &context.file_uri,
+        &context.receiver_type.leaf,
+        &mut visited,
+        0,
+        items,
+    );
+}
 
-    // Deduplicate by label: direct members win over inherited ones (they come first).
+fn filter_inaccessible_completion_items(items: &mut Vec<CompletionItem>) {
+    items.retain(|item| {
+        item.sort_text
+            .as_deref()
+            .map(|sort_text| !sort_text.starts_with("prv:") && !sort_text.starts_with("prt:"))
+            .unwrap_or(true)
+    });
+}
+
+fn dedup_completion_labels(items: &mut Vec<CompletionItem>) {
     let mut seen_labels = std::collections::HashSet::new();
-    items.retain(|i| seen_labels.insert(i.label.clone()));
+    items.retain(|item| seen_labels.insert(item.label.clone()));
+}
 
-    // Strip snippet fields if client doesn't support them.
-    if !snippets {
-        for item in &mut items {
-            item.insert_text = None;
-            item.insert_text_format = None;
-        }
+fn strip_completion_snippets(items: &mut [CompletionItem], snippets: bool) {
+    if snippets {
+        return;
     }
+    for item in items {
+        item.insert_text = None;
+        item.insert_text_format = None;
+    }
+}
 
-    // Sort: functions/methods first, then fields/vars, then everything else.
-    items.sort_by_key(|i| kind_sort_rank(i.kind));
-
-    // Append stdlib extensions filtered to the receiver type. Only add Kotlin stdlib
-    // when the current file is a Kotlin file; add Swift-specific snippets for Swift.
+fn append_dot_tail_completions(
+    idx: &Indexer,
+    receiver_type: &ReceiverType,
+    from_uri: &Url,
+    snippets: bool,
+    items: &mut Vec<CompletionItem>,
+) {
     let from_path = from_uri.path();
-    items.extend(dot_completions_for_lang(from_path, &rt.qualified, snippets));
-
-    // Append indexed extension functions whose receiver matches `rt.outer`.
-    // These may be defined in other files and need an auto-import.
+    items.extend(dot_completions_for_lang(
+        from_path,
+        &receiver_type.qualified,
+        snippets,
+    ));
     if crate::Language::from_path(from_path).is_kotlin() {
-        items.extend(extension_fn_completions(idx, &rt.outer, from_uri, snippets));
+        items.extend(extension_fn_completions(
+            idx,
+            &receiver_type.outer,
+            from_uri,
+            snippets,
+        ));
     }
-
-    items
 }
 
 /// Recursively collect members from parent classes/interfaces of `type_name`

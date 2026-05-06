@@ -271,132 +271,149 @@ pub(crate) fn lambda_receiver_type_from_context(
     uri: &Url,
 ) -> Option<String> {
     let trimmed = before_brace.trim_end();
+    let callee = normalized_lambda_callee(trimmed);
 
-    // Strip a trailing balanced `(args)` to expose the callee expression.
-    let callee_raw = strip_trailing_call_args(trimmed).replace("?.", ".");
-    let callee = callee_raw.trim(); // trim both ends — leading spaces from indentation matter
+    receiver_dot_lambda_type(&callee, deps, uri)
+        .or_else(|| plain_trailing_lambda_type(trimmed, &callee, deps, uri))
+        .or_else(|| inline_lambda_param_type(trimmed, deps, uri))
+}
 
-    // ── Case A: `receiver.method` ────────────────────────────────────────────
-    // Use a depth-aware dot search so dots INSIDE argument lists are ignored
-    // (e.g., `fn(Enum.VALUE, {` must not match the dot inside `Enum.VALUE`).
-    if let Some(dot_pos) = find_last_dot_at_depth_zero(callee) {
-        let receiver_expr = callee[..dot_pos].trim_end();
-        // Strip a trailing `(args)` so method chains like `getList().joinAll().map { it }`
-        // yield `receiver_var = "joinAll"` rather than `""`.
-        let receiver_var = last_ident_in(strip_trailing_call_args(receiver_expr));
-        // Extract method name (everything after the dot up to the first non-id char).
-        let method = callee[dot_pos + 1..].trim_start().ident_prefix();
+fn normalized_lambda_callee(before_brace: &str) -> String {
+    strip_trailing_call_args(before_brace)
+        .replace("?.", ".")
+        .trim()
+        .to_owned()
+}
 
-        if !receiver_var.is_empty() {
-            if let Some(raw) = deps.find_var_type(receiver_var, uri) {
-                if let Some(elem) = extract_collection_element_type(&raw) {
-                    return Some(elem);
-                }
-                // Non-collection receiver: prefer the method's own lambda param type when
-                // the method is indexed (e.g. `flow.collectIn { it }` → T from `collectIn`'s
-                // `block: suspend (T) -> Unit`).  Fall back to receiver type when the method
-                // is not found (e.g. stdlib `run`, `apply`, `let` → receiver type is correct).
-                if !method.is_empty() {
-                    if let Some(ty) = fun_trailing_lambda_it_type(&method, deps, uri) {
-                        return Some(ty);
-                    }
-                }
-                let base = raw.ident_prefix();
-                if !base.is_empty() && base.starts_with_uppercase() {
-                    return Some(base);
-                }
-            }
-
-            // Multi-segment receiver: `outer.field.method { it }` where `field`
-            // is not a local variable but a property of `outer`.
-            // Example: `result.availableBanks.firstOrNull { it }` →
-            //   outer_var = "result", field = "availableBanks"
-            //   → infer result's type → look up availableBanks in that class.
-            if let Some(rdot) = receiver_expr.rfind('.') {
-                let outer_var = last_ident_in(&receiver_expr[..rdot]);
-                let field = &receiver_expr[rdot + 1..];
-                if !outer_var.is_empty() && !field.is_empty() {
-                    if let Some(outer_type) = deps.find_var_type(outer_var, uri) {
-                        let outer_base = outer_type.ident_prefix();
-                        if !outer_base.is_empty() {
-                            if let Some(field_raw) = deps.find_field_type(&outer_base, field) {
-                                if let Some(elem) = extract_collection_element_type(&field_raw) {
-                                    return Some(elem);
-                                }
-                                // Mirror single-segment: try method's lambda param type first.
-                                if !method.is_empty() {
-                                    if let Some(ty) =
-                                        fun_trailing_lambda_it_type(&method, deps, uri)
-                                    {
-                                        return Some(ty);
-                                    }
-                                }
-                                let base = field_raw.ident_prefix();
-                                if !base.is_empty() && base.starts_with_uppercase() {
-                                    return Some(base);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Method-chain receiver: `getList().joinAll().firstOrNull { it }` —
-            // receiver_var is a method name (e.g. "joinAll"), not a local variable.
-            // Look up its return type directly and extract the element type.
-            if let Some(ret_raw) = deps.find_fun_return_type(receiver_var) {
-                if let Some(elem) = extract_collection_element_type(&ret_raw) {
-                    return Some(elem);
-                }
-                if !method.is_empty() {
-                    if let Some(ty) = fun_trailing_lambda_it_type(&method, deps, uri) {
-                        return Some(ty);
-                    }
-                }
-                let base = ret_raw.ident_prefix();
-                if !base.is_empty() && base.starts_with_uppercase() {
-                    return Some(base);
-                }
-            }
-
-            if receiver_var.starts_with_uppercase() {
-                return Some(receiver_var.to_owned());
-            }
-        }
+fn receiver_dot_lambda_type(callee: &str, deps: &impl InferDeps, uri: &Url) -> Option<String> {
+    let dot_pos = find_last_dot_at_depth_zero(callee)?;
+    let receiver_expr = callee[..dot_pos].trim_end();
+    let receiver_var = last_ident_in(strip_trailing_call_args(receiver_expr));
+    let method = callee[dot_pos + 1..].trim_start().ident_prefix();
+    if receiver_var.is_empty() {
+        return None;
     }
 
-    // ── Case B: plain trailing lambda — `fnName(args) { it/this }` ─────────
-    // Extract the trailing identifier from callee — handles cases where callee
-    // is prefixed by outer-lambda context like `{ setState` (the `{` belongs
-    // to an enclosing lambda, not this call).
+    receiver_var_lambda_type(receiver_var, receiver_expr, &method, deps, uri)
+        .or_else(|| uppercase_name(receiver_var))
+}
+
+fn receiver_var_lambda_type(
+    receiver_var: &str,
+    receiver_expr: &str,
+    method: &str,
+    deps: &impl InferDeps,
+    uri: &Url,
+) -> Option<String> {
+    direct_receiver_lambda_type(receiver_var, method, deps, uri)
+        .or_else(|| nested_receiver_lambda_type(receiver_expr, method, deps, uri))
+        .or_else(|| method_chain_lambda_type(receiver_var, method, deps, uri))
+}
+
+fn direct_receiver_lambda_type(
+    receiver_var: &str,
+    method: &str,
+    deps: &impl InferDeps,
+    uri: &Url,
+) -> Option<String> {
+    let raw = deps.find_var_type(receiver_var, uri)?;
+    inferred_receiver_lambda_type(&raw, method, deps, uri)
+}
+
+fn nested_receiver_lambda_type(
+    receiver_expr: &str,
+    method: &str,
+    deps: &impl InferDeps,
+    uri: &Url,
+) -> Option<String> {
+    let (outer_var, field) = receiver_outer_field(receiver_expr)?;
+    let outer_type = deps.find_var_type(outer_var, uri)?;
+    let outer_base = outer_type.ident_prefix();
+    if outer_base.is_empty() {
+        return None;
+    }
+    let field_raw = deps.find_field_type(&outer_base, field)?;
+    inferred_receiver_lambda_type(&field_raw, method, deps, uri)
+}
+
+fn receiver_outer_field(receiver_expr: &str) -> Option<(&str, &str)> {
+    let dot = receiver_expr.rfind('.')?;
+    let outer_var = last_ident_in(&receiver_expr[..dot]);
+    let field = &receiver_expr[dot + 1..];
+    if outer_var.is_empty() || field.is_empty() {
+        return None;
+    }
+    Some((outer_var, field))
+}
+
+fn method_chain_lambda_type(
+    receiver_var: &str,
+    method: &str,
+    deps: &impl InferDeps,
+    uri: &Url,
+) -> Option<String> {
+    let ret_raw = deps.find_fun_return_type(receiver_var)?;
+    inferred_receiver_lambda_type(&ret_raw, method, deps, uri)
+}
+
+fn inferred_receiver_lambda_type(
+    raw_type: &str,
+    method: &str,
+    deps: &impl InferDeps,
+    uri: &Url,
+) -> Option<String> {
+    extract_collection_element_type(raw_type)
+        .or_else(|| method_lambda_input_type(method, deps, uri))
+        .or_else(|| uppercase_ident_prefix(raw_type))
+}
+
+fn method_lambda_input_type(method: &str, deps: &impl InferDeps, uri: &Url) -> Option<String> {
+    if method.is_empty() {
+        return None;
+    }
+    fun_trailing_lambda_it_type(method, deps, uri)
+}
+
+fn uppercase_ident_prefix(raw: &str) -> Option<String> {
+    let base = raw.ident_prefix();
+    if base.is_empty() {
+        return None;
+    }
+    uppercase_name(&base)
+}
+
+fn uppercase_name(name: &str) -> Option<String> {
+    name.starts_with_uppercase().then(|| name.to_owned())
+}
+
+fn plain_trailing_lambda_type(
+    before_brace: &str,
+    callee: &str,
+    deps: &impl InferDeps,
+    uri: &Url,
+) -> Option<String> {
     let trailing_fn = last_ident_in(callee);
-    if !trailing_fn.is_empty() {
-        // Known stdlib scope function `with(receiver) { this }` — extract the
-        // first argument as the receiver and infer its type directly.
-        if trailing_fn == "with" {
-            if let Some(recv_name) = extract_first_arg(trimmed) {
-                if let Some(raw) = deps.find_var_type(recv_name, uri) {
-                    let base = raw.ident_prefix();
-                    if !base.is_empty() {
-                        return Some(base);
-                    }
-                }
-                // If recv_name starts uppercase it IS the type (companion / object ref).
-                let base = recv_name.ident_prefix();
-                if base.starts_with_uppercase() {
-                    return Some(base);
-                }
-            }
-        }
-        if let Some(ty) = fun_trailing_lambda_it_type(trailing_fn, deps, uri) {
-            return Some(ty);
-        }
+    if trailing_fn.is_empty() {
+        return None;
     }
 
-    // ── Case C: inline lambda arg — `fn(arg, { param -> ... }, ...)` ─────────
-    // `before_brace` ends inside an unclosed `(`, so scan backward to find
-    // the function name and the positional index of this lambda argument.
-    inline_lambda_param_type(trimmed, deps, uri)
+    with_receiver_lambda_type(trailing_fn, before_brace, deps, uri)
+        .or_else(|| fun_trailing_lambda_it_type(trailing_fn, deps, uri))
+}
+
+fn with_receiver_lambda_type(
+    trailing_fn: &str,
+    before_brace: &str,
+    deps: &impl InferDeps,
+    uri: &Url,
+) -> Option<String> {
+    if trailing_fn != "with" {
+        return None;
+    }
+    let recv_name = extract_first_arg(before_brace)?;
+    deps.find_var_type(recv_name, uri)
+        .and_then(|raw| uppercase_ident_prefix(&raw))
+        .or_else(|| uppercase_ident_prefix(recv_name))
 }
 
 // ─── private helpers ─────────────────────────────────────────────────────────
@@ -415,7 +432,9 @@ fn cursor_node_at(
         row: pos.line,
         column: byte_col,
     };
-    doc.tree.root_node().descendant_for_point_range(point, point)
+    doc.tree
+        .root_node()
+        .descendant_for_point_range(point, point)
 }
 
 fn lambda_before_brace_context(
@@ -586,7 +605,16 @@ fn find_it_element_type_in_lines_impl(
                             return lambda_receiver_this_type_from_context(before_brace, idx, uri);
                         }
                         return lambda_receiver_type_from_context(before_brace, idx, uri).or_else(
-                            || lambda_receiver_type_named_arg_ml(before_brace, 0, lines, ln, idx, uri),
+                            || {
+                                lambda_receiver_type_named_arg_ml(
+                                    before_brace,
+                                    0,
+                                    lines,
+                                    ln,
+                                    idx,
+                                    uri,
+                                )
+                            },
                         );
                     }
                 }

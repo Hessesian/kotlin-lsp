@@ -295,103 +295,40 @@ impl Indexer {
         cursor_line: usize,
         cursor_col: usize,
     ) -> Vec<String> {
-        // ── CST fast path ────────────────────────────────────────────────────
-        if let Some(doc) = self.live_doc(uri) {
-            let line_text = self
-                .live_lines
-                .get(uri.as_str())
-                .and_then(|ll| ll.get(cursor_line).cloned())
-                .unwrap_or_default();
-            let byte_col = crate::indexer::live_tree::utf16_col_to_byte(&line_text, cursor_col);
-            let point = Point {
-                row: cursor_line,
-                column: byte_col,
-            };
-            if let Some(node) = doc
-                .tree
-                .root_node()
-                .descendant_for_point_range(point, point)
-            {
-                let mut params: Vec<String> = Vec::new();
-                let mut cur = node;
-                loop {
-                    if cur.kind() == KIND_LAMBDA_LIT {
-                        let new_names = cur.collect_lambda_param_names(&doc.bytes, &params);
-                        params.extend(new_names);
-                    }
-                    let Some(p) = cur.parent() else {
-                        break;
-                    };
-                    cur = p;
-                }
-                return params;
-            }
+        if let Some(params) = self.cst_lambda_params_at_col(uri, cursor_line, cursor_col) {
+            return params;
         }
 
-        // ── Text fallback ────────────────────────────────────────────────────
-        let lines = self
+        let lines = self.lambda_param_scan_lines(uri);
+        scan_lambda_params_in_lines(&lines, cursor_line, cursor_col)
+    }
+
+    fn cst_lambda_params_at_col(
+        &self,
+        uri: &Url,
+        cursor_line: usize,
+        cursor_col: usize,
+    ) -> Option<Vec<String>> {
+        let doc = self.live_doc(uri)?;
+        let line_text = self
             .live_lines
             .get(uri.as_str())
-            .map(|ll| ll.clone())
-            .or_else(|| self.files.get(uri.as_str()).map(|f| f.lines.clone()))
+            .and_then(|lines| lines.get(cursor_line).cloned())
             .unwrap_or_default();
+        let point = lambda_cursor_point(&line_text, cursor_line, cursor_col);
+        let node = doc
+            .tree
+            .root_node()
+            .descendant_for_point_range(point, point)?;
+        Some(collect_cst_lambda_params(node, &doc.bytes))
+    }
 
-        let mut params: Vec<String> = Vec::new();
-        let mut depth: i32 = 0;
-        let scan_start = cursor_line.saturating_sub(SCOPE_SCAN_BACK_LINES);
-
-        for ln in (scan_start..=cursor_line).rev() {
-            let line = match lines.get(ln) {
-                Some(l) => l,
-                None => continue,
-            };
-            let scan_line: &str = if ln == cursor_line && cursor_col < line.len() {
-                let mut utf16 = 0usize;
-                let mut byte_end = line.len();
-                for (bi, ch) in line.char_indices() {
-                    if utf16 >= cursor_col {
-                        byte_end = bi;
-                        break;
-                    }
-                    utf16 += ch.len_utf16();
-                }
-                &line[..byte_end]
-            } else {
-                line
-            };
-            for (bi, ch) in scan_line.char_indices().rev() {
-                match ch {
-                    '}' => depth += 1,
-                    '{' => {
-                        depth -= 1;
-                        if depth < 0 {
-                            if line[..bi].ends_with('$') {
-                                depth = 0;
-                                continue;
-                            }
-                            let after = line[bi + 1..].trim_start();
-                            if let Some(arrow_pos) = after.find("->") {
-                                let names_str = &after[..arrow_pos];
-                                for tok in names_str.split(',') {
-                                    let name = tok.trim().ident_prefix();
-                                    if !name.is_empty()
-                                        && name != "it"
-                                        && name != "_"
-                                        && name.starts_with_lowercase()
-                                        && !params.contains(&name)
-                                    {
-                                        params.push(name.clone());
-                                    }
-                                }
-                            }
-                            depth = 0;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        params
+    fn lambda_param_scan_lines(&self, uri: &Url) -> Arc<Vec<String>> {
+        self.live_lines
+            .get(uri.as_str())
+            .map(|lines| lines.clone())
+            .or_else(|| self.files.get(uri.as_str()).map(|file| file.lines.clone()))
+            .unwrap_or_default()
     }
 
     /// Find the `{ name ->` declaration line for a lambda parameter in scope at
@@ -616,6 +553,123 @@ pub(crate) fn last_ident_in(s: &str) -> &str {
         .map(|c| c.len_utf8())
         .sum();
     &s[s.len() - ident_bytes..]
+}
+
+fn lambda_cursor_point(line_text: &str, cursor_line: usize, cursor_col: usize) -> Point {
+    Point {
+        row: cursor_line,
+        column: crate::indexer::live_tree::utf16_col_to_byte(line_text, cursor_col),
+    }
+}
+
+fn collect_cst_lambda_params(node: tree_sitter::Node<'_>, bytes: &[u8]) -> Vec<String> {
+    let mut params = Vec::new();
+    let mut current = node;
+    loop {
+        if current.kind() == KIND_LAMBDA_LIT {
+            params.extend(current.collect_lambda_param_names(bytes, &params));
+        }
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        current = parent;
+    }
+    params
+}
+
+fn scan_lambda_params_in_lines(
+    lines: &[String],
+    cursor_line: usize,
+    cursor_col: usize,
+) -> Vec<String> {
+    let scan_start = cursor_line.saturating_sub(SCOPE_SCAN_BACK_LINES);
+    let mut scan = LambdaParamTextScan::default();
+    for line_index in (scan_start..=cursor_line).rev() {
+        let Some(line) = lines.get(line_index) else {
+            continue;
+        };
+        scan.scan_line(line_before_cursor(
+            line,
+            line_index,
+            cursor_line,
+            cursor_col,
+        ));
+    }
+    scan.params
+}
+
+fn line_before_cursor(
+    line: &str,
+    line_index: usize,
+    cursor_line: usize,
+    cursor_col: usize,
+) -> &str {
+    if line_index != cursor_line {
+        return line;
+    }
+    let byte_end = utf16_prefix_byte_end(line, cursor_col);
+    &line[..byte_end]
+}
+
+fn utf16_prefix_byte_end(line: &str, cursor_col: usize) -> usize {
+    let mut utf16 = 0usize;
+    for (byte_index, ch) in line.char_indices() {
+        if utf16 >= cursor_col {
+            return byte_index;
+        }
+        utf16 += ch.len_utf16();
+    }
+    line.len()
+}
+
+#[derive(Default)]
+struct LambdaParamTextScan {
+    params: Vec<String>,
+    depth: i32,
+}
+
+impl LambdaParamTextScan {
+    fn scan_line(&mut self, line: &str) {
+        for (byte_index, ch) in line.char_indices().rev() {
+            match ch {
+                '}' => self.depth += 1,
+                '{' => self.visit_lambda_open(line, byte_index),
+                _ => {}
+            }
+        }
+    }
+
+    fn visit_lambda_open(&mut self, line: &str, byte_index: usize) {
+        self.depth -= 1;
+        if self.depth >= 0 || line[..byte_index].ends_with('$') {
+            if line[..byte_index].ends_with('$') {
+                self.depth = 0;
+            }
+            return;
+        }
+        self.collect_param_names(&line[byte_index + 1..]);
+        self.depth = 0;
+    }
+
+    fn collect_param_names(&mut self, after_brace: &str) {
+        let Some((names, _)) = after_brace.trim_start().split_once("->") else {
+            return;
+        };
+        for token in names.split(',') {
+            let name = token.trim().ident_prefix();
+            if should_collect_lambda_param(&name, &self.params) {
+                self.params.push(name);
+            }
+        }
+    }
+}
+
+fn should_collect_lambda_param(name: &str, existing: &[String]) -> bool {
+    !name.is_empty()
+        && name != "it"
+        && name != "_"
+        && name.starts_with_lowercase()
+        && !existing.iter().any(|existing_name| existing_name == name)
 }
 
 /// Scan backward from `(line_no, col)` — where `col` is the START of the cursor
