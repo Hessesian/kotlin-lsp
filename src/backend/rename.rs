@@ -3,9 +3,9 @@ use super::helpers::resolve_references_scope;
 use super::Backend;
 use crate::indexer::live_tree::utf16_col_to_byte;
 use crate::queries::{
-    KIND_ANON_FUN, KIND_CLASS_BODY, KIND_COMPANION_OBJ, KIND_FUN_DECL, KIND_METHOD_DECL,
-    KIND_MULTI_VAR_DECL, KIND_NAV_EXPR, KIND_OBJECT_DECL, KIND_PROP_DECL, KIND_SOURCE_FILE,
-    KIND_VAR_DECL,
+    KIND_ANON_FUN, KIND_CLASS_BODY, KIND_COMPANION_OBJ, KIND_FUN_DECL, KIND_LAMBDA_LIT,
+    KIND_METHOD_DECL, KIND_MULTI_VAR_DECL, KIND_NAV_EXPR, KIND_OBJECT_DECL, KIND_PROP_DECL,
+    KIND_SOURCE_FILE, KIND_VAR_DECL,
 };
 use crate::StrExt;
 use tower_lsp::jsonrpc::Result;
@@ -62,10 +62,14 @@ fn cst_cursor_is_local_var(indexer: &crate::indexer::Indexer, uri: &Url, pos: Po
             KIND_PROP_DECL | KIND_VAR_DECL | KIND_MULTI_VAR_DECL => {
                 in_binding = true;
             }
-            // Inside a binding and hit a function boundary → local variable.
-            KIND_FUN_DECL | KIND_METHOD_DECL | KIND_ANON_FUN if in_binding => return true,
-            // Function/method declaration without being in a binding → not a local var.
-            KIND_FUN_DECL | KIND_METHOD_DECL | KIND_ANON_FUN => return false,
+            // Inside a binding and hit a function/lambda boundary → local variable.
+            KIND_FUN_DECL | KIND_METHOD_DECL | KIND_ANON_FUN | KIND_LAMBDA_LIT
+                if in_binding =>
+            {
+                return true
+            }
+            // Function/method/lambda without being in a binding → not a local var.
+            KIND_FUN_DECL | KIND_METHOD_DECL | KIND_ANON_FUN | KIND_LAMBDA_LIT => return false,
             // Navigation expression → member access, not a local var.
             KIND_NAV_EXPR => return false,
             // Class body, companion object, or source file reached while in a binding
@@ -88,6 +92,7 @@ fn cst_cursor_is_local_var(indexer: &crate::indexer::Indexer, uri: &Url, pos: Po
     }
 }
 
+#[cfg(test)]
 /// Return `true` when the CST node at `pos` belongs to a function/method
 /// declaration or a navigation expression (member access). Returns `false`
 /// for property/variable declarations, parameters, and unknown contexts.
@@ -601,6 +606,22 @@ mod tests {
         assert!(
             !cst_cursor_is_local_var(&idx, &uri, pos),
             "class property should not be local var"
+        );
+    }
+
+    /// Variable declared inside a lambda literal → is local var (skip_dotted = true).
+    #[test]
+    fn local_var_inside_lambda_is_local() {
+        let src = "val f = { val x = 1\n    x\n}\n";
+        let (idx, uri) = make_indexed(src);
+        // Cursor on `x` at line 0, col 14 (the `val x` declaration inside the lambda)
+        let pos = Position {
+            line: 0,
+            character: 14,
+        };
+        assert!(
+            cst_cursor_is_local_var(&idx, &uri, pos),
+            "val inside lambda should be local var"
         );
     }
 }
