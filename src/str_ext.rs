@@ -95,15 +95,22 @@ impl StrExt for str {
             let mut cu = 0usize;
             let mut idx = chars.len();
             for (i, c) in chars.iter().enumerate() {
-                if cu >= utf16_col { idx = i; break; }
+                if cu >= utf16_col {
+                    idx = i;
+                    break;
+                }
                 cu += c.len_utf16();
             }
             idx
         };
         let mut ws = col;
-        while ws > 0 && (chars[ws - 1].is_alphanumeric() || chars[ws - 1] == '_') { ws -= 1; }
+        while ws > 0 && (chars[ws - 1].is_alphanumeric() || chars[ws - 1] == '_') {
+            ws -= 1;
+        }
         let mut we = col;
-        while we < chars.len() && (chars[we].is_alphanumeric() || chars[we] == '_') { we += 1; }
+        while we < chars.len() && (chars[we].is_alphanumeric() || chars[we] == '_') {
+            we += 1;
+        }
         chars[ws..we].iter().collect()
     }
 }

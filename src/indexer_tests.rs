@@ -1886,7 +1886,9 @@ async fn e2e_ignore_patterns_excludes_symbols() {
         root,
     )));
 
-    Arc::clone(&indexer).index_workspace_full(root, Arc::new(NoopReporter)).await;
+    Arc::clone(&indexer)
+        .index_workspace_full(root, Arc::new(NoopReporter))
+        .await;
 
     assert!(
         indexer.definitions.contains_key("MainClass"),
@@ -1925,7 +1927,9 @@ async fn e2e_ignore_patterns_bare_pattern_any_depth() {
         root,
     )));
 
-    Arc::clone(&indexer).index_workspace_full(root, Arc::new(NoopReporter)).await;
+    Arc::clone(&indexer)
+        .index_workspace_full(root, Arc::new(NoopReporter))
+        .await;
 
     assert!(
         indexer.definitions.contains_key("KeepMe"),

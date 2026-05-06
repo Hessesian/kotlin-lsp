@@ -110,6 +110,12 @@ pub(crate) trait IndexRead {
     fn infer_variable_type_for(&self, _name: &str, _uri: &Url) -> Option<String> {
         None
     }
+
+    /// Trigger on-demand indexing for a file if needed (production hook).
+    /// Default impl does nothing; test stubs don't need on-demand indexing.
+    /// Callers that need on-demand indexing must call `ensure_indexed_on_demand()`
+    /// before `get_file_data()` (as `build_type_param_subst_impl` does).
+    fn ensure_indexed_on_demand(&self, _uri: &str) {}
 }
 
 // ─── Pipeline Entry Point (thin coordinator) ───────────────────────────────
@@ -194,9 +200,11 @@ pub(crate) fn cross_file_type_subst<I: IndexRead>(
     sym_uri: &str,
     sym_line: u32,
     calling_uri: &str,
+    caller_cursor_line: Option<u32>,
     sig: &str,
 ) -> String {
-    let subst = build_type_param_subst_impl(index, sym_uri, sym_line, calling_uri, None);
+    let subst =
+        build_type_param_subst_impl(index, sym_uri, sym_line, calling_uri, caller_cursor_line);
     if subst.is_empty() {
         sig.to_owned()
     } else {
@@ -396,6 +404,9 @@ fn build_type_param_subst_impl<I: IndexRead>(
         return HashMap::new();
     }
 
+    // Trigger on-demand indexing if the file hasn't been indexed yet.
+    index.ensure_indexed_on_demand(sym_uri);
+
     let sym_data = match index.get_file_data(sym_uri) {
         Some(d) => d,
         None => return HashMap::new(),
@@ -415,6 +426,9 @@ fn build_type_param_subst_impl<I: IndexRead>(
     if type_params.is_empty() {
         return HashMap::new();
     }
+
+    // Trigger on-demand indexing for the calling file too.
+    index.ensure_indexed_on_demand(calling_uri);
 
     let calling_data = match index.get_file_data(calling_uri) {
         Some(d) => d,
@@ -612,6 +626,18 @@ impl IndexRead for super::Indexer {
 
     fn infer_variable_type_for(&self, name: &str, uri: &Url) -> Option<String> {
         self.infer_variable_type(name, uri)
+    }
+
+    fn ensure_indexed_on_demand(&self, uri: &str) {
+        // Fast path: if the file is already in the in-memory index, skip URI parsing.
+        if self.files.contains_key(uri) {
+            return;
+        }
+        // Convert string URI to Url and trigger on-demand indexing if needed.
+        // Silently skips URIs that can't be parsed — they can't be indexed anyway.
+        if let Ok(parsed_uri) = Url::parse(uri) {
+            self.ensure_indexed(&parsed_uri);
+        }
     }
 }
 

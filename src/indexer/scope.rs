@@ -32,7 +32,11 @@ impl Indexer {
     }
 
     /// Like `word_at` but also returns the `Range` of the word in LSP (UTF-16) coordinates.
-    pub(crate) fn word_and_range_at(&self, uri: &Url, position: Position) -> Option<(String, Range)> {
+    pub(crate) fn word_and_range_at(
+        &self,
+        uri: &Url,
+        position: Position,
+    ) -> Option<(String, Range)> {
         let lines = self.lines_for(uri)?;
         let line_text = lines.get(position.line as usize)?;
         let target_utf16 = position.character as usize;

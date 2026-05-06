@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::indexer::Indexer;
 use crate::parser::{parse_java, parse_kotlin};
@@ -1042,7 +1041,7 @@ fn dot_complete_does_not_leak_top_level_fns() {
     let caller_uri = Url::parse("file:///a/Caller.kt").unwrap();
     idx.index_content(&caller_uri, "package a\nval key: ProductKey = TODO()");
 
-    let items = complete_dot(&idx, "ProductKey", &caller_uri, false);
+    let items = complete_dot(&idx, "ProductKey", &caller_uri, false, None);
     let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
 
     assert!(labels.contains(&"fromString"), "member fun should appear");
@@ -1072,7 +1071,7 @@ fn dot_complete_includes_inherited_members() {
         "package com.example\nval resp: AccountDetailResponseBody = TODO()",
     );
 
-    let items = complete_dot(&idx, "AccountDetailResponseBody", &caller_uri, false);
+    let items = complete_dot(&idx, "AccountDetailResponseBody", &caller_uri, false, None);
     let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
 
     // Direct members
@@ -1282,7 +1281,7 @@ fn auto_import_completion_adds_edit() {
         "package com.example.app\n\nfun Screen() {\n    Comp\n}",
     );
 
-    let (items, _) = complete_symbol(&idx, "Comp", None, &cur_uri, false);
+    let (items, _) = complete_symbol(&idx, "Comp", None, &cur_uri, false, None);
     let import_item = items.iter().find(|i| i.label == "Composable");
     assert!(
         import_item.is_some(),
@@ -1309,7 +1308,7 @@ fn auto_import_skipped_when_already_imported() {
         "package com.app\nimport com.lib.Foo\nclass Bar { val f: Foo = Foo() }",
     );
 
-    let (items, _) = complete_symbol(&idx, "Foo", None, &cur_uri, false);
+    let (items, _) = complete_symbol(&idx, "Foo", None, &cur_uri, false, None);
     let foo_items: Vec<_> = items.iter().filter(|i| i.label == "Foo").collect();
     // May appear (from tier-0/1 or tier-2 without edit) but must not have an import edit.
     for item in &foo_items {
@@ -1329,7 +1328,7 @@ fn auto_import_skipped_same_package() {
     let cur_uri = uri("/app/Bar.kt");
     idx.index_content(&cur_uri, "package com.example\nclass Bar");
 
-    let (items, _) = complete_symbol(&idx, "Foo", None, &cur_uri, false);
+    let (items, _) = complete_symbol(&idx, "Foo", None, &cur_uri, false, None);
     // Foo is in the same package — any completion item for it must have no import edit.
     for item in items.iter().filter(|i| i.label == "Foo") {
         assert!(
@@ -1354,7 +1353,7 @@ fn auto_import_two_packages_two_items() {
     let cur_uri = uri("/app/Screen.kt");
     idx.index_content(&cur_uri, "package com.example\nfun screen() {}");
 
-    let (items, _) = complete_symbol(&idx, "Button", None, &cur_uri, false);
+    let (items, _) = complete_symbol(&idx, "Button", None, &cur_uri, false, None);
     let button_items: Vec<_> = items.iter().filter(|i| i.label == "Button").collect();
     assert_eq!(
         button_items.len(),
@@ -1387,7 +1386,7 @@ fn caps_mode_hides_lowercase_functions() {
         "package com.example\nclass Column\nfun collectAsState() {}",
     );
 
-    let (items, _) = complete_symbol(&idx, "Col", None, &cur_uri, false);
+    let (items, _) = complete_symbol(&idx, "Col", None, &cur_uri, false, None);
     // Column (uppercase) should appear.
     assert!(
         items.iter().any(|i| i.label == "Column"),
@@ -1409,7 +1408,7 @@ fn lowercase_mode_hides_classes() {
         "package com.example\nclass Column\nfun collectAsState() {}",
     );
 
-    let (items, _) = complete_symbol(&idx, "col", None, &cur_uri, false);
+    let (items, _) = complete_symbol(&idx, "col", None, &cur_uri, false, None);
     // collectAsState (lowercase) should appear.
     assert!(
         items.iter().any(|i| i.label == "collectAsState"),
@@ -1429,7 +1428,7 @@ fn tier2_suppressed_when_name_visible_in_current_file() {
     let cur_uri = uri("/app/Bar.kt");
     idx.index_content(&cur_uri, "package com.example\nclass Foo");
 
-    let (items, _) = complete_symbol(&idx, "Foo", None, &cur_uri, false);
+    let (items, _) = complete_symbol(&idx, "Foo", None, &cur_uri, false, None);
     let foo_items: Vec<_> = items.iter().filter(|i| i.label == "Foo").collect();
     assert_eq!(
         foo_items.len(),
@@ -1486,7 +1485,7 @@ fn match_score_prefix_beats_acronym_in_sort() {
         "package com.example\nclass Column\nclass ColumnButton",
     );
 
-    let (items, _) = complete_symbol(&idx, "Col", None, &cur_uri, false);
+    let (items, _) = complete_symbol(&idx, "Col", None, &cur_uri, false, None);
     let col_pos = items.iter().position(|i| i.label == "Column").unwrap();
     let colbtn_pos = items
         .iter()
@@ -1512,7 +1511,7 @@ fn tier2_requires_prefix_length_2() {
     idx.index_content(&cur_uri, "package com.example\n");
 
     // Single char 'C' — tier-2 should NOT fire, so Column (cross-pkg) not returned.
-    let (items, _) = complete_symbol(&idx, "C", None, &cur_uri, false);
+    let (items, _) = complete_symbol(&idx, "C", None, &cur_uri, false, None);
     assert!(
         !items
             .iter()
@@ -1521,7 +1520,7 @@ fn tier2_requires_prefix_length_2() {
     );
 
     // Two chars 'Co' — tier-2 SHOULD fire.
-    let (items, _) = complete_symbol(&idx, "Co", None, &cur_uri, false);
+    let (items, _) = complete_symbol(&idx, "Co", None, &cur_uri, false, None);
     assert!(
         items.iter().any(|i| i.label == "Column"),
         "tier-2 must fire for prefix length >= 2"
@@ -1539,7 +1538,7 @@ fn result_cap_sets_hit_cap() {
         .join("\n");
     idx.index_content(&cur_uri, &format!("package com.example\n{src}"));
 
-    let (items, hit_cap) = complete_symbol(&idx, "Cls", None, &cur_uri, false);
+    let (items, hit_cap) = complete_symbol(&idx, "Cls", None, &cur_uri, false, None);
     assert!(
         hit_cap,
         "hit_cap should be true when result count exceeds COMPLETION_CAP"
@@ -1565,7 +1564,7 @@ fn annotation_context_hides_functions() {
     let annotation_only = is_annotation_context(line, prefix);
     assert!(annotation_only, "should detect annotation context");
 
-    let (items, _) = complete_symbol_with_context(&idx, prefix, None, &cur_uri, false, true);
+    let (items, _) = complete_symbol_with_context(&idx, prefix, None, &cur_uri, false, true, None);
     // Annotation class should appear.
     assert!(
         items.iter().any(|i| i.label == "Composable"),
@@ -1586,7 +1585,7 @@ fn camel_mode_hides_screaming_snake() {
             "package com.example\nclass ChildDashboardViewModel\nconst val CHILD_DASHBOARD_MAX = 10\nval CHILD_COUNT = 5");
 
     // Typing CamelCase prefix — SCREAMING_SNAKE constants must not appear.
-    let (items, _) = complete_symbol(&idx, "Child", None, &cur_uri, false);
+    let (items, _) = complete_symbol(&idx, "Child", None, &cur_uri, false, None);
     assert!(
         items.iter().any(|i| i.label == "ChildDashboardViewModel"),
         "CamelCase class must appear"
@@ -1601,7 +1600,7 @@ fn camel_mode_hides_screaming_snake() {
     );
 
     // Typing all-uppercase prefix — SCREAMING_SNAKE constants may appear.
-    let (items2, _) = complete_symbol(&idx, "CHILD", None, &cur_uri, false);
+    let (items2, _) = complete_symbol(&idx, "CHILD", None, &cur_uri, false, None);
     assert!(
         items2.iter().any(|i| i.label == "CHILD_DASHBOARD_MAX"),
         "SCREAMING_SNAKE constant must appear when prefix is uppercase"
@@ -1631,14 +1630,14 @@ fn long_prefix_tier2_not_crowded_out() {
     );
 
     // Short prefix (2 chars): substring allowed, cross-pkg fires.
-    let (short, _) = complete_symbol(&idx, "Ch", None, &cur_uri, false);
+    let (short, _) = complete_symbol(&idx, "Ch", None, &cur_uri, false, None);
     assert!(
         short.iter().any(|i| i.label == "ChildDashboardViewModel"),
         "cross-pkg must appear for short prefix"
     );
 
     // Long prefix (5 chars): substring suppressed for tier-0/1 — cross-pkg prefix match wins.
-    let (long, _) = complete_symbol(&idx, "Child", None, &cur_uri, false);
+    let (long, _) = complete_symbol(&idx, "Child", None, &cur_uri, false, None);
     assert!(
         long.iter().any(|i| i.label == "ChildDashboardViewModel"),
         "cross-pkg prefix match must survive long prefix even with many same-pkg substring hits"
@@ -1649,6 +1648,86 @@ fn long_prefix_tier2_not_crowded_out() {
             .iter()
             .any(|i| i.label.ends_with("Child") && i.label.starts_with("Something")),
         "same-pkg substring matches must be filtered for long prefix"
+    );
+}
+
+#[test]
+fn cross_file_type_subst_multi_class_same_file() {
+    // Regression test: when multiple classes in one file extend the same generic base
+    // with different type args, completion must pick the correct substitution based on
+    // which class the caller is in (via cursor_line).
+    let idx = Indexer::new();
+
+    let base_uri = Url::parse("file:///a/Base.kt").unwrap();
+    idx.index_content(
+        &base_uri,
+        "package a\nclass Base<T> {\n  fun get(): T = TODO()\n}",
+    );
+
+    let caller_uri = Url::parse("file:///a/Caller.kt").unwrap();
+    // Two classes in same file, each extends Base with different type arg
+    idx.index_content(
+        &caller_uri,
+        "package a\n\
+         class CallerA : Base<String>() {\n\
+             fun testA() { val x = Base<String>()\n\
+         }\n\
+         }\n\
+         \n\
+         class CallerB : Base<Int>() {\n\
+             fun testB() { val x = Base<Int>()\n\
+         }\n\
+         }",
+    );
+
+    // For CallerA (around line 2-3), Base members should show String substitution
+    // This test verifies cursor_line is threaded through completion → symbols_from_nested_type
+    // → completion_item_for_nested_symbol → cross_file_type_subst
+    let items_a = complete_dot(&idx, "Base", &caller_uri, false, Some(2));
+    let get_item_a = items_a.iter().find(|i| i.label == "get");
+    assert!(
+        get_item_a.is_some(),
+        "get method should be in completion items for CallerA"
+    );
+    let detail_a = get_item_a.unwrap().detail.as_deref().unwrap_or("");
+    assert!(
+        detail_a.contains("String"),
+        "CallerA (Base<String>) should substitute T→String in detail, got: {detail_a}"
+    );
+    assert!(
+        !detail_a.contains(": T"),
+        "CallerA detail should not contain unresolved T, got: {detail_a}"
+    );
+
+    // For CallerB (around line 6-7), Base members should show Int substitution
+    let items_b = complete_dot(&idx, "Base", &caller_uri, false, Some(6));
+    let get_item_b = items_b.iter().find(|i| i.label == "get");
+    assert!(
+        get_item_b.is_some(),
+        "get method should be in completion items for CallerB"
+    );
+    let detail_b = get_item_b.unwrap().detail.as_deref().unwrap_or("");
+    assert!(
+        detail_b.contains("Int"),
+        "CallerB (Base<Int>) should substitute T→Int in detail, got: {detail_b}"
+    );
+    assert!(
+        !detail_b.contains(": T"),
+        "CallerB detail should not contain unresolved T, got: {detail_b}"
+    );
+
+    // Cursor line threading must produce different substitutions for each class.
+    assert_ne!(
+        detail_a, detail_b,
+        "CallerA and CallerB completions should differ (String vs Int substitution)"
+    );
+
+    // Both should have the method, but with potentially different type substitutions
+    // (if the caller_cursor_line is correctly applied to pick the right class definition).
+    assert_eq!(
+        items_a.len(),
+        items_b.len(),
+        "both completions should return same number of items"
     );
 }
 

@@ -10,9 +10,9 @@ use crate::types::{CursorPos, FileData};
 use crate::StrExt;
 
 // Re-export rg-module items that existing callers reach via `crate::indexer::`.
+pub(crate) use self::scan::{NoopReporter, ProgressReporter};
 pub(crate) use crate::rg::IgnoreMatcher;
 pub(crate) use crate::rg::SOURCE_EXTENSIONS;
-pub(crate) use self::scan::{NoopReporter, ProgressReporter};
 
 mod doc;
 
@@ -459,7 +459,14 @@ impl Indexer {
                 let elem_type =
                     self.resolve_lambda_recv_type(recv, before, cursor_line, cursor_col, uri);
                 if let Some(elem_type) = elem_type {
-                    let (items, _) = complete_symbol(self, prefix, Some(&elem_type), uri, snippets);
+                    let (items, _) = complete_symbol(
+                        self,
+                        prefix,
+                        Some(&elem_type),
+                        uri,
+                        snippets,
+                        Some(position.line as u32),
+                    );
                     if items.is_empty() {
                         // Type name known (e.g. generic param `T`, `StateType`) but not
                         // indexed — show a single hint item so the user sees the inferred type.
@@ -489,6 +496,7 @@ impl Indexer {
             uri,
             snippets,
             annotation_only,
+            Some(position.line as u32),
         );
 
         // Add scope-aware lambda parameter names (bare-word completion only).

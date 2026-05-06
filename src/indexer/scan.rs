@@ -54,7 +54,12 @@ pub(crate) trait ProgressReporter: Send + Sync {
     /// Register the progress token and send the WorkDone Begin notification.
     fn begin(&self, token: &NumberOrString, message: &str) -> impl Future<Output = ()> + Send;
     /// Send an intermediate progress update (called periodically during parse).
-    fn report(&self, token: &NumberOrString, done: usize, total: usize) -> impl Future<Output = ()> + Send;
+    fn report(
+        &self,
+        token: &NumberOrString,
+        done: usize,
+        total: usize,
+    ) -> impl Future<Output = ()> + Send;
     /// Send the WorkDone End notification.
     fn end(&self, token: &NumberOrString, message: &str) -> impl Future<Output = ()> + Send;
 }
@@ -499,8 +504,12 @@ async fn run_parse_phase<R: ProgressReporter + 'static>(
     log::info!("Parsing {} files concurrently", work_items.len());
     let idx_ref = Arc::clone(&idx);
     let sem = Arc::clone(&idx.parse_sem);
-    let progress_handle =
-        spawn_progress_reporter(Arc::clone(&idx), Arc::clone(reporter), token.clone(), parse_count);
+    let progress_handle = spawn_progress_reporter(
+        Arc::clone(&idx),
+        Arc::clone(reporter),
+        token.clone(),
+        parse_count,
+    );
     let counters = ParseCounters::default();
     let task_counters = counters.clone();
     let results = run_concurrent(work_items, sem, move |item, sem| {
@@ -619,7 +628,10 @@ async fn parse_work_item(
         }
     };
 
-    let _permit = sem.acquire().await.expect("parse semaphore closed unexpectedly");
+    let _permit = sem
+        .acquire()
+        .await
+        .expect("parse semaphore closed unexpectedly");
     let t0 = std::time::Instant::now();
     let uri_clone = uri.clone();
     let parse_result = match tokio::task::spawn_blocking(move || {
@@ -813,10 +825,7 @@ impl Indexer {
     /// Called at the end of every public scan function, after the full workflow
     /// (impl + apply + source_paths + save_cache) completes. Mirrors RA's
     /// `OpQueue` pattern: at most one pending request is retained (last wins).
-    async fn run_pending_reindex<R: ProgressReporter + 'static>(
-        self: Arc<Self>,
-        reporter: Arc<R>,
-    ) {
+    async fn run_pending_reindex<R: ProgressReporter + 'static>(self: Arc<Self>, reporter: Arc<R>) {
         loop {
             // Never consume the pending flag while another scan is still active.
             // The finishing scan will call run_pending_reindex itself and drain it.

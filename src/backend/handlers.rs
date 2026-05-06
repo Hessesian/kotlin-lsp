@@ -416,13 +416,21 @@ impl Backend {
             return Ok(None);
         };
 
-        let params_text =
-            find_fun_signature_with_receiver(&self.indexer, uri, &ci.fn_name, ci.qualifier.as_deref());
+        let params_text = find_fun_signature_with_receiver(
+            &self.indexer,
+            uri,
+            &ci.fn_name,
+            ci.qualifier.as_deref(),
+        );
         if params_text.is_empty() {
             return Ok(None);
         }
 
-        Ok(build_signature_help(&ci.fn_name, &params_text, ci.active_param))
+        Ok(build_signature_help(
+            &ci.fn_name,
+            &params_text,
+            ci.active_param,
+        ))
     }
 
     pub(super) async fn folding_range_impl(
@@ -631,11 +639,7 @@ fn extract_call_info(
 /// - no live tree available
 /// - cursor is inside a `lambda_literal`
 /// - callee shape not recognised (`simple_identifier` / `navigation_expression`)
-fn cst_call_info(
-    pos: Position,
-    indexer: &crate::indexer::Indexer,
-    uri: &Url,
-) -> Option<CallInfo> {
+fn cst_call_info(pos: Position, indexer: &crate::indexer::Indexer, uri: &Url) -> Option<CallInfo> {
     use crate::indexer::live_tree::utf16_col_to_byte;
     use tree_sitter::Point;
 
@@ -696,7 +700,11 @@ fn cst_call_info(
         count
     };
 
-    Some(CallInfo { fn_name, qualifier, active_param })
+    Some(CallInfo {
+        fn_name,
+        qualifier,
+        active_param,
+    })
 }
 
 /// Scans a single source line for an unclosed call-site opening.
@@ -795,11 +803,7 @@ fn extract_dot_qualifier(chars: &[char], j: usize) -> Option<String> {
 
 /// Text-scan fallback: extract `(fn_name, qualifier, active_param)` by walking
 /// backwards through `before` (and up to 10 previous lines for multiline calls).
-fn text_call_info(
-    lines: &[String],
-    before: &str,
-    line_idx: usize,
-) -> Option<CallInfo> {
+fn text_call_info(lines: &[String], before: &str, line_idx: usize) -> Option<CallInfo> {
     let mut depth: i32 = 0;
     let mut active_param: u32 = 0;
     let mut call_name: Option<String> = None;
@@ -851,7 +855,11 @@ fn text_call_info(
     }
 
     let fn_name = call_name.filter(|n| !n.is_empty())?;
-    Some(CallInfo { fn_name, qualifier: call_qualifier, active_param })
+    Some(CallInfo {
+        fn_name,
+        qualifier: call_qualifier,
+        active_param,
+    })
 }
 
 /// Iterator over the byte offsets in `line` where `word` occurs as a whole

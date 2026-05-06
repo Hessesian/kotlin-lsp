@@ -124,8 +124,17 @@ pub(crate) fn complete_symbol(
     dot_receiver: Option<&str>,
     from_uri: &Url,
     snippets: bool,
+    cursor_line: Option<u32>,
 ) -> (Vec<CompletionItem>, bool) {
-    complete_symbol_with_context(idx, prefix, dot_receiver, from_uri, snippets, false)
+    complete_symbol_with_context(
+        idx,
+        prefix,
+        dot_receiver,
+        from_uri,
+        snippets,
+        false,
+        cursor_line,
+    )
 }
 
 /// Like `complete_symbol` but with explicit annotation context flag.
@@ -137,9 +146,13 @@ pub(crate) fn complete_symbol_with_context(
     from_uri: &Url,
     snippets: bool,
     annotation_only: bool,
+    cursor_line: Option<u32>,
 ) -> (Vec<CompletionItem>, bool) {
     if let Some(receiver) = dot_receiver {
-        return (complete_dot(idx, receiver, from_uri, snippets), false);
+        return (
+            complete_dot(idx, receiver, from_uri, snippets, cursor_line),
+            false,
+        );
     }
     complete_bare(idx, prefix, from_uri, snippets, annotation_only)
 }
@@ -355,6 +368,7 @@ pub(crate) fn complete_dot(
     receiver: &str,
     from_uri: &Url,
     snippets: bool,
+    cursor_line: Option<u32>,
 ) -> Vec<CompletionItem> {
     // `super.` — collect all members from the parent class hierarchy.
     if receiver == "super" {
@@ -382,7 +396,13 @@ pub(crate) fn complete_dot(
 
     // For dotted types (e.g. `Outer.Inner`), show only the inner type's members.
     // `rt.leaf` is the last segment, so it works for both plain and dotted types.
-    let mut items = symbols_from_nested_type(idx, &file_uri, &rt.leaf, Some(from_uri.as_str()));
+    let mut items = symbols_from_nested_type(
+        idx,
+        &file_uri,
+        &rt.leaf,
+        Some(from_uri.as_str()),
+        cursor_line,
+    );
 
     // Filter out private/protected members — they are inaccessible from outside the class.
     items.retain(|i| {
@@ -399,6 +419,7 @@ pub(crate) fn complete_dot(
         idx,
         calling_uri: from_uri,
         snippets,
+        cursor_line,
     }
     .collect(&file_uri, &rt.leaf, &mut visited, 0, &mut items);
 
@@ -440,6 +461,7 @@ struct InheritanceWalker<'a> {
     idx: &'a Indexer,
     calling_uri: &'a Url,
     snippets: bool,
+    cursor_line: Option<u32>,
 }
 
 impl<'a> InheritanceWalker<'a> {
@@ -496,6 +518,7 @@ impl<'a> InheritanceWalker<'a> {
                     loc.uri.as_str(),
                     &super_name,
                     Some(self.calling_uri.as_str()),
+                    self.cursor_line,
                 );
                 inherited.retain(|i| {
                     i.sort_text
@@ -527,6 +550,7 @@ fn completion_item_for_nested_symbol(
     s: &crate::types::SymbolEntry,
     uri_str: &str,
     calling_uri: Option<&str>,
+    caller_cursor_line: Option<u32>,
 ) -> CompletionItem {
     let kind = symbol_kind_to_completion(s.kind);
     let is_fn = matches!(
@@ -541,7 +565,14 @@ fn completion_item_for_nested_symbol(
     };
     let detail = detail_raw.map(|d| {
         if let Some(cu) = calling_uri {
-            crate::indexer::resolution::cross_file_type_subst(idx, uri_str, s.selection_start(), cu, &d)
+            crate::indexer::resolution::cross_file_type_subst(
+                idx,
+                uri_str,
+                s.selection_start(),
+                cu,
+                caller_cursor_line,
+                &d,
+            )
         } else {
             d
         }
@@ -583,6 +614,7 @@ fn symbols_from_nested_type(
     file_uri: &str,
     inner_name: &str,
     calling_uri: Option<&str>,
+    cursor_line: Option<u32>,
 ) -> Vec<CompletionItem> {
     // Try in-memory index first; fall back to on-demand disk parse.
     let owned: crate::types::FileData;
@@ -616,7 +648,9 @@ fn symbols_from_nested_type(
             return symbols_ref
                 .iter()
                 .filter(|s| s.visibility != Visibility::Private)
-                .map(|s| completion_item_for_nested_symbol(idx, s, file_uri, calling_uri))
+                .map(|s| {
+                    completion_item_for_nested_symbol(idx, s, file_uri, calling_uri, cursor_line)
+                })
                 .collect();
         }
     };
@@ -638,7 +672,7 @@ fn symbols_from_nested_type(
             starts_after && starts_before
         })
         .filter(|s| s.visibility != Visibility::Private)
-        .map(|s| completion_item_for_nested_symbol(idx, s, file_uri, calling_uri))
+        .map(|s| completion_item_for_nested_symbol(idx, s, file_uri, calling_uri, cursor_line))
         .collect()
 }
 
@@ -675,14 +709,14 @@ fn vis_tag(vis: Visibility) -> &'static str {
 /// key and is handled manually by `complete_bare` so per-FQN import edits
 /// are preserved correctly.
 struct BareCompleter {
-    pub items:          Vec<CompletionItem>,
-    pub seen:           std::collections::HashSet<String>,
-    lowercase_mode:     bool,
-    uppercase_mode:     bool,
-    camel_mode:         bool,
-    local_max_score:    u8,
-    snippets:           bool,
-    annotation_only:    bool,
+    pub items: Vec<CompletionItem>,
+    pub seen: std::collections::HashSet<String>,
+    lowercase_mode: bool,
+    uppercase_mode: bool,
+    camel_mode: bool,
+    local_max_score: u8,
+    snippets: bool,
+    annotation_only: bool,
 }
 
 impl BareCompleter {
@@ -691,7 +725,11 @@ impl BareCompleter {
         let lowercase_mode = first_char.map(|c| c.is_lowercase()).unwrap_or(false);
         let uppercase_mode = first_char.map(|c| c.is_uppercase()).unwrap_or(false);
         let camel_mode = uppercase_mode && prefix.chars().any(|c| c.is_lowercase());
-        let local_max_score: u8 = if prefix.len() >= MIN_PREFIX_SCORE_REDUCTION { 1 } else { 2 };
+        let local_max_score: u8 = if prefix.len() >= MIN_PREFIX_SCORE_REDUCTION {
+            1
+        } else {
+            2
+        };
         Self {
             items: Vec::new(),
             seen: std::collections::HashSet::new(),
@@ -727,25 +765,52 @@ impl BareCompleter {
         {
             return;
         }
-        if self.lowercase_mode && name.starts_with_uppercase() { return; }
-        if self.uppercase_mode && name.starts_with_lowercase() { return; }
-        if self.camel_mode && is_screaming_snake(name) { return; }
+        if self.lowercase_mode && name.starts_with_uppercase() {
+            return;
+        }
+        if self.uppercase_mode && name.starts_with_lowercase() {
+            return;
+        }
+        if self.camel_mode && is_screaming_snake(name) {
+            return;
+        }
         let score = match match_score(name, prefix) {
             Some(s) if s <= self.local_max_score => s,
             _ => return,
         };
-        if !self.seen.insert(name.to_string()) { return; }
+        if !self.seen.insert(name.to_string()) {
+            return;
+        }
         let is_fn = self.snippets
-            && matches!(kind, CompletionItemKind::FUNCTION | CompletionItemKind::METHOD);
+            && matches!(
+                kind,
+                CompletionItemKind::FUNCTION | CompletionItemKind::METHOD
+            );
         self.items.push(CompletionItem {
             label: name.to_string(),
             kind: Some(kind),
             filter_text: Some(name.to_string()),
             sort_text: Some(format!("{}{}{}", src_tier, score, name.to_lowercase())),
-            insert_text: if is_fn { Some(format!("{}($1)", name)) } else { None },
-            insert_text_format: if is_fn { Some(InsertTextFormat::SNIPPET) } else { None },
-            detail: if detail.is_empty() { None } else { Some(detail.to_string()) },
-            command: if is_fn { Some(trigger_parameter_hints()) } else { None },
+            insert_text: if is_fn {
+                Some(format!("{}($1)", name))
+            } else {
+                None
+            },
+            insert_text_format: if is_fn {
+                Some(InsertTextFormat::SNIPPET)
+            } else {
+                None
+            },
+            detail: if detail.is_empty() {
+                None
+            } else {
+                Some(detail.to_string())
+            },
+            command: if is_fn {
+                Some(trigger_parameter_hints())
+            } else {
+                None
+            },
             data: item_data,
             ..Default::default()
         });
@@ -803,7 +868,9 @@ pub(crate) fn complete_bare(
     if !pkg.is_empty() {
         if let Some(uris) = idx.packages.get(&pkg) {
             for uri_str in uris.iter() {
-                if uri_str == from_uri.as_str() { continue; }
+                if uri_str == from_uri.as_str() {
+                    continue;
+                }
                 if let Some(f) = idx.files.get(uri_str.as_str()) {
                     for sym in &f.symbols {
                         bc.add(
@@ -928,8 +995,12 @@ pub(crate) fn complete_bare(
     // 4. Stdlib top-level / scope functions — src_tier 3.
     for mut item in bare_completions(snippets) {
         let label = item.label.clone();
-        if bc.lowercase_mode && label.starts_with_uppercase() { continue; }
-        if bc.camel_mode && is_screaming_snake(&label) { continue; }
+        if bc.lowercase_mode && label.starts_with_uppercase() {
+            continue;
+        }
+        if bc.camel_mode && is_screaming_snake(&label) {
+            continue;
+        }
         let score = match match_score(&label, prefix) {
             Some(s) if s <= 2 => s,
             _ => continue,
@@ -1073,7 +1144,10 @@ fn make_completion_item(
 
 /// Public wrapper around `symbols_from_uri_as_completions` for use by the
 /// pre-warmer in `indexer.rs`.  Builds + caches completion items for a file.
-pub(crate) fn symbols_from_uri_as_completions_pub(idx: &Indexer, file_uri: &str) -> Vec<CompletionItem> {
+pub(crate) fn symbols_from_uri_as_completions_pub(
+    idx: &Indexer,
+    file_uri: &str,
+) -> Vec<CompletionItem> {
     symbols_from_uri_as_completions(idx, file_uri)
 }
 
@@ -1099,7 +1173,7 @@ impl crate::indexer::Indexer {
         from_uri: &Url,
         snippets: bool,
     ) -> Vec<CompletionItem> {
-        complete_dot(self, receiver, from_uri, snippets)
+        complete_dot(self, receiver, from_uri, snippets, None)
     }
     pub(crate) fn complete_bare(
         &self,
@@ -1119,7 +1193,10 @@ impl crate::indexer::Indexer {
     pub(super) fn build_completion_items_w(&self, file_uri: &str) -> Vec<CompletionItem> {
         build_completion_items(self, file_uri)
     }
-    pub(crate) fn symbols_from_uri_as_completions_pub(&self, file_uri: &str) -> Vec<CompletionItem> {
+    pub(crate) fn symbols_from_uri_as_completions_pub(
+        &self,
+        file_uri: &str,
+    ) -> Vec<CompletionItem> {
         symbols_from_uri_as_completions_pub(self, file_uri)
     }
 }
