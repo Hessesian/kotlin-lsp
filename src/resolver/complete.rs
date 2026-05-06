@@ -858,17 +858,17 @@ impl CurrentFileCompletionContext {
     }
 
     fn needs_import(&self, fully_qualified_name: &str) -> bool {
-        let package_name = fully_qualified_name
+        let qualifier = fully_qualified_name
             .rsplit_once('.')
-            .map(|(package_name, _)| package_name)
+            .map(|(qualifier, _)| qualifier)
             .unwrap_or_default();
 
         !already_imported(fully_qualified_name, &self.imports)
             && !self
                 .imports
                 .iter()
-                .any(|import_entry| import_entry.is_star && import_entry.full_path == package_name)
-            && package_name != self.package_name
+                .any(|import_entry| import_entry.is_star && import_entry.full_path == qualifier)
+            && qualifier != self.package_name
     }
 }
 
@@ -1039,9 +1039,9 @@ impl<'a> BareCompletionWalk<'a> {
             return;
         }
 
-        let package_name = fully_qualified_name
+        let qualifier = fully_qualified_name
             .rsplit_once('.')
-            .map(|(package_name, _)| package_name)
+            .map(|(qualifier, _)| qualifier)
             .unwrap_or_default();
         let needs_import = current_context.needs_import(fully_qualified_name);
         let additional_text_edits = needs_import.then(|| {
@@ -1049,7 +1049,7 @@ impl<'a> BareCompletionWalk<'a> {
                 .lines
                 .make_import_edit(fully_qualified_name, current_context.is_java)]
         });
-        let detail = needs_import.then(|| package_name.to_string());
+        let detail = needs_import.then(|| qualifier.to_string());
 
         self.completer.items.push(CompletionItem {
             label: bare_name.to_string(),

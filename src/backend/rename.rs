@@ -472,7 +472,7 @@ impl Backend {
                 files.push(location.uri.clone());
             }
         }
-        eprintln!(
+        log::debug!(
             "[rename] rg found {} locs across {} files",
             reference_locations.len(),
             files.len()

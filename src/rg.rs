@@ -497,10 +497,10 @@ fn package_scoped_reference_locations(
 /// Run `rg` to find all *usages* of `name` in the project.
 ///
 /// Uses `--word-regexp` so only whole-word matches are returned.
-/// If `include_decl` is false, declaration lines are filtered out by
-/// excluding lines that contain declaration keywords before `name`.
-/// If `from_uri` is provided, the source file is excluded when
-/// `include_decl` is false (the definition is already known).
+/// If `include_decl` is false, lines in `from_uri` that contain declaration
+/// keywords (e.g. `fun`, `val`, `class`) alongside `name` are filtered out.
+/// Other lines from `from_uri` are still included (e.g. call sites in the
+/// same file).
 ///
 /// Results in directories matched by `matcher` are filtered out.
 pub(crate) fn rg_find_references(
