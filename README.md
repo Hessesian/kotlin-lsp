@@ -80,6 +80,8 @@ All features work immediately — `rg` fallback handles symbols before indexing 
 
 `kotlin-lsp` also works as a standalone command-line tool — no daemon, no editor, just results on stdout.
 
+![kotlin-lsp CLI demo](demo/cli.gif)
+
 ```bash
 # Find declarations
 kotlin-lsp find MyViewModel
