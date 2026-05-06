@@ -49,6 +49,7 @@ serde_json = "1"
 bincode  = "1"
 sha2 = "0.10"
 futures = "0.3.32"
+lexopt = "0.3"
 
 [profile.release]
 opt-level = 3
@@ -58,4 +59,3 @@ strip     = true
 
 [dev-dependencies]
 tempfile = "3"
-
