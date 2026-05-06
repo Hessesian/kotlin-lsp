@@ -2,3 +2,5 @@
 *.orig
 .env
 __pycache__/
+copilot-rename-args-worktree
+src/lib.rs
