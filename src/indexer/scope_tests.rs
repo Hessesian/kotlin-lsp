@@ -301,7 +301,16 @@ fn named_lambda_param_same_line() {
     let src = "val items: List<Product> = emptyList()";
     let (u, idx) = indexed("/t.kt", src);
     let before = "items.forEach { item -> item.";
-    let result = find_named_lambda_param_type(before, "item", &idx, &u, 0);
+    let result = find_named_lambda_param_type(
+        before,
+        "item",
+        &idx,
+        &u,
+        crate::types::CursorPos {
+            line: 0,
+            utf16_col: before.encode_utf16().count(),
+        },
+    );
     assert_eq!(result.as_deref(), Some("Product"));
 }
 
@@ -312,7 +321,16 @@ fn named_lambda_param_multiline() {
     let src = "val items: List<Order> = emptyList()\nitems.forEach { order ->\n    order.x\n}";
     let (u, idx) = indexed("/t.kt", src);
     // cursor on line 2 ("    order.x"), scanning back to line 1 for `{ order ->`
-    let result = find_named_lambda_param_type("    order.", "order", &idx, &u, 2);
+    let result = find_named_lambda_param_type(
+        "    order.",
+        "order",
+        &idx,
+        &u,
+        crate::types::CursorPos {
+            line: 2,
+            utf16_col: "    order.".encode_utf16().count(),
+        },
+    );
     assert_eq!(result.as_deref(), Some("Order"));
 }
 
@@ -322,7 +340,16 @@ fn named_lambda_param_scope_fn() {
     let src = "val user: User = User()";
     let (u, idx) = indexed("/t.kt", src);
     let before = "user.also { u -> u.";
-    let result = find_named_lambda_param_type(before, "u", &idx, &u, 0);
+    let result = find_named_lambda_param_type(
+        before,
+        "u",
+        &idx,
+        &u,
+        crate::types::CursorPos {
+            line: 0,
+            utf16_col: before.encode_utf16().count(),
+        },
+    );
     assert_eq!(result.as_deref(), Some("User"));
 }
 

@@ -1,5 +1,8 @@
 use super::NodeExt;
-use crate::queries::{KIND_CALL_EXPR, KIND_LAMBDA_LIT, KIND_VALUE_ARG, KIND_VALUE_ARGS};
+use crate::queries::{
+    KIND_CALL_EXPR, KIND_LAMBDA_LIT, KIND_NAV_EXPR, KIND_SIMPLE_IDENT, KIND_VALUE_ARG,
+    KIND_VALUE_ARGS,
+};
 
 fn parse_kotlin(src: &str) -> (tree_sitter::Tree, Vec<u8>) {
     let mut parser = tree_sitter::Parser::new();
@@ -20,6 +23,26 @@ fn find_node_kind<'a>(
     }
     for i in 0..node.child_count() {
         if let Some(n) = node.child(i).and_then(|c| find_node_kind(c, kind)) {
+            return Some(n);
+        }
+    }
+    None
+}
+
+fn find_node_text<'a>(
+    node: tree_sitter::Node<'a>,
+    kind: &str,
+    text: &str,
+    bytes: &[u8],
+) -> Option<tree_sitter::Node<'a>> {
+    if node.kind() == kind && node.utf8_text(bytes).ok() == Some(text) {
+        return Some(node);
+    }
+    for i in 0..node.child_count() {
+        if let Some(n) = node
+            .child(i)
+            .and_then(|c| find_node_text(c, kind, text, bytes))
+        {
             return Some(n);
         }
     }
@@ -98,6 +121,73 @@ fn collect_lambda_param_names_collects_named() {
     let lambda = find_node_kind(tree.root_node(), KIND_LAMBDA_LIT).unwrap();
     let names = lambda.collect_lambda_param_names(&bytes, &[]);
     assert_eq!(names, vec!["item".to_string()]);
+}
+
+#[test]
+fn lambda_param_names_collects_all_explicit_params() {
+    let (tree, bytes) = parse_kotlin("val x = items.zip(other) { a, b -> a to b }");
+    let lambda = find_node_kind(tree.root_node(), KIND_LAMBDA_LIT).unwrap();
+    assert_eq!(
+        lambda.lambda_param_names(&bytes),
+        vec!["a".to_string(), "b".to_string()]
+    );
+}
+
+#[test]
+fn lambda_param_position_returns_matching_index() {
+    let (tree, bytes) = parse_kotlin("val x = items.zip(other) { a, b -> a to b }");
+    let lambda = find_node_kind(tree.root_node(), KIND_LAMBDA_LIT).unwrap();
+    assert_eq!(lambda.lambda_param_position("b", &bytes), Some(1));
+    assert_eq!(lambda.lambda_param_position("missing", &bytes), None);
+}
+
+#[test]
+fn enclosing_call_expression_from_lambda_finds_outer_call() {
+    let (tree, bytes) = parse_kotlin("val x = outer { it }");
+    let lambda = find_node_kind(tree.root_node(), KIND_LAMBDA_LIT).unwrap();
+    let call = lambda.enclosing_call_expression().unwrap();
+    assert_eq!(call.call_fn_name(&bytes), Some("outer".to_string()));
+}
+
+#[test]
+fn enclosing_call_expression_stops_at_lambda_boundary() {
+    let (tree, bytes) = parse_kotlin("val x = outer { inner }");
+    let inner = find_node_text(tree.root_node(), KIND_SIMPLE_IDENT, "inner", &bytes).unwrap();
+    assert_eq!(inner.enclosing_call_expression(), None);
+}
+
+#[test]
+fn enclosing_lambda_literal_finds_nearest_lambda() {
+    let (tree, bytes) = parse_kotlin("val x = outer { inner -> inner.name }");
+    let inner = find_node_text(tree.root_node(), KIND_SIMPLE_IDENT, "inner", &bytes).unwrap();
+    let lambda = inner.enclosing_lambda_literal().unwrap();
+    assert_eq!(lambda.kind(), KIND_LAMBDA_LIT);
+}
+
+#[test]
+fn first_value_argument_text_returns_first_argument() {
+    let (tree, bytes) = parse_kotlin("val x = with(user, other) { user.name }");
+    let call = find_node_kind(tree.root_node(), KIND_CALL_EXPR).unwrap();
+    assert_eq!(call.first_value_argument_text(&bytes), Some("user".to_string()));
+}
+
+#[test]
+fn navigation_parts_split_receiver_and_member() {
+    let (tree, bytes) = parse_kotlin("val x = result.availableBanks.firstOrNull()");
+    let nav = find_node_text(
+        tree.root_node(),
+        KIND_NAV_EXPR,
+        "result.availableBanks.firstOrNull",
+        &bytes,
+    )
+    .unwrap();
+    assert_eq!(
+        nav.navigation_parts(&bytes),
+        Some((
+            "result.availableBanks".to_string(),
+            "firstOrNull".to_string(),
+        ))
+    );
 }
 
 #[test]

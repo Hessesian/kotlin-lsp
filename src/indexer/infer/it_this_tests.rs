@@ -210,6 +210,34 @@ fn this_type_with_block() {
     );
 }
 
+#[test]
+fn named_lambda_param_type_cst_fast_path() {
+    let sig_src = "fun consume(block: (User) -> Unit) {}";
+    let code_src = "consume { user ->\n    user.name\n}";
+    let (u, idx, _lines) = indexed_with_live("/t.kt", sig_src, code_src);
+    let before = "    user.";
+    let result = find_named_lambda_param_type(
+        before,
+        "user",
+        &idx,
+        &u,
+        CursorPos {
+            line: 1,
+            utf16_col: before.encode_utf16().count(),
+        },
+    );
+    assert_eq!(result.as_deref(), Some("User"));
+}
+
+#[test]
+fn named_lambda_param_type_in_lines_cst_uses_param_position() {
+    let sig_src = "fun zipUsers(block: (LeftUser, RightUser) -> Unit) {}";
+    let code_src = "zipUsers { left, right ->\n    right.name\n}";
+    let (u, idx, lines) = indexed_with_live("/t.kt", sig_src, code_src);
+    let result = find_named_lambda_param_type_in_lines(&lines, "right", 1, &idx, &u);
+    assert_eq!(result.as_deref(), Some("RightUser"));
+}
+
 // ── line_has_lambda_param ────────────────────────────────────────────────────
 
 #[test]
@@ -859,4 +887,15 @@ fn is_inside_receiver_lambda_foreach_is_false() {
         !result,
         "cursor inside forEach{{}} should NOT be inside receiver lambda"
     );
+}
+
+#[test]
+fn is_inside_receiver_lambda_apply_live_tree() {
+    let src = "val user: User = User()\nuser.apply {\n    this\n}";
+    let (u, idx, lines) = indexed_with_live("/t.kt", src, src);
+    let pos = crate::types::CursorPos {
+        line: 2,
+        utf16_col: 8,
+    };
+    assert!(super::is_inside_receiver_lambda(&lines, pos, &idx, &u));
 }
