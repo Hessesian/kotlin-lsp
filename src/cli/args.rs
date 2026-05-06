@@ -52,11 +52,17 @@ impl CliArgs {
                 print_version();
                 std::process::exit(0);
             }
+            Some(lexopt::Arg::Long(flag))
+                if matches!(flag, "find" | "refs" | "hover" | "index") =>
+            {
+                return Err(format!(
+                    "'{flag}' is a subcommand, not a flag — use `kotlin-lsp {flag}` (without --)"
+                ));
+            }
             Some(lexopt::Arg::Short(_) | lexopt::Arg::Long(_)) => {
                 // Other flag before subcommand → LSP mode
                 return Ok(None);
-            }
-        };
+            }        };
 
         let subcmd_str = first.to_string_lossy();
         let subcommand = match subcmd_str.as_ref() {
