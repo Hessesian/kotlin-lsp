@@ -634,7 +634,7 @@ impl IndexRead for super::Indexer {
             return;
         }
         // Convert string URI to Url and trigger on-demand indexing if needed.
-        // Silently ignores invalid URIs; ensure_indexed() handles them gracefully.
+        // Silently skips URIs that can't be parsed — they can't be indexed anyway.
         if let Ok(parsed_uri) = Url::parse(uri) {
             self.ensure_indexed(&parsed_uri);
         }
