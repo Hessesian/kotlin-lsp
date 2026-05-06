@@ -192,13 +192,32 @@ impl<'a> NodeExt<'a> for Node<'a> {
                 }
             }
         }
-        None
+        // Kotlin trailing-lambda pattern:
+        //   call_expression (outer)
+        //     call_expression (inner) ← has value_arguments
+        //     call_suffix             ← has lambda_literal only
+        // Walk into the first child call_expression one level deep.
+        self.child(0)
+            .filter(|c| c.kind() == KIND_CALL_EXPR)
+            .and_then(|inner| inner.find_value_arguments())
     }
 
     fn has_lambda_named_params(self, bytes: &[u8]) -> bool {
-        self.lambda_param_names(bytes)
-            .into_iter()
-            .any(|name| name != "it" && name != "_")
+        let Some(lp) = self.first_child_of_kind(KIND_LAMBDA_PARAMS) else {
+            return false;
+        };
+        (0..lp.child_count())
+            .filter_map(|i| lp.child(i))
+            .filter(|c| c.kind() == KIND_VAR_DECL)
+            .any(|vd| {
+                let Some(si) = vd.child(0).filter(|n| n.kind() == KIND_SIMPLE_IDENT) else {
+                    return false;
+                };
+                let Ok(name) = std::str::from_utf8(&bytes[si.byte_range()]) else {
+                    return false;
+                };
+                name != "it" && name != "_"
+            })
     }
 
     fn lambda_param_names(self, bytes: &[u8]) -> Vec<String> {
@@ -260,24 +279,13 @@ impl<'a> NodeExt<'a> for Node<'a> {
     }
 
     fn first_value_argument_text(self, bytes: &[u8]) -> Option<String> {
-        let mut stack = vec![self];
-        while let Some(node) = stack.pop() {
-            if node.kind() == KIND_VALUE_ARG {
-                let text = node.utf8_text_owned(bytes)?;
-                let text = text.trim();
-                return if text.is_empty() {
-                    None
-                } else {
-                    Some(text.to_owned())
-                };
-            }
-            for i in (0..node.child_count()).rev() {
-                if let Some(child) = node.child(i) {
-                    stack.push(child);
-                }
-            }
-        }
-        None
+        let args = self.find_value_arguments()?;
+        (0..args.child_count())
+            .filter_map(|i| args.child(i))
+            .find(|c| c.kind() == KIND_VALUE_ARG)
+            .and_then(|arg| arg.utf8_text_owned(bytes))
+            .map(|t| t.trim().to_owned())
+            .filter(|t| !t.is_empty())
     }
 
     fn navigation_parts(self, bytes: &[u8]) -> Option<(String, String)> {

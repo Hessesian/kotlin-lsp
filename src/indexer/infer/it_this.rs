@@ -409,11 +409,8 @@ fn cursor_node_at(
 
     let source = std::str::from_utf8(&doc.bytes).ok()?;
     let line_text = source.lines().nth(pos.line).unwrap_or("");
-    let byte_col = if pos.utf16_col == 0 {
-        line_text.len()
-    } else {
-        crate::indexer::live_tree::utf16_col_to_byte(line_text, pos.utf16_col).min(line_text.len())
-    };
+    let byte_col =
+        crate::indexer::live_tree::utf16_col_to_byte(line_text, pos.utf16_col).min(line_text.len());
     let point = Point {
         row: pos.line,
         column: byte_col,
