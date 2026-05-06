@@ -242,13 +242,15 @@ pub(crate) fn resolve_symbol_inner(
     // Swift files have no package declarations, so same-package and star-import
     // steps return empty. Use the in-memory definitions index directly to avoid
     // expensive project-wide rg fallback at step 5.
-    if crate::Language::from_path(from_uri.path()).is_swift() && name.starts_with_uppercase() {
+    if crate::Language::from_path(from_uri.path()) == crate::Language::Swift
+        && name.starts_with_uppercase()
+    {
         if let Some(locs_ref) = idx.definitions.get(name) {
             let locs: Vec<Location> = locs_ref.clone();
             // Prefer definitions from .swift files when available.
             let swift_locs: Vec<Location> = locs
                 .iter()
-                .filter(|l| crate::Language::from_path(l.uri.path()).is_swift())
+                .filter(|l| crate::Language::from_path(l.uri.path()) == crate::Language::Swift)
                 .cloned()
                 .collect();
             if !swift_locs.is_empty() {

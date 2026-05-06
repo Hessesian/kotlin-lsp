@@ -9,12 +9,12 @@ use crate::queries::{
     self, KIND_CALLABLE_REF, KIND_CALL_EXPR, KIND_CALL_SUFFIX, KIND_CLASS_DECL, KIND_CTOR_DECL,
     KIND_DELEGATION_SPEC, KIND_ENUM_DECL, KIND_EXTENDS_INTERFACES, KIND_FIELD_DECL, KIND_FUN_DECL,
     KIND_IDENTIFIER, KIND_IMPORT_DECL, KIND_IMPORT_HEADER, KIND_INHERITANCE_SPEC,
-    KIND_INTERFACE_DECL, KIND_LAMBDA_LIT, KIND_METHOD_DECL, KIND_MODIFIERS, KIND_MOD_FINAL,
-    KIND_MOD_STATIC, KIND_NAV_EXPR, KIND_OBJECT_DECL, KIND_PACKAGE_DECL, KIND_PROP_DECL,
-    KIND_PROP_DELEGATE, KIND_PROTOCOL_DECL, KIND_RECORD_DECL, KIND_SCOPED_IDENT, KIND_SIMPLE_IDENT,
-    KIND_STATEMENTS, KIND_SUPERCLASS, KIND_SUPER_INTERFACES, KIND_TYPE_IDENT, KIND_USER_TYPE,
-    KIND_VALUE_ARG, KIND_VALUE_ARGS, KIND_VAR_DECL, KIND_VAR_DECLARATOR, KOTLIN_DEFINITIONS,
-    SWIFT_DEFINITIONS,
+    KIND_INHERITANCE_SPECS, KIND_INTERFACE_DECL, KIND_LAMBDA_LIT, KIND_METHOD_DECL, KIND_MODIFIERS,
+    KIND_MOD_FINAL, KIND_MOD_STATIC, KIND_NAV_EXPR, KIND_OBJECT_DECL, KIND_PACKAGE_DECL,
+    KIND_PROP_DECL, KIND_PROP_DELEGATE, KIND_PROTOCOL_DECL, KIND_RECORD_DECL, KIND_SCOPED_IDENT,
+    KIND_SIMPLE_IDENT, KIND_STATEMENTS, KIND_SUPERCLASS, KIND_SUPER_INTERFACES, KIND_TYPE_IDENT,
+    KIND_USER_TYPE, KIND_VALUE_ARG, KIND_VALUE_ARGS, KIND_VAR_DECL, KIND_VAR_DECLARATOR,
+    KOTLIN_DEFINITIONS, SWIFT_DEFINITIONS,
 };
 use crate::StrExt;
 
@@ -1048,13 +1048,26 @@ fn extract_swift_imports(root: tree_sitter::Node, bytes: &[u8], data: &mut FileD
 /// ```
 ///
 /// Multi-line modifier blocks (rare) are NOT handled; they default to Public.
+const KOTLIN_JAVA_VIS_MODIFIERS: &[(&str, Visibility)] = &[
+    ("private", Visibility::Private),
+    ("protected", Visibility::Protected),
+    ("internal", Visibility::Internal),
+];
+
+const SWIFT_VIS_MODIFIERS: &[(&str, Visibility)] = &[
+    ("private", Visibility::Private),
+    ("fileprivate", Visibility::Private),
+    ("public", Visibility::Public),
+    ("open", Visibility::Public),
+];
+
 pub(crate) fn visibility_at_line(lines: &[String], line_no: usize) -> Visibility {
-    const KOTLIN_JAVA_MODS: &[(&str, Visibility)] = &[
-        ("private", Visibility::Private),
-        ("protected", Visibility::Protected),
-        ("internal", Visibility::Internal),
-    ];
-    visibility_at_line_impl(lines, line_no, Visibility::Public, KOTLIN_JAVA_MODS)
+    visibility_at_line_with(
+        lines,
+        line_no,
+        Visibility::Public,
+        KOTLIN_JAVA_VIS_MODIFIERS,
+    )
 }
 
 /// Swift visibility detection.
@@ -1062,29 +1075,21 @@ pub(crate) fn visibility_at_line(lines: &[String], line_no: usize) -> Visibility
 /// Swift modifiers: `private`, `fileprivate`, `internal`, `public`, `open`.
 /// Default is `internal` (unlike Kotlin which defaults to `public`).
 pub(crate) fn swift_visibility_at_line(lines: &[String], line_no: usize) -> Visibility {
-    const SWIFT_MODS: &[(&str, Visibility)] = &[
-        ("private", Visibility::Private),
-        ("fileprivate", Visibility::Private),
-        ("public", Visibility::Public),
-        ("open", Visibility::Public),
-    ];
-    visibility_at_line_impl(lines, line_no, Visibility::Internal, SWIFT_MODS)
+    visibility_at_line_with(lines, line_no, Visibility::Internal, SWIFT_VIS_MODIFIERS)
 }
 
-fn visibility_at_line_impl(
+fn visibility_at_line_with(
     lines: &[String],
     line_no: usize,
     default: Visibility,
     modifiers: &[(&str, Visibility)],
 ) -> Visibility {
-    let Some(line) = lines.get(line_no) else {
+    let Some(decl) = lines.get(line_no) else {
         return default;
     };
-    // Work only on the part before any `=`, `{`, or `(` to avoid false positives
-    // from string literals / bodies.
-    let decl = line.decl_prefix();
+    let prefix = decl.decl_prefix();
     for &(kw, vis) in modifiers {
-        if contains_word(decl, kw) {
+        if contains_word(prefix, kw) {
             return vis;
         }
     }
@@ -1392,11 +1397,23 @@ impl crate::types::FileData {
         while let Some(node) = stack.pop() {
             if node.kind() == KIND_CLASS_DECL || node.kind() == KIND_PROTOCOL_DECL {
                 let name_line = node.name_line();
-                for spec in node.children_of_kind(KIND_INHERITANCE_SPEC) {
+                let mut specs = node.children_of_kind(KIND_INHERITANCE_SPEC);
+                if specs.is_empty() {
+                    if let Some(clause) = node.first_child_of_kind(KIND_INHERITANCE_SPECS) {
+                        specs = clause.children_of_kind(KIND_INHERITANCE_SPEC);
+                    }
+                }
+                for spec in specs {
                     if let Some(ut) = spec.first_child_of_kind(KIND_USER_TYPE) {
                         if let Some(name) = ut.user_type_name(bytes) {
-                            let type_args = ut.type_arg_strings(bytes);
-                            self.supers.push((name_line, name, type_args));
+                            self.supers
+                                .push((name_line, name, ut.type_arg_strings(bytes)));
+                        }
+                        continue;
+                    }
+                    if let Some(type_identifier) = spec.first_child_of_kind(KIND_TYPE_IDENT) {
+                        if let Some(name) = type_identifier.utf8_text_owned(bytes) {
+                            self.supers.push((name_line, name, Vec::new()));
                         }
                     }
                 }

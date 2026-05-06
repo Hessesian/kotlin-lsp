@@ -161,11 +161,7 @@ pub(crate) fn symbol_kw_for_lang(kind: SymbolKind, lang: &str) -> &'static str {
 }
 
 pub(crate) fn lang_str(path: &str) -> &'static str {
-    match crate::Language::from_path(path) {
-        crate::Language::Kotlin => "kotlin",
-        crate::Language::Swift => "swift",
-        crate::Language::Java => "java",
-    }
+    crate::Language::from_path(path).code_fence()
 }
 
 // ─── Generic type parameter substitution ─────────────────────────────────────

@@ -379,6 +379,7 @@ pub(crate) const KIND_TYPE_LIST: &str = "type_list";
 
 // Swift-specific
 pub(crate) const KIND_PROTOCOL_DECL: &str = "protocol_declaration";
+pub(crate) const KIND_INHERITANCE_SPECS: &str = "inheritance_specifiers";
 pub(crate) const KIND_INHERITANCE_SPEC: &str = "inheritance_specifier";
 
 // ─── Generic / type parameter node kinds (shared across Kotlin, Java, Swift) ─

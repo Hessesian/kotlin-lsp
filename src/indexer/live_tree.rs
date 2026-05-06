@@ -1,4 +1,4 @@
-use tree_sitter::{Language, Parser, Tree};
+use tree_sitter::{Language as TsLanguage, Parser, Tree};
 
 pub(crate) struct LiveDoc {
     pub bytes: Vec<u8>,
@@ -11,15 +11,16 @@ pub(crate) struct LiveDoc {
 /// recognised by `parser.rs`'s `parse_by_extension`.  Unlike that function,
 /// `lang_for_path` never falls back to a default language for unknown
 /// extensions — it returns `None` so callers can skip live-tree work entirely.
-pub(crate) fn lang_for_path(path: &str) -> Option<Language> {
-    if path.ends_with(".swift") {
-        Some(tree_sitter_swift_bundled::language())
-    } else if path.ends_with(".java") {
-        Some(tree_sitter_java::language())
-    } else if path.ends_with(".kt") || path.ends_with(".kts") {
-        Some(tree_sitter_kotlin::language())
-    } else {
-        None
+pub(crate) fn lang_for_path(path: &str) -> Option<TsLanguage> {
+    match crate::Language::from_path(path) {
+        crate::Language::Swift if path.ends_with(".swift") => {
+            Some(tree_sitter_swift_bundled::language())
+        }
+        crate::Language::Java if path.ends_with(".java") => Some(tree_sitter_java::language()),
+        crate::Language::Kotlin if path.ends_with(".kt") || path.ends_with(".kts") => {
+            Some(tree_sitter_kotlin::language())
+        }
+        _ => None,
     }
 }
 
@@ -38,7 +39,7 @@ pub(crate) fn utf16_col_to_byte(line_text: &str, utf16_col: usize) -> usize {
 
 /// Parse `content` with `lang` and return a `LiveDoc`, or `None` if the
 /// parser fails (malformed grammar state — extremely rare).
-pub(crate) fn parse_live(content: &str, lang: Language) -> Option<LiveDoc> {
+pub(crate) fn parse_live(content: &str, lang: TsLanguage) -> Option<LiveDoc> {
     let mut parser = Parser::new();
     parser.set_language(&lang).ok()?;
     let tree = parser.parse(content, None)?;

@@ -2,42 +2,42 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tower_lsp::lsp_types::{Range, SymbolKind};
 
-/// Source language inferred from a file's path extension.
-///
-/// Used to centralise all `path.ends_with(".kt")` / `".swift"` / `".java"` dispatch.
-/// Obtain via [`Language::from_path`]; the default is `Kotlin` (most common case).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// File language, derived from path extension.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Language {
-    #[default]
     Kotlin,
     Java,
     Swift,
 }
 
 impl Language {
-    /// Infer the language from a file path or URI string.
-    ///
-    /// Explicit matches: `.java` → Java, `.swift` → Swift.
-    /// Everything else (`.kt`, `.kts`, unknown extensions) → Kotlin, since this
-    /// server is Kotlin-primary and `.kts` files use the same language features.
     pub(crate) fn from_path(path: &str) -> Self {
-        if path.ends_with(".swift") {
-            Language::Swift
-        } else if path.ends_with(".java") {
+        if path.ends_with(".java") {
             Language::Java
+        } else if path.ends_with(".swift") {
+            Language::Swift
         } else {
             Language::Kotlin
         }
     }
 
-    pub(crate) fn is_kotlin(self) -> bool {
-        matches!(self, Language::Kotlin)
+    pub(crate) fn code_fence(self) -> &'static str {
+        match self {
+            Language::Kotlin => "kotlin",
+            Language::Java => "java",
+            Language::Swift => "swift",
+        }
     }
-    pub(crate) fn is_java(self) -> bool {
+
+    pub(crate) fn needs_semicolons(self) -> bool {
         matches!(self, Language::Java)
     }
-    pub(crate) fn is_swift(self) -> bool {
-        matches!(self, Language::Swift)
+
+    pub(crate) fn val_keyword(self) -> &'static str {
+        match self {
+            Language::Swift => "let",
+            _ => "val",
+        }
     }
 }
 

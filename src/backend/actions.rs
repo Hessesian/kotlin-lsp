@@ -203,7 +203,7 @@ impl Backend {
         };
 
         let cursor_word = line_text.word_at_utf16_col(range.start.character as usize);
-        let is_kotlin = crate::Language::from_path(uri.path()).is_kotlin();
+        let is_kotlin = crate::Language::from_path(uri.path()) == crate::Language::Kotlin;
 
         if let Some(a) = build_import_alias_action(&line_text, &trimmed, uri, range, is_kotlin) {
             actions.push(a);

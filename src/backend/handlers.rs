@@ -997,11 +997,7 @@ fn has_reference_start(locations: &[Location], candidate: &Location) -> bool {
 }
 
 fn hover_binding_keyword(uri: &Url) -> &'static str {
-    if crate::Language::from_path(uri.path()).is_swift() {
-        "let"
-    } else {
-        "val"
-    }
+    crate::Language::from_path(uri.path()).val_keyword()
 }
 
 fn hover_substitution_context(uri: &Url, line: u32) -> SubstitutionContext<'_> {

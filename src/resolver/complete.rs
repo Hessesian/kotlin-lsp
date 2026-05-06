@@ -185,7 +185,7 @@ fn extension_fn_completions(
 
     for file_entry in idx.files.iter() {
         let file_uri_str = file_entry.key();
-        if !crate::Language::from_path(file_uri_str).is_kotlin() {
+        if crate::Language::from_path(file_uri_str) != crate::Language::Kotlin {
             continue;
         }
         builder.add_file(file_uri_str, file_entry.value());
@@ -584,7 +584,7 @@ fn append_dot_tail_completions(
         &receiver_type.qualified,
         snippets,
     ));
-    if crate::Language::from_path(from_path).is_kotlin() {
+    if crate::Language::from_path(from_path) == crate::Language::Kotlin {
         items.extend(extension_fn_completions(
             idx,
             &receiver_type.outer,
@@ -963,12 +963,12 @@ struct CurrentFileCompletionContext {
     imports: Vec<crate::types::ImportEntry>,
     package_name: String,
     lines: Arc<Vec<String>>,
-    is_java: bool,
+    needs_semicolons: bool,
 }
 
 impl CurrentFileCompletionContext {
     fn from_indexer(indexer: &Indexer, from_uri: &Url) -> Self {
-        let is_java = crate::Language::from_path(from_uri.as_str()).is_java();
+        let needs_semicolons = crate::Language::from_path(from_uri.as_str()).needs_semicolons();
         let live_lines = indexer
             .live_lines
             .get(from_uri.as_str())
@@ -995,7 +995,7 @@ impl CurrentFileCompletionContext {
             imports,
             package_name,
             lines,
-            is_java,
+            needs_semicolons,
         }
     }
 
@@ -1189,7 +1189,7 @@ impl<'a> BareCompletionWalk<'a> {
         let additional_text_edits = needs_import.then(|| {
             vec![current_context
                 .lines
-                .make_import_edit(fully_qualified_name, current_context.is_java)]
+                .make_import_edit(fully_qualified_name, current_context.needs_semicolons)]
         });
         let detail = needs_import.then(|| qualifier.to_string());
 
