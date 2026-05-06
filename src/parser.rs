@@ -919,17 +919,22 @@ fn parse_import_header(header: &tree_sitter::Node, bytes: &[u8], data: &mut File
     }
 
     if let Some(full_path) = path_text {
-        let local_name = if is_star {
-            "*".to_owned()
-        } else {
-            alias_text.unwrap_or_else(|| full_path.last_segment().to_owned())
-        };
-        data.imports.push(ImportEntry {
-            full_path,
-            local_name,
-            is_star,
-        });
+        push_import(data, full_path, alias_text, is_star);
     }
+}
+
+/// Push a single import entry, computing `local_name` from alias or last path segment.
+fn push_import(data: &mut FileData, full_path: String, alias: Option<String>, is_star: bool) {
+    let local_name = if is_star {
+        "*".to_owned()
+    } else {
+        alias.unwrap_or_else(|| full_path.last_segment().to_owned())
+    };
+    data.imports.push(ImportEntry {
+        full_path,
+        local_name,
+        is_star,
+    });
 }
 
 /// Lightweight import scanner for live (unsaved) buffer lines.
@@ -1008,12 +1013,7 @@ fn extract_swift_imports(root: tree_sitter::Node, bytes: &[u8], data: &mut FileD
     for node in root.children(&mut cur) {
         if node.kind() == KIND_IMPORT_DECL {
             if let Some(txt) = swift_import_path(node, bytes) {
-                let local = txt.last_segment();
-                data.imports.push(ImportEntry {
-                    full_path: txt.to_owned(),
-                    local_name: local.to_owned(),
-                    is_star: false,
-                });
+                push_import(data, txt.to_owned(), None, false);
             }
         }
     }
@@ -1558,13 +1558,7 @@ impl crate::types::FileData {
         for child in node.children(&mut cur) {
             if matches!(child.kind(), KIND_SCOPED_IDENT | KIND_IDENTIFIER) {
                 if let Ok(txt) = child.utf8_text(bytes) {
-                    let full_path = txt.to_owned();
-                    let local_name = full_path.last_segment().to_owned();
-                    self.imports.push(ImportEntry {
-                        full_path,
-                        local_name,
-                        is_star: false,
-                    });
+                    push_import(self, txt.to_owned(), None, false);
                 }
                 return;
             }
