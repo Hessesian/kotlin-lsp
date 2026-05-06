@@ -92,8 +92,48 @@ fn cst_cursor_is_local_var(indexer: &crate::indexer::Indexer, uri: &Url, pos: Po
     }
 }
 
+/// Return `true` when the file index (within `scope`) contains a `val`/`var`
+/// declaration of `name` that is itself a local variable.
+///
+/// Complements `cst_cursor_is_local_var` for the *reference* case: when the
+/// cursor is on a reference the CST parent chain never contains a
+/// `property_declaration`, so `cst_cursor_is_local_var(cursor_pos)` returns
+/// false. This function recovers the declaration from the index and applies the
+/// same CST check on its `selection_range`, so both declaration and reference
+/// sites produce the correct `skip_dotted` result.
+///
+/// Class-level properties are naturally excluded: they are declared outside the
+/// function's `scope` window and therefore never matched by the line filter.
+fn any_local_var_decl_in_scope(
+    indexer: &crate::indexer::Indexer,
+    uri: &Url,
+    name: &str,
+    scope: (usize, usize),
+) -> bool {
+    use tower_lsp::lsp_types::SymbolKind;
+
+    let file = match indexer.files.get(uri.as_str()) {
+        Some(f) => f,
+        None => return false,
+    };
+    file.symbols
+        .iter()
+        .filter(|s| {
+            matches!(s.kind, SymbolKind::PROPERTY | SymbolKind::VARIABLE | SymbolKind::CONSTANT)
+                && s.name == name
+                && (s.selection_range.start.line as usize) >= scope.0
+                && (s.selection_range.start.line as usize) <= scope.1
+        })
+        .any(|s| {
+            let decl_pos = Position {
+                line: s.selection_range.start.line,
+                character: s.selection_range.start.character,
+            };
+            cst_cursor_is_local_var(indexer, uri, decl_pos)
+        })
+}
+
 #[cfg(test)]
-/// Return `true` when the CST node at `pos` belongs to a function/method
 /// declaration or a navigation expression (member access). Returns `false`
 /// for property/variable declarations, parameters, and unknown contexts.
 ///
@@ -358,7 +398,11 @@ impl Backend {
             // nearest scope ancestor is a function body (not a class body or source file).
             // Class properties, top-level vals, and method call sites all need dotted
             // accesses included so that `this.myProp` / `obj.myProp` are also renamed.
-            let skip_dotted = cst_cursor_is_local_var(&self.indexer, uri, pos);
+            //
+            // Check both the cursor position (declaration case) and the file index
+            // (reference case: cursor on a reference, not the declaration itself).
+            let skip_dotted = cst_cursor_is_local_var(&self.indexer, uri, pos)
+                || any_local_var_decl_in_scope(&self.indexer, uri, &name, scope);
 
             let mut file_edits = rename_in_scope(&lines, &name, new_name, scope, skip_dotted);
             if file_edits.is_empty() {
@@ -497,131 +541,5 @@ impl Backend {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{cst_cursor_is_local_var, cst_cursor_is_method};
-    use crate::indexer::Indexer;
-    use tower_lsp::lsp_types::{Position, Url};
-
-    fn make_indexer_with(src: &str) -> (Indexer, Url) {
-        let idx = Indexer::new();
-        let uri = Url::parse("file:///tmp/test.kt").unwrap();
-        idx.store_live_tree(&uri, src);
-        (idx, uri)
-    }
-
-    fn make_indexed(src: &str) -> (Indexer, Url) {
-        let idx = Indexer::new();
-        let uri = Url::parse("file:///tmp/test.kt").unwrap();
-        idx.index_content(&uri, src);
-        idx.store_live_tree(&uri, src);
-        (idx, uri)
-    }
-
-    #[test]
-    fn cst_var_declaration_is_not_method() {
-        let src = "val syncWith = repo.syncWith(Arg())\n";
-        let (idx, uri) = make_indexer_with(src);
-        // Cursor on `syncWith` at col 4 (the variable declaration)
-        let pos = Position {
-            line: 0,
-            character: 4,
-        };
-        assert!(
-            !cst_cursor_is_method(&idx, &uri, pos),
-            "val decl should not be method"
-        );
-    }
-
-    #[test]
-    fn cst_nav_expr_member_access_is_method() {
-        let src = "val syncWith = repo.syncWith(Arg())\n";
-        let (idx, uri) = make_indexer_with(src);
-        // Cursor on `syncWith` in `.syncWith(` — after 'repo.' → col 20
-        let pos = Position {
-            line: 0,
-            character: 20,
-        };
-        assert!(
-            cst_cursor_is_method(&idx, &uri, pos),
-            "navigation_expression should be method"
-        );
-    }
-
-    #[test]
-    fn cst_function_declaration_is_method() {
-        let src = "fun syncWith(arg: Arg): Result {\n    return Result()\n}\n";
-        let (idx, uri) = make_indexer_with(src);
-        // Cursor on `syncWith` at col 4
-        let pos = Position {
-            line: 0,
-            character: 4,
-        };
-        assert!(
-            cst_cursor_is_method(&idx, &uri, pos),
-            "fun declaration should be method"
-        );
-    }
-
-    #[test]
-    fn cst_var_reference_not_method() {
-        let src = "fun go() {\n    val x = 1\n    x.toString()\n}\n";
-        let (idx, uri) = make_indexer_with(src);
-        // Cursor on `x` at line 1, col 8 (in `val x = 1`)
-        let pos = Position {
-            line: 1,
-            character: 8,
-        };
-        assert!(
-            !cst_cursor_is_method(&idx, &uri, pos),
-            "var decl should not be method"
-        );
-    }
-
-    /// Local variable inside a function body → is local var (skip_dotted = true).
-    #[test]
-    fn local_var_inside_function_is_local() {
-        let src = "fun go() {\n    val localFoo = 1\n}\n";
-        let (idx, uri) = make_indexed(src);
-        // Cursor on `localFoo` at line 1, col 8
-        let pos = Position {
-            line: 1,
-            character: 8,
-        };
-        assert!(
-            cst_cursor_is_local_var(&idx, &uri, pos),
-            "val inside fun should be local var"
-        );
-    }
-
-    /// Class property → not a local var, dotted accesses should be renamed.
-    #[test]
-    fn class_property_is_not_local_var() {
-        let src = "class Foo {\n    val myProp: String = \"\"\n}\n";
-        let (idx, uri) = make_indexed(src);
-        // Cursor on `myProp` at line 1, col 8
-        let pos = Position {
-            line: 1,
-            character: 8,
-        };
-        assert!(
-            !cst_cursor_is_local_var(&idx, &uri, pos),
-            "class property should not be local var"
-        );
-    }
-
-    /// Variable declared inside a lambda literal → is local var (skip_dotted = true).
-    #[test]
-    fn local_var_inside_lambda_is_local() {
-        let src = "val f = { val x = 1\n    x\n}\n";
-        let (idx, uri) = make_indexed(src);
-        // Cursor on `x` at line 0, col 14 (the `val x` declaration inside the lambda)
-        let pos = Position {
-            line: 0,
-            character: 14,
-        };
-        assert!(
-            cst_cursor_is_local_var(&idx, &uri, pos),
-            "val inside lambda should be local var"
-        );
-    }
-}
+#[path = "rename_tests.rs"]
+mod tests;
