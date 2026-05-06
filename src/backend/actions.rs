@@ -167,15 +167,13 @@ impl Backend {
         let uri = &params.text_document.uri;
         let range = params.range;
 
+        let lines = self.indexer.mem_lines_for(uri.as_str());
         let line_text: String = {
             let ln = range.start.line as usize;
-            if let Some(ll) = self.indexer.live_lines.get(uri.as_str()) {
-                ll.get(ln).cloned().unwrap_or_default()
-            } else if let Some(data) = self.indexer.files.get(uri.as_str()) {
-                data.lines.get(ln).cloned().unwrap_or_default()
-            } else {
-                String::new()
-            }
+            lines
+                .as_ref()
+                .and_then(|lines| lines.get(ln).cloned())
+                .unwrap_or_default()
         };
 
         let trimmed = line_text.trim().to_owned();
@@ -192,15 +190,10 @@ impl Backend {
             }
         }
 
-        let all_lines: Vec<String> = {
-            if let Some(ll) = self.indexer.live_lines.get(uri.as_str()) {
-                ll.clone().to_vec()
-            } else if let Some(data) = self.indexer.files.get(uri.as_str()) {
-                data.lines.to_vec()
-            } else {
-                vec![]
-            }
-        };
+        let all_lines: Vec<String> = lines
+            .as_ref()
+            .map(|lines| lines.as_ref().clone())
+            .unwrap_or_default();
 
         let cursor_word = line_text.word_at_utf16_col(range.start.character as usize);
         let is_kotlin = crate::Language::from_path(uri.path()) == crate::Language::Kotlin;

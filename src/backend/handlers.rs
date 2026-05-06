@@ -3,14 +3,11 @@ use super::cursor::CursorContext;
 use super::format::{format_contextual_hover, format_symbol_hover};
 use super::helpers::resolve_references_scope;
 use super::Backend;
-use crate::indexer::apply_type_subst;
-use crate::indexer::find_fun_signature_with_receiver;
 use crate::indexer::resolution::{
     enrich_at_location, resolve_symbol_info, ResolveOptions, SubstitutionContext,
 };
-use crate::indexer::NodeExt;
+use crate::indexer::{apply_type_subst, cst_call_info, find_fun_signature_with_receiver, CallInfo};
 use crate::inlay_hints::compute_inlay_hints;
-use crate::queries::{KIND_CALL_EXPR, KIND_LAMBDA_LIT, KIND_VALUE_ARG};
 use crate::StrExt;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
@@ -169,34 +166,18 @@ impl Backend {
         parent_class: Option<&str>,
     ) -> Vec<String> {
         self.indexer
-            .definitions
-            .get(name)
-            .map(|locations| {
-                locations
-                    .iter()
-                    .filter(|location| {
-                        reference_matches_parent_class(&self.indexer, location, parent_class)
-                    })
-                    .filter_map(|location| location.uri.to_file_path().ok())
-                    .filter_map(|path| path.to_str().map(|path| path.to_owned()))
-                    .collect()
+            .definition_locations(name)
+            .into_iter()
+            .filter(|location| {
+                reference_matches_parent_class(&self.indexer, location, parent_class)
             })
-            .unwrap_or_default()
+            .filter_map(|location| location.uri.to_file_path().ok())
+            .filter_map(|path| path.to_str().map(|path| path.to_owned()))
+            .collect()
     }
 
     async fn rg_reference_locations(&self, search: &ReferenceSearch) -> Vec<Location> {
-        let workspace_root = self
-            .indexer
-            .workspace_root
-            .read()
-            .ok()
-            .and_then(|root| root.clone());
-        let ignore_matcher = self
-            .indexer
-            .ignore_matcher
-            .read()
-            .ok()
-            .and_then(|matcher| matcher.clone());
+        let (workspace_root, ignore_matcher) = self.rg_context().await;
         let request = search.clone();
         tokio::task::spawn_blocking(move || {
             let rg_request = crate::rg::RgSearchRequest::new(
@@ -215,10 +196,7 @@ impl Backend {
     }
 
     fn filter_library_reference_locations(&self, locations: &mut Vec<Location>) {
-        if self.indexer.library_uris.is_empty() {
-            return;
-        }
-        locations.retain(|location| !self.indexer.library_uris.contains(location.uri.as_str()));
+        locations.retain(|location| !self.indexer.is_library_uri(&location.uri));
     }
 
     fn add_current_file_reference_locations(
@@ -227,10 +205,10 @@ impl Backend {
         name: &str,
         locations: &mut Vec<Location>,
     ) {
-        let Some(data) = self.indexer.files.get(uri.as_str()) else {
+        let Some(lines) = self.indexer.mem_lines_for(uri.as_str()) else {
             return;
         };
-        for (line_idx, line) in data.lines.iter().enumerate() {
+        for (line_idx, line) in lines.iter().enumerate() {
             let line_number = line_idx as u32;
             if has_reference_line(locations, uri, line_number) {
                 continue;
@@ -304,11 +282,11 @@ impl Backend {
 
     fn collect_workspace_symbols(&self, query: &WorkspaceSymbolQuery) -> Vec<SymbolInformation> {
         let mut results = Vec::new();
-        for entry in self.indexer.files.iter() {
-            let Some(uri) = workspace_symbol_uri(entry.key()) else {
+        for (uri_str, data) in self.indexer.indexed_files() {
+            let Some(uri) = workspace_symbol_uri(&uri_str) else {
                 continue;
             };
-            collect_matching_workspace_symbols(&uri, &entry.value().symbols, query, &mut results);
+            collect_matching_workspace_symbols(&uri, &data.symbols, query, &mut results);
             if results.len() >= WORKSPACE_SYMBOL_CAP {
                 break;
             }
@@ -321,18 +299,7 @@ impl Backend {
         if !query.allows_rg_fallback() {
             return vec![];
         }
-        let workspace_root = self
-            .indexer
-            .workspace_root
-            .read()
-            .ok()
-            .and_then(|root| root.clone());
-        let ignore_matcher = self
-            .indexer
-            .ignore_matcher
-            .read()
-            .ok()
-            .and_then(|matcher| matcher.clone());
+        let (workspace_root, ignore_matcher) = self.rg_context().await;
         let query_text = query.raw.clone();
         let rg_locations = tokio::task::spawn_blocking(move || {
             crate::rg::rg_find_definition(
@@ -400,13 +367,11 @@ impl Backend {
         params: FoldingRangeParams,
     ) -> Result<Option<Vec<FoldingRange>>> {
         let uri = &params.text_document.uri;
-        let data = match self.indexer.files.get(uri.as_str()) {
-            Some(d) => d,
-            None => return Ok(None),
+        let Some(lines) = self.indexer.mem_lines_for(uri.as_str()) else {
+            return Ok(None);
         };
 
         let mut ranges: Vec<FoldingRange> = Vec::new();
-        let lines = &data.lines;
         let mut stack: Vec<u32> = Vec::new();
 
         for (i, line) in lines.iter().enumerate() {
@@ -484,23 +449,18 @@ impl Backend {
         // as Write highlights; all other occurrences are Read.
         let decl_lines: std::collections::HashSet<u32> = self
             .indexer
-            .definitions
-            .get(&name)
-            .map(|locs| {
-                locs.iter()
-                    .filter(|l| l.uri == *uri)
-                    .map(|l| l.range.start.line)
-                    .collect()
-            })
-            .unwrap_or_default();
+            .definition_locations(&name)
+            .into_iter()
+            .filter(|location| location.uri == *uri)
+            .map(|location| location.range.start.line)
+            .collect();
 
-        let data = match self.indexer.files.get(uri.as_str()) {
-            Some(d) => d,
-            None => return Ok(None),
+        let Some(lines) = self.indexer.mem_lines_for(uri.as_str()) else {
+            return Ok(None);
         };
 
         let mut highlights = Vec::new();
-        for (line_idx, line) in data.lines.iter().enumerate() {
+        for (line_idx, line) in lines.iter().enumerate() {
             for abs in word_byte_offsets(line, &name) {
                 let col: u32 = line[..abs].chars().map(|c| c.len_utf16() as u32).sum();
                 let col_end: u32 = col + name.chars().map(|c| c.len_utf16() as u32).sum::<u32>();
@@ -563,16 +523,6 @@ fn build_signature_help(
     })
 }
 
-/// Resolved call-site information needed for `textDocument/signatureHelp`.
-struct CallInfo {
-    /// Name of the function being called.
-    fn_name: String,
-    /// Optional receiver before the dot (e.g. `"builder"` in `builder.build()`).
-    qualifier: Option<String>,
-    /// Zero-based index of the parameter the cursor is currently inside.
-    active_param: u32,
-}
-
 /// Extract [`CallInfo`] for the call under the cursor.
 ///
 /// Tries the CST (live tree) first — O(depth), accurate qualifier extraction.
@@ -586,87 +536,11 @@ fn extract_call_info(
     before: &str,
     line_idx: usize,
 ) -> Option<CallInfo> {
-    // ── CST path ─────────────────────────────────────────────────────────────
     if let Some(result) = cst_call_info(pos, indexer, uri) {
         return Some(result);
     }
 
-    // ── Text path ────────────────────────────────────────────────────────────
     text_call_info(lines, before, line_idx)
-}
-
-/// CST path: walk from cursor up to `call_expression`, extract name/qualifier/param.
-///
-/// Returns `None` when:
-/// - no live tree available
-/// - cursor is inside a `lambda_literal`
-/// - callee shape not recognised (`simple_identifier` / `navigation_expression`)
-fn cst_call_info(pos: Position, indexer: &crate::indexer::Indexer, uri: &Url) -> Option<CallInfo> {
-    use crate::indexer::live_tree::utf16_col_to_byte;
-    use tree_sitter::Point;
-
-    let doc = indexer.live_doc(uri)?;
-    let bytes = &doc.bytes;
-    let full_text = std::str::from_utf8(bytes).ok()?;
-
-    let line_idx = pos.line as usize;
-    let line_text = full_text.lines().nth(line_idx)?;
-    let byte_col = utf16_col_to_byte(line_text, pos.character as usize);
-    let point = Point {
-        row: line_idx,
-        column: byte_col,
-    };
-    let start_node = doc
-        .tree
-        .root_node()
-        .descendant_for_point_range(point, point)?;
-
-    // Walk up: find call_expression; bail out if we cross into a lambda literal.
-    let mut cur = start_node;
-    let call_expr = loop {
-        match cur.kind() {
-            KIND_CALL_EXPR => break Some(cur),
-            KIND_LAMBDA_LIT => break None,
-            _ => match cur.parent() {
-                Some(p) => cur = p,
-                None => break None,
-            },
-        }
-    }?;
-
-    // Extract function name and optional qualifier from the callee.
-    let (fn_name, qualifier) = call_expr.call_fn_and_qualifier(bytes)?;
-
-    // Find the value_arguments node (may be inside call_suffix).
-    let value_arguments = call_expr.find_value_arguments()?;
-
-    // Count active param: how many value_argument children end before the cursor.
-    let cursor_byte = full_text
-        .lines()
-        .take(line_idx)
-        .map(|l| l.len() + 1) // +1 for the newline
-        .sum::<usize>()
-        + byte_col;
-    let active_param = {
-        let mut count = 0u32;
-        let mut walker = value_arguments.walk();
-        for child in value_arguments.children(&mut walker) {
-            if child.kind() == KIND_VALUE_ARG {
-                if child.end_byte() <= cursor_byte {
-                    count += 1;
-                } else {
-                    break;
-                }
-            }
-        }
-        count
-    };
-
-    Some(CallInfo {
-        fn_name,
-        qualifier,
-        active_param,
-    })
 }
 
 /// Scans a single source line for an unclosed call-site opening.

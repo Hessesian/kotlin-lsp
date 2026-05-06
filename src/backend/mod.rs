@@ -135,6 +135,22 @@ impl Backend {
         }
     }
 
+    pub(crate) async fn rg_context(&self) -> (Option<PathBuf>, Option<Arc<IgnoreMatcher>>) {
+        let root = self
+            .indexer
+            .workspace_root
+            .read()
+            .ok()
+            .and_then(|root| root.clone());
+        let ignore = self
+            .indexer
+            .ignore_matcher
+            .read()
+            .ok()
+            .and_then(|ignore| ignore.clone());
+        (root, ignore)
+    }
+
     /// Try `find_definition_qualified` with `rt.qualified`, falling back to `rt.leaf`
     /// when the first lookup is empty and the two names differ.
     pub(super) fn resolve_with_receiver_fallback(
@@ -801,7 +817,7 @@ impl LanguageServer for Backend {
         }
 
         self.indexer.remove_live_tree(uri);
-        self.indexer.live_lines.remove(uri.as_str());
+        self.indexer.remove_live_lines(uri);
         // Clear diagnostics so stale errors don't linger after the file is closed.
         self.client
             .publish_diagnostics(params.text_document.uri, Vec::new(), None)
@@ -839,7 +855,7 @@ impl LanguageServer for Backend {
         for change in params.changes {
             if change.typ == FileChangeType::DELETED {
                 // Remove from index; definition map cleanup is handled lazily.
-                self.indexer.files.remove(change.uri.as_str());
+                self.indexer.remove_indexed_file(&change.uri);
                 continue;
             }
             let uri = change.uri;

@@ -1,94 +1,18 @@
 use super::actions::is_non_call_keyword;
 use super::helpers::resolve_references_scope;
 use super::Backend;
+use crate::indexer::cst_cursor_is_local_var;
+#[cfg(test)]
 use crate::indexer::live_tree::utf16_col_to_byte;
+#[cfg(test)]
 use crate::queries::{
-    KIND_ANON_FUN, KIND_CLASS_BODY, KIND_COMPANION_OBJ, KIND_FUN_DECL, KIND_LAMBDA_LIT,
-    KIND_METHOD_DECL, KIND_MULTI_VAR_DECL, KIND_NAV_EXPR, KIND_OBJECT_DECL, KIND_PROP_DECL,
-    KIND_SOURCE_FILE, KIND_VAR_DECL,
+    KIND_ANON_FUN, KIND_CLASS_BODY, KIND_COMPANION_OBJ, KIND_FUN_DECL, KIND_METHOD_DECL,
+    KIND_MULTI_VAR_DECL, KIND_NAV_EXPR, KIND_OBJECT_DECL, KIND_PROP_DECL, KIND_SOURCE_FILE,
+    KIND_VAR_DECL,
 };
 use crate::StrExt;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
-
-/// Return `true` when the cursor is on a local variable declaration — i.e. a
-/// `property_declaration` / `variable_declaration` whose nearest scope-boundary
-/// ancestor is a function/lambda body rather than a class body or source file.
-///
-/// This is used to decide whether to skip dotted occurrences during rename:
-/// - local var `val syncWith` inside a function → `skip_dotted = true`
-///   (avoid renaming `.syncWith()` method calls)
-/// - class property `val myProp` → `skip_dotted = false`
-///   (must rename `this.myProp` / `obj.myProp` accesses)
-/// - navigation expression (`.method()`) → `skip_dotted = false`
-/// - function declaration → `skip_dotted = false`
-fn cst_cursor_is_local_var(indexer: &crate::indexer::Indexer, uri: &Url, pos: Position) -> bool {
-    use tree_sitter::Point;
-
-    let doc = match indexer.live_doc(uri) {
-        Some(d) => d,
-        None => return false,
-    };
-    let full_text = match std::str::from_utf8(&doc.bytes) {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
-    let line_idx = pos.line as usize;
-    let line_text = match full_text.lines().nth(line_idx) {
-        Some(l) => l,
-        None => return false,
-    };
-    let byte_col = utf16_col_to_byte(line_text, pos.character as usize);
-    let point = Point {
-        row: line_idx,
-        column: byte_col,
-    };
-    let start_node = match doc
-        .tree
-        .root_node()
-        .descendant_for_point_range(point, point)
-    {
-        Some(n) => n,
-        None => return false,
-    };
-
-    // Track whether we've entered a property/variable declaration binding.
-    let mut in_binding = false;
-    let mut cur = start_node;
-    loop {
-        let kind = cur.kind();
-        match kind {
-            // Entering a property/variable binding — continue walking up.
-            KIND_PROP_DECL | KIND_VAR_DECL | KIND_MULTI_VAR_DECL => {
-                in_binding = true;
-            }
-            // Inside a binding and hit a function/lambda boundary → local variable.
-            KIND_FUN_DECL | KIND_METHOD_DECL | KIND_ANON_FUN | KIND_LAMBDA_LIT if in_binding => {
-                return true;
-            }
-            // Function/method/lambda without being in a binding → not a local var.
-            KIND_FUN_DECL | KIND_METHOD_DECL | KIND_ANON_FUN | KIND_LAMBDA_LIT => return false,
-            // Navigation expression → member access, not a local var.
-            KIND_NAV_EXPR => return false,
-            // Class body, companion object, or source file reached while in a binding
-            // → class-level or top-level property, NOT a local var.
-            KIND_CLASS_BODY | KIND_OBJECT_DECL | KIND_COMPANION_OBJ | KIND_SOURCE_FILE
-                if in_binding =>
-            {
-                return false;
-            }
-            // Scope boundary without being in a binding → not applicable.
-            KIND_CLASS_BODY | KIND_OBJECT_DECL | KIND_COMPANION_OBJ | KIND_SOURCE_FILE => {
-                return false;
-            }
-            _ => {}
-        }
-        match cur.parent() {
-            Some(p) => cur = p,
-            None => return false,
-        }
-    }
-}
 
 /// Return `true` when the file index (within `scope`) contains a `val`/`var`
 /// declaration of `name` that is itself a local variable.
@@ -110,12 +34,9 @@ fn any_local_var_decl_in_scope(
 ) -> bool {
     use tower_lsp::lsp_types::SymbolKind;
 
-    let file = match indexer.files.get(uri.as_str()) {
-        Some(f) => f,
-        None => return false,
-    };
-    file.symbols
-        .iter()
+    indexer
+        .file_symbols(uri)
+        .into_iter()
         .filter(|s| {
             matches!(
                 s.kind,
@@ -404,24 +325,19 @@ impl Backend {
 
     fn definition_files_for_rename(&self, name: &str, parent_class: Option<&str>) -> Vec<String> {
         self.indexer
-            .definitions
-            .get(name)
-            .map(|locations| {
-                locations
-                    .iter()
-                    .filter(|location| {
-                        parent_class.is_none_or(|parent| {
-                            self.indexer
-                                .enclosing_class_at(&location.uri, location.range.start.line)
-                                .as_deref()
-                                == Some(parent)
-                        })
-                    })
-                    .filter_map(|location| location.uri.to_file_path().ok())
-                    .filter_map(|path| path.to_str().map(str::to_owned))
-                    .collect()
+            .definition_locations(name)
+            .into_iter()
+            .filter(|location| {
+                parent_class.is_none_or(|parent| {
+                    self.indexer
+                        .enclosing_class_at(&location.uri, location.range.start.line)
+                        .as_deref()
+                        == Some(parent)
+                })
             })
-            .unwrap_or_default()
+            .filter_map(|location| location.uri.to_file_path().ok())
+            .filter_map(|path| path.to_str().map(str::to_owned))
+            .collect()
     }
 
     async fn collect_reference_locations(
@@ -433,8 +349,7 @@ impl Backend {
             &rename_target.name,
             rename_target.parent_class.as_deref(),
         );
-        let root = self.indexer.workspace_root.read().unwrap().clone();
-        let matcher = self.indexer.ignore_matcher.read().unwrap().clone();
+        let (root, matcher) = self.rg_context().await;
         let uri_clone = uri.clone();
         let name = rename_target.name.clone();
         let parent_class = rename_target.parent_class.clone();
@@ -454,10 +369,7 @@ impl Backend {
         .await
         .unwrap_or_default();
 
-        let library_uris = &self.indexer.library_uris;
-        if !library_uris.is_empty() {
-            reference_locations.retain(|location| !library_uris.contains(location.uri.as_str()));
-        }
+        reference_locations.retain(|location| !self.indexer.is_library_uri(&location.uri));
         reference_locations
     }
 

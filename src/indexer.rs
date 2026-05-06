@@ -319,12 +319,14 @@ impl Indexer {
         self.files.get(uri).map(|f| f.lines.clone())
     }
 
+    #[allow(dead_code)]
     pub(crate) fn live_lines_for(&self, uri: &Url) -> Option<Arc<Vec<String>>> {
         self.live_lines
             .get(uri.as_str())
             .map(|lines| Arc::clone(lines.value()))
     }
 
+    #[allow(dead_code)]
     pub(crate) fn file_data(&self, uri: &Url) -> Option<Arc<FileData>> {
         self.files
             .get(uri.as_str())
@@ -338,6 +340,7 @@ impl Indexer {
             .unwrap_or_default()
     }
 
+    #[allow(dead_code)]
     pub(crate) fn subtype_locations(&self, name: &str) -> Vec<Location> {
         self.subtypes
             .get(name)

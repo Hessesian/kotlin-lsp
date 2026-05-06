@@ -8,11 +8,13 @@
 //! - `it_this`  — resolving `it`/`this` element types inside Kotlin lambda bodies
 
 pub(super) mod args;
+pub(super) mod cst_cursor;
 pub(super) mod deps;
 pub(super) mod it_this;
 pub(super) mod lambda;
 pub(super) mod sig;
 
+pub(crate) use cst_cursor::{cst_call_info, cst_cursor_is_local_var, CallInfo};
 pub(crate) use deps::InferDeps;
 #[cfg(test)]
 pub(crate) use deps::TestDeps;
