@@ -53,7 +53,6 @@ pub(crate) struct CursorPos {
 }
 
 /// The caller's position context, used for visibility filtering and type-param substitution.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct CallerContext<'a> {
     pub uri: Option<&'a str>,

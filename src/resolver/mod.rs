@@ -21,6 +21,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 use std::process::Command;
+use std::sync::Arc;
 
 use tower_lsp::lsp_types::{Location, Range, TextEdit, Url};
 
@@ -64,14 +65,15 @@ use infer::{infer_field_type, infer_variable_type};
 
 /// Return `FileData` for `uri` — from the live index if indexed, otherwise parse from disk.
 /// Returns `None` if the file is not indexed and not readable from disk.
-pub(crate) fn ensure_file_data(idx: &Indexer, uri: &Url) -> Option<FileData> {
+/// Returns an `Arc` so callers can read without copying the full `FileData`.
+pub(crate) fn ensure_file_data(idx: &Indexer, uri: &Url) -> Option<Arc<FileData>> {
     if let Some(file_data) = idx.files.get(uri.as_str()) {
-        return Some(file_data.value().as_ref().clone());
+        return Some(file_data.value().clone());
     }
 
     let path = uri.to_file_path().ok()?;
     let content = std::fs::read_to_string(path).ok()?;
-    Some(parse_by_extension(uri.path(), &content))
+    Some(Arc::new(parse_by_extension(uri.path(), &content)))
 }
 
 /// Walk the class hierarchy starting from `start_class`, collecting items at each level.
@@ -92,7 +94,7 @@ where
         caller,
         max_depth,
         collect,
-        visited: HashSet::from([start_class.to_owned()]),
+        visited: HashSet::from([(start_uri.to_owned(), start_class.to_owned())]),
         items: Vec::new(),
     };
     walker.recurse(start_class, start_uri, 0);
@@ -107,7 +109,7 @@ where
     caller: CallerContext<'a>,
     max_depth: usize,
     collect: F,
-    visited: HashSet<String>,
+    visited: HashSet<(String, String)>,
     items: Vec<T>,
 }
 
@@ -121,7 +123,7 @@ where
         }
 
         for (super_name, super_uri) in supertype_targets(self.idx, class_name, class_uri) {
-            if !self.visited.insert(super_name.clone()) {
+            if !self.visited.insert((super_uri.clone(), super_name.clone())) {
                 continue;
             }
             self.items.extend((self.collect)(
@@ -953,14 +955,18 @@ fn resolve_star_imports(idx: &Indexer, name: &str, uri: &Url) -> Vec<Location> {
 /// 3. Search the resolved file's symbol table for `name`.
 /// 4. Recurse into that file's own supertypes (depth-limited, cycle-safe).
 fn resolve_from_class_hierarchy(idx: &Indexer, name: &str, from_uri: &Url) -> Vec<Location> {
-    walk_hierarchy(
+    let mut results = walk_hierarchy(
         idx,
         "",
         from_uri.as_str(),
         CallerContext::default(),
         4,
         |index, _, class_uri, _| find_name_in_uri(index, name, class_uri),
-    )
+    );
+    // Deduplicate: hierarchy walk may find the same definition via multiple paths
+    // (e.g. diamond inheritance). Keep traversal order (most-specific first).
+    results.dedup_by(|a, b| a.uri == b.uri && a.range == b.range);
+    results
 }
 
 /// `rg` scoped to the directory that would contain `package` sources.
