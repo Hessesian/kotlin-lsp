@@ -1,5 +1,6 @@
 #![warn(unreachable_pub)]
 mod backend;
+mod cli;
 mod indexer;
 mod inlay_hints;
 mod lines_ext;
@@ -34,6 +35,20 @@ async fn async_main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .target(env_logger::Target::Stderr) // keep stdout clean for LSP JSON-RPC
         .init();
+
+    // CLI subcommands: find, refs, hover, index
+    match cli::CliArgs::parse() {
+        Ok(Some(args)) => {
+            cli::run(args).await;
+            return;
+        }
+        Ok(None) => {} // LSP mode
+        Err(e) => {
+            eprintln!("error: {e}");
+            eprintln!("Usage: kotlin-lsp [find|refs|hover|index] [--fast|--smart] [--json] [--root <dir>]");
+            std::process::exit(1);
+        }
+    }
 
     let mut args = std::env::args().skip(1).peekable();
 

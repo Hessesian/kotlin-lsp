@@ -726,6 +726,18 @@ fn rg_word_in_files(safe_name: &str, files: &[String]) -> Vec<(Location, String)
         .locations_with_content()
 }
 
+/// Plain word-boundary search for all occurrences of `name` under `root`.
+///
+/// Used by the CLI `refs --fast` subcommand.  Less precise than
+/// `rg_find_references` (no package/class context) but zero-cost to run —
+/// no index required.
+pub(crate) fn rg_word_search(name: &str, root: &Path) -> Vec<Location> {
+    RgSearch::rooted(root)
+        .word_regexp()
+        .with_pattern(regex_escape(name))
+        .locations()
+}
+
 fn parse_rg_line_with_content_rooted(line: &str, root: &Path) -> Option<(Location, String)> {
     let mut parts = line.splitn(4, ':');
     let file = parts.next()?;

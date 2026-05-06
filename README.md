@@ -60,6 +60,7 @@ More editors: [Neovim, VS Code, Zed →](docs/editors.md)
 | **Go-to-implementation** | Transitive subtype lookup (BFS) |
 | **Signature help** | Active parameter highlighting |
 | **Folding** | Brace regions + consecutive comment blocks |
+| **CLI mode** | `find`, `refs`, `hover`, `index` subcommands — no daemon, scriptable |
 
 All features work immediately — `rg` fallback handles symbols before indexing finishes (applies to Kotlin, Java and Swift).
 
@@ -72,6 +73,42 @@ All features work immediately — `rg` fallback handles symbols before indexing 
 | **Kotlin** | `class`, `interface`, `object`, `fun`, `val`, `var`, `typealias`, constructor params, enum entries |
 | **Java** | `class`, `interface`, `enum`, `method`, `field`, `enum_constant` |
 | **Swift** | `class`, `struct`, `enum`, `protocol`, `func`, `let`, `var`, `typealias`, `extension`, `init`, enum cases |
+
+---
+
+## CLI mode
+
+`kotlin-lsp` also works as a standalone command-line tool — no daemon, no editor, just results on stdout.
+
+```bash
+# Find declarations
+kotlin-lsp find MyViewModel
+
+# Find all references (fast: rg only, no index required)
+kotlin-lsp refs --fast MyViewModel --root ./android
+
+# Hover info at a position
+kotlin-lsp hover src/Foo.kt 42 10
+
+# Pre-build the index (subsequent find/refs/hover calls load from cache)
+kotlin-lsp index --root ./android
+
+# JSON output
+kotlin-lsp find --json MyViewModel
+```
+
+**Modes:**
+
+| Flag | Behaviour |
+|---|---|
+| _(none)_ | Auto: use cached index if available, fall back to fast rg/fd |
+| `--fast` | Always use rg/fd; instant startup, no index needed |
+| `--smart` | Require index; build it if missing |
+
+```
+kotlin-lsp --help        # full usage
+kotlin-lsp --version
+```
 
 ---
 
@@ -233,6 +270,17 @@ They can coexist — use kotlin-lsp for fast navigation, the official one for di
 ---
 
 ## Changelog
+
+### 0.10.0
+
+- **CLI mode** — `kotlin-lsp find|refs|hover|index` subcommands: use kotlin-lsp as a standalone tool without an editor or daemon
+- **Auto mode** — uses cached index when available, falls back to fast rg/fd automatically (no flag needed)
+- **`--fast` flag** — pure rg/fd, zero startup cost; useful in scripts and CI
+- **`--smart` flag** — builds index if missing, uses full cross-file accuracy
+- **`--json` flag** — machine-readable output for piping/scripting
+- **`--root` flag** — workspace root override; defaults to nearest `.git` dir or cwd
+- **`--help` / `--version`** — standard CLI flags; work before or after subcommand
+- **Helpful errors** — `--find` (common mistake) prints `'find' is a subcommand, not a flag`
 
 ### 0.8.0
 

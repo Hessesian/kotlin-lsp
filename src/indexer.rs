@@ -342,7 +342,7 @@ impl Indexer {
 
     /// Ensures the file at `uri` is indexed, loading from disk if needed.
     /// Called on the completion hot-path before the debounced re-index finishes.
-    fn ensure_indexed(&self, uri: &Url) {
+    pub(crate) fn ensure_indexed(&self, uri: &Url) {
         if !self.files.contains_key(uri.as_str()) {
             if let Ok(path) = uri.to_file_path() {
                 if let Ok(content) = std::fs::read_to_string(&path) {
