@@ -1,13 +1,13 @@
-use super::Backend;
 use super::actions::is_non_call_keyword;
 use super::helpers::resolve_references_scope;
-use crate::StrExt;
+use super::Backend;
 use crate::indexer::live_tree::utf16_col_to_byte;
 use crate::queries::{
     KIND_ANON_FUN, KIND_CLASS_BODY, KIND_COMPANION_OBJ, KIND_FUN_DECL, KIND_LAMBDA_LIT,
     KIND_METHOD_DECL, KIND_MULTI_VAR_DECL, KIND_NAV_EXPR, KIND_OBJECT_DECL, KIND_PROP_DECL,
     KIND_SOURCE_FILE, KIND_VAR_DECL,
 };
+use crate::StrExt;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 
@@ -440,7 +440,7 @@ impl Backend {
         let parent_class = rename_target.parent_class.clone();
         let declared_package = rename_target.declared_package.clone();
         let mut reference_locations = tokio::task::spawn_blocking(move || {
-            crate::rg::rg_find_references(
+            let request = crate::rg::RgSearchRequest::new(
                 &name,
                 parent_class.as_deref(),
                 declared_package.as_deref(),
@@ -448,8 +448,8 @@ impl Backend {
                 true,
                 &uri_clone,
                 &decl_files,
-                matcher.as_deref(),
-            )
+            );
+            crate::rg::rg_find_references(&request, matcher.as_deref())
         })
         .await
         .unwrap_or_default();

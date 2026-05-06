@@ -9,7 +9,9 @@
 
 use tower_lsp::lsp_types::Url;
 
-use crate::rg::{parse_rg_line, rg_find_definition, rg_find_references, IgnoreMatcher};
+use crate::rg::{
+    parse_rg_line, rg_find_definition, rg_find_references, IgnoreMatcher, RgSearchRequest,
+};
 
 // ─── parse_rg_line ────────────────────────────────────────────────────────────
 
@@ -112,16 +114,17 @@ fn refs_inner_class_does_not_bleed_across_contracts() {
 
     // Simulate: cursor on declaration of Event inside ActivateUpdateAppContract.
     // parent_class = "ActivateUpdateAppContract", declared_pkg = "com.example.activate"
-    let locs = rg_find_references(
+    let decl_files = [activate_decl];
+    let request = RgSearchRequest::new(
         "Event",
         Some("ActivateUpdateAppContract"),
         Some("com.example.activate"), // declared_pkg
         Some(root),
         true, // include_declaration
         &activate_uri,
-        &[activate_decl],
-        None, // no ignore patterns in this test
+        &decl_files,
     );
+    let locs = rg_find_references(&request, None);
 
     let hit_files: std::collections::HashSet<String> = locs
         .iter()
@@ -210,16 +213,17 @@ fn refs_inner_class_resolved_from_import_in_reference_file() {
     let other_vm_uri = Url::from_file_path(root.join("other_vm.kt")).unwrap();
     let other_decl = root.join("other_contract.kt").to_str().unwrap().to_owned();
 
-    let locs = rg_find_references(
+    let decl_files = [other_decl];
+    let request = RgSearchRequest::new(
         "Event",
         Some("OtherContract"),
         Some("com.example.other"),
         Some(root),
         true,
         &other_vm_uri,
-        &[other_decl],
-        None,
+        &decl_files,
     );
+    let locs = rg_find_references(&request, None);
 
     let hit_files: std::collections::HashSet<String> = locs
         .iter()
@@ -313,16 +317,17 @@ fn refs_decl_files_filtered_by_enclosing_class() {
         .unwrap()
         .to_owned();
 
-    let locs = rg_find_references(
+    let decl_files = [dashboard_decl];
+    let request = RgSearchRequest::new(
         "Event",
         Some("DashboardContract"),
         Some("com.example.dashboard"),
         Some(root),
         true,
         &dashboard_uri,
-        &[dashboard_decl], // NOT including VisitBranchContract.kt
-        None,
+        &decl_files, // NOT including VisitBranchContract.kt
     );
+    let locs = rg_find_references(&request, None);
 
     let hit_files: std::collections::HashSet<String> = locs
         .iter()
@@ -424,16 +429,17 @@ fn rg_find_references_filters_ignored_dirs() {
     let decl = root.join("src/Contract.kt").to_str().unwrap().to_owned();
     let matcher = IgnoreMatcher::new(vec!["buildSrc".to_owned()], root);
 
-    let locs = rg_find_references(
+    let decl_files = [decl];
+    let request = RgSearchRequest::new(
         "Event",
         Some("Contract"),
         Some("com.example"),
         Some(root),
         true,
         &uri,
-        &[decl],
-        Some(&matcher),
+        &decl_files,
     );
+    let locs = rg_find_references(&request, Some(&matcher));
     let files: Vec<String> = locs
         .iter()
         .map(|l| l.uri.to_file_path().unwrap().to_string_lossy().into_owned())

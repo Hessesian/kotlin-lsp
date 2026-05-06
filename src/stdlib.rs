@@ -26,6 +26,242 @@ impl StdlibEntry {
     }
 }
 
+#[derive(Clone, Copy)]
+struct TemplateData {
+    label: &'static str,
+    description: &'static str,
+    snippet_body: &'static str,
+}
+
+const DECLARATION_TEMPLATES: &[TemplateData] = &[
+    TemplateData {
+        label: "fun",
+        description: "Function declaration",
+        snippet_body: "fun ${1:name}(${2}): ${3:Unit} {
+	${0}
+}",
+    },
+    TemplateData {
+        label: "pfun",
+        description: "Private function declaration",
+        snippet_body: "private fun ${1:name}(${2}): ${3:Unit} {
+	${0}
+}",
+    },
+    TemplateData {
+        label: "class",
+        description: "Class declaration",
+        snippet_body: "class ${1:Name}(${2}) {
+	${0}
+}",
+    },
+    TemplateData {
+        label: "dclass",
+        description: "Data class declaration",
+        snippet_body: "data class ${1:Name}(
+	val ${2:field}: ${3:Type}
+)",
+    },
+    TemplateData {
+        label: "sclass",
+        description: "Sealed class declaration",
+        snippet_body: "sealed class ${1:Name} {
+	${0}
+}",
+    },
+    TemplateData {
+        label: "object",
+        description: "Object declaration",
+        snippet_body: "object ${1:Name} {
+	${0}
+}",
+    },
+    TemplateData {
+        label: "iface",
+        description: "Interface declaration",
+        snippet_body: "interface ${1:Name} {
+	${0}
+}",
+    },
+    TemplateData {
+        label: "comp",
+        description: "Companion object",
+        snippet_body: "companion object {
+	${0}
+}",
+    },
+    TemplateData {
+        label: "enum",
+        description: "Enum class",
+        snippet_body: "enum class ${1:Name} {
+	${0}
+}",
+    },
+];
+
+const PROPERTY_TEMPLATES: &[TemplateData] = &[
+    TemplateData {
+        label: "val",
+        description: "Immutable property",
+        snippet_body: "val ${1:name}: ${2:Type} = ${0}",
+    },
+    TemplateData {
+        label: "var",
+        description: "Mutable property",
+        snippet_body: "var ${1:name}: ${2:Type} = ${0}",
+    },
+    TemplateData {
+        label: "lazy",
+        description: "Lazy property",
+        snippet_body: "val ${1:name}: ${2:Type} by lazy {
+	${0}
+}",
+    },
+    TemplateData {
+        label: "lateinit",
+        description: "Late-init property",
+        snippet_body: "lateinit var ${1:name}: ${2:Type}",
+    },
+];
+
+const CONTROL_FLOW_TEMPLATES: &[TemplateData] = &[
+    TemplateData {
+        label: "if",
+        description: "If expression",
+        snippet_body: "if (${1:condition}) {
+	${0}
+}",
+    },
+    TemplateData {
+        label: "ife",
+        description: "If-else expression",
+        snippet_body: "if (${1:condition}) {
+	${2}
+} else {
+	${0}
+}",
+    },
+    TemplateData {
+        label: "when",
+        description: "When expression",
+        snippet_body: "when (${1:value}) {
+	${2} -> ${3}
+	else -> ${0}
+}",
+    },
+    TemplateData {
+        label: "for",
+        description: "For loop",
+        snippet_body: "for (${1:item} in ${2:collection}) {
+	${0}
+}",
+    },
+    TemplateData {
+        label: "fori",
+        description: "For loop with index",
+        snippet_body: "for ((${1:index}, ${2:item}) in ${3:collection}.withIndex()) {
+	${0}
+}",
+    },
+    TemplateData {
+        label: "while",
+        description: "While loop",
+        snippet_body: "while (${1:condition}) {
+	${0}
+}",
+    },
+    TemplateData {
+        label: "try",
+        description: "Try-catch",
+        snippet_body: "try {
+	${1}
+} catch (${2:e}: ${3:Exception}) {
+	${0}
+}",
+    },
+    TemplateData {
+        label: "trycf",
+        description: "Try-catch-finally",
+        snippet_body: "try {
+	${1}
+} catch (${2:e}: ${3:Exception}) {
+	${4}
+} finally {
+	${0}
+}",
+    },
+];
+
+const FUNCTION_TEMPLATES: &[TemplateData] = &[
+    TemplateData {
+        label: "lam",
+        description: "Lambda expression",
+        snippet_body: "{ ${1:it} ->
+	${0}
+}",
+    },
+    TemplateData {
+        label: "main",
+        description: "Main function",
+        snippet_body: "fun main(args: Array<String>) {
+	${0}
+}",
+    },
+];
+
+const COROUTINE_TEMPLATES: &[TemplateData] = &[
+    TemplateData {
+        label: "launch",
+        description: "Coroutine launch",
+        snippet_body: "viewModelScope.launch {
+	${0}
+}",
+    },
+    TemplateData {
+        label: "async",
+        description: "Coroutine async",
+        snippet_body: "viewModelScope.async {
+	${0}
+}",
+    },
+    TemplateData {
+        label: "flow",
+        description: "Flow builder",
+        snippet_body: "flow {
+	emit(${1})
+	${0}
+}",
+    },
+];
+
+const COMMON_TEMPLATES: &[TemplateData] = &[
+    TemplateData {
+        label: "logd",
+        description: "Log.d",
+        snippet_body: r#"Log.d(TAG, "${0}")"#,
+    },
+    TemplateData {
+        label: "loge",
+        description: "Log.e",
+        snippet_body: r#"Log.e(TAG, "${1}", ${0})"#,
+    },
+    TemplateData {
+        label: "tag",
+        description: "TAG constant",
+        snippet_body: r#"private const val TAG = "${1:${TM_FILENAME_BASE}}""#,
+    },
+    TemplateData {
+        label: "todo",
+        description: "TODO stub",
+        snippet_body: r#"TODO("${0:Not yet implemented}")"#,
+    },
+    TemplateData {
+        label: "sout",
+        description: "println",
+        snippet_body: r#"println("${0}")"#,
+    },
+];
+
 // ─── scope / control-flow functions (available on every type) ─────────────────
 
 pub(crate) static SCOPE_FUNS: &[StdlibEntry] = &[
@@ -412,154 +648,51 @@ pub(crate) fn bare_completions(snippets: bool) -> Vec<tower_lsp::lsp_types::Comp
 /// Modelled on IntelliJ's built-in Kotlin live templates.
 /// Each item has a short trigger label and expands to a multi-line snippet.
 pub(crate) fn live_templates() -> Vec<tower_lsp::lsp_types::CompletionItem> {
+    live_template_groups()
+        .into_iter()
+        .flatten()
+        .map(build_live_template_completion)
+        .collect()
+}
+
+fn live_template_groups() -> [&'static [TemplateData]; 6] {
+    [
+        DECLARATION_TEMPLATES,
+        PROPERTY_TEMPLATES,
+        CONTROL_FLOW_TEMPLATES,
+        FUNCTION_TEMPLATES,
+        COROUTINE_TEMPLATES,
+        COMMON_TEMPLATES,
+    ]
+}
+
+fn build_live_template_completion(template: &TemplateData) -> tower_lsp::lsp_types::CompletionItem {
     use tower_lsp::lsp_types::{
         CompletionItem, CompletionItemKind, Documentation, InsertTextFormat, MarkupContent,
         MarkupKind,
     };
 
-    // (label, description, snippet_body)
-    let templates: &[(&str, &str, &str)] = &[
-        // ── declarations ────────────────────────────────────────────────────
-        (
-            "fun",
-            "Function declaration",
-            "fun ${1:name}(${2}): ${3:Unit} {\n\t${0}\n}",
-        ),
-        (
-            "pfun",
-            "Private function declaration",
-            "private fun ${1:name}(${2}): ${3:Unit} {\n\t${0}\n}",
-        ),
-        (
-            "class",
-            "Class declaration",
-            "class ${1:Name}(${2}) {\n\t${0}\n}",
-        ),
-        (
-            "dclass",
-            "Data class declaration",
-            "data class ${1:Name}(\n\tval ${2:field}: ${3:Type}\n)",
-        ),
-        (
-            "sclass",
-            "Sealed class declaration",
-            "sealed class ${1:Name} {\n\t${0}\n}",
-        ),
-        (
-            "object",
-            "Object declaration",
-            "object ${1:Name} {\n\t${0}\n}",
-        ),
-        (
-            "iface",
-            "Interface declaration",
-            "interface ${1:Name} {\n\t${0}\n}",
-        ),
-        ("comp", "Companion object", "companion object {\n\t${0}\n}"),
-        ("enum", "Enum class", "enum class ${1:Name} {\n\t${0}\n}"),
-        // ── properties ──────────────────────────────────────────────────────
-        (
-            "val",
-            "Immutable property",
-            "val ${1:name}: ${2:Type} = ${0}",
-        ),
-        ("var", "Mutable property", "var ${1:name}: ${2:Type} = ${0}"),
-        (
-            "lazy",
-            "Lazy property",
-            "val ${1:name}: ${2:Type} by lazy {\n\t${0}\n}",
-        ),
-        (
-            "lateinit",
-            "Late-init property",
-            "lateinit var ${1:name}: ${2:Type}",
-        ),
-        // ── control flow ────────────────────────────────────────────────────
-        ("if", "If expression", "if (${1:condition}) {\n\t${0}\n}"),
-        (
-            "ife",
-            "If-else expression",
-            "if (${1:condition}) {\n\t${2}\n} else {\n\t${0}\n}",
-        ),
-        (
-            "when",
-            "When expression",
-            "when (${1:value}) {\n\t${2} -> ${3}\n\telse -> ${0}\n}",
-        ),
-        (
-            "for",
-            "For loop",
-            "for (${1:item} in ${2:collection}) {\n\t${0}\n}",
-        ),
-        (
-            "fori",
-            "For loop with index",
-            "for ((${1:index}, ${2:item}) in ${3:collection}.withIndex()) {\n\t${0}\n}",
-        ),
-        ("while", "While loop", "while (${1:condition}) {\n\t${0}\n}"),
-        (
-            "try",
-            "Try-catch",
-            "try {\n\t${1}\n} catch (${2:e}: ${3:Exception}) {\n\t${0}\n}",
-        ),
-        (
-            "trycf",
-            "Try-catch-finally",
-            "try {\n\t${1}\n} catch (${2:e}: ${3:Exception}) {\n\t${4}\n} finally {\n\t${0}\n}",
-        ),
-        // ── lambdas / higher-order ───────────────────────────────────────────
-        ("lam", "Lambda expression", "{ ${1:it} ->\n\t${0}\n}"),
-        (
-            "main",
-            "Main function",
-            "fun main(args: Array<String>) {\n\t${0}\n}",
-        ),
-        // ── coroutines ───────────────────────────────────────────────────────
-        (
-            "launch",
-            "Coroutine launch",
-            "viewModelScope.launch {\n\t${0}\n}",
-        ),
-        (
-            "async",
-            "Coroutine async",
-            "viewModelScope.async {\n\t${0}\n}",
-        ),
-        ("flow", "Flow builder", "flow {\n\temit(${1})\n\t${0}\n}"),
-        // ── Android / common ─────────────────────────────────────────────────
-        ("logd", "Log.d", "Log.d(TAG, \"${0}\")"),
-        ("loge", "Log.e", "Log.e(TAG, \"${1}\", ${0})"),
-        (
-            "tag",
-            "TAG constant",
-            "private const val TAG = \"${1:${TM_FILENAME_BASE}}\"",
-        ),
-        ("todo", "TODO stub", "TODO(\"${0:Not yet implemented}\")"),
-        ("sout", "println", "println(\"${0}\")"),
-    ];
-
-    templates
-        .iter()
-        .map(|(label, desc, body)| {
-            CompletionItem {
-                label: label.to_string(),
-                kind: Some(CompletionItemKind::SNIPPET),
-                detail: Some(desc.to_string()),
-                documentation: Some(Documentation::MarkupContent(MarkupContent {
-                    kind: MarkupKind::Markdown,
-                    value: format!(
-                        "```kotlin\n{}\n```",
-                        body.replace("${0}", "").replace(['$', '{', '}'], "")
-                    ),
-                })),
-                insert_text: Some(body.to_string()),
-                insert_text_format: Some(InsertTextFormat::SNIPPET),
-                // Templates sort just before stdlib (prefix "y:") but after project symbols.
-                sort_text: Some(format!("y:{label}")),
-                ..Default::default()
-            }
-        })
-        .collect()
+    CompletionItem {
+        label: template.label.to_string(),
+        kind: Some(CompletionItemKind::SNIPPET),
+        detail: Some(template.description.to_string()),
+        documentation: Some(Documentation::MarkupContent(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value: format!(
+                "```kotlin
+{}
+```",
+                template
+                    .snippet_body
+                    .replace("${0}", "")
+                    .replace(['$', '{', '}'], "")
+            ),
+        })),
+        insert_text: Some(template.snippet_body.to_string()),
+        insert_text_format: Some(InsertTextFormat::SNIPPET),
+        sort_text: Some(format!("y:{}", template.label)),
+        ..Default::default()
+    }
 }
 
 fn make_item_ex(
