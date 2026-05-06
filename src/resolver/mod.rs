@@ -955,7 +955,7 @@ fn resolve_star_imports(idx: &Indexer, name: &str, uri: &Url) -> Vec<Location> {
 /// 3. Search the resolved file's symbol table for `name`.
 /// 4. Recurse into that file's own supertypes (depth-limited, cycle-safe).
 fn resolve_from_class_hierarchy(idx: &Indexer, name: &str, from_uri: &Url) -> Vec<Location> {
-    let mut results = walk_hierarchy(
+    let results = walk_hierarchy(
         idx,
         "",
         from_uri.as_str(),
@@ -963,10 +963,19 @@ fn resolve_from_class_hierarchy(idx: &Indexer, name: &str, from_uri: &Url) -> Ve
         4,
         |index, _, class_uri, _| find_name_in_uri(index, name, class_uri),
     );
-    // Deduplicate: hierarchy walk may find the same definition via multiple paths
-    // (e.g. diamond inheritance). Keep traversal order (most-specific first).
-    results.dedup_by(|a, b| a.uri == b.uri && a.range == b.range);
+    // Stable dedup via HashSet — diamond inheritance can produce the same location
+    // via multiple paths; dedup_by only removes consecutive duplicates.
+    let mut seen = HashSet::new();
     results
+        .into_iter()
+        .filter(|loc| {
+            seen.insert((
+                loc.uri.clone(),
+                loc.range.start.line,
+                loc.range.start.character,
+            ))
+        })
+        .collect()
 }
 
 /// `rg` scoped to the directory that would contain `package` sources.

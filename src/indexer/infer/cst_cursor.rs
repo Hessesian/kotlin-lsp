@@ -9,7 +9,6 @@ use crate::queries::{
     KIND_PROP_DECL, KIND_SOURCE_FILE, KIND_VALUE_ARG, KIND_VAR_DECL,
 };
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CallInfo {
     pub fn_name: String,
@@ -17,7 +16,6 @@ pub(crate) struct CallInfo {
     pub active_param: u32,
 }
 
-#[allow(dead_code)]
 pub(crate) fn cst_call_info(pos: Position, indexer: &Indexer, uri: &Url) -> Option<CallInfo> {
     let doc = indexer.live_doc(uri)?;
     let bytes = &doc.bytes;
@@ -77,7 +75,6 @@ pub(crate) fn cst_call_info(pos: Position, indexer: &Indexer, uri: &Url) -> Opti
     })
 }
 
-#[allow(dead_code)]
 pub(crate) fn cst_cursor_is_local_var(indexer: &Indexer, uri: &Url, pos: Position) -> bool {
     let doc = match indexer.live_doc(uri) {
         Some(doc) => doc,
