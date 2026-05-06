@@ -136,18 +136,8 @@ impl Backend {
     }
 
     pub(crate) async fn rg_context(&self) -> (Option<PathBuf>, Option<Arc<IgnoreMatcher>>) {
-        let root = self
-            .indexer
-            .workspace_root
-            .read()
-            .ok()
-            .and_then(|root| root.clone());
-        let ignore = self
-            .indexer
-            .ignore_matcher
-            .read()
-            .ok()
-            .and_then(|ignore| ignore.clone());
+        let root = self.indexer.workspace_root.read().unwrap().clone();
+        let ignore = self.indexer.ignore_matcher.read().unwrap().clone();
         (root, ignore)
     }
 
