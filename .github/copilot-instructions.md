@@ -251,6 +251,16 @@ Flatten with:
 
 A `match` nested inside another `match` inside an `if` is a signal to extract.
 
+### 5. Section comments inside a function body signal a split
+
+If you feel the need to write a `// --- Step 1: …` or `// Build the result` comment to
+separate logical phases inside a function, that's a signal the function should be split.
+
+- Each logical phase becomes a named helper function — the name replaces the comment.
+- The top-level function becomes a readable sequence of helper calls.
+- Exception: a single clarifying comment on a non-obvious line is fine; what's banned is
+  using comments as section dividers to compensate for a function doing too many things.
+
 ### 5. No `unwrap()` or `expect()` in production code
 
 Use `?`, `if let`, `match`, or log-and-return patterns. Exception: `#[cfg(test)]` code may
