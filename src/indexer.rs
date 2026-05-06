@@ -326,13 +326,6 @@ impl Indexer {
             .unwrap_or_default()
     }
 
-    pub(crate) fn indexed_files(&self) -> Vec<(String, Arc<FileData>)> {
-        self.files
-            .iter()
-            .map(|entry| (entry.key().clone(), Arc::clone(entry.value())))
-            .collect()
-    }
-
     pub(crate) fn is_library_uri(&self, uri: &Url) -> bool {
         self.library_uris.contains(uri.as_str())
     }

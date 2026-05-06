@@ -34,9 +34,11 @@ fn any_local_var_decl_in_scope(
 ) -> bool {
     use tower_lsp::lsp_types::SymbolKind;
 
-    indexer
-        .file_symbols(uri)
-        .into_iter()
+    let Some(data) = indexer.files.get(uri.as_str()) else {
+        return false;
+    };
+    data.symbols
+        .iter()
         .filter(|s| {
             matches!(
                 s.kind,
