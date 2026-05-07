@@ -5,7 +5,7 @@
   "description": "VSCode client for kotlin-lsp",
   "version": "0.0.1",
   "engines": { "vscode": "^1.75.0" },
-  "activationEvents": ["onLanguage:kotlin", "onLanguage:java"],
+  "activationEvents": ["onLanguage:kotlin", "onLanguage:java", "onLanguage:swift"],
   "main": "./extension.js",
   "contributes": {
     "languages": [

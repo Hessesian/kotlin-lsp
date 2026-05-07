@@ -27,6 +27,7 @@ function activate(context) {
     documentSelector: [
       { scheme: "file", language: "kotlin" },
       { scheme: "file", language: "java" },
+      { scheme: "file", language: "swift" },
     ],
   };
 
