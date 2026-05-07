@@ -66,24 +66,37 @@ require('cmp').setup {
 
 ## VS Code
 
-VS Code does not support arbitrary LSP binaries natively. Use the
-[**Custom Language Server**](https://marketplace.visualstudio.com/items?itemName=cesium.custom-language-server)
-extension, then add to `.vscode/settings.json`:
+A self-contained extension is included in `contrib/vscode/`. It registers the Kotlin language, provides syntax highlighting, and launches kotlin-lsp as the language server — no other Kotlin plugins needed.
+
+**Install:**
+
+```bash
+cd contrib/vscode && npm install
+```
+
+Then symlink into your VS Code extensions directory:
+
+```bash
+# VS Code
+ln -s "$(pwd)/contrib/vscode" ~/.vscode/extensions/kotlin-lsp.kotlin-lsp-client-0.0.1
+
+# VS Code OSS / Code
+ln -s "$(pwd)/contrib/vscode" ~/.vscode-oss/extensions/kotlin-lsp.kotlin-lsp-client-0.0.1
+```
+
+Restart VS Code. The extension activates automatically for `.kt` and `.java` files.
+
+> **Tip:** Disable other Kotlin extensions (`fwcd.kotlin`, `jetbrains.kotlin`) to avoid conflicts — kotlin-lsp handles language registration, syntax highlighting, and LSP on its own.
+
+**Configuration** (optional) — in `.vscode/settings.json`:
 
 ```json
 {
-  "custom-language-server.servers": [
-    {
-      "name": "kotlin-lsp",
-      "command": "/path/to/kotlin-lsp",
-      "filetypes": ["kotlin", "java", "swift"]
-    }
-  ]
+  "kotlinLsp.path": "/path/to/kotlin-lsp"
 }
 ```
 
-> **Note:** The [Kotlin language plugin](https://marketplace.visualstudio.com/items?itemName=mathiasfrohlich.Kotlin) must be installed so VS Code recognises `.kt` files as `kotlin`.  
-> For a production-grade Kotlin experience in VS Code, consider [Kotlin Language Server](https://github.com/fwcd/kotlin-language-server) alongside this one (they can coexist on different capabilities).
+Default: `kotlin-lsp` (looks on `$PATH`).
 
 ## Zed
 

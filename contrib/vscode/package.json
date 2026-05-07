@@ -1,0 +1,40 @@
+{
+  "name": "kotlin-lsp-client",
+  "publisher": "kotlin-lsp",
+  "displayName": "Kotlin LSP (kotlin-lsp)",
+  "description": "VSCode client for kotlin-lsp",
+  "version": "0.0.1",
+  "engines": { "vscode": "^1.75.0" },
+  "activationEvents": ["onLanguage:kotlin", "onLanguage:java"],
+  "main": "./extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "kotlin",
+        "aliases": ["Kotlin"],
+        "extensions": [".kt", ".kts"],
+        "configuration": "./kotlin-language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "kotlin",
+        "scopeName": "source.kotlin",
+        "path": "./syntaxes/kotlin.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "Kotlin LSP",
+      "properties": {
+        "kotlinLsp.path": {
+          "type": "string",
+          "default": "kotlin-lsp",
+          "description": "Path to kotlin-lsp binary"
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  }
+}
