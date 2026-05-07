@@ -11,7 +11,7 @@ use crate::rg::{rg_find_definition, rg_word_search, RgSearchRequest};
 use super::args::{CliArgs, Mode, OutputFmt, Subcommand};
 use super::hover::hover_at;
 use super::output::{print_results, CliResult};
-use super::tokens::{dump_tree, print_token_rows, token_rows};
+use super::tokens::{dump_tree, print_token_rows, token_rows, token_rows_phases};
 
 // ── Root resolution ───────────────────────────────────────────────────────────
 
@@ -120,8 +120,9 @@ pub(crate) async fn run(args: CliArgs) {
         Subcommand::Tokens {
             file,
             cst_only,
+            phases,
             show_tree,
-        } => run_tokens(&root, json, &file, cst_only, show_tree).await,
+        } => run_tokens(&root, json, &file, cst_only, phases, show_tree).await,
         Subcommand::Tree { file } => run_tree(&file),
     }
 }
@@ -185,12 +186,22 @@ async fn run_hover(root: &Path, mode: Mode, json: bool, file: &Path, line: u32, 
     }
 }
 
-async fn run_tokens(root: &Path, json: bool, file: &Path, cst_only: bool, show_tree: bool) {
-    let index = if cst_only {
+async fn run_tokens(root: &Path, json: bool, file: &Path, cst_only: bool, phases: bool, show_tree: bool) {
+    let index = if cst_only && !phases {
         None
     } else {
         Some(build_index(root).await)
     };
+    if phases {
+        match token_rows_phases(file, index.as_ref()) {
+            Ok(output) => print!("{output}"),
+            Err(error) => {
+                eprintln!("error: {error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     match token_rows(file, index.as_ref(), cst_only) {
         Ok(rows) => {
             print_token_rows(&rows, json);

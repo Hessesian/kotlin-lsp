@@ -97,12 +97,12 @@ pub(crate) fn legend() -> SemanticTokensLegend {
 // ─── Classification ───────────────────────────────────────────────────────────
 
 #[derive(Clone)]
-struct RawToken {
-    line: u32,
-    col: u32, // UTF-16 column
-    length: u32,
-    token_type: u32,
-    token_modifiers_bitset: u32,
+pub(crate) struct RawToken {
+    pub(crate) line: u32,
+    pub(crate) col: u32, // UTF-16 column
+    pub(crate) length: u32,
+    pub(crate) token_type: u32,
+    pub(crate) token_modifiers_bitset: u32,
 }
 
 /// Bundles source bytes with precomputed line-start offsets for O(1) UTF-16
@@ -124,6 +124,54 @@ impl<'a> Source<'a> {
         crate::inlay_hints::ts_byte_col_to_utf16(self.bytes, &self.line_starts, row, byte_col)
             as u32
     }
+}
+
+/// Per-phase token breakdown for debug output.
+pub(crate) struct TokenPhases {
+    pub phase1: Vec<RawToken>,
+    pub phase1b: Vec<RawToken>,
+    pub phase2: Vec<RawToken>,
+}
+
+impl TokenPhases {
+    pub(crate) fn final_tokens(&self) -> Vec<RawToken> {
+        let mut raw = self.phase1.clone();
+        raw.extend_from_slice(&self.phase1b);
+        raw.extend_from_slice(&self.phase2);
+        raw.sort_by_key(|t| (t.line, t.col));
+        raw.dedup_by_key(|t| (t.line, t.col));
+        raw
+    }
+}
+
+/// Like `collect_tokens` but returns each phase's tokens separately for debug.
+/// Does not apply range filtering or delta encoding.
+pub(crate) fn collect_tokens_phases(
+    doc: &LiveDoc,
+    language: Language,
+    indexer: Option<&Indexer>,
+    uri: Option<&Url>,
+) -> TokenPhases {
+    let src = Source::new(&doc.bytes);
+    let mut phase1 = Vec::new();
+    let mut phase1b = Vec::new();
+    let mut phase2 = Vec::new();
+
+    match language {
+        Language::Kotlin => walk_kotlin(doc.tree.root_node(), &src, &mut phase1),
+        Language::Java => walk_java(doc.tree.root_node(), &src, &mut phase1),
+        _ => {}
+    }
+
+    if language == Language::Kotlin {
+        emit_kotlin_param_uses(doc.tree.root_node(), &src, &mut phase1b);
+    }
+
+    if let (Some(idx), Some(file_uri)) = (indexer, uri) {
+        walk_references(doc, &src, language, idx, file_uri, &mut phase2);
+    }
+
+    TokenPhases { phase1, phase1b, phase2 }
 }
 
 /// Collect semantic tokens for `doc`, for the given `language`.

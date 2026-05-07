@@ -21,6 +21,8 @@ pub(crate) enum Subcommand {
         file: PathBuf,
         /// Use CST classification only; skip cross-file index resolution.
         cst_only: bool,
+        /// Show per-phase token breakdown before dedup.
+        phases: bool,
         /// Also print the tree-sitter parse tree after tokens.
         show_tree: bool,
     },
@@ -68,6 +70,7 @@ impl CliArgs {
             &subcommand,
             parsed.positionals,
             parsed.cst_only,
+            parsed.phases,
             parsed.show_tree,
         )?;
         Ok(Some(Self {
@@ -85,6 +88,7 @@ struct ParsedCliFlags {
     root: Option<PathBuf>,
     positionals: Vec<String>,
     cst_only: bool,
+    phases: bool,
     show_tree: bool,
 }
 
@@ -123,6 +127,7 @@ fn parse_cli_flags(args: &mut lexopt::Parser) -> Result<ParsedCliFlags, String> 
         root: None,
         positionals: Vec::new(),
         cst_only: false,
+        phases: false,
         show_tree: false,
     };
 
@@ -133,6 +138,7 @@ fn parse_cli_flags(args: &mut lexopt::Parser) -> Result<ParsedCliFlags, String> 
             Some(lexopt::Arg::Long("smart")) => parsed.mode = Mode::Smart,
             Some(lexopt::Arg::Long("json")) => parsed.fmt = OutputFmt::Json,
             Some(lexopt::Arg::Long("cst-only")) => parsed.cst_only = true,
+            Some(lexopt::Arg::Long("phases")) => parsed.phases = true,
             Some(lexopt::Arg::Long("tree")) => parsed.show_tree = true,
             Some(lexopt::Arg::Long("root")) => {
                 let value = args.value().map_err(|e| e.to_string())?;
@@ -159,6 +165,7 @@ fn build_subcommand(
     subcommand: &str,
     positionals: Vec<String>,
     cst_only: bool,
+    phases: bool,
     show_tree: bool,
 ) -> Result<Subcommand, String> {
     match subcommand {
@@ -176,6 +183,7 @@ fn build_subcommand(
                 "tokens requires a FILE argument",
             )?),
             cst_only,
+            phases,
             show_tree,
         }),
         "tree" => Ok(Subcommand::Tree {
@@ -262,6 +270,7 @@ OPTIONS:
     --json          Output results as JSON array
     --root <dir>    Workspace root (default: nearest .git dir or cwd)
     --cst-only      (tokens) Skip index; CST classification only
+    --phases        (tokens) Show per-phase token breakdown with dedup markers
     --tree          (tokens) Also print the parse tree after tokens
     -h, --help      Print this help
     -V, --version   Print version

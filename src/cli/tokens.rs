@@ -14,7 +14,7 @@ use tower_lsp::lsp_types::Url;
 
 use crate::indexer::live_tree::{lang_for_path, parse_live, utf16_col_to_byte};
 use crate::indexer::Indexer;
-use crate::semantic_tokens::{collect_tokens, TOKEN_MODIFIERS, TOKEN_TYPES};
+use crate::semantic_tokens::{collect_tokens, collect_tokens_phases, TOKEN_MODIFIERS, TOKEN_TYPES};
 use crate::Language;
 
 // ── Token row ────────────────────────────────────────────────────────────────
@@ -66,6 +66,101 @@ pub(crate) fn token_rows(
     };
 
     let tokens = collect_tokens(&doc, language, None, idx_ref, uri_ref);
+    decode_token_rows(&tokens, &content)
+}
+
+/// Like `token_rows` but returns one section per phase showing which tokens
+/// survive dedup. Helps diagnose missing or incorrectly dropped tokens.
+pub(crate) fn token_rows_phases(
+    file: &Path,
+    indexer: Option<&Arc<Indexer>>,
+) -> Result<String, String> {
+    let abs = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
+    let path_str = abs.to_string_lossy();
+    let content =
+        std::fs::read_to_string(&abs).map_err(|e| format!("cannot read {}: {e}", abs.display()))?;
+    let ts_lang = lang_for_path(&path_str)
+        .ok_or_else(|| format!("unsupported file type: {}", abs.display()))?;
+    let language = Language::from_path(&path_str);
+    let doc = parse_live(&content, ts_lang)
+        .ok_or_else(|| format!("tree-sitter parse failed for {}", abs.display()))?;
+    let uri = Url::from_file_path(&abs)
+        .map_err(|_| format!("cannot convert path to URI: {}", abs.display()))?;
+
+    let (idx_ref, uri_ref) = match indexer {
+        None => (None, None),
+        Some(indexer) => {
+            indexer.ensure_indexed(&uri);
+            (Some(indexer.as_ref()), Some(&uri))
+        }
+    };
+
+    let phases = collect_tokens_phases(&doc, language, idx_ref, uri_ref);
+    let lines: Vec<&str> = content.lines().collect();
+    let final_raw = phases.final_tokens();
+
+    let mut out = String::new();
+    for (label, raw) in [
+        ("Phase 1  — CST: declarations, soft-keywords, named-arg labels", phases.phase1.as_slice()),
+        ("Phase 1b — param use-sites in function bodies", phases.phase1b.as_slice()),
+        ("Phase 2  — cross-file reference resolution", phases.phase2.as_slice()),
+    ] {
+        out.push_str(&format!("\n=== {label} ===\n"));
+        if raw.is_empty() {
+            out.push_str("  (empty)\n");
+            continue;
+        }
+        for tok in raw {
+            let kept = final_raw
+                .iter()
+                .any(|t| t.line == tok.line && t.col == tok.col && t.token_type == tok.token_type);
+            let row = format_raw_tok(tok, &lines);
+            if kept {
+                out.push_str(&format!("  {row}\n"));
+            } else {
+                out.push_str(&format!("  {row}  [dropped by dedup]\n"));
+            }
+        }
+    }
+    out.push_str("\n=== Final (after sort + dedup) ===\n");
+    for tok in &final_raw {
+        out.push_str(&format!("  {}\n", format_raw_tok(tok, &lines)));
+    }
+    Ok(out)
+}
+
+fn format_raw_tok(
+    tok: &crate::semantic_tokens::RawToken,
+    lines: &[&str],
+) -> String {
+    let type_name = TOKEN_TYPES
+        .get(tok.token_type as usize)
+        .map(|t| format!("{t:?}"))
+        .unwrap_or_else(|| format!("#{}", tok.token_type));
+    let modifiers = decode_modifiers(tok.token_modifiers_bitset);
+    let mods = if modifiers.is_empty() {
+        String::new()
+    } else {
+        format!("+{}", modifiers.join(","))
+    };
+    let text = lines
+        .get(tok.line as usize)
+        .map(|line| {
+            let s = utf16_col_to_byte(line, tok.col as usize);
+            let e = utf16_col_to_byte(line, (tok.col + tok.length) as usize);
+            if e <= line.len() { &line[s..e] } else { "" }
+        })
+        .unwrap_or("");
+    format!(
+        "{}:{}+{}  {}{:30}  {:?}",
+        tok.line, tok.col, tok.length, type_name, mods, text
+    )
+}
+
+fn decode_token_rows(
+    tokens: &[tower_lsp::lsp_types::SemanticToken],
+    content: &str,
+) -> Result<Vec<TokenRow>, String> {
 
     // Decode the delta-encoded token stream back to absolute positions.
     let lines: Vec<&str> = content.lines().collect();
@@ -73,7 +168,7 @@ pub(crate) fn token_rows(
     let mut abs_line = 0u32;
     let mut abs_col = 0u32;
 
-    for tok in &tokens {
+    for tok in tokens {
         if tok.delta_line > 0 {
             abs_line += tok.delta_line;
             abs_col = tok.delta_start;
