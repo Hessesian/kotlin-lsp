@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.11.0
+
+- **Semantic tokens** — full `textDocument/semanticTokens/full` implementation with two-phase pipeline: Phase 1 (CST classification via tree-sitter) + Phase 2 (cross-file resolution via index). Supports Kotlin, Java, and Swift.
+- **`tokens` CLI command** — `kotlin-lsp tokens <file>` dumps semantic tokens (CST-only by default, 19ms). `--resolve` opts into Phase 2 cross-file resolution.
+- **`tree` CLI command** — `kotlin-lsp tree <file>` dumps the tree-sitter parse tree for debugging.
+- **VS Code extension** — bundled extension with syntax highlighting, binary auto-discovery, and support for Kotlin, Java, and Swift files. GitHub Actions release workflow builds cross-platform binaries and packages `.vsix`.
+- **Performance** — CLI `tokens` defaults to CST-only mode (19ms vs 1.1s with full index). Added `docs/performance.md` with benchmarks and profiling guide.
+- **`fd` optional** — file discovery falls back to `walkdir` when `fd` is not installed.
+
 ## 0.10.0
 
 - **CLI mode** — `kotlin-lsp find|refs|hover|index` subcommands: use kotlin-lsp as a standalone tool without an editor or daemon

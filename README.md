@@ -17,7 +17,8 @@ cargo install kotlin-lsp
 > ```
 > After install, `kotlin-lsp` lands in `~/.cargo/bin/` — make sure it's on your `PATH`.
 
-> **Runtime dependencies** — `fd` and `rg` (ripgrep) must be on your `PATH`:  
+> **Optional runtime tools** — `fd` and `rg` (ripgrep) improve performance but are not required.  
+> Without them, kotlin-lsp uses built-in `walkdir` for file discovery and tree-sitter for parsing.  
 > macOS: `brew install fd ripgrep`  
 > Debian/Ubuntu: `apt install fd-find ripgrep`
 
@@ -56,11 +57,12 @@ More editors: [Neovim, VS Code, Zed →](docs/editors.md)
 | **Document/workspace symbol** | Outline view, fuzzy search, dot-qualified extension function queries |
 | **Rename** | Project-wide via `WorkspaceEdit` |
 | **Inlay hints** | Lambda `it`, named params, `this`, untyped `val`/`var` |
+| **Semantic tokens** | Full syntax highlighting via tree-sitter CST + cross-file resolution |
 | **Diagnostics** | Syntax errors from tree-sitter (not type checking) |
 | **Go-to-implementation** | Transitive subtype lookup (BFS) |
 | **Signature help** | Active parameter highlighting |
 | **Folding** | Brace regions + consecutive comment blocks |
-| **CLI mode** | `find`, `refs`, `hover`, `index` subcommands — no daemon, scriptable |
+| **CLI mode** | `find`, `refs`, `hover`, `index`, `tokens`, `tree` subcommands — no daemon, scriptable |
 
 All features work immediately — `rg` fallback handles symbols before indexing finishes (applies to Kotlin, Java and Swift).
 
@@ -108,6 +110,9 @@ kotlin-lsp find --json MyViewModel
 | `--smart` | Require index; build it if missing |
 
 ```
+kotlin-lsp tokens src/Foo.kt           # semantic tokens (CST-only, fast)
+kotlin-lsp tokens --resolve src/Foo.kt # semantic tokens with cross-file resolution
+
 kotlin-lsp --help        # full usage
 kotlin-lsp --version
 ```
@@ -253,6 +258,7 @@ Results are capped at 150 items. When the cap is hit, `isIncomplete: true` is re
 - [Editor setup](docs/editors.md) — Helix, Neovim, VS Code
 - [GitHub Copilot CLI](docs/copilot.md) — agent integration, skill extension
 - [Architecture & performance](docs/architecture.md) — source layout, memory model, build from source
+- [Performance & profiling](docs/performance.md) — benchmarks, flamegraph setup, optimization roadmap
 
 ---
 
@@ -272,6 +278,15 @@ They can coexist — use kotlin-lsp for fast navigation, the official one for di
 ---
 
 ## Changelog
+
+### 0.11.0
+
+- **Semantic tokens** — full `textDocument/semanticTokens/full` implementation with two-phase pipeline: Phase 1 (CST classification via tree-sitter) + Phase 2 (cross-file resolution via index). Supports Kotlin, Java, and Swift.
+- **`tokens` CLI command** — `kotlin-lsp tokens <file>` dumps semantic tokens (CST-only by default, 19ms). `--resolve` opts into Phase 2 cross-file resolution.
+- **`tree` CLI command** — `kotlin-lsp tree <file>` dumps the tree-sitter parse tree for debugging.
+- **VS Code extension** — bundled extension with syntax highlighting, binary auto-discovery, and support for Kotlin, Java, and Swift files.
+- **GitHub Actions release workflow** — cross-platform binary builds (Linux x86_64/aarch64, macOS x86_64/aarch64) + `.vsix` packaging on tag push.
+- **Performance** — CLI `tokens` defaults to CST-only (19ms vs 1.1s with full index). Added `docs/performance.md` with benchmarks and profiling guide.
 
 ### 0.10.0
 

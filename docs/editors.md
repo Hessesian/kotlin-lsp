@@ -86,7 +86,7 @@ ln -s "$(pwd)/contrib/vscode" ~/.vscode/extensions/kotlin-lsp.kotlin-lsp-client-
 ln -s "$(pwd)/contrib/vscode" ~/.vscode-oss/extensions/kotlin-lsp.kotlin-lsp-client-0.0.1
 ```
 
-Restart VS Code. The extension activates automatically for `.kt` and `.java` files.
+Restart VS Code. The extension activates automatically for `.kt`, `.java`, and `.swift` files.
 
 > **Tip:** Disable other Kotlin extensions (`fwcd.kotlin`, `jetbrains.kotlin`) to avoid conflicts — kotlin-lsp handles language registration, syntax highlighting, and LSP on its own.
 
