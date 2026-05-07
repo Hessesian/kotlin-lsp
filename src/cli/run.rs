@@ -192,7 +192,7 @@ async fn run_hover(root: &Path, mode: Mode, json: bool, verbose: bool, file: &Pa
 }
 
 async fn run_tokens(root: &Path, json: bool, _verbose: bool, file: &Path, cst_only: bool, phases: bool, show_tree: bool) {
-    let index = if cst_only && !phases {
+    let index = if cst_only {
         None
     } else {
         Some(build_index(root).await)

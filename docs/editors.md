@@ -74,7 +74,7 @@ A self-contained extension is included in `contrib/vscode/`. It registers the Ko
 cd contrib/vscode && npm install
 ```
 
-Then symlink into your VS Code extensions directory:
+Then symlink into your VS Code extensions directory (run from the repo root):
 
 ```bash
 # VS Code

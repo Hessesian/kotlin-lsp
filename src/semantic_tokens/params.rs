@@ -6,7 +6,8 @@ use tree_sitter::Node;
 use crate::queries::{
     KIND_BLOCK, KIND_CATCH_BLOCK, KIND_CONTROL_STRUCTURE_BODY, KIND_FOR_STMT, KIND_FUN_BODY,
     KIND_FUN_DECL, KIND_FUN_VALUE_PARAMS, KIND_INTERP_IDENT, KIND_LAMBDA_LIT, KIND_METHOD_DECL,
-    KIND_PARAMETER, KIND_PROP_DECL, KIND_SIMPLE_IDENT, KIND_STATEMENTS, KIND_VAR_DECL,
+    KIND_MULTI_VAR_DECL, KIND_PARAMETER, KIND_PROP_DECL, KIND_SIMPLE_IDENT, KIND_STATEMENTS,
+    KIND_VAR_DECL,
 };
 
 use super::helpers::{
@@ -146,6 +147,21 @@ fn emit_param_refs_in_scope(
 fn local_binding_name(node: Node<'_>, params: &[String], bytes: &[u8]) -> Option<String> {
     match node.kind() {
         KIND_PROP_DECL | KIND_FOR_STMT => {
+            if let Some(multi) = first_child_of_kind(node, KIND_MULTI_VAR_DECL) {
+                let mut cursor = multi.walk();
+                for child in multi.children(&mut cursor) {
+                    if child.kind() == KIND_VAR_DECL {
+                        if let Some(ident) = child_ident(child) {
+                            if let Ok(name) = ident.utf8_text(bytes) {
+                                if params.contains(&name.to_owned()) {
+                                    return Some(name.to_owned());
+                                }
+                            }
+                        }
+                    }
+                }
+                return None;
+            }
             let variable_declaration = first_child_of_kind(node, KIND_VAR_DECL)?;
             let ident = child_ident(variable_declaration)?;
             let name = ident.utf8_text(bytes).ok()?.to_owned();

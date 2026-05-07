@@ -6,8 +6,9 @@ use crate::queries::{
     KIND_ANNOTATION, KIND_CLASS_BODY, KIND_CLASS_DECL, KIND_CLASS_PARAM, KIND_COMPANION_OBJ,
     KIND_CONSTRUCTOR_INVOCATION, KIND_ENUM_CLASS_BODY, KIND_ENUM_ENTRY, KIND_FUN_DECL,
     KIND_IDENTIFIER, KIND_INTERFACE_BODY, KIND_INTERFACE_DECL, KIND_MODIFIERS,
-    KIND_MULTI_ANNOTATION, KIND_OBJECT_BODY, KIND_OBJECT_DECL, KIND_PARAMETER, KIND_SIMPLE_IDENT,
-    KIND_TYPE_ALIAS, KIND_TYPE_IDENT, KIND_TYPE_PARAM, KIND_USER_TYPE, KIND_VAR_DECL,
+    KIND_MULTI_ANNOTATION, KIND_OBJECT_BODY, KIND_OBJECT_DECL, KIND_PARAMETER, KIND_PREFIX_EXPR,
+    KIND_SIMPLE_IDENT, KIND_TYPE_ALIAS, KIND_TYPE_IDENT, KIND_TYPE_PARAM, KIND_USER_TYPE,
+    KIND_VAR_DECL,
 };
 
 use super::{RawToken, Source};
@@ -126,30 +127,37 @@ fn contains_deprecated_annotation(node: Node<'_>, src: &[u8]) -> bool {
     false
 }
 
-/// Returns true if the node has a preceding `@Deprecated` annotation.
+/// Returns true if the node has a `@Deprecated` annotation.
+///
+/// Checks the node's own `modifiers` child first, then scans only
+/// immediately-preceding annotation/modifier siblings (stops at the first
+/// non-annotation sibling to avoid false positives from earlier declarations).
 pub(super) fn has_deprecated_annotation(node: Node<'_>, src: &[u8]) -> bool {
     if first_child_of_kind(node, KIND_MODIFIERS)
         .is_some_and(|modifiers| contains_deprecated_annotation(modifiers, src))
     {
         return true;
     }
-    let Some(parent) = node.parent() else {
+    let Some(mut sibling) = node.prev_sibling() else {
         return false;
     };
-    let mut cursor = parent.walk();
-    if cursor.goto_first_child() {
-        loop {
-            let sibling = cursor.node();
-            if sibling.id() == node.id() {
-                break;
-            }
+    loop {
+        let kind = sibling.kind();
+        if kind == KIND_ANNOTATION
+            || kind == KIND_MULTI_ANNOTATION
+            || kind == KIND_MODIFIERS
+            || kind == KIND_PREFIX_EXPR
+        {
             if contains_deprecated_annotation(sibling, src) {
                 return true;
             }
-            if !cursor.goto_next_sibling() {
-                break;
-            }
+        } else {
+            break;
         }
+        let Some(prev) = sibling.prev_sibling() else {
+            break;
+        };
+        sibling = prev;
     }
     false
 }

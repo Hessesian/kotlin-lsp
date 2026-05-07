@@ -1,9 +1,11 @@
 //! Semantic token classification for `textDocument/semanticTokens/full` and
 //! `textDocument/semanticTokens/range`.
 //!
-//! Tokens are derived purely from the tree-sitter CST — no cross-file type
-//! resolution.  This is sufficient to distinguish classes from functions,
-//! parameters from properties, `val` (readonly) from `var`, etc.
+//! Two-phase pipeline:
+//! - **Phase 1** (CST): classify declarations, soft keywords, named-arg labels,
+//!   and parameter use-sites purely from the tree-sitter parse tree.
+//! - **Phase 2** (Index): when an `Indexer` and file URI are provided, resolve
+//!   reference-site identifiers against the cross-file index for richer tokens.
 //!
 //! # Encoding
 //! LSP semantic tokens are delta-encoded: each token stores the line *delta*
@@ -57,18 +59,24 @@ pub(crate) const TOKEN_MODIFIERS: &[SemanticTokenModifier] = &[
 ];
 
 fn type_index(token_type: &SemanticTokenType) -> u32 {
-    TOKEN_TYPES
+    let index = TOKEN_TYPES
         .iter()
         .position(|t| t == token_type)
-        .unwrap_or(0) as u32
+        .unwrap_or(0);
+    debug_assert!(
+        TOKEN_TYPES.get(index) == Some(token_type),
+        "token type {token_type:?} not found in TOKEN_TYPES legend"
+    );
+    index as u32
 }
 
 fn modifier_bit(modifier: &SemanticTokenModifier) -> u32 {
-    TOKEN_MODIFIERS
-        .iter()
-        .position(|m| m == modifier)
-        .map(|i| 1u32 << i)
-        .unwrap_or(0)
+    let position = TOKEN_MODIFIERS.iter().position(|m| m == modifier);
+    debug_assert!(
+        position.is_some(),
+        "modifier {modifier:?} not found in TOKEN_MODIFIERS legend"
+    );
+    position.map(|i| 1u32 << i).unwrap_or(0)
 }
 
 pub(crate) fn legend() -> SemanticTokensLegend {

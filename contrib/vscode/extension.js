@@ -1,4 +1,4 @@
-const { LanguageClient, TransportKind } = require("vscode-languageclient/node");
+const { LanguageClient } = require("vscode-languageclient/node");
 const vscode = require("vscode");
 
 let client;
@@ -8,7 +8,6 @@ function activate(context) {
 
   const serverOptions = {
     command,
-    transport: TransportKind.stdio,
   };
 
   const clientOptions = {

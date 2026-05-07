@@ -7,8 +7,9 @@ use crate::indexer::{
     find_it_element_type_in_lines, find_this_element_type_in_lines, Indexer, LiveDoc, NodeExt,
 };
 use crate::queries::{
-    KIND_CALL_EXPR, KIND_LAMBDA_LIT, KIND_LAMBDA_PARAMS, KIND_NAV_EXPR, KIND_SIMPLE_IDENT,
-    KIND_THIS_EXPR, KIND_TYPE_IDENT, KIND_VAR_DECL,
+    KIND_CALL_EXPR, KIND_KW_AS, KIND_KW_BY, KIND_KW_CONSTRUCTOR, KIND_KW_GET, KIND_KW_IN,
+    KIND_KW_IS, KIND_KW_SET, KIND_KW_WHERE, KIND_LAMBDA_LIT, KIND_LAMBDA_PARAMS, KIND_NAV_EXPR,
+    KIND_SIMPLE_IDENT, KIND_THIS_EXPR, KIND_TYPE_IDENT, KIND_VAR_DECL,
 };
 use crate::resolver::infer::{
     find_field_type_in_class, find_fun_return_type_by_name, find_method_return_type,
@@ -73,7 +74,14 @@ fn walk_kotlin_references(
 fn is_kotlin_keyword_node(node: Node<'_>) -> bool {
     matches!(
         node.kind(),
-        "by" | "where" | "get" | "set" | "is" | "as" | "in" | "constructor"
+        KIND_KW_BY
+            | KIND_KW_WHERE
+            | KIND_KW_GET
+            | KIND_KW_SET
+            | KIND_KW_IS
+            | KIND_KW_AS
+            | KIND_KW_IN
+            | KIND_KW_CONSTRUCTOR
     )
 }
 
@@ -174,12 +182,18 @@ fn resolve_lambda_params(
 ) -> Vec<RawToken> {
     let mut tokens = Vec::new();
     let lines_arc = indexer.mem_lines_for(uri.as_str());
-    let fallback_lines: Vec<String> = std::str::from_utf8(&doc.bytes)
-        .unwrap_or("")
-        .lines()
-        .map(String::from)
-        .collect();
-    let lines: &[String] = lines_arc.as_deref().unwrap_or(&fallback_lines);
+    let fallback;
+    let lines: &[String] = match lines_arc.as_deref() {
+        Some(l) => l,
+        None => {
+            fallback = std::str::from_utf8(&doc.bytes)
+                .unwrap_or("")
+                .lines()
+                .map(String::from)
+                .collect::<Vec<_>>();
+            &fallback
+        }
+    };
 
     visit_tree(doc.tree.root_node(), &mut |node| {
         if node.kind() == KIND_LAMBDA_LIT {
@@ -558,7 +572,7 @@ fn symbol_kind_to_token_type(kind: SymbolKind) -> Option<u32> {
 
 fn range_contains(range: &Range, position: &Position) -> bool {
     (range.start.line, range.start.character) <= (position.line, position.character)
-        && (position.line, position.character) <= (range.end.line, range.end.character)
+        && (position.line, position.character) < (range.end.line, range.end.character)
 }
 
 struct ResolvedReference {
