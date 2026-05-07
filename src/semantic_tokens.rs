@@ -834,12 +834,20 @@ fn resolve_member_access(doc: &LiveDoc, src: &Source<'_>, indexer: &Indexer, uri
         let Some(member_name) = member_ident.utf8_text_owned(&doc.bytes) else {
             return;
         };
+        let is_call = is_call_callee(node);
         let resolved_type = navigation_receiver_node(node)
             .and_then(|receiver| expression_type(receiver, doc, &src.line_starts, indexer, uri))
             .and_then(|receiver_type| member_token_type_for_receiver(indexer, &receiver_type, &member_name));
-        let token_type = resolved_type.or_else(|| {
-            is_call_callee(node).then(|| type_index(&SemanticTokenType::METHOD))
-        });
+        // For call expressions, override any PROPERTY false-positive to METHOD.
+        // A called navigation suffix is always a function invocation, even if the
+        // index resolved it as a property (e.g. library type not fully indexed).
+        let method_type = type_index(&SemanticTokenType::METHOD);
+        let property_type = type_index(&SemanticTokenType::PROPERTY);
+        let token_type = if is_call {
+            Some(resolved_type.map(|t| if t == property_type { method_type } else { t }).unwrap_or(method_type))
+        } else {
+            resolved_type
+        };
         if let Some(token_type) = token_type {
             push_token(member_ident, token_type, 0, src, &mut tokens);
         }
