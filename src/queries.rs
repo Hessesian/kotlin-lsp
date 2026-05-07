@@ -406,6 +406,7 @@ pub(crate) const KIND_CALLABLE_REF: &str = "callable_reference";
 // ─── Kotlin structural / scope node kinds ─────────────────────────────────────
 pub(crate) const KIND_SOURCE_FILE: &str = "source_file";
 pub(crate) const KIND_CLASS_BODY: &str = "class_body";
+pub(crate) const KIND_FUN_BODY: &str = "function_body";
 pub(crate) const KIND_COMPANION_OBJ: &str = "companion_object";
 pub(crate) const KIND_ANON_FUN: &str = "anonymous_function";
 pub(crate) const KIND_STATEMENTS: &str = "statements";
@@ -437,3 +438,4 @@ pub(crate) const KIND_MARKER_ANNOTATION: &str = "marker_annotation";
 // Java modifier keywords appear as their own leaf node kinds in the Java grammar.
 pub(crate) const KIND_MOD_STATIC: &str = "static";
 pub(crate) const KIND_MOD_FINAL: &str = "final";
+pub(crate) const KIND_MOD_ABSTRACT: &str = "abstract";

@@ -561,14 +561,14 @@ fn server_capabilities() -> ServerCapabilities {
             retrigger_characters: None,
             work_done_progress_options: Default::default(),
         }),
-        semantic_tokens_provider: Some(
-            SemanticTokensServerCapabilities::SemanticTokensOptions(SemanticTokensOptions {
+        semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
+            SemanticTokensOptions {
                 legend: semantic_tokens::legend(),
                 full: Some(SemanticTokensFullOptions::Bool(true)),
                 range: Some(true),
                 work_done_progress_options: Default::default(),
-            }),
-        ),
+            },
+        )),
         ..Default::default()
     }
 }
@@ -1048,7 +1048,7 @@ impl LanguageServer for Backend {
     ) -> Result<Option<SemanticTokensResult>> {
         let uri = params.text_document.uri.to_string();
         let language = crate::Language::from_path(&uri);
-        let Some(doc) = self.indexer.live_trees.get(&uri).map(|r| Arc::clone(&r)) else {
+        let Some(doc) = self.indexer.live_doc(&params.text_document.uri) else {
             return Ok(None);
         };
         let parsed_uri = params.text_document.uri;
@@ -1065,12 +1065,18 @@ impl LanguageServer for Backend {
     ) -> Result<Option<SemanticTokensRangeResult>> {
         let uri = params.text_document.uri.to_string();
         let language = crate::Language::from_path(&uri);
-        let Some(doc) = self.indexer.live_trees.get(&uri).map(|r| Arc::clone(&r)) else {
+        let Some(doc) = self.indexer.live_doc(&params.text_document.uri) else {
             return Ok(None);
         };
         let parsed_uri = params.text_document.uri;
         Ok(Some(SemanticTokensRangeResult::Tokens(
-            semantic_tokens::range_tokens(&self.indexer, &parsed_uri, &doc, language, &params.range),
+            semantic_tokens::range_tokens(
+                &self.indexer,
+                &parsed_uri,
+                &doc,
+                language,
+                &params.range,
+            ),
         )))
     }
 }

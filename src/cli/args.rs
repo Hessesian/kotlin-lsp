@@ -4,9 +4,17 @@ use std::path::PathBuf;
 
 #[derive(Debug)]
 pub(crate) enum Subcommand {
-    Find { name: String },
-    Refs { name: String },
-    Hover { file: PathBuf, line: u32, col: u32 },
+    Find {
+        name: String,
+    },
+    Refs {
+        name: String,
+    },
+    Hover {
+        file: PathBuf,
+        line: u32,
+        col: u32,
+    },
     Index,
     /// Dump semantic tokens for a file (debug).
     Tokens {
@@ -17,7 +25,9 @@ pub(crate) enum Subcommand {
         show_tree: bool,
     },
     /// Dump the tree-sitter parse tree for a file (debug).
-    Tree { file: PathBuf },
+    Tree {
+        file: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,13 +57,87 @@ pub(crate) struct CliArgs {
 impl CliArgs {
     pub(crate) fn parse() -> Result<Option<Self>, String> {
         let mut args = lexopt::Parser::from_env();
+        let Some(first) = parse_first_argument(&mut args)? else {
+            return Ok(None);
+        };
+        let Some(subcommand) = parse_subcommand_name(first)? else {
+            return Ok(None);
+        };
+        let parsed = parse_cli_flags(&mut args)?;
+        let subcommand = build_subcommand(
+            &subcommand,
+            parsed.positionals,
+            parsed.cst_only,
+            parsed.show_tree,
+        )?;
+        Ok(Some(Self {
+            subcommand,
+            mode: parsed.mode,
+            fmt: parsed.fmt,
+            root: parsed.root,
+        }))
+    }
+}
 
-        // Peek at first positional to decide if this is a CLI subcommand
-        // or an LSP invocation.  LSP mode has no positional args (just flags
-        // like --port or --index-only).
-        let first = match args.next().map_err(|e| e.to_string())? {
-            None => return Ok(None), // no args → LSP stdio mode
-            Some(lexopt::Arg::Value(v)) => v,
+struct ParsedCliFlags {
+    mode: Mode,
+    fmt: OutputFmt,
+    root: Option<PathBuf>,
+    positionals: Vec<String>,
+    cst_only: bool,
+    show_tree: bool,
+}
+
+fn parse_first_argument(args: &mut lexopt::Parser) -> Result<Option<std::ffi::OsString>, String> {
+    match args.next().map_err(|e| e.to_string())? {
+        None => Ok(None),
+        Some(lexopt::Arg::Value(value)) => Ok(Some(value)),
+        Some(lexopt::Arg::Short('h') | lexopt::Arg::Long("help")) => {
+            print_help();
+            std::process::exit(0);
+        }
+        Some(lexopt::Arg::Short('V') | lexopt::Arg::Long("version")) => {
+            print_version();
+            std::process::exit(0);
+        }
+        Some(lexopt::Arg::Long(flag)) if is_subcommand(flag) => Err(format!(
+            "'{flag}' is a subcommand, not a flag — use `kotlin-lsp {flag}` (without --)"
+        )),
+        Some(lexopt::Arg::Short(_) | lexopt::Arg::Long(_)) => Ok(None),
+    }
+}
+
+fn parse_subcommand_name(first: std::ffi::OsString) -> Result<Option<String>, String> {
+    let subcommand = first.to_string_lossy().into_owned();
+    if is_subcommand(&subcommand) {
+        Ok(Some(subcommand))
+    } else {
+        Ok(None)
+    }
+}
+
+fn parse_cli_flags(args: &mut lexopt::Parser) -> Result<ParsedCliFlags, String> {
+    let mut parsed = ParsedCliFlags {
+        mode: Mode::Auto,
+        fmt: OutputFmt::Text,
+        root: None,
+        positionals: Vec::new(),
+        cst_only: false,
+        show_tree: false,
+    };
+
+    loop {
+        match args.next().map_err(|e| e.to_string())? {
+            None => return Ok(parsed),
+            Some(lexopt::Arg::Long("fast")) => parsed.mode = Mode::Fast,
+            Some(lexopt::Arg::Long("smart")) => parsed.mode = Mode::Smart,
+            Some(lexopt::Arg::Long("json")) => parsed.fmt = OutputFmt::Json,
+            Some(lexopt::Arg::Long("cst-only")) => parsed.cst_only = true,
+            Some(lexopt::Arg::Long("tree")) => parsed.show_tree = true,
+            Some(lexopt::Arg::Long("root")) => {
+                let value = args.value().map_err(|e| e.to_string())?;
+                parsed.root = Some(PathBuf::from(value.to_string_lossy().as_ref()));
+            }
             Some(lexopt::Arg::Short('h') | lexopt::Arg::Long("help")) => {
                 print_help();
                 std::process::exit(0);
@@ -62,122 +146,94 @@ impl CliArgs {
                 print_version();
                 std::process::exit(0);
             }
-            Some(lexopt::Arg::Long(flag))
-                if matches!(flag, "find" | "refs" | "hover" | "index" | "tokens" | "tree") =>
-            {
-                return Err(format!(
-                    "'{flag}' is a subcommand, not a flag — use `kotlin-lsp {flag}` (without --)"
-                ));
-            }
-            Some(lexopt::Arg::Short(_) | lexopt::Arg::Long(_)) => {
-                // Other flag before subcommand → LSP mode
-                return Ok(None);
-            }        };
-
-        let subcmd_str = first.to_string_lossy();
-        let subcommand = match subcmd_str.as_ref() {
-            "find" | "refs" | "hover" | "index" | "tokens" | "tree" => subcmd_str.into_owned(),
-            _ => return Ok(None), // unknown first positional → LSP mode
-        };
-
-        let mut mode = Mode::Auto;
-        let mut fmt = OutputFmt::Text;
-        let mut root: Option<PathBuf> = None;
-        let mut positionals: Vec<String> = Vec::new();
-        let mut cst_only = false;
-        let mut show_tree = false;
-
-        loop {
-            match args.next().map_err(|e| e.to_string())? {
-                None => break,
-                Some(lexopt::Arg::Long("fast")) => mode = Mode::Fast,
-                Some(lexopt::Arg::Long("smart")) => mode = Mode::Smart,
-                Some(lexopt::Arg::Long("json")) => fmt = OutputFmt::Json,
-                Some(lexopt::Arg::Long("cst-only")) => cst_only = true,
-                Some(lexopt::Arg::Long("tree")) => show_tree = true,
-                Some(lexopt::Arg::Long("root")) => {
-                    let val = args.value().map_err(|e| e.to_string())?;
-                    root = Some(PathBuf::from(val.to_string_lossy().as_ref()));
-                }
-                Some(lexopt::Arg::Short('h') | lexopt::Arg::Long("help")) => {
-                    print_help();
-                    std::process::exit(0);
-                }
-                Some(lexopt::Arg::Short('V') | lexopt::Arg::Long("version")) => {
-                    print_version();
-                    std::process::exit(0);
-                }
-                Some(lexopt::Arg::Value(v)) => positionals.push(v.to_string_lossy().into_owned()),
-                Some(lexopt::Arg::Short(c)) => {
-                    return Err(format!("Unknown short flag: -{c}"));
-                }
-                Some(lexopt::Arg::Long(l)) => {
-                    return Err(format!("Unknown flag: --{l}"));
-                }
-            }
+            Some(lexopt::Arg::Value(value)) => parsed
+                .positionals
+                .push(value.to_string_lossy().into_owned()),
+            Some(lexopt::Arg::Short(flag)) => return Err(format!("Unknown short flag: -{flag}")),
+            Some(lexopt::Arg::Long(flag)) => return Err(format!("Unknown flag: --{flag}")),
         }
-
-        let sub = match subcommand.as_str() {
-            "find" => {
-                let name = positionals
-                    .into_iter()
-                    .next()
-                    .ok_or("find requires a NAME argument")?;
-                Subcommand::Find { name }
-            }
-            "refs" => {
-                let name = positionals
-                    .into_iter()
-                    .next()
-                    .ok_or("refs requires a NAME argument")?;
-                Subcommand::Refs { name }
-            }
-            "hover" => {
-                let mut it = positionals.into_iter();
-                let file = PathBuf::from(
-                    it.next().ok_or("hover requires FILE LINE COL arguments")?,
-                );
-                let line: u32 = it
-                    .next()
-                    .ok_or("hover requires LINE argument")?
-                    .parse()
-                    .map_err(|_| "LINE must be a positive integer")?;
-                let col: u32 = it
-                    .next()
-                    .ok_or("hover requires COL argument")?
-                    .parse()
-                    .map_err(|_| "COL must be a positive integer")?;
-                Subcommand::Hover { file, line, col }
-            }
-            "index" => Subcommand::Index,
-            "tokens" => {
-                let file = PathBuf::from(
-                    positionals
-                        .into_iter()
-                        .next()
-                        .ok_or("tokens requires a FILE argument")?,
-                );
-                Subcommand::Tokens { file, cst_only, show_tree }
-            }
-            "tree" => {
-                let file = PathBuf::from(
-                    positionals
-                        .into_iter()
-                        .next()
-                        .ok_or("tree requires a FILE argument")?,
-                );
-                Subcommand::Tree { file }
-            }
-            _ => unreachable!(),
-        };
-
-        Ok(Some(Self {
-            subcommand: sub,
-            mode,
-            fmt,
-            root,
-        }))
     }
+}
+
+fn build_subcommand(
+    subcommand: &str,
+    positionals: Vec<String>,
+    cst_only: bool,
+    show_tree: bool,
+) -> Result<Subcommand, String> {
+    match subcommand {
+        "find" => Ok(Subcommand::Find {
+            name: first_positional(positionals, "find requires a NAME argument")?,
+        }),
+        "refs" => Ok(Subcommand::Refs {
+            name: first_positional(positionals, "refs requires a NAME argument")?,
+        }),
+        "hover" => build_hover_subcommand(positionals),
+        "index" => Ok(Subcommand::Index),
+        "tokens" => Ok(Subcommand::Tokens {
+            file: PathBuf::from(first_positional(
+                positionals,
+                "tokens requires a FILE argument",
+            )?),
+            cst_only,
+            show_tree,
+        }),
+        "tree" => Ok(Subcommand::Tree {
+            file: PathBuf::from(first_positional(
+                positionals,
+                "tree requires a FILE argument",
+            )?),
+        }),
+        _ => unreachable!(),
+    }
+}
+
+fn build_hover_subcommand(positionals: Vec<String>) -> Result<Subcommand, String> {
+    let mut positionals = positionals.into_iter();
+    let file = PathBuf::from(
+        positionals
+            .next()
+            .ok_or("hover requires FILE LINE COL arguments")?,
+    );
+    let line = parse_position_arg(
+        positionals.next(),
+        "hover requires LINE argument",
+        "LINE must be a positive integer",
+    )?;
+    let col = parse_position_arg(
+        positionals.next(),
+        "hover requires COL argument",
+        "COL must be a positive integer",
+    )?;
+    Ok(Subcommand::Hover { file, line, col })
+}
+
+fn parse_position_arg(
+    value: Option<String>,
+    missing_message: &'static str,
+    invalid_message: &'static str,
+) -> Result<u32, String> {
+    value
+        .ok_or(missing_message)?
+        .parse()
+        .map_err(|_| invalid_message.to_string())
+}
+
+fn first_positional(
+    positionals: Vec<String>,
+    missing_message: &'static str,
+) -> Result<String, String> {
+    positionals
+        .into_iter()
+        .next()
+        .ok_or_else(|| missing_message.to_string())
+}
+
+fn is_subcommand(value: &str) -> bool {
+    matches!(
+        value,
+        "find" | "refs" | "hover" | "index" | "tokens" | "tree"
+    )
 }
 
 fn print_version() {

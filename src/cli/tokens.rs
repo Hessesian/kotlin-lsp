@@ -40,13 +40,11 @@ pub(crate) fn token_rows(
     indexer: Option<&Arc<Indexer>>,
     cst_only: bool,
 ) -> Result<Vec<TokenRow>, String> {
-    let abs = file
-        .canonicalize()
-        .unwrap_or_else(|_| file.to_path_buf());
+    let abs = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
     let path_str = abs.to_string_lossy();
 
-    let content = std::fs::read_to_string(&abs)
-        .map_err(|e| format!("cannot read {}: {e}", abs.display()))?;
+    let content =
+        std::fs::read_to_string(&abs).map_err(|e| format!("cannot read {}: {e}", abs.display()))?;
 
     let ts_lang = lang_for_path(&path_str)
         .ok_or_else(|| format!("unsupported file type: {}", abs.display()))?;
@@ -59,12 +57,12 @@ pub(crate) fn token_rows(
     let uri = Url::from_file_path(&abs)
         .map_err(|_| format!("cannot convert path to URI: {}", abs.display()))?;
 
-    let (idx_ref, uri_ref) = if cst_only || indexer.is_none() {
-        (None, None)
-    } else {
-        let idx = indexer.unwrap();
-        idx.ensure_indexed(&uri);
-        (Some(idx.as_ref()), Some(&uri))
+    let (idx_ref, uri_ref) = match (cst_only, indexer) {
+        (true, _) | (_, None) => (None, None),
+        (false, Some(indexer)) => {
+            indexer.ensure_indexed(&uri);
+            (Some(indexer.as_ref()), Some(&uri))
+        }
     };
 
     let tokens = collect_tokens(&doc, language, None, idx_ref, uri_ref);
@@ -130,10 +128,7 @@ fn decode_modifiers(bits: u32) -> Vec<String> {
 
 pub(crate) fn print_token_rows(rows: &[TokenRow], json: bool) {
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(rows).unwrap_or_default()
-        );
+        println!("{}", serde_json::to_string_pretty(rows).unwrap_or_default());
         return;
     }
     for row in rows {
@@ -144,12 +139,7 @@ pub(crate) fn print_token_rows(rows: &[TokenRow], json: bool) {
         };
         println!(
             "{}:{}+{}  {}{:30}  {:?}",
-            row.line,
-            row.col,
-            row.len,
-            row.token_type,
-            mods,
-            row.text,
+            row.line, row.col, row.len, row.token_type, mods, row.text,
         );
     }
 }
@@ -158,13 +148,11 @@ pub(crate) fn print_token_rows(rows: &[TokenRow], json: bool) {
 
 /// Parse `file` and print the tree-sitter CST to stdout.
 pub(crate) fn dump_tree(file: &Path) -> Result<(), String> {
-    let abs = file
-        .canonicalize()
-        .unwrap_or_else(|_| file.to_path_buf());
+    let abs = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
     let path_str = abs.to_string_lossy();
 
-    let content = std::fs::read_to_string(&abs)
-        .map_err(|e| format!("cannot read {}: {e}", abs.display()))?;
+    let content =
+        std::fs::read_to_string(&abs).map_err(|e| format!("cannot read {}: {e}", abs.display()))?;
 
     let ts_lang = lang_for_path(&path_str)
         .ok_or_else(|| format!("unsupported file type: {}", abs.display()))?;

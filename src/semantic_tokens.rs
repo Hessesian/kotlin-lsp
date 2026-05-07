@@ -24,9 +24,10 @@ use crate::queries::{
     KIND_ANNOTATION, KIND_ANNOTATION_TYPE_DECL, KIND_CALL_EXPR, KIND_CLASS_BODY, KIND_CLASS_DECL,
     KIND_COMPANION_OBJ, KIND_CONSTRUCTOR_INVOCATION, KIND_ENUM_CLASS_BODY, KIND_ENUM_CONSTANT,
     KIND_ENUM_ENTRY, KIND_ENUM_JAVA_DECL, KIND_EQ, KIND_FIELD_DECL, KIND_FORMAL_PARAM,
-    KIND_FUN_DECL, KIND_FUN_VALUE_PARAMS, KIND_IDENTIFIER, KIND_INTERFACE_BODY, KIND_INTERFACE_DECL,
-    KIND_INTERP_IDENT, KIND_LAMBDA_LIT, KIND_LAMBDA_PARAMS, KIND_MARKER_ANNOTATION, KIND_METHOD_DECL,
-    KIND_MODIFIERS, KIND_MULTI_ANNOTATION, KIND_MULTI_VAR_DECL, KIND_NAV_EXPR, KIND_NAV_SUFFIX,
+    KIND_FUN_BODY, KIND_FUN_DECL, KIND_FUN_VALUE_PARAMS, KIND_IDENTIFIER, KIND_INTERFACE_BODY,
+    KIND_INTERFACE_DECL, KIND_INTERP_IDENT, KIND_LAMBDA_LIT, KIND_LAMBDA_PARAMS,
+    KIND_MARKER_ANNOTATION, KIND_METHOD_DECL, KIND_MODIFIERS, KIND_MOD_ABSTRACT, KIND_MOD_FINAL,
+    KIND_MOD_STATIC, KIND_MULTI_ANNOTATION, KIND_MULTI_VAR_DECL, KIND_NAV_EXPR, KIND_NAV_SUFFIX,
     KIND_OBJECT_BODY, KIND_OBJECT_DECL, KIND_PARAMETER, KIND_PROP_DECL, KIND_RECORD_DECL,
     KIND_SIMPLE_IDENT, KIND_SPREAD_PARAM, KIND_THIS_EXPR, KIND_TYPE_IDENT, KIND_TYPE_PARAM,
     KIND_USER_TYPE, KIND_VALUE_ARG, KIND_VAR_DECL, KIND_VAR_DECLARATOR,
@@ -95,7 +96,7 @@ pub(crate) fn legend() -> SemanticTokensLegend {
 #[derive(Clone)]
 struct RawToken {
     line: u32,
-    col: u32,  // UTF-16 column
+    col: u32, // UTF-16 column
     length: u32,
     token_type: u32,
     token_modifiers_bitset: u32,
@@ -165,10 +166,24 @@ pub(crate) fn collect_tokens(
     raw.dedup_by_key(|t| (t.line, t.col));
 
     // Apply range filter before delta-encoding.
+    // Filter by full (line, character) bounds per LSP semanticTokens/range spec.
     if let Some(r) = range {
-        let start_line = r.start.line;
-        let end_line = r.end.line;
-        raw.retain(|t| t.line >= start_line && t.line <= end_line);
+        let s_line = r.start.line;
+        let s_col = r.start.character;
+        let e_line = r.end.line;
+        let e_col = r.end.character;
+        raw.retain(|t| {
+            if t.line < s_line || t.line > e_line {
+                return false;
+            }
+            if t.line == s_line && t.col < s_col {
+                return false;
+            }
+            if t.line == e_line && t.col >= e_col {
+                return false;
+            }
+            true
+        });
     }
 
     delta_encode(raw)
@@ -201,14 +216,26 @@ fn classify_kotlin(node: Node<'_>, src: &Source<'_>, out: &mut Vec<RawToken>) {
         KIND_PARAMETER => {
             let mods = modifier_bit(&SemanticTokenModifier::DECLARATION);
             if let Some(name) = child_ident(node) {
-                push_token(name, type_index(&SemanticTokenType::PARAMETER), mods, src, out);
+                push_token(
+                    name,
+                    type_index(&SemanticTokenType::PARAMETER),
+                    mods,
+                    src,
+                    out,
+                );
             }
         }
         KIND_ENUM_ENTRY => {
             let mods = modifier_bit(&SemanticTokenModifier::DECLARATION)
                 | modifier_bit(&SemanticTokenModifier::READONLY);
             if let Some(name) = child_ident(node) {
-                push_token(name, type_index(&SemanticTokenType::ENUM_MEMBER), mods, src, out);
+                push_token(
+                    name,
+                    type_index(&SemanticTokenType::ENUM_MEMBER),
+                    mods,
+                    src,
+                    out,
+                );
             }
         }
         KIND_ANNOTATION | KIND_MULTI_ANNOTATION => {
@@ -238,15 +265,27 @@ fn kotlin_class_token(node: Node<'_>, src: &Source<'_>, out: &mut Vec<RawToken>)
     if has_modifier(node, src, "abstract") {
         mods |= modifier_bit(&SemanticTokenModifier::ABSTRACT);
     }
+    if has_deprecated_annotation(node, src.bytes) {
+        mods |= modifier_bit(&SemanticTokenModifier::DEPRECATED);
+    }
     if let Some(name) = child_ident(node) {
         push_token(name, token_type, mods, src, out);
     }
 }
 
 fn kotlin_object_token(node: Node<'_>, src: &Source<'_>, out: &mut Vec<RawToken>) {
-    let mods = modifier_bit(&SemanticTokenModifier::DECLARATION);
+    let mut mods = modifier_bit(&SemanticTokenModifier::DECLARATION);
+    if has_deprecated_annotation(node, src.bytes) {
+        mods |= modifier_bit(&SemanticTokenModifier::DEPRECATED);
+    }
     if let Some(name) = child_ident(node) {
-        push_token(name, type_index(&SemanticTokenType::NAMESPACE), mods, src, out);
+        push_token(
+            name,
+            type_index(&SemanticTokenType::NAMESPACE),
+            mods,
+            src,
+            out,
+        );
     }
 }
 
@@ -276,6 +315,12 @@ fn kotlin_fun_token(node: Node<'_>, src: &Source<'_>, out: &mut Vec<RawToken>) {
     if has_modifier(node, src, "abstract") {
         mods |= modifier_bit(&SemanticTokenModifier::ABSTRACT);
     }
+    if has_deprecated_annotation(node, src.bytes) {
+        mods |= modifier_bit(&SemanticTokenModifier::DEPRECATED);
+    }
+    if is_in_companion_body(node) {
+        mods |= modifier_bit(&SemanticTokenModifier::STATIC);
+    }
     if let Some(name) = child_ident(node) {
         push_token(name, token_type, mods, src, out);
     }
@@ -293,6 +338,12 @@ fn kotlin_prop_token(node: Node<'_>, src: &Source<'_>, out: &mut Vec<RawToken>) 
     let mut mods = modifier_bit(&SemanticTokenModifier::DECLARATION);
     if is_val {
         mods |= modifier_bit(&SemanticTokenModifier::READONLY);
+    }
+    if has_deprecated_annotation(node, src.bytes) {
+        mods |= modifier_bit(&SemanticTokenModifier::DEPRECATED);
+    }
+    if is_in_companion_body(node) {
+        mods |= modifier_bit(&SemanticTokenModifier::STATIC);
     }
     if let Some(var_decl) = first_child_of_kind(node, KIND_VAR_DECL) {
         if let Some(name) = child_ident(var_decl) {
@@ -314,7 +365,13 @@ fn kotlin_type_param_token(node: Node<'_>, src: &Source<'_>, out: &mut Vec<RawTo
     if let Some(ident) = first_child_of_kind(node, KIND_TYPE_IDENT)
         .or_else(|| first_child_of_kind(node, KIND_SIMPLE_IDENT))
     {
-        push_token(ident, type_index(&SemanticTokenType::TYPE_PARAMETER), mods, src, out);
+        push_token(
+            ident,
+            type_index(&SemanticTokenType::TYPE_PARAMETER),
+            mods,
+            src,
+            out,
+        );
     }
 }
 
@@ -334,101 +391,140 @@ fn walk_java(node: Node<'_>, src: &Source<'_>, out: &mut Vec<RawToken>) {
 }
 
 fn classify_java(node: Node<'_>, src: &Source<'_>, out: &mut Vec<RawToken>) {
-    let kind = node.kind();
-
-    match kind {
+    match node.kind() {
         k if k == KIND_CLASS_DECL || k == KIND_RECORD_DECL => {
-            let mut mods = modifier_bit(&SemanticTokenModifier::DECLARATION);
-            if has_java_modifier(node, src, "abstract") {
-                mods |= modifier_bit(&SemanticTokenModifier::ABSTRACT);
-            }
-            if let Some(name) = first_child_of_kind(node, KIND_IDENTIFIER) {
-                push_token(name, type_index(&SemanticTokenType::CLASS), mods, src, out);
-            }
+            push_java_class_like_token(node, src, out)
         }
-
         k if k == KIND_INTERFACE_DECL || k == KIND_ANNOTATION_TYPE_DECL => {
-            let token_type = if k == KIND_ANNOTATION_TYPE_DECL {
-                type_index(&SemanticTokenType::DECORATOR)
-            } else {
-                type_index(&SemanticTokenType::INTERFACE)
-            };
-            let mods = modifier_bit(&SemanticTokenModifier::DECLARATION);
-            if let Some(name) = first_child_of_kind(node, KIND_IDENTIFIER) {
-                push_token(name, token_type, mods, src, out);
-            }
+            push_java_interface_like_token(node, k, src, out)
         }
-
-        KIND_ENUM_JAVA_DECL => {
-            let mods = modifier_bit(&SemanticTokenModifier::DECLARATION);
-            if let Some(name) = first_child_of_kind(node, KIND_IDENTIFIER) {
-                push_token(name, type_index(&SemanticTokenType::ENUM), mods, src, out);
-            }
-        }
-
-        k if k == KIND_METHOD_DECL => {
-            let mut mods = modifier_bit(&SemanticTokenModifier::DECLARATION);
-            if has_java_modifier(node, src, "abstract") {
-                mods |= modifier_bit(&SemanticTokenModifier::ABSTRACT);
-            }
-            if let Some(name) = first_child_of_kind(node, KIND_IDENTIFIER) {
-                push_token(name, type_index(&SemanticTokenType::METHOD), mods, src, out);
-            }
-        }
-
-        k if k == KIND_FIELD_DECL => {
-            let is_final = has_java_modifier(node, src, "final");
-            let mut mods = modifier_bit(&SemanticTokenModifier::DECLARATION);
-            if is_final {
-                mods |= modifier_bit(&SemanticTokenModifier::READONLY);
-            }
-            if has_java_modifier(node, src, "static") {
-                mods |= modifier_bit(&SemanticTokenModifier::STATIC);
-            }
-            for i in 0..node.child_count() {
-                if let Some(child) = node.child(i) {
-                    if child.kind() == KIND_VAR_DECLARATOR {
-                        if let Some(name) = first_child_of_kind(child, KIND_IDENTIFIER) {
-                            push_token(name, type_index(&SemanticTokenType::PROPERTY), mods, src, out);
-                        }
-                    }
-                }
-            }
-        }
-
-        KIND_FORMAL_PARAM | KIND_SPREAD_PARAM => {
-            let mods = modifier_bit(&SemanticTokenModifier::DECLARATION);
-            if let Some(name) = first_child_of_kind(node, KIND_IDENTIFIER) {
-                push_token(name, type_index(&SemanticTokenType::PARAMETER), mods, src, out);
-            }
-        }
-
-        k if k == KIND_ENUM_CONSTANT => {
-            let mods = modifier_bit(&SemanticTokenModifier::DECLARATION)
-                | modifier_bit(&SemanticTokenModifier::READONLY);
-            if let Some(name) = first_child_of_kind(node, KIND_IDENTIFIER) {
-                push_token(name, type_index(&SemanticTokenType::ENUM_MEMBER), mods, src, out);
-            }
-        }
-
-        k if k == KIND_TYPE_PARAM => {
-            let mods = modifier_bit(&SemanticTokenModifier::DECLARATION);
-            // Java type_parameter has type_identifier child; Kotlin uses type_identifier too
-            if let Some(name) = first_child_of_kind(node, KIND_TYPE_IDENT)
-                .or_else(|| first_child_of_kind(node, KIND_IDENTIFIER))
-            {
-                push_token(name, type_index(&SemanticTokenType::TYPE_PARAMETER), mods, src, out);
-            }
-        }
-
-        KIND_MARKER_ANNOTATION | KIND_ANNOTATION => {
-            // @Override, @SuppressWarnings("...") etc.
-            if let Some(name) = first_child_of_kind(node, KIND_IDENTIFIER) {
-                push_token(name, type_index(&SemanticTokenType::DECORATOR), 0, src, out);
-            }
-        }
-
+        KIND_ENUM_JAVA_DECL => push_java_enum_token(node, src, out),
+        KIND_METHOD_DECL => push_java_method_token(node, src, out),
+        KIND_FIELD_DECL => push_java_field_tokens(node, src, out),
+        KIND_FORMAL_PARAM | KIND_SPREAD_PARAM => push_java_parameter_token(node, src, out),
+        KIND_ENUM_CONSTANT => push_java_enum_member_token(node, src, out),
+        KIND_TYPE_PARAM => push_java_type_parameter_token(node, src, out),
+        KIND_MARKER_ANNOTATION | KIND_ANNOTATION => push_java_annotation_token(node, src, out),
         _ => {}
+    }
+}
+
+fn push_java_class_like_token(node: Node<'_>, src: &Source<'_>, out: &mut Vec<RawToken>) {
+    let mut mods = modifier_bit(&SemanticTokenModifier::DECLARATION);
+    if has_java_modifier(node, KIND_MOD_ABSTRACT) {
+        mods |= modifier_bit(&SemanticTokenModifier::ABSTRACT);
+    }
+    if let Some(name) = first_child_of_kind(node, KIND_IDENTIFIER) {
+        push_token(name, type_index(&SemanticTokenType::CLASS), mods, src, out);
+    }
+}
+
+fn push_java_interface_like_token(
+    node: Node<'_>,
+    kind: &str,
+    src: &Source<'_>,
+    out: &mut Vec<RawToken>,
+) {
+    let token_type = if kind == KIND_ANNOTATION_TYPE_DECL {
+        type_index(&SemanticTokenType::DECORATOR)
+    } else {
+        type_index(&SemanticTokenType::INTERFACE)
+    };
+    let mods = modifier_bit(&SemanticTokenModifier::DECLARATION);
+    if let Some(name) = first_child_of_kind(node, KIND_IDENTIFIER) {
+        push_token(name, token_type, mods, src, out);
+    }
+}
+
+fn push_java_enum_token(node: Node<'_>, src: &Source<'_>, out: &mut Vec<RawToken>) {
+    let mods = modifier_bit(&SemanticTokenModifier::DECLARATION);
+    if let Some(name) = first_child_of_kind(node, KIND_IDENTIFIER) {
+        push_token(name, type_index(&SemanticTokenType::ENUM), mods, src, out);
+    }
+}
+
+fn push_java_method_token(node: Node<'_>, src: &Source<'_>, out: &mut Vec<RawToken>) {
+    let mut mods = modifier_bit(&SemanticTokenModifier::DECLARATION);
+    if has_java_modifier(node, KIND_MOD_ABSTRACT) {
+        mods |= modifier_bit(&SemanticTokenModifier::ABSTRACT);
+    }
+    if let Some(name) = first_child_of_kind(node, KIND_IDENTIFIER) {
+        push_token(name, type_index(&SemanticTokenType::METHOD), mods, src, out);
+    }
+}
+
+fn push_java_field_tokens(node: Node<'_>, src: &Source<'_>, out: &mut Vec<RawToken>) {
+    let mut mods = modifier_bit(&SemanticTokenModifier::DECLARATION);
+    if has_java_modifier(node, KIND_MOD_FINAL) {
+        mods |= modifier_bit(&SemanticTokenModifier::READONLY);
+    }
+    if has_java_modifier(node, KIND_MOD_STATIC) {
+        mods |= modifier_bit(&SemanticTokenModifier::STATIC);
+    }
+    for index in 0..node.child_count() {
+        let Some(child) = node.child(index) else {
+            continue;
+        };
+        if child.kind() != KIND_VAR_DECLARATOR {
+            continue;
+        }
+        if let Some(name) = first_child_of_kind(child, KIND_IDENTIFIER) {
+            push_token(
+                name,
+                type_index(&SemanticTokenType::PROPERTY),
+                mods,
+                src,
+                out,
+            );
+        }
+    }
+}
+
+fn push_java_parameter_token(node: Node<'_>, src: &Source<'_>, out: &mut Vec<RawToken>) {
+    let mods = modifier_bit(&SemanticTokenModifier::DECLARATION);
+    if let Some(name) = first_child_of_kind(node, KIND_IDENTIFIER) {
+        push_token(
+            name,
+            type_index(&SemanticTokenType::PARAMETER),
+            mods,
+            src,
+            out,
+        );
+    }
+}
+
+fn push_java_enum_member_token(node: Node<'_>, src: &Source<'_>, out: &mut Vec<RawToken>) {
+    let mods = modifier_bit(&SemanticTokenModifier::DECLARATION)
+        | modifier_bit(&SemanticTokenModifier::READONLY);
+    if let Some(name) = first_child_of_kind(node, KIND_IDENTIFIER) {
+        push_token(
+            name,
+            type_index(&SemanticTokenType::ENUM_MEMBER),
+            mods,
+            src,
+            out,
+        );
+    }
+}
+
+fn push_java_type_parameter_token(node: Node<'_>, src: &Source<'_>, out: &mut Vec<RawToken>) {
+    let mods = modifier_bit(&SemanticTokenModifier::DECLARATION);
+    if let Some(name) = first_child_of_kind(node, KIND_TYPE_IDENT)
+        .or_else(|| first_child_of_kind(node, KIND_IDENTIFIER))
+    {
+        push_token(
+            name,
+            type_index(&SemanticTokenType::TYPE_PARAMETER),
+            mods,
+            src,
+            out,
+        );
+    }
+}
+
+fn push_java_annotation_token(node: Node<'_>, src: &Source<'_>, out: &mut Vec<RawToken>) {
+    if let Some(name) = first_child_of_kind(node, KIND_IDENTIFIER) {
+        push_token(name, type_index(&SemanticTokenType::DECORATOR), 0, src, out);
     }
 }
 
@@ -513,7 +609,9 @@ fn has_modifier(node: Node<'_>, src: &Source<'_>, keyword: &str) -> bool {
     for i in 0..node.child_count() {
         if let Some(child) = node.child(i) {
             if child.kind() == KIND_MODIFIERS
-                && node_text(child, src.bytes).split_whitespace().any(|w| w == keyword)
+                && node_text(child, src.bytes)
+                    .split_whitespace()
+                    .any(|w| w == keyword)
             {
                 return true;
             }
@@ -526,31 +624,117 @@ fn has_modifier(node: Node<'_>, src: &Source<'_>, keyword: &str) -> bool {
 }
 
 /// Check whether a Java node has a modifier keyword inside a `modifiers` node.
-fn has_java_modifier(node: Node<'_>, src: &Source<'_>, keyword: &str) -> bool {
-    for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
-            if child.kind() == KIND_MODIFIERS
-                && node_text(child, src.bytes).split_whitespace().any(|w| w == keyword)
-            {
+fn has_java_modifier(node: Node<'_>, keyword: &str) -> bool {
+    let Some(mods) = first_child_of_kind(node, KIND_MODIFIERS) else {
+        return false;
+    };
+    let mut cursor = mods.walk();
+    if cursor.goto_first_child() {
+        loop {
+            if cursor.node().kind() == keyword {
                 return true;
+            }
+            if !cursor.goto_next_sibling() {
+                break;
             }
         }
     }
     false
 }
 
+fn is_deprecated_annotation(node: Node<'_>, src: &[u8]) -> bool {
+    (node.kind() == KIND_ANNOTATION || node.kind() == KIND_MULTI_ANNOTATION)
+        && find_annotation_ident(node)
+            .and_then(|ident| ident.utf8_text(src).ok())
+            .is_some_and(|text| text == "Deprecated")
+}
+
+fn contains_deprecated_annotation(node: Node<'_>, src: &[u8]) -> bool {
+    if is_deprecated_annotation(node, src) {
+        return true;
+    }
+    let mut cursor = node.walk();
+    if cursor.goto_first_child() {
+        loop {
+            if contains_deprecated_annotation(cursor.node(), src) {
+                return true;
+            }
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+    }
+    false
+}
+
+/// Returns true if the node has a preceding `@Deprecated` annotation.
+fn has_deprecated_annotation(node: Node<'_>, src: &[u8]) -> bool {
+    if first_child_of_kind(node, KIND_MODIFIERS)
+        .is_some_and(|modifiers| contains_deprecated_annotation(modifiers, src))
+    {
+        return true;
+    }
+    let Some(parent) = node.parent() else {
+        return false;
+    };
+    let mut cursor = parent.walk();
+    if cursor.goto_first_child() {
+        loop {
+            let sibling = cursor.node();
+            if sibling.id() == node.id() {
+                break;
+            }
+            if contains_deprecated_annotation(sibling, src) {
+                return true;
+            }
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+    }
+    false
+}
+
+fn is_in_companion_body(node: Node<'_>) -> bool {
+    let mut ancestor = node.parent();
+    while let Some(parent) = ancestor {
+        if parent.kind() == KIND_COMPANION_OBJ {
+            return true;
+        }
+        if parent.kind() == KIND_CLASS_DECL
+            || parent.kind() == KIND_INTERFACE_DECL
+            || parent.kind() == KIND_OBJECT_DECL
+        {
+            return false;
+        }
+        ancestor = parent.parent();
+    }
+    false
+}
+
 /// True when this node is a direct child of a class/interface/enum body.
 fn is_inside_class_body(node: Node<'_>) -> bool {
-    let Some(parent) = node.parent() else { return false };
-    let k = parent.kind();
-    k == KIND_CLASS_BODY || k == KIND_INTERFACE_BODY || k == KIND_ENUM_CLASS_BODY || k == KIND_OBJECT_BODY
+    let Some(parent) = node.parent() else {
+        return false;
+    };
+    let kind = parent.kind();
+    kind == KIND_CLASS_BODY
+        || kind == KIND_INTERFACE_BODY
+        || kind == KIND_ENUM_CLASS_BODY
+        || kind == KIND_OBJECT_BODY
 }
 
 fn node_text<'a>(node: Node<'_>, src: &'a [u8]) -> &'a str {
     node.utf8_text(src).unwrap_or("")
 }
 
-fn push_token(node: Node<'_>, token_type: u32, token_modifiers_bitset: u32, src: &Source<'_>, out: &mut Vec<RawToken>) {
+fn push_token(
+    node: Node<'_>,
+    token_type: u32,
+    token_modifiers_bitset: u32,
+    src: &Source<'_>,
+    out: &mut Vec<RawToken>,
+) {
     let start = node.start_position();
     let text = node_text(node, src.bytes);
     let length = text.encode_utf16().count() as u32;
@@ -565,7 +749,6 @@ fn push_token(node: Node<'_>, token_type: u32, token_modifiers_bitset: u32, src:
         token_modifiers_bitset,
     });
 }
-
 
 // ─── Delta encoding ───────────────────────────────────────────────────────────
 
@@ -615,9 +798,9 @@ fn navigation_receiver_node(node: Node<'_>) -> Option<Node<'_>> {
 
 fn navigation_member_ident(node: Node<'_>) -> Option<Node<'_>> {
     let suffix = node.first_child_of_kind(KIND_NAV_SUFFIX)?;
-    (0..suffix.child_count()).filter_map(|i| suffix.child(i)).find(|child| {
-        child.kind() == KIND_SIMPLE_IDENT || child.kind() == KIND_TYPE_IDENT
-    })
+    (0..suffix.child_count())
+        .filter_map(|i| suffix.child(i))
+        .find(|child| child.kind() == KIND_SIMPLE_IDENT || child.kind() == KIND_TYPE_IDENT)
 }
 
 fn token_position(bytes: &[u8], starts: &[usize], node: Node<'_>) -> Position {
@@ -699,7 +882,11 @@ fn matches_receiver_type(extension_receiver: &str, receiver_type: &str) -> bool 
     extension_receiver == receiver_type || extension_receiver == receiver_leaf
 }
 
-fn owner_member_token_type(indexer: &Indexer, receiver_type: &str, member_name: &str) -> Option<u32> {
+fn owner_member_token_type(
+    indexer: &Indexer,
+    receiver_type: &str,
+    member_name: &str,
+) -> Option<u32> {
     let receiver_leaf = receiver_type.rsplit('.').next().unwrap_or(receiver_type);
     for loc in indexer.definition_locations(receiver_leaf) {
         let Some(file_data) = indexer.files.get(loc.uri.as_str()) else {
@@ -713,18 +900,22 @@ fn owner_member_token_type(indexer: &Indexer, receiver_type: &str, member_name: 
         let Some(owner_range) = owner_range else {
             continue;
         };
-        if let Some(symbol) = file_data
-            .symbols
-            .iter()
-            .find(|symbol| symbol.name == member_name && is_member_symbol(symbol.kind) && range_within(&symbol.range, &owner_range))
-        {
+        if let Some(symbol) = file_data.symbols.iter().find(|symbol| {
+            symbol.name == member_name
+                && is_member_symbol(symbol.kind)
+                && range_within(&symbol.range, &owner_range)
+        }) {
             return member_token_type(symbol.kind);
         }
     }
     None
 }
 
-fn extension_member_token_type(indexer: &Indexer, receiver_type: &str, member_name: &str) -> Option<u32> {
+fn extension_member_token_type(
+    indexer: &Indexer,
+    receiver_type: &str,
+    member_name: &str,
+) -> Option<u32> {
     for loc in indexer.definition_locations(member_name) {
         let Some(file_data) = indexer.files.get(loc.uri.as_str()) else {
             continue;
@@ -754,15 +945,21 @@ fn member_token_type_for_receiver(
         })
 }
 
-
-
 fn member_return_type(indexer: &Indexer, receiver_type: &str, member_name: &str) -> Option<String> {
     find_method_return_type(indexer, receiver_type, member_name)
 }
 
-fn identifier_type(node: Node<'_>, doc: &LiveDoc, starts: &[usize], indexer: &Indexer, uri: &Url) -> Option<String> {
+fn identifier_type(
+    node: Node<'_>,
+    doc: &LiveDoc,
+    starts: &[usize],
+    indexer: &Indexer,
+    uri: &Url,
+) -> Option<String> {
     let name = node.utf8_text_owned(&doc.bytes)?;
-    if let Some(inferred) = indexer.infer_lambda_param_type_at(&name, uri, token_position(&doc.bytes, starts, node)) {
+    if let Some(inferred) =
+        indexer.infer_lambda_param_type_at(&name, uri, token_position(&doc.bytes, starts, node))
+    {
         return Some(inferred);
     }
     if let Some(inferred) = infer_variable_type(indexer, &name, uri) {
@@ -793,7 +990,13 @@ fn navigation_expression_type(
     find_field_type_in_class(indexer, &receiver_type, &member)
 }
 
-fn call_expression_type(node: Node<'_>, doc: &LiveDoc, starts: &[usize], indexer: &Indexer, uri: &Url) -> Option<String> {
+fn call_expression_type(
+    node: Node<'_>,
+    doc: &LiveDoc,
+    starts: &[usize],
+    indexer: &Indexer,
+    uri: &Url,
+) -> Option<String> {
     let (member, _) = node.call_fn_and_qualifier(&doc.bytes)?;
     if let Some(callee) = node.child(0).filter(|child| child.kind() == KIND_NAV_EXPR) {
         if let Some(receiver) = navigation_receiver_node(callee) {
@@ -807,10 +1010,20 @@ fn call_expression_type(node: Node<'_>, doc: &LiveDoc, starts: &[usize], indexer
     find_fun_return_type_by_name(indexer, &member)
 }
 
-fn expression_type(node: Node<'_>, doc: &LiveDoc, starts: &[usize], indexer: &Indexer, uri: &Url) -> Option<String> {
+fn expression_type(
+    node: Node<'_>,
+    doc: &LiveDoc,
+    starts: &[usize],
+    indexer: &Indexer,
+    uri: &Url,
+) -> Option<String> {
     match node.kind() {
         KIND_SIMPLE_IDENT | KIND_TYPE_IDENT => identifier_type(node, doc, starts, indexer, uri),
-        KIND_THIS_EXPR => indexer.infer_lambda_param_type_at("this", uri, token_position(&doc.bytes, starts, node)),
+        KIND_THIS_EXPR => indexer.infer_lambda_param_type_at(
+            "this",
+            uri,
+            token_position(&doc.bytes, starts, node),
+        ),
         KIND_NAV_EXPR => navigation_expression_type(node, doc, starts, indexer, uri),
         KIND_CALL_EXPR => call_expression_type(node, doc, starts, indexer, uri),
         _ => None,
@@ -833,7 +1046,12 @@ fn is_inside_lambda_parameters(node: Node<'_>) -> bool {
 
 /// Resolve member accesses in navigation expressions.
 /// Returns resolved tokens for member identifiers.
-fn resolve_member_access(doc: &LiveDoc, src: &Source<'_>, indexer: &Indexer, uri: &Url) -> Vec<RawToken> {
+fn resolve_member_access(
+    doc: &LiveDoc,
+    src: &Source<'_>,
+    indexer: &Indexer,
+    uri: &Url,
+) -> Vec<RawToken> {
     let mut tokens = Vec::new();
     visit_tree(doc.tree.root_node(), &mut |node| {
         if node.kind() != KIND_NAV_EXPR {
@@ -848,14 +1066,20 @@ fn resolve_member_access(doc: &LiveDoc, src: &Source<'_>, indexer: &Indexer, uri
         let is_call = is_call_callee(node);
         let resolved_type = navigation_receiver_node(node)
             .and_then(|receiver| expression_type(receiver, doc, &src.line_starts, indexer, uri))
-            .and_then(|receiver_type| member_token_type_for_receiver(indexer, &receiver_type, &member_name));
+            .and_then(|receiver_type| {
+                member_token_type_for_receiver(indexer, &receiver_type, &member_name)
+            });
         // For call expressions, override any PROPERTY false-positive to METHOD.
         // A called navigation suffix is always a function invocation, even if the
         // index resolved it as a property (e.g. library type not fully indexed).
         let method_type = type_index(&SemanticTokenType::METHOD);
         let property_type = type_index(&SemanticTokenType::PROPERTY);
         let token_type = if is_call {
-            Some(resolved_type.map(|t| if t == property_type { method_type } else { t }).unwrap_or(method_type))
+            Some(
+                resolved_type
+                    .map(|t| if t == property_type { method_type } else { t })
+                    .unwrap_or(method_type),
+            )
         } else {
             resolved_type
         };
@@ -867,7 +1091,12 @@ fn resolve_member_access(doc: &LiveDoc, src: &Source<'_>, indexer: &Indexer, uri
 }
 
 /// Resolve lambda parameter identifiers (`it`, `this`, named params).
-fn resolve_lambda_params(doc: &LiveDoc, src: &Source<'_>, indexer: &Indexer, uri: &Url) -> Vec<RawToken> {
+fn resolve_lambda_params(
+    doc: &LiveDoc,
+    src: &Source<'_>,
+    indexer: &Indexer,
+    uri: &Url,
+) -> Vec<RawToken> {
     let mut tokens = Vec::new();
     let lines_arc = indexer.mem_lines_for(uri.as_str());
     let fallback_lines: Vec<String> = std::str::from_utf8(&doc.bytes)
@@ -899,10 +1128,8 @@ fn resolve_lambda_params(doc: &LiveDoc, src: &Source<'_>, indexer: &Indexer, uri
         if node.kind() == KIND_THIS_EXPR && node.enclosing_lambda_literal().is_some() {
             let pos = crate::types::CursorPos {
                 line: node.start_position().row,
-                utf16_col: src.col_utf16(
-                    node.start_position().row,
-                    node.start_position().column,
-                ) as usize,
+                utf16_col: src.col_utf16(node.start_position().row, node.start_position().column)
+                    as usize,
             };
             if find_this_element_type_in_lines(lines, pos, indexer, uri).is_some() {
                 push_token(
@@ -925,10 +1152,8 @@ fn resolve_lambda_params(doc: &LiveDoc, src: &Source<'_>, indexer: &Indexer, uri
         };
         let pos = crate::types::CursorPos {
             line: node.start_position().row,
-            utf16_col: src.col_utf16(
-                node.start_position().row,
-                node.start_position().column,
-            ) as usize,
+            utf16_col: src.col_utf16(node.start_position().row, node.start_position().column)
+                as usize,
         };
 
         if name == "it" {
@@ -1008,7 +1233,7 @@ fn emit_param_uses_for_function(fn_node: Node<'_>, src: &Source<'_>, out: &mut V
     if params.is_empty() {
         return;
     }
-    let Some(body) = first_child_of_kind(fn_node, "function_body") else {
+    let Some(body) = first_child_of_kind(fn_node, KIND_FUN_BODY) else {
         return;
     };
     emit_param_refs_in_scope(body, &params, src, out);
@@ -1019,15 +1244,19 @@ fn emit_param_uses_for_function(fn_node: Node<'_>, src: &Source<'_>, out: &mut V
 /// parameter captures to be colored inside nested functions and lambdas.
 /// Nested function declarations are also processed separately by the outer
 /// `visit_tree` call, so their own parameters are handled independently.
-fn emit_param_refs_in_scope(node: Node<'_>, params: &[String], src: &Source<'_>, out: &mut Vec<RawToken>) {
-    if node.kind() == KIND_SIMPLE_IDENT || node.kind() == KIND_INTERP_IDENT {
-        if !is_declaration_site(node) {
-            if let Ok(name) = node.utf8_text(src.bytes) {
-                if params.iter().any(|p| p == name) {
-                    push_token(node, type_index(&SemanticTokenType::PARAMETER), 0, src, out);
-                }
-            }
-        }
+fn emit_param_refs_in_scope(
+    node: Node<'_>,
+    params: &[String],
+    src: &Source<'_>,
+    out: &mut Vec<RawToken>,
+) {
+    if (node.kind() == KIND_SIMPLE_IDENT || node.kind() == KIND_INTERP_IDENT)
+        && !is_declaration_site(node)
+        && node
+            .utf8_text(src.bytes)
+            .is_ok_and(|name| params.iter().any(|param| param == name))
+    {
+        push_token(node, type_index(&SemanticTokenType::PARAMETER), 0, src, out);
     }
     let mut cursor = node.walk();
     if cursor.goto_first_child() {
@@ -1039,8 +1268,6 @@ fn emit_param_refs_in_scope(node: Node<'_>, params: &[String], src: &Source<'_>,
         }
     }
 }
-
-
 
 /// Walk non-declaration identifiers and resolve them against the index.
 /// Emits tokens for type references, function calls, member accesses, etc.
@@ -1067,7 +1294,12 @@ fn walk_references(
     raw.extend(resolve_lambda_params(doc, src, indexer, uri));
 }
 
-fn walk_kotlin_references(node: Node<'_>, src: &Source<'_>, indexer: &Indexer, out: &mut Vec<RawToken>) {
+fn walk_kotlin_references(
+    node: Node<'_>,
+    src: &Source<'_>,
+    indexer: &Indexer,
+    out: &mut Vec<RawToken>,
+) {
     // Emit keyword tokens for Kotlin soft keywords
     if is_kotlin_keyword_node(node) {
         push_token(node, type_index(&SemanticTokenType::KEYWORD), 0, src, out);
@@ -1125,26 +1357,42 @@ fn classify_kotlin_reference(node: Node<'_>, src: &[u8], indexer: &Indexer) -> O
 
     if is_top_level_call_name(node) {
         return resolve_symbol_kind(node_text(node, src), indexer, |kind| {
-            matches!(kind, SymbolKind::CLASS | SymbolKind::STRUCT | SymbolKind::FUNCTION | SymbolKind::METHOD)
+            matches!(
+                kind,
+                SymbolKind::CLASS | SymbolKind::STRUCT | SymbolKind::FUNCTION | SymbolKind::METHOD
+            )
         })
         .and_then(|resolved| call_symbol_kind_to_token_type(resolved.kind));
     }
 
     if is_navigation_receiver(node) {
-        return resolve_symbol_kind(node_text(node, src), indexer, |kind| kind == SymbolKind::OBJECT)
-            .map(|_| type_index(&SemanticTokenType::NAMESPACE));
+        return resolve_symbol_kind(node_text(node, src), indexer, |kind| {
+            kind == SymbolKind::OBJECT
+        })
+        .map(|_| type_index(&SemanticTokenType::NAMESPACE));
     }
 
     None
 }
 
 fn is_declaration_site(node: Node<'_>) -> bool {
-    let Some(parent) = node.parent() else { return false };
+    let Some(parent) = node.parent() else {
+        return false;
+    };
     let pk = parent.kind();
-    if pk == KIND_CLASS_DECL || pk == KIND_OBJECT_DECL || pk == KIND_COMPANION_OBJ || pk == "type_alias" {
+    if pk == KIND_CLASS_DECL
+        || pk == KIND_OBJECT_DECL
+        || pk == KIND_COMPANION_OBJ
+        || pk == "type_alias"
+    {
         return node.kind() == KIND_TYPE_IDENT;
     }
-    if pk == KIND_FUN_DECL || pk == KIND_PARAMETER || pk == KIND_ENUM_ENTRY || pk == KIND_VAR_DECL || pk == "class_parameter" {
+    if pk == KIND_FUN_DECL
+        || pk == KIND_PARAMETER
+        || pk == KIND_ENUM_ENTRY
+        || pk == KIND_VAR_DECL
+        || pk == "class_parameter"
+    {
         return node.kind() == KIND_SIMPLE_IDENT;
     }
     if pk == KIND_TYPE_PARAM {
@@ -1154,11 +1402,15 @@ fn is_declaration_site(node: Node<'_>) -> bool {
 }
 
 fn is_annotation_reference(node: Node<'_>) -> bool {
-    let Some(parent) = node.parent() else { return false };
+    let Some(parent) = node.parent() else {
+        return false;
+    };
     if parent.kind() != KIND_USER_TYPE {
         return false;
     }
-    let Some(grandparent) = parent.parent() else { return false };
+    let Some(grandparent) = parent.parent() else {
+        return false;
+    };
     // @Simple annotation: annotation > user_type > type_identifier
     if grandparent.kind() == KIND_ANNOTATION || grandparent.kind() == KIND_MULTI_ANNOTATION {
         return true;
@@ -1180,7 +1432,9 @@ fn is_type_reference(node: Node<'_>) -> bool {
 }
 
 fn is_top_level_call_name(node: Node<'_>) -> bool {
-    let Some(parent) = node.parent() else { return false };
+    let Some(parent) = node.parent() else {
+        return false;
+    };
     parent.kind() == KIND_CALL_EXPR
         && parent
             .named_child(0)
@@ -1188,7 +1442,9 @@ fn is_top_level_call_name(node: Node<'_>) -> bool {
 }
 
 fn is_navigation_receiver(node: Node<'_>) -> bool {
-    let Some(parent) = node.parent() else { return false };
+    let Some(parent) = node.parent() else {
+        return false;
+    };
     parent.kind() == KIND_NAV_EXPR
         && parent
             .named_child(0)
@@ -1198,17 +1454,20 @@ fn is_navigation_receiver(node: Node<'_>) -> bool {
 /// Named argument label: `foo(name = value)` — the `name` identifier is the
 /// first child of `value_argument` and is followed by `=`.
 fn is_named_argument_label(node: Node<'_>) -> bool {
-    let Some(parent) = node.parent() else { return false };
+    let Some(parent) = node.parent() else {
+        return false;
+    };
     if parent.kind() != KIND_VALUE_ARG {
         return false;
     }
     // The label is the first named child and must be followed by "="
-    let Some(first) = parent.named_child(0) else { return false };
+    let Some(first) = parent.named_child(0) else {
+        return false;
+    };
     if first.id() != node.id() {
         return false;
     }
-    node.next_sibling()
-        .is_some_and(|sib| sib.kind() == KIND_EQ)
+    node.next_sibling().is_some_and(|sib| sib.kind() == KIND_EQ)
 }
 
 fn enum_entry_reference_token(node: Node<'_>, src: &[u8], indexer: &Indexer) -> Option<u32> {
@@ -1219,8 +1478,9 @@ fn enum_entry_reference_token(node: Node<'_>, src: &[u8], indexer: &Indexer) -> 
     }
 
     let receiver = navigation.named_child(0)?;
-    let receiver_kind =
-        resolve_symbol_kind(node_text(receiver, src), indexer, |kind| kind == SymbolKind::ENUM)?;
+    let receiver_kind = resolve_symbol_kind(node_text(receiver, src), indexer, |kind| {
+        kind == SymbolKind::ENUM
+    })?;
     let receiver_data = indexer.files.get(receiver_kind.uri.as_str())?;
     receiver_data
         .symbols
@@ -1296,14 +1556,25 @@ struct ResolvedReference {
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 
-pub(crate) fn full_tokens(indexer: &Indexer, uri: &Url, doc: &LiveDoc, language: Language) -> SemanticTokens {
+pub(crate) fn full_tokens(
+    indexer: &Indexer,
+    uri: &Url,
+    doc: &LiveDoc,
+    language: Language,
+) -> SemanticTokens {
     SemanticTokens {
         result_id: None,
         data: collect_tokens(doc, language, None, Some(indexer), Some(uri)),
     }
 }
 
-pub(crate) fn range_tokens(indexer: &Indexer, uri: &Url, doc: &LiveDoc, language: Language, range: &Range) -> SemanticTokens {
+pub(crate) fn range_tokens(
+    indexer: &Indexer,
+    uri: &Url,
+    doc: &LiveDoc,
+    language: Language,
+    range: &Range,
+) -> SemanticTokens {
     SemanticTokens {
         result_id: None,
         data: collect_tokens(doc, language, Some(range), Some(indexer), Some(uri)),
@@ -1321,7 +1592,11 @@ pub(crate) fn full_tokens_cst_only(doc: &LiveDoc, language: Language) -> Semanti
 }
 
 #[cfg(test)]
-pub(crate) fn range_tokens_cst_only(doc: &LiveDoc, language: Language, range: &Range) -> SemanticTokens {
+pub(crate) fn range_tokens_cst_only(
+    doc: &LiveDoc,
+    language: Language,
+    range: &Range,
+) -> SemanticTokens {
     SemanticTokens {
         result_id: None,
         data: collect_tokens(doc, language, Some(range), None, None),
