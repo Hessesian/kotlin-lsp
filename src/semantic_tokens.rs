@@ -254,6 +254,18 @@ fn classify_kotlin(node: Node<'_>, src: &Source<'_>, out: &mut Vec<RawToken>) {
                 push_token(node, type_index(&SemanticTokenType::DECORATOR), 0, src, out);
             }
         }
+        // Named argument label: `foo(name = value)` — purely CST, no index needed.
+        k if k == KIND_VALUE_ARG => {
+            if let Some(label) = value_arg_label(node) {
+                push_token(
+                    label,
+                    type_index(&SemanticTokenType::PARAMETER),
+                    0,
+                    src,
+                    out,
+                );
+            }
+        }
         // Soft keywords: tree-sitter captures these as @operator or not at all,
         // but JetBrains colors them as keywords. Emit KEYWORD to override.
         k if k == KIND_KW_IS
@@ -1620,21 +1632,24 @@ fn is_navigation_receiver(node: Node<'_>) -> bool {
 
 /// Named argument label: `foo(name = value)` — the `name` identifier is the
 /// first child of `value_argument` and is followed by `=`.
+/// Returns the label identifier of a `value_argument` node if it is a named argument.
+/// `foo(name = value)` — `name` is the first named child followed by `=`.
+fn value_arg_label(node: Node<'_>) -> Option<Node<'_>> {
+    let first = node.named_child(0)?;
+    if first.kind() != KIND_SIMPLE_IDENT {
+        return None;
+    }
+    first
+        .next_sibling()
+        .is_some_and(|s| s.kind() == KIND_EQ)
+        .then_some(first)
+}
+
 fn is_named_argument_label(node: Node<'_>) -> bool {
     let Some(parent) = node.parent() else {
         return false;
     };
-    if parent.kind() != KIND_VALUE_ARG {
-        return false;
-    }
-    // The label is the first named child and must be followed by "="
-    let Some(first) = parent.named_child(0) else {
-        return false;
-    };
-    if first.id() != node.id() {
-        return false;
-    }
-    node.next_sibling().is_some_and(|sib| sib.kind() == KIND_EQ)
+    parent.kind() == KIND_VALUE_ARG && value_arg_label(parent).is_some_and(|l| l.id() == node.id())
 }
 
 fn enum_entry_reference_token(node: Node<'_>, src: &[u8], indexer: &Indexer) -> Option<u32> {
