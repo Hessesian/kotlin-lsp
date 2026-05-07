@@ -11,6 +11,7 @@ use crate::rg::{rg_find_definition, rg_word_search, RgSearchRequest};
 use super::args::{CliArgs, Mode, OutputFmt, Subcommand};
 use super::hover::hover_at;
 use super::output::{print_results, CliResult};
+use super::tokens::{dump_tree, print_token_rows, token_rows};
 
 // ── Root resolution ───────────────────────────────────────────────────────────
 
@@ -189,6 +190,38 @@ pub(crate) async fn run(args: CliArgs) {
                     eprintln!("No symbol found at {}:{}:{}", file.display(), line, col);
                     std::process::exit(1);
                 }
+            }
+        }
+
+        // ── tokens ────────────────────────────────────────────────────────────
+        Subcommand::Tokens { file, cst_only, show_tree } => {
+            let idx = if !cst_only {
+                Some(build_index(&root).await)
+            } else {
+                None
+            };
+            match token_rows(&file, idx.as_ref(), cst_only) {
+                Ok(rows) => {
+                    print_token_rows(&rows, json);
+                    if show_tree {
+                        eprintln!();
+                        if let Err(e) = dump_tree(&file) {
+                            eprintln!("tree: {e}");
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        // ── tree ──────────────────────────────────────────────────────────────
+        Subcommand::Tree { file } => {
+            if let Err(e) = dump_tree(&file) {
+                eprintln!("error: {e}");
+                std::process::exit(1);
             }
         }
     }

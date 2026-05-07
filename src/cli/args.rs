@@ -8,6 +8,16 @@ pub(crate) enum Subcommand {
     Refs { name: String },
     Hover { file: PathBuf, line: u32, col: u32 },
     Index,
+    /// Dump semantic tokens for a file (debug).
+    Tokens {
+        file: PathBuf,
+        /// Use CST classification only; skip cross-file index resolution.
+        cst_only: bool,
+        /// Also print the tree-sitter parse tree after tokens.
+        show_tree: bool,
+    },
+    /// Dump the tree-sitter parse tree for a file (debug).
+    Tree { file: PathBuf },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,7 +63,7 @@ impl CliArgs {
                 std::process::exit(0);
             }
             Some(lexopt::Arg::Long(flag))
-                if matches!(flag, "find" | "refs" | "hover" | "index") =>
+                if matches!(flag, "find" | "refs" | "hover" | "index" | "tokens" | "tree") =>
             {
                 return Err(format!(
                     "'{flag}' is a subcommand, not a flag — use `kotlin-lsp {flag}` (without --)"
@@ -66,7 +76,7 @@ impl CliArgs {
 
         let subcmd_str = first.to_string_lossy();
         let subcommand = match subcmd_str.as_ref() {
-            "find" | "refs" | "hover" | "index" => subcmd_str.into_owned(),
+            "find" | "refs" | "hover" | "index" | "tokens" | "tree" => subcmd_str.into_owned(),
             _ => return Ok(None), // unknown first positional → LSP mode
         };
 
@@ -74,6 +84,8 @@ impl CliArgs {
         let mut fmt = OutputFmt::Text;
         let mut root: Option<PathBuf> = None;
         let mut positionals: Vec<String> = Vec::new();
+        let mut cst_only = false;
+        let mut show_tree = false;
 
         loop {
             match args.next().map_err(|e| e.to_string())? {
@@ -81,6 +93,8 @@ impl CliArgs {
                 Some(lexopt::Arg::Long("fast")) => mode = Mode::Fast,
                 Some(lexopt::Arg::Long("smart")) => mode = Mode::Smart,
                 Some(lexopt::Arg::Long("json")) => fmt = OutputFmt::Json,
+                Some(lexopt::Arg::Long("cst-only")) => cst_only = true,
+                Some(lexopt::Arg::Long("tree")) => show_tree = true,
                 Some(lexopt::Arg::Long("root")) => {
                     let val = args.value().map_err(|e| e.to_string())?;
                     root = Some(PathBuf::from(val.to_string_lossy().as_ref()));
@@ -136,6 +150,24 @@ impl CliArgs {
                 Subcommand::Hover { file, line, col }
             }
             "index" => Subcommand::Index,
+            "tokens" => {
+                let file = PathBuf::from(
+                    positionals
+                        .into_iter()
+                        .next()
+                        .ok_or("tokens requires a FILE argument")?,
+                );
+                Subcommand::Tokens { file, cst_only, show_tree }
+            }
+            "tree" => {
+                let file = PathBuf::from(
+                    positionals
+                        .into_iter()
+                        .next()
+                        .ok_or("tree requires a FILE argument")?,
+                );
+                Subcommand::Tree { file }
+            }
             _ => unreachable!(),
         };
 
@@ -161,16 +193,20 @@ USAGE:
     kotlin-lsp                            # start LSP server (stdio)
 
 SUBCOMMANDS:
-    find  <name>              Find declarations of a symbol
-    refs  <name>              Find all references to a symbol
-    hover <file> <line> <col> Show type/doc info at a position
-    index                     Build and cache the workspace index
+    find   <name>              Find declarations of a symbol
+    refs   <name>              Find all references to a symbol
+    hover  <file> <line> <col> Show type/doc info at a position
+    index                      Build and cache the workspace index
+    tokens <file>              Dump semantic tokens (debug)
+    tree   <file>              Dump tree-sitter parse tree (debug)
 
 OPTIONS:
     --fast          Use rg/fd only; never load index (default when no cache)
     --smart         Require index; build it if missing
     --json          Output results as JSON array
     --root <dir>    Workspace root (default: nearest .git dir or cwd)
+    --cst-only      (tokens) Skip index; CST classification only
+    --tree          (tokens) Also print the parse tree after tokens
     -h, --help      Print this help
     -V, --version   Print version
 
@@ -178,7 +214,10 @@ EXAMPLES:
     kotlin-lsp find MyViewModel
     kotlin-lsp refs --fast MyViewModel --root ./android
     kotlin-lsp hover src/Foo.kt 42 10 --json
-    kotlin-lsp index --root ./android",
+    kotlin-lsp index --root ./android
+    kotlin-lsp tokens --cst-only src/Foo.kt
+    kotlin-lsp tokens src/Foo.kt --tree
+    kotlin-lsp tree src/Foo.kt",
         env!("CARGO_PKG_VERSION")
     );
 }
