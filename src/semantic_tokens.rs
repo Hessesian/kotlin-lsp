@@ -534,13 +534,16 @@ fn push_token(node: Node<'_>, token_type: u32, token_modifiers_bitset: u32, src:
 
 /// Convert a tree-sitter byte-column to a UTF-16 column for LSP.
 fn byte_col_to_utf16(src: &[u8], row: usize, byte_col: usize) -> u32 {
-    let line_start = src
-        .iter()
-        .enumerate()
-        .filter(|(_, &b)| b == b'\n')
-        .nth(row.saturating_sub(1))
-        .map(|(i, _)| i + 1)
-        .unwrap_or(0);
+    let line_start = if row == 0 {
+        0
+    } else {
+        src.iter()
+            .enumerate()
+            .filter(|(_, &b)| b == b'\n')
+            .nth(row - 1)
+            .map(|(i, _)| i + 1)
+            .unwrap_or(0)
+    };
     let line_bytes = &src[line_start..];
     let prefix = if byte_col <= line_bytes.len() {
         &line_bytes[..byte_col]
