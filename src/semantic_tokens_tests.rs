@@ -926,3 +926,99 @@ fn multiline_columns_correct() {
     assert_token_at(&tokens, 0, 6, class_type, "CLASS 'A' at line 0 col 6");
     assert_token_at(&tokens, 1, 6, class_type, "CLASS 'B' at line 1 col 6");
 }
+
+// ─── Modifier coverage ────────────────────────────────────────────────────────
+
+#[test]
+fn companion_object_has_static_modifier() {
+    // companion object itself gets NAMESPACE + STATIC|DECLARATION
+    let src = "class Foo {\n    companion object {}\n}\n";
+    let doc = parse_kotlin(src);
+    let tokens = decode_all(&doc, Language::Kotlin);
+    let ns_type = type_id(&SemanticTokenType::NAMESPACE);
+    let static_bit = 1u32 << 2;
+    let decl_bit = 1u32 << 0;
+    let companion = tokens.iter().find(|&&(_, _, _, tt, _)| tt == ns_type);
+    assert!(companion.is_some(), "expected NAMESPACE token for companion object");
+    let (_, _, _, _, mods) = *companion.unwrap();
+    assert_ne!(mods & static_bit, 0, "companion object should have STATIC modifier, mods={mods:#b}");
+    assert_ne!(mods & decl_bit, 0, "companion object should have DECLARATION modifier, mods={mods:#b}");
+}
+
+#[test]
+fn java_field_final_is_property_readonly() {
+    let src = "class Foo { private final int count = 0; }\n";
+    let doc = parse_java(src);
+    let tokens = decode_all(&doc, Language::Java);
+    let prop_type = type_id(&SemanticTokenType::PROPERTY);
+    let readonly_bit = 1u32 << 1;
+    let decl_bit = 1u32 << 0;
+    // "count" at col 30
+    let field = tokens.iter().find(|&&(_, col, _, tt, _)| col == 30 && tt == prop_type);
+    assert!(field.is_some(), "expected PROPERTY for 'count', tokens: {tokens:?}");
+    let (_, _, _, _, mods) = *field.unwrap();
+    assert_ne!(mods & readonly_bit, 0, "final field should have READONLY modifier, mods={mods:#b}");
+    assert_ne!(mods & decl_bit, 0, "field should have DECLARATION modifier, mods={mods:#b}");
+}
+
+#[test]
+fn java_field_static_has_static_modifier() {
+    let src = "class Foo { static int count = 0; }\n";
+    let doc = parse_java(src);
+    let tokens = decode_all(&doc, Language::Java);
+    let prop_type = type_id(&SemanticTokenType::PROPERTY);
+    let static_bit = 1u32 << 2;
+    let field = tokens.iter().find(|&&(_, _, _, tt, _)| tt == prop_type);
+    assert!(field.is_some(), "expected PROPERTY for 'count'");
+    let (_, _, _, _, mods) = *field.unwrap();
+    assert_ne!(mods & static_bit, 0, "static field should have STATIC modifier, mods={mods:#b}");
+}
+
+#[test]
+fn java_field_non_final_non_static_has_no_readonly_static() {
+    let src = "class Foo { int count = 0; }\n";
+    let doc = parse_java(src);
+    let tokens = decode_all(&doc, Language::Java);
+    let prop_type = type_id(&SemanticTokenType::PROPERTY);
+    let readonly_bit = 1u32 << 1;
+    let static_bit = 1u32 << 2;
+    let field = tokens.iter().find(|&&(_, _, _, tt, _)| tt == prop_type);
+    assert!(field.is_some(), "expected PROPERTY for 'count'");
+    let (_, _, _, _, mods) = *field.unwrap();
+    assert_eq!(mods & readonly_bit, 0, "mutable field should NOT have READONLY, mods={mods:#b}");
+    assert_eq!(mods & static_bit, 0, "instance field should NOT have STATIC, mods={mods:#b}");
+}
+
+#[test]
+fn deprecated_modifier_not_set_without_annotation() {
+    // Negative test: regular function should never get DEPRECATED
+    let src = "fun normal(): Unit {}\n";
+    let doc = parse_kotlin(src);
+    let tokens = decode_all(&doc, Language::Kotlin);
+    let deprecated_bit = 1u32 << 5;
+    for &(_, _, _, _, mods) in &tokens {
+        assert_eq!(mods & deprecated_bit, 0, "DEPRECATED should not be set without @Deprecated, mods={mods:#b}");
+    }
+}
+
+#[test]
+fn abstract_class_method_both_abstract() {
+    let src = "abstract class Base {\n    abstract fun doIt()\n}\n";
+    let doc = parse_kotlin(src);
+    let tokens = decode_all(&doc, Language::Kotlin);
+    let class_type = type_id(&SemanticTokenType::CLASS);
+    let method_type = type_id(&SemanticTokenType::METHOD);
+    let abstract_bit = 1u32 << 3;
+    let decl_bit = 1u32 << 0;
+    // class Base
+    let cls = tokens.iter().find(|&&(_, _, _, tt, _)| tt == class_type);
+    assert!(cls.is_some(), "expected CLASS token");
+    let (_, _, _, _, class_mods) = *cls.unwrap();
+    assert_ne!(class_mods & abstract_bit, 0, "abstract class should have ABSTRACT, mods={class_mods:#b}");
+    // fun doIt
+    let method = tokens.iter().find(|&&(_, _, _, tt, _)| tt == method_type);
+    assert!(method.is_some(), "expected METHOD token");
+    let (_, _, _, _, method_mods) = *method.unwrap();
+    assert_ne!(method_mods & abstract_bit, 0, "abstract fun should have ABSTRACT, mods={method_mods:#b}");
+    assert_ne!(method_mods & decl_bit, 0, "method should have DECLARATION, mods={method_mods:#b}");
+}
