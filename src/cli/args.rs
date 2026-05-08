@@ -34,6 +34,13 @@ pub(crate) enum Subcommand {
     },
     /// List auto-discovered source roots for the workspace.
     Sources,
+    /// Extract Gradle *-sources.jar files to a sourcePaths-ready directory.
+    ExtractSources {
+        gradle_home: Option<PathBuf>,
+        output: Option<PathBuf>,
+        dry_run: bool,
+        patterns: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,20 +78,17 @@ impl CliArgs {
             return Ok(None);
         };
         let parsed = parse_cli_flags(&mut args)?;
-        let subcommand = build_subcommand(
-            &subcommand,
-            parsed.positionals,
-            parsed.cst_only,
-            parsed.resolve,
-            parsed.phases,
-            parsed.show_tree,
-        )?;
+        let mode = parsed.mode;
+        let fmt = parsed.fmt;
+        let root = parsed.root.clone();
+        let verbose = parsed.verbose;
+        let subcommand = build_subcommand(&subcommand, parsed)?;
         Ok(Some(Self {
             subcommand,
-            mode: parsed.mode,
-            fmt: parsed.fmt,
-            root: parsed.root,
-            verbose: parsed.verbose,
+            mode,
+            fmt,
+            root,
+            verbose,
         }))
     }
 }
@@ -99,6 +103,9 @@ struct ParsedCliFlags {
     phases: bool,
     show_tree: bool,
     verbose: bool,
+    gradle_home: Option<PathBuf>,
+    output_dir: Option<PathBuf>,
+    dry_run: bool,
 }
 
 fn parse_first_argument(args: &mut lexopt::Parser) -> Result<Option<std::ffi::OsString>, String> {
@@ -140,6 +147,9 @@ fn parse_cli_flags(args: &mut lexopt::Parser) -> Result<ParsedCliFlags, String> 
         phases: false,
         show_tree: false,
         verbose: false,
+        gradle_home: None,
+        output_dir: None,
+        dry_run: false,
     };
 
     loop {
@@ -157,6 +167,15 @@ fn parse_cli_flags(args: &mut lexopt::Parser) -> Result<ParsedCliFlags, String> 
                 let value = args.value().map_err(|e| e.to_string())?;
                 parsed.root = Some(PathBuf::from(value.to_string_lossy().as_ref()));
             }
+            Some(lexopt::Arg::Long("gradle-home")) => {
+                let value = args.value().map_err(|e| e.to_string())?;
+                parsed.gradle_home = Some(PathBuf::from(value.to_string_lossy().as_ref()));
+            }
+            Some(lexopt::Arg::Long("output")) => {
+                let value = args.value().map_err(|e| e.to_string())?;
+                parsed.output_dir = Some(PathBuf::from(value.to_string_lossy().as_ref()));
+            }
+            Some(lexopt::Arg::Long("dry-run")) => parsed.dry_run = true,
             Some(lexopt::Arg::Short('h') | lexopt::Arg::Long("help")) => {
                 print_help();
                 std::process::exit(0);
@@ -174,14 +193,18 @@ fn parse_cli_flags(args: &mut lexopt::Parser) -> Result<ParsedCliFlags, String> 
     }
 }
 
-fn build_subcommand(
-    subcommand: &str,
-    positionals: Vec<String>,
-    cst_only: bool,
-    resolve: bool,
-    phases: bool,
-    show_tree: bool,
-) -> Result<Subcommand, String> {
+fn build_subcommand(subcommand: &str, parsed: ParsedCliFlags) -> Result<Subcommand, String> {
+    let ParsedCliFlags {
+        positionals,
+        cst_only,
+        resolve,
+        phases,
+        show_tree,
+        gradle_home,
+        output_dir,
+        dry_run,
+        ..
+    } = parsed;
     match subcommand {
         "find" => Ok(Subcommand::Find {
             name: first_positional(positionals, "find requires a NAME argument")?,
@@ -208,6 +231,12 @@ fn build_subcommand(
             )?),
         }),
         "sources" => Ok(Subcommand::Sources),
+        "extract-sources" => Ok(Subcommand::ExtractSources {
+            gradle_home,
+            output: output_dir,
+            dry_run,
+            patterns: positionals,
+        }),
         _ => unreachable!(),
     }
 }
@@ -256,7 +285,7 @@ fn first_positional(
 fn is_subcommand(value: &str) -> bool {
     matches!(
         value,
-        "find" | "refs" | "hover" | "index" | "tokens" | "tree" | "sources"
+        "find" | "refs" | "hover" | "index" | "tokens" | "tree" | "sources" | "extract-sources"
     )
 }
 
@@ -278,21 +307,25 @@ SUBCOMMANDS:
     hover   <file> <line> <col> Show type/doc info at a position
     index                       Build and cache the workspace index
     sources                     List auto-discovered source roots
+    extract-sources [PATTERN…]  Extract Gradle *-sources.jar to sourcePaths dir
     tokens  <file>              Dump semantic tokens (debug)
     tree    <file>              Dump tree-sitter parse tree (debug)
 
 OPTIONS:
-    --fast          Use rg/fd only; never load index (default when no cache)
-    --smart         Require index; build it if missing
-    --json          Output results as JSON array
-    --root <dir>    Workspace root (default: nearest .git dir or cwd)
-    --resolve       (tokens) Load index for Phase 2 cross-file resolution
-    --cst-only      (tokens) Force CST-only mode (default, kept for clarity)
-    --phases        (tokens) Show per-phase token breakdown with dedup markers
-    --tree          (tokens) Also print the parse tree after tokens
-    -v, --verbose   Show progress messages (indexing, cache status)
-    -h, --help      Print this help
-    -V, --version   Print version
+    --fast              Use rg/fd only; never load index (default when no cache)
+    --smart             Require index; build it if missing
+    --json              Output results as JSON array
+    --root <dir>        Workspace root (default: nearest .git dir or cwd)
+    --resolve           (tokens) Load index for Phase 2 cross-file resolution
+    --cst-only          (tokens) Force CST-only mode (default, kept for clarity)
+    --phases            (tokens) Show per-phase token breakdown with dedup markers
+    --tree              (tokens) Also print the parse tree after tokens
+    --gradle-home <dir> (extract-sources) Gradle home (default: $GRADLE_USER_HOME or ~/.gradle)
+    --output <dir>      (extract-sources) Output root (default: ~/.kotlin-lsp/sources)
+    --dry-run           (extract-sources) Print what would be extracted; write nothing
+    -v, --verbose       Show progress messages (indexing, cache status)
+    -h, --help          Print this help
+    -V, --version       Print version
 
 EXAMPLES:
     kotlin-lsp find MyViewModel
@@ -301,6 +334,10 @@ EXAMPLES:
     kotlin-lsp index --root ./android
     kotlin-lsp sources --root ./android
     kotlin-lsp sources --json
+    kotlin-lsp extract-sources
+    kotlin-lsp extract-sources androidx.compose org.jetbrains.kotlin
+    kotlin-lsp extract-sources --dry-run
+    kotlin-lsp extract-sources --output ~/my-sources androidx.compose
     kotlin-lsp tokens src/Foo.kt
     kotlin-lsp tokens --resolve src/Foo.kt
     kotlin-lsp tokens src/Foo.kt --tree

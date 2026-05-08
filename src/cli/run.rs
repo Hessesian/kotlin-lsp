@@ -138,6 +138,19 @@ pub(crate) async fn run(args: CliArgs) {
         }
         Subcommand::Tree { file } => run_tree(&file),
         Subcommand::Sources => super::sources::run_sources(&root, json),
+        Subcommand::ExtractSources {
+            gradle_home,
+            output,
+            dry_run,
+            patterns,
+        } => super::extract_sources::run_extract_sources(
+            super::extract_sources::ExtractOptions {
+                gradle_home,
+                output,
+                dry_run,
+                patterns,
+            },
+        ),
     }
 }
 

@@ -82,4 +82,11 @@ pub(crate) fn run_sources(workspace_root: &Path, json: bool) {
     if missing > 0 {
         eprintln!("\n{missing} path(s) marked ✗ do not exist on disk.");
     }
+
+    if roots.is_empty() || roots.iter().any(|r| r.origin == "build-layout") {
+        eprintln!(
+            "\nTip: run `kotlin-lsp extract-sources` to unpack Gradle *-sources.jar files"
+        );
+        eprintln!("     so library source code is available for hover and go-to-definition.");
+    }
 }

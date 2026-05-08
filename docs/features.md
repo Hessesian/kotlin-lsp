@@ -53,6 +53,46 @@ Small improvements identified by comparing against the JetBrains reference imple
 | **FoldingRange — block comments** | Detect `/* … */` multi-line comments and fold with `FoldingRangeKind::Comment`. Currently only `//` line-comment blocks are folded. | Low |
 | **FoldingRange — collapsedText** | Set `collapsed_text` on every fold range (e.g. `"..."` for blocks, `"imports"` for import folds). Improves editor display when a region is collapsed. | Trivial |
 
+## CLI subcommands
+
+`kotlin-lsp` ships with a standalone CLI in addition to the LSP server.
+
+```
+kotlin-lsp sources [--root <dir>] [--json]
+```
+Lists every source root that would be auto-discovered for a project (from `workspace.json` or standard Gradle/Maven build layout). Marks which paths exist on disk. Run this to verify the indexer will find your sources without starting the server.
+
+If source roots are missing, the command suggests `extract-sources` as a next step.
+
+```
+kotlin-lsp extract-sources [PATTERN…] [OPTIONS]
+```
+Unpacks `*-sources.jar` files from the Gradle module cache so the LSP server can serve hover docs and go-to-definition for library code.
+
+| Option | Default | Description |
+|---|---|---|
+| `PATTERN…` | (all) | Substring filter on artifact path, e.g. `androidx.compose` `org.jetbrains.kotlin` |
+| `--gradle-home <dir>` | `$GRADLE_USER_HOME` or `~/.gradle` | Gradle home directory |
+| `--output <dir>` | `~/.kotlin-lsp/sources` | Extraction root |
+| `--dry-run` | off | Print what would be extracted; write nothing |
+
+**Typical workflow:**
+
+```sh
+# 1. Check what source roots are auto-detected
+kotlin-lsp sources --root ./android
+
+# 2. Extract library sources (first time, or after a Gradle sync)
+kotlin-lsp extract-sources androidx.compose org.jetbrains.kotlin
+
+# 3. Add the output dir to your LSP config (one-time)
+#    sourcePaths = ["~/.kotlin-lsp/sources"]
+
+# 4. Re-index (or restart the server) to pick up new sources
+kotlin-lsp index --root ./android
+```
+
+The extractor deduplicates by artifact — when multiple versions are cached, only the latest is extracted.
 
 ## What gets indexed
 
