@@ -7,7 +7,7 @@
 //!
 //! Placeholder substitution:
 //! - `<WORKSPACE>` → absolute workspace root path
-//! - `<MAVEN_REPO>` → `~/.m2/repository` (library jars, currently skipped)
+//! - `<MAVEN_REPO>` → skipped (library jars are not indexed)
 //!
 //! Source root types we index:
 //! - `"java-source"` — production Kotlin/Java sources
@@ -154,7 +154,7 @@ pub(crate) fn detect_build_layout_source_paths(workspace_root: &Path) -> Vec<Pat
     for dir in &all_dirs {
         for candidate in &source_candidates {
             let path = dir.join(candidate);
-            if path.exists() && !roots.contains(&path) {
+            if path.is_dir() && !roots.contains(&path) {
                 roots.push(path);
             }
         }
@@ -187,29 +187,32 @@ fn settings_subprojects(workspace_root: &Path) -> Vec<String> {
 }
 
 /// Parses `include("...", "...")` calls and returns directory paths.
+///
+/// Handles both double- and single-quoted project names, and both Kotlin DSL
+/// (`include(":app")`) and Groovy (`include ':app'`) styles. Lines starting
+/// with `includeBuild` or `includeFlat` are intentionally ignored.
 fn parse_include_calls(content: &str) -> Vec<String> {
     let mut result = Vec::new();
     for line in content.lines() {
         let trimmed = line.trim();
-        if !trimmed.starts_with("include") {
+        // Only match `include(` — reject `includeBuild(`, `includeFlat(`, etc.
+        if !trimmed.starts_with("include(") {
             continue;
         }
-        // Extract all quoted strings on this line.
-        let mut pos = 0;
-        while let Some(start) = trimmed[pos..].find('"') {
-            let start = pos + start + 1;
-            let Some(end) = trimmed[start..].find('"') else {
-                break;
-            };
-            let token = &trimmed[start..start + end];
-            // ":app" → "app", ":feature:login" → "feature/login"
-            let dir = token
-                .trim_start_matches(':')
-                .replace(':', std::path::MAIN_SEPARATOR_STR);
-            if !dir.is_empty() && !result.contains(&dir) {
-                result.push(dir);
+        // Extract all single- or double-quoted strings on this line.
+        let mut chars = trimmed.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '"' || c == '\'' {
+                let quote = c;
+                let token: String = chars.by_ref().take_while(|&d| d != quote).collect();
+                // ":app" → "app", ":feature:login" → "feature/login"
+                let dir = token
+                    .trim_start_matches(':')
+                    .replace(':', std::path::MAIN_SEPARATOR_STR);
+                if !dir.is_empty() && !result.contains(&dir) {
+                    result.push(dir);
+                }
             }
-            pos = start + end + 1;
         }
     }
     result

@@ -5,13 +5,13 @@
 //! where each path was found. Useful for verifying project setup without
 //! starting the LSP server.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
 pub(crate) struct SourceRoot {
-    pub path: PathBuf,
+    pub path: String, // lossy-UTF8; always serializable
     pub origin: &'static str, // "workspace.json" | "build-layout"
     pub exists: bool,
 }
@@ -23,8 +23,8 @@ pub(crate) fn discover(workspace_root: &Path) -> Vec<SourceRoot> {
     let json_paths = crate::workspace_json::load_source_paths(workspace_root);
     for path in &json_paths {
         roots.push(SourceRoot {
-            exists: path.exists(),
-            path: path.clone(),
+            exists: path.is_dir(),
+            path: path.to_string_lossy().into_owned(),
             origin: "workspace.json",
         });
     }
@@ -32,8 +32,8 @@ pub(crate) fn discover(workspace_root: &Path) -> Vec<SourceRoot> {
     if json_paths.is_empty() {
         for path in crate::workspace_json::detect_build_layout_source_paths(workspace_root) {
             roots.push(SourceRoot {
-                exists: path.exists(),
-                path,
+                exists: path.is_dir(),
+                path: path.to_string_lossy().into_owned(),
                 origin: "build-layout",
             });
         }
@@ -57,10 +57,13 @@ pub(crate) fn run_sources(workspace_root: &Path, json: bool) {
     }
 
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&roots).unwrap_or_default()
-        );
+        match serde_json::to_string_pretty(&roots) {
+            Ok(json_str) => println!("{json_str}"),
+            Err(e) => {
+                eprintln!("error: failed to serialize sources: {e}");
+                std::process::exit(1);
+            }
+        }
         return;
     }
 
@@ -72,7 +75,7 @@ pub(crate) fn run_sources(workspace_root: &Path, json: bool) {
             last_origin = root.origin;
         }
         let marker = if root.exists { "  ✓" } else { "  ✗" };
-        println!("{} {}", marker, root.path.display());
+        println!("{} {}", marker, root.path);
     }
 
     let missing = roots.iter().filter(|r| !r.exists).count();

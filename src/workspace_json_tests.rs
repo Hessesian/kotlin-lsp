@@ -175,3 +175,17 @@ fn deduplicates_include_entries() {
     let result = parse_include_calls(content);
     assert_eq!(result.len(), 1);
 }
+
+#[test]
+fn parses_single_quoted_includes() {
+    let content = "include(':app', ':core')";
+    let result = parse_include_calls(content);
+    assert_eq!(result, vec!["app", "core"]);
+}
+
+#[test]
+fn ignores_include_build_lines() {
+    let content = "includeBuild(\"../other-project\")\ninclude(\":app\")";
+    let result = parse_include_calls(content);
+    assert_eq!(result, vec!["app"]);
+}

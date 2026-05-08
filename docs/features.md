@@ -41,6 +41,17 @@ parsing only (no type resolution):
 | `textDocument/onTypeFormatting` | Low | Auto-indent / brace matching as you type. |
 | `textDocument/formatting` | Low | Delegate to `ktfmt` / `google-java-format` subprocess if available on `$PATH`. |
 
+## Known UX gaps (scouted from JetBrains kotlin-lsp, 2026-05)
+
+Small improvements identified by comparing against the JetBrains reference implementation. None require type resolution.
+
+| Area | What to change | Effort |
+|---|---|---|
+| **Hover — backtick identifiers** | Change ` ```kotlin ` to ` ````kotlin ` (quadruple backtick fence) in `src/backend/format.rs`. Kotlin identifiers can contain backticks (`` `my fun` ``); a triple-backtick fence breaks the Markdown block. | Trivial |
+| **Completion item kind — METHOD** | `symbol_kind_to_completion` in `src/resolver/complete.rs` maps both `SymbolKind::FUNCTION` and `SymbolKind::METHOD` to `CompletionItemKind::FUNCTION`. Should map METHOD → `CompletionItemKind::METHOD` so editors show the correct icon. | Trivial |
+| **FoldingRange — import block** | Detect `import` blocks (consecutive lines starting with `import`) and emit `FoldingRangeKind::Imports` instead of `Region`. Currently all folds are `Region`. (`src/backend/handlers.rs`) | Low |
+| **FoldingRange — block comments** | Detect `/* … */` multi-line comments and fold with `FoldingRangeKind::Comment`. Currently only `//` line-comment blocks are folded. | Low |
+| **FoldingRange — collapsedText** | Set `collapsed_text` on every fold range (e.g. `"..."` for blocks, `"imports"` for import folds). Improves editor display when a region is collapsed. | Trivial |
 
 
 ## What gets indexed
