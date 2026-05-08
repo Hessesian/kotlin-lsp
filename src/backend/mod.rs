@@ -271,13 +271,24 @@ impl Backend {
             }
         }
 
-        if let Some(source_paths) =
+        let mut all_source_paths: Vec<String> =
             Self::collect_indexing_option_strings(initialization_options, "sourcePaths")
-        {
-            log::info!("sourcePaths: {:?}", source_paths);
+                .unwrap_or_default();
+
+        // Auto-discover source roots from workspace.json (JetBrains Gradle/Maven format).
+        // Discovered paths are merged with any user-configured sourcePaths.
+        for path in crate::workspace_json::load_source_paths(workspace_root) {
+            let path_str = path.to_string_lossy().into_owned();
+            if !all_source_paths.contains(&path_str) {
+                all_source_paths.push(path_str);
+            }
+        }
+
+        if !all_source_paths.is_empty() {
+            log::info!("sourcePaths (combined): {:?}", all_source_paths);
             match self.indexer.source_paths_raw.write() {
                 Ok(mut source_paths_raw) => {
-                    *source_paths_raw = source_paths;
+                    *source_paths_raw = all_source_paths;
                 }
                 Err(error) => {
                     log::warn!("Failed to update source paths: {error}");
