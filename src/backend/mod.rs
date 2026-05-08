@@ -277,10 +277,21 @@ impl Backend {
 
         // Auto-discover source roots from workspace.json (JetBrains Gradle/Maven format).
         // Discovered paths are merged with any user-configured sourcePaths.
-        for path in crate::workspace_json::load_source_paths(workspace_root) {
+        let workspace_json_paths = crate::workspace_json::load_source_paths(workspace_root);
+        for path in &workspace_json_paths {
             let path_str = path.to_string_lossy().into_owned();
             if !all_source_paths.contains(&path_str) {
                 all_source_paths.push(path_str);
+            }
+        }
+
+        // Fallback: if workspace.json wasn't present, probe standard Maven/Gradle layouts.
+        if workspace_json_paths.is_empty() {
+            for path in crate::workspace_json::detect_build_layout_source_paths(workspace_root) {
+                let path_str = path.to_string_lossy().into_owned();
+                if !all_source_paths.contains(&path_str) {
+                    all_source_paths.push(path_str);
+                }
             }
         }
 

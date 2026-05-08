@@ -97,6 +97,124 @@ pub(crate) fn load_source_paths(workspace_root: &Path) -> Vec<PathBuf> {
     paths
 }
 
+/// Detects standard Maven/Gradle source layouts without requiring `workspace.json`.
+///
+/// Activates when a build file (`build.gradle.kts`, `build.gradle`, `pom.xml`, …) exists
+/// at the workspace root. Probes well-known source directories; returns only those that
+/// actually exist on disk so the indexer never spins on empty paths.
+///
+/// Multi-module Gradle: `settings.gradle(.kts)` is parsed for `include(":module")` calls;
+/// each listed module is treated as a subproject and its standard source dirs are probed.
+///
+/// These paths are typically already covered by the workspace root scan, but listing them
+/// explicitly ensures consistent indexing when the workspace root is set to a parent dir.
+pub(crate) fn detect_build_layout_source_paths(workspace_root: &Path) -> Vec<PathBuf> {
+    let has_gradle = ["build.gradle.kts", "build.gradle"]
+        .iter()
+        .any(|f| workspace_root.join(f).exists());
+    let has_settings = ["settings.gradle.kts", "settings.gradle"]
+        .iter()
+        .any(|f| workspace_root.join(f).exists());
+    let has_maven = workspace_root.join("pom.xml").exists();
+
+    if !has_gradle && !has_settings && !has_maven {
+        return Vec::new();
+    }
+
+    let mut roots: Vec<PathBuf> = Vec::new();
+
+    // Subproject dirs from settings.gradle(.kts)
+    let subprojects = settings_subprojects(workspace_root);
+
+    // Probe candidates for each directory scope.
+    let scan_dirs: Vec<PathBuf> = if subprojects.is_empty() {
+        vec![workspace_root.to_owned()]
+    } else {
+        subprojects
+            .iter()
+            .map(|s| workspace_root.join(s))
+            .collect()
+    };
+
+    // Always include the root itself (root build.gradle may have sources too).
+    let mut all_dirs = vec![workspace_root.to_owned()];
+    for d in &scan_dirs {
+        if d != workspace_root && !all_dirs.contains(d) {
+            all_dirs.push(d.clone());
+        }
+    }
+
+    let source_candidates = [
+        "src/main/kotlin",
+        "src/main/java",
+        "src/test/kotlin",
+        "src/test/java",
+    ];
+
+    for dir in &all_dirs {
+        for candidate in &source_candidates {
+            let path = dir.join(candidate);
+            if path.exists() && !roots.contains(&path) {
+                roots.push(path);
+            }
+        }
+    }
+
+    if !roots.is_empty() {
+        log::info!(
+            "build-layout: auto-discovered {} source roots",
+            roots.len()
+        );
+    }
+    roots
+}
+
+/// Extracts subproject directory names from `settings.gradle` / `settings.gradle.kts`.
+///
+/// Handles both forms:
+/// - `include(":app", ":core")` — Gradle convention (colon prefix)
+/// - `include("app", "core")` — variant without colon
+/// - Nested: `include(":feature:login")` → maps to `feature/login`
+fn settings_subprojects(workspace_root: &Path) -> Vec<String> {
+    for filename in &["settings.gradle.kts", "settings.gradle"] {
+        let path = workspace_root.join(filename);
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        return parse_include_calls(&content);
+    }
+    Vec::new()
+}
+
+/// Parses `include("...", "...")` calls and returns directory paths.
+fn parse_include_calls(content: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("include") {
+            continue;
+        }
+        // Extract all quoted strings on this line.
+        let mut pos = 0;
+        while let Some(start) = trimmed[pos..].find('"') {
+            let start = pos + start + 1;
+            let Some(end) = trimmed[start..].find('"') else {
+                break;
+            };
+            let token = &trimmed[start..start + end];
+            // ":app" → "app", ":feature:login" → "feature/login"
+            let dir = token
+                .trim_start_matches(':')
+                .replace(':', std::path::MAIN_SEPARATOR_STR);
+            if !dir.is_empty() && !result.contains(&dir) {
+                result.push(dir);
+            }
+            pos = start + end + 1;
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 #[path = "workspace_json_tests.rs"]
 mod tests;

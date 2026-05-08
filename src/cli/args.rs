@@ -32,6 +32,8 @@ pub(crate) enum Subcommand {
     Tree {
         file: PathBuf,
     },
+    /// List auto-discovered source roots for the workspace.
+    Sources,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -205,6 +207,7 @@ fn build_subcommand(
                 "tree requires a FILE argument",
             )?),
         }),
+        "sources" => Ok(Subcommand::Sources),
         _ => unreachable!(),
     }
 }
@@ -253,7 +256,7 @@ fn first_positional(
 fn is_subcommand(value: &str) -> bool {
     matches!(
         value,
-        "find" | "refs" | "hover" | "index" | "tokens" | "tree"
+        "find" | "refs" | "hover" | "index" | "tokens" | "tree" | "sources"
     )
 }
 
@@ -270,12 +273,13 @@ USAGE:
     kotlin-lsp                            # start LSP server (stdio)
 
 SUBCOMMANDS:
-    find   <name>              Find declarations of a symbol
-    refs   <name>              Find all references to a symbol
-    hover  <file> <line> <col> Show type/doc info at a position
-    index                      Build and cache the workspace index
-    tokens <file>              Dump semantic tokens (debug)
-    tree   <file>              Dump tree-sitter parse tree (debug)
+    find    <name>              Find declarations of a symbol
+    refs    <name>              Find all references to a symbol
+    hover   <file> <line> <col> Show type/doc info at a position
+    index                       Build and cache the workspace index
+    sources                     List auto-discovered source roots
+    tokens  <file>              Dump semantic tokens (debug)
+    tree    <file>              Dump tree-sitter parse tree (debug)
 
 OPTIONS:
     --fast          Use rg/fd only; never load index (default when no cache)
@@ -295,6 +299,8 @@ EXAMPLES:
     kotlin-lsp refs --fast MyViewModel --root ./android
     kotlin-lsp hover src/Foo.kt 42 10 --json
     kotlin-lsp index --root ./android
+    kotlin-lsp sources --root ./android
+    kotlin-lsp sources --json
     kotlin-lsp tokens src/Foo.kt
     kotlin-lsp tokens --resolve src/Foo.kt
     kotlin-lsp tokens src/Foo.kt --tree

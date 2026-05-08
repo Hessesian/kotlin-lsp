@@ -24,6 +24,7 @@ mod args;
 mod hover;
 mod output;
 mod run;
+mod sources;
 mod tokens;
 
 pub(crate) use args::CliArgs;
