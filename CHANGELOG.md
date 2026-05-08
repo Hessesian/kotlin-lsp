@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.12.0
+
+- **`extract-sources` CLI** — `kotlin-lsp extract-sources` walks the Gradle cache (`~/.gradle/caches/modules-2/files-2.1`), deduplicates `*-sources.jar` by keeping the latest version per artifact, and extracts `.kt`/`.java` sources to `~/.kotlin-lsp/sources`. Supports `--dry-run`, `--output`, `--gradle-home`, and optional group/artifact filter patterns. CLI commands (`find`, `refs`, `hover`, `index`) now automatically include `~/.kotlin-lsp/sources` so extracted library sources are indexed without any manual configuration.
+- **`sources` CLI** — `kotlin-lsp sources` lists auto-discovered source roots and their origin (`workspace.json` or `build-layout`). Prints a tip to run `extract-sources` when build-layout detection is active.
+- **Zero-config source root discovery** — the LSP server and CLI now auto-discover source roots from JetBrains `workspace.json` (exported by IntelliJ/Android Studio) and from standard Gradle/Maven build layouts (`src/main/kotlin`, `src/main/java`, per-module subprojects). No manual `sourcePaths` configuration needed for most Android projects.
+- **Extension robustness** — fixed hang on large workspaces; `shutdown` is now non-blocking; top-level `object` declarations emit `STATIC` semantic token modifier.
+
 ## 0.11.0
 
 - **Semantic tokens** — full `textDocument/semanticTokens/full` implementation with two-phase pipeline: Phase 1 (CST classification via tree-sitter) + Phase 2 (cross-file resolution via index). Supports Kotlin, Java, and Swift.
