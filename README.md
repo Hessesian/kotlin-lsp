@@ -3,7 +3,7 @@
 [![crates.io](https://img.shields.io/crates/v/kotlin-lsp)](https://crates.io/crates/kotlin-lsp)
 [![downloads](https://img.shields.io/crates/d/kotlin-lsp)](https://crates.io/crates/kotlin-lsp)
 [![release](https://img.shields.io/github/v/release/Hessesian/kotlin-lsp)](https://github.com/Hessesian/kotlin-lsp/releases/latest)
-[![build](https://img.shields.io/github/actions/workflow/status/Hessesian/kotlin-lsp/release.yml)](https://github.com/Hessesian/kotlin-lsp/actions/workflows/release.yml)
+[![build](https://img.shields.io/github/actions/workflow/status/Hessesian/kotlin-lsp/ci.yml)](https://github.com/Hessesian/kotlin-lsp/actions/workflows/ci.yml)
 [![license](https://img.shields.io/crates/l/kotlin-lsp)](LICENSE)
 
 A fast, low-memory LSP server for **Kotlin**, **Java**, and **Swift**, written in Rust.  
