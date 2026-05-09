@@ -77,9 +77,11 @@
 
 #### Unit Test Organization
 
-- Co-located: `#[cfg(test)] mod tests` at end of same file
+- Tests live in companion `*_tests.rs` files next to source files
+  - e.g., `src/parser_tests.rs` alongside `src/parser.rs`
+  - Source file contains only: `#[cfg(test)] #[path = "parser_tests.rs"] mod tests;`
 - Naming: `#[test] fn test_<behavior>()` or `#[test] fn <behavior>_test()`
-- Test helpers in `indexer/test_helpers.rs` and `resolver/tests.rs`
+- Test helpers in `indexer/test_helpers.rs`
 
 #### Test Doubles
 
@@ -143,15 +145,11 @@ No global singletons or service locators.
 - `clippy::too_many_lines` — function size cap (default ~200 lines)
 - Regular clippy runs to catch common mistakes (see commits: "refactor(clippy): apply...")
 
-### Phase 12 Refactoring Standards (In-Progress)
+### Phase 12 Refactoring Standards (Complete)
 
-The codebase is undergoing structural refactoring (Phase 12) to:
-- Replace `Option<T>` with trait-based ports (e.g., `ProgressReporter`)
-- Enforce hexagonal architecture boundaries
-- Remove anti-patterns (bare `unwrap`, double dereferences)
-- Replace blocking I/O with tokio equivalents
-
-Standard for all new code:
+The structural refactoring (Phase 12) has been completed. Standards applied to all new code:
 - Use traits for outbound dependencies
 - Return named structs instead of bool/tuple for domain logic
 - Apply visibility downgrade (`pub` → `pub(crate)`) unless external API
+- Tests in companion `*_tests.rs` files, never inline `mod tests { }` blocks
+- No `.unwrap()` or `.expect()` in production code (`#[cfg(test)]` code may use them)

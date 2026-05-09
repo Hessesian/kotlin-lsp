@@ -4,19 +4,33 @@
 
 ### 1) High-Level Data Flow
 
-**Request entry → Response output:**
+**Two operating modes — same indexer, different inbound adapters:**
 
 ```
-Client (VSCode, Neovim, Helix, etc.)
-  ↓ (LSP JSON-RPC over stdio)
-backend/handlers.rs (LSP LanguageServer impl)
-  ├─ initialize() → Indexer::new() + spawn workspace scan
-  ├─ hover(file, pos) → resolver::build_hover()
-  ├─ definition(file, pos) → resolver::find_definition()
-  ├─ completion(file, pos) → resolver::complete()
-  ├─ references(file, pos) → rg (ripgrep fallback) + index
-  ├─ documentSymbol(file) → indexer lookup
-  └─ rename(file, pos, newName) → apply workspace edit
+┌─────────────────────────────────────────────┐
+│  MODE 1: LSP Server (stdio or TCP)          │
+│  Editor (VSCode, Neovim, Helix, etc.)       │
+│    ↓ (JSON-RPC over stdio OR TCP :9257)     │
+│  backend/ (LanguageServer trait impl)       │
+│    ├─ initialize() → Indexer::new()         │
+│    │   + spawn background workspace scan    │
+│    ├─ hover, definition, completion, refs   │
+│    ├─ documentSymbol, rename, inlayHints    │
+│    └─ semanticTokens                        │
+└─────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────┐
+│  MODE 2: CLI Subcommands                    │
+│  Terminal user / scripting                  │
+│    ↓ (argv: find|refs|hover|index|tokens…)  │
+│  cli/ (arg parse → build_index → query)     │
+│    ├─ collect_cli_source_paths()            │
+│    │   (workspace.json, build-layout,       │
+│    │    ~/.kotlin-lsp/sources auto-include) │
+│    └─ Indexer::new() + index_workspace_full │
+└─────────────────────────────────────────────┘
+
+Both modes converge here:
   ↓
 resolver/ (type inference, definition resolution, completion scoring)
   ├─ Multi-hop field chains (e.g. obj.field.method())
@@ -28,8 +42,7 @@ resolver/ (type inference, definition resolution, completion scoring)
 indexer/ (index maintenance, cache, file discovery)
   ├─ scan.rs: workspace scanning orchestration
   ├─ discover.rs: file enumeration (fd or walkdir)
-  ├─ parser.rs: tree-sitter symbol extraction
-  ├─ cache.rs: on-disk index persistence
+  ├─ cache.rs: on-disk index persistence (bincode)
   └─ live_tree.rs: dynamic AST for open documents
   ↓
 parser.rs (tree-sitter grammar execution)
@@ -44,7 +57,7 @@ types.rs (domain model: SymbolEntry, FileData)
 
 | Layer | Files | Responsibility | Inbound/Outbound |
 |-------|-------|-----------------|------------------|
-| **Inbound Adapter** | `backend/` | LSP protocol parsing, request routing, response serialization | Receives LSP messages via tower-lsp |
+| **Inbound Adapters** | `backend/`, `cli/` | LSP protocol parsing OR CLI arg parsing, request routing, response serialization | Receives LSP messages (tower-lsp) or CLI args (lexopt) |
 | **Application** | `indexer/`, `parser.rs` | Workspace scanning, file discovery, symbol extraction, index state | Maintains index, orchestrates parsing |
 | **Domain** | `resolver/`, `types.rs` | Symbol resolution, type inference, completion scoring | Pure business logic, no I/O |
 | **Outbound Port** | `indexer/scan.rs` (ProgressReporter trait) | Progress notification abstraction | Injects `LspProgressReporter` or `NoopReporter` |
@@ -155,7 +168,7 @@ Send Location back to client (file URI + range)
 
 ### Testing Strategy
 
-- **Unit tests:** inline `#[cfg(test)]` modules per source file, with fake indexers
+- **Unit tests:** companion `*_tests.rs` files next to source files (e.g., `parser_tests.rs` next to `parser.rs`); each `mod.rs` or source file includes a 3-line stub `#[cfg(test)] #[path = "foo_tests.rs"] mod tests;`
 - **Integration tests:** `tests/` directory, use real tree-sitter grammars
 - **Fixture-based:** test data in `tests/fixtures/kotlin/`, `tests/fixtures/mvi/`
-- **No mocking framework:** manual test double structs (e.g., `TestIndexer`)
+- **No mocking framework:** manual test double structs (e.g., `TestIndexer`, `TestDeps`)

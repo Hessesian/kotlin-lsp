@@ -9,12 +9,16 @@
 | **ripgrep (rg)** | Text search for cross-file symbol references | Invoked via `Command::new("rg")` when symbol not in index | src/rg.rs |
 | **fd** | Fast file discovery | Primary file enumeration; used in `find_source_files()` | src/indexer/discover.rs |
 | **walkdir** | Fallback file discovery | Used when `fd` unavailable or `ignore` patterns needed | src/indexer/discover.rs |
+| **crates.io** | Binary distribution | `cargo install kotlin-lsp`; automated publish via CI | .github/workflows/release.yml, Cargo.toml |
+| **GitHub Releases** | Binary downloads | Pre-built binaries for 4 targets; built in CI on tag push | .github/workflows/release.yml |
 
 ### 2) Credentials and Secrets
 
-- **None:** kotlin-lsp is a local tool with no authentication
-- **No external services:** Does not connect to cloud APIs, databases, or remote LSP servers
-- **.env / config:** No environment variables beyond `RUST_LOG` and `KOTLIN_LSP_MAX_FILES`
+- **No runtime secrets:** kotlin-lsp is a local tool with no authentication required for use
+- **CI secrets (build-time only):**
+  - `CARGO_REGISTRY_TOKEN` — used by the `publish` job in `.github/workflows/release.yml` to publish to crates.io; stored as a GitHub Actions repository secret
+  - `GITHUB_TOKEN` — standard Actions token for GitHub Release creation
+- **.env / config:** No environment variables beyond `RUST_LOG`, `KOTLIN_LSP_WORKSPACE_ROOT`, and `GRADLE_USER_HOME`
 
 ### 3) Databases and Persistence
 
@@ -158,11 +162,21 @@ client.send_notification("$/progress", WorkDoneProgressEnd)
 - `sourcePaths` — additional directories to index (e.g., Gradle cache, sources.jar extracts)
 - `ignorePatterns` — gitignore-style exclusions (v0.7.1+)
 
-**Python helper:** `contrib/extract-sources.py` finds `*-sources.jar` in Gradle cache, extracts, prepares for `sourcePaths`
+**Python helper:** `contrib/extract-sources.py` finds `*-sources.jar` in Gradle cache, extracts, prepares for `sourcePaths`. **As of v0.12.0, this functionality is built-in:** `kotlin-lsp extract-sources` (written in Rust, ships in the binary). The Python script is retained for reference only.
 
-### No Remote Dependencies
+### Transport Options
 
-- ✅ All dependencies vendored in Cargo.lock (crates.io or git)
-- ✅ No network calls at runtime (only CLI tool invocations)
-- ✅ No API keys, auth tokens, or service accounts required
-- ✅ No telemetry or phone-home functionality
+kotlin-lsp supports two transport modes:
+- **Stdio (default):** JSON-RPC over stdin/stdout; standard for all LSP clients
+- **TCP (`--port N`):** Listens on `127.0.0.1:N`, loopback only; useful for Android Studio (via LSP4J), Sora Editor, or other clients that cannot spawn a subprocess
+
+### crates.io Publish Pipeline
+
+**Automated:** The `publish` job in `.github/workflows/release.yml` runs `cargo publish --no-verify` on every tag push (or manual `workflow_dispatch`).
+
+**Trigger sequence:**
+1. Push tag `v*.*.*` → `build` job cross-compiles 4 targets
+2. `release` job uploads binaries to GitHub Releases
+3. `publish` job publishes to crates.io (needs `CARGO_REGISTRY_TOKEN` secret)
+
+**crate size:** 309 KB compressed (demo/contrib/docs excluded via `[package] exclude = [...]` in Cargo.toml).

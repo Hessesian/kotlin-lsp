@@ -11,25 +11,18 @@ Search result from scan:
 - No `// TODO:` or `// FIXME:` comments in src/
 - Production code is clean of deliberate tech debt markers
 
-### 2) High-Churn Files (Last 90 Days, Top 20)
-
-Files with highest modification counts are undergoing active refactoring (Phase 12 structural changes).
+### 2) High-Churn Files (Last 90 Days, Top 10)
 
 | File | Commits | Risk Level | Why |
 |------|---------|-----------|-----|
-| `src/indexer.rs` | 85 | 🔴 **CRITICAL** | Core index interface; undergoing trait refactoring (ProgressReporter, port extraction) |
+| `src/indexer.rs` | 93 | 🔴 **CRITICAL** | Core index interface; ongoing feature additions (CLI, source paths, tokens) |
+| `src/parser.rs` | 50 | 🟡 **HIGH** | Symbol extraction logic; tree-sitter grammar updates |
 | `src/backend.rs` | 50 | 🟡 **HIGH** | LSP handler dispatch; frequent LSP feature updates |
-| `src/parser.rs` | 47 | 🟡 **HIGH** | Symbol extraction logic; tree-sitter grammar updates |
 | `src/resolver.rs` | 41 | 🟡 **HIGH** | Type inference, completion; complex multi-hop logic |
-| `Cargo.toml` | 31 | 🟢 **MEDIUM** | Dependency updates and feature toggles |
-| `src/resolver/complete.rs` | 26 | 🟡 **HIGH** | Completion scoring and ranking; frequent algorithm tweaks |
-| `src/backend/handlers.rs` | 26 | 🟡 **HIGH** | Individual LSP handlers; protocol evolution |
-| `src/indexer/lookup.rs` | 23 | 🟡 **HIGH** | Symbol lookup; undergoing consolidation into resolver |
-| `src/indexer/resolution.rs` | 23 | 🟡 **HIGH** | Type substitution and symbol enrichment |
-| `src/resolver/infer.rs` | 23 | 🟡 **HIGH** | Type inference for `it`, `this`; complex edge cases |
+| `Cargo.toml` | 40 | 🟢 **MEDIUM** | Dependency updates and version bumps |
 
 **Implications:**
-- **Fragility risk:** High-churn code has hidden complexity; recent refactoring may introduce bugs
+- **Fragility risk:** High-churn code has hidden complexity; recent feature additions may introduce regressions
 - **Code review priority:** Changes to top 5 files warrant extra scrutiny
 - **Test coverage:** Top files have good test coverage (resolver 60KB, indexer 75KB test files)
 
@@ -74,6 +67,11 @@ Files over 500 LOC often mix multiple responsibilities:
 - **Swift:** Partial (hover works; some advanced features untested)
 - **Other JVM languages** (Scala, Groovy, Clojure): Not supported
 
+#### f) Binary `.aar` / `.jar` files
+- Compiled Android library archives (`.aar`) and bare compiled JARs cannot be indexed
+- Tree-sitter parses source text only; bytecode decompilation is out of scope
+- **Workaround:** Use `kotlin-lsp extract-sources` to unpack `*-sources.jar` files from Gradle cache; if a library ships no sources jar, only its public API surface is unavailable
+
 ### 5) Security Risks
 
 | Risk | Severity | Mitigation |
@@ -111,15 +109,19 @@ Files over 500 LOC often mix multiple responsibilities:
 
 **Objective:** Decouple application layer from LSP framework (Ports & Adapters pattern).
 
-**Work in Progress:**
+**Completed:**
 - ✅ Replace `Option<tower_lsp::Client>` with `ProgressReporter` trait (v0.9.3+)
 - ✅ Move framework types to adapter layer (KotlinProgress in backend/mod.rs)
 - ✅ Downgrade `pub` to `pub(crate)` across codebase (visibility cleanup)
 - ✅ Fix anti-patterns (bare unwrap, double dereferences, blocking I/O)
-- ⏳ Split `parser.rs` into smaller modules (planned Phase 13)
-- ⏳ Consolidate `indexer/lookup.rs` into `resolver/` (already migrated in recent commits)
+- ✅ Consolidate `indexer/lookup.rs` into `resolver/` (migrated in v0.10+)
+- ✅ Move tests to companion `*_tests.rs` files (no inline `mod tests`)
 
-**Impact:** This refactoring enables future language server implementations (e.g., Swift LSP) without LSP framework coupling.
+**Remaining debt:**
+- ⏳ Split `parser.rs` into smaller modules (still 61+ KB; planned future work)
+- ⏳ Type-aware reference resolution (currently name-based via rg)
+
+**Impact:** Refactoring enables future language server implementations (e.g., Swift LSP) without LSP framework coupling.
 
 ### Dependency Risk Assessment
 
@@ -157,7 +159,7 @@ Files over 500 LOC often mix multiple responsibilities:
 
 | Issue | Workaround |
 |-------|-----------|
-| Need to index extra library sources | Use `sourcePaths` configuration + contrib/extract-sources.py |
+| Need to index extra library sources (.aar, .jar) | Run `kotlin-lsp extract-sources` to unpack `*-sources.jar` from Gradle cache; output auto-indexed in CLI mode, or configure `sourcePaths` in LSP init options |
 | LSP doesn't find symbol in huge project | Restart LSP or manually clear cache (`~/.cache/kotlin-lsp/`) |
 | Hover shows wrong type for overloaded method | LSP resolution may pick first candidate; user can disambiguate via go-to-definition |
 

@@ -6,7 +6,11 @@
 .github/extensions/kotlin-lsp
 .github/extensions/kotlin-lsp/README.md
 .github/extensions/kotlin-lsp/extension.mjs
+.github/workflows
+.github/workflows/release.yml
 .gitignore
+.tours
+.tours/feature-contributor-guide.tour
 CHANGELOG.md
 Cargo.lock
 Cargo.toml
@@ -16,9 +20,128 @@ contrib
 contrib/copilot-extension
 contrib/copilot-extension/README.md
 contrib/copilot-extension/extension.mjs
+contrib/copilot-skill
+contrib/copilot-skill/SKILL.md
 contrib/extract-sources.py
 contrib/kotlin-cli.py
+contrib/vscode
+contrib/vscode/.gitignore
+contrib/vscode/.vscodeignore
+contrib/vscode/extension.js
+contrib/vscode/kotlin-language-configuration.json
+contrib/vscode/package.json
+contrib/vscode/syntaxes
+contrib/vscode/syntaxes/kotlin.tmLanguage.json
+copilot-rename-args-worktree
+copilot-rename-args-worktree/.github
+copilot-rename-args-worktree/.github/copilot-instructions.md
+copilot-rename-args-worktree/.github/extensions
+copilot-rename-args-worktree/.github/extensions/kotlin-lsp
+copilot-rename-args-worktree/.gitignore
+copilot-rename-args-worktree/.tours
+copilot-rename-args-worktree/.tours/feature-contributor-guide.tour
+copilot-rename-args-worktree/CHANGELOG.md
+copilot-rename-args-worktree/Cargo.lock
+copilot-rename-args-worktree/Cargo.toml
+copilot-rename-args-worktree/LICENSE
+copilot-rename-args-worktree/README.md
+copilot-rename-args-worktree/contrib
+copilot-rename-args-worktree/contrib/copilot-extension
+copilot-rename-args-worktree/contrib/copilot-extension/README.md
+copilot-rename-args-worktree/contrib/copilot-extension/extension.mjs
+copilot-rename-args-worktree/contrib/extract-sources.py
+copilot-rename-args-worktree/contrib/kotlin-cli.py
+copilot-rename-args-worktree/demo
+copilot-rename-args-worktree/demo/demo.cast
+copilot-rename-args-worktree/demo/demo.gif
+copilot-rename-args-worktree/demo/demo.tape
+copilot-rename-args-worktree/demo/demo_slowed.cast
+copilot-rename-args-worktree/demo/demo_v2.cast
+copilot-rename-args-worktree/demo/kotlin-lsp-demo-opt.gif
+copilot-rename-args-worktree/demo/kotlin-lsp-demo.gif
+copilot-rename-args-worktree/docs
+copilot-rename-args-worktree/docs/architecture.md
+copilot-rename-args-worktree/docs/codebase
+copilot-rename-args-worktree/docs/codebase/.codebase-scan.txt
+copilot-rename-args-worktree/docs/codebase/ARCHITECTURE.md
+copilot-rename-args-worktree/docs/codebase/CONCERNS.md
+copilot-rename-args-worktree/docs/codebase/CONVENTIONS.md
+copilot-rename-args-worktree/docs/codebase/INTEGRATIONS.md
+copilot-rename-args-worktree/docs/codebase/STACK.md
+copilot-rename-args-worktree/docs/codebase/STRUCTURE.md
+copilot-rename-args-worktree/docs/codebase/TESTING.md
+copilot-rename-args-worktree/docs/copilot.md
+copilot-rename-args-worktree/docs/editors.md
+copilot-rename-args-worktree/docs/features.md
+copilot-rename-args-worktree/src
+copilot-rename-args-worktree/src/backend
+copilot-rename-args-worktree/src/backend/actions.rs
+copilot-rename-args-worktree/src/backend/cursor.rs
+copilot-rename-args-worktree/src/backend/format.rs
+copilot-rename-args-worktree/src/backend/handlers.rs
+copilot-rename-args-worktree/src/backend/handlers_tests.rs
+copilot-rename-args-worktree/src/backend/helpers.rs
+copilot-rename-args-worktree/src/backend/helpers_tests.rs
+copilot-rename-args-worktree/src/backend/mod.rs
+copilot-rename-args-worktree/src/backend/nav.rs
+copilot-rename-args-worktree/src/backend/rename.rs
+copilot-rename-args-worktree/src/backend/rename_tests.rs
+copilot-rename-args-worktree/src/indexer
+copilot-rename-args-worktree/src/indexer/apply.rs
+copilot-rename-args-worktree/src/indexer/apply_tests.rs
+copilot-rename-args-worktree/src/indexer/cache.rs
+copilot-rename-args-worktree/src/indexer/cache_tests.rs
+copilot-rename-args-worktree/src/indexer/discover.rs
+copilot-rename-args-worktree/src/indexer/discover_tests.rs
+copilot-rename-args-worktree/src/indexer/doc.rs
+copilot-rename-args-worktree/src/indexer/doc_tests.rs
+copilot-rename-args-worktree/src/indexer/infer
+copilot-rename-args-worktree/src/indexer/live_tree.rs
+copilot-rename-args-worktree/src/indexer/live_tree_impl.rs
+copilot-rename-args-worktree/src/indexer/live_tree_tests.rs
+copilot-rename-args-worktree/src/indexer/lookup.rs
+copilot-rename-args-worktree/src/indexer/lookup_tests.rs
+copilot-rename-args-worktree/src/indexer/node_ext.rs
+copilot-rename-args-worktree/src/indexer/node_ext_tests.rs
+copilot-rename-args-worktree/src/indexer/resolution.rs
+copilot-rename-args-worktree/src/indexer/resolution_tests.rs
+copilot-rename-args-worktree/src/indexer/scan.rs
+copilot-rename-args-worktree/src/indexer/scan_tests.rs
+copilot-rename-args-worktree/src/indexer/scope.rs
+copilot-rename-args-worktree/src/indexer/scope_tests.rs
+copilot-rename-args-worktree/src/indexer/test_helpers.rs
+copilot-rename-args-worktree/src/indexer.rs
+copilot-rename-args-worktree/src/indexer_tests.rs
+copilot-rename-args-worktree/src/inlay_hints.rs
+copilot-rename-args-worktree/src/inlay_hints_tests.rs
+copilot-rename-args-worktree/src/lines_ext.rs
+copilot-rename-args-worktree/src/lines_ext_tests.rs
+copilot-rename-args-worktree/src/main.rs
+copilot-rename-args-worktree/src/parser.rs
+copilot-rename-args-worktree/src/parser_tests.rs
+copilot-rename-args-worktree/src/queries.rs
+copilot-rename-args-worktree/src/resolver
+copilot-rename-args-worktree/src/resolver/complete.rs
+copilot-rename-args-worktree/src/resolver/find.rs
+copilot-rename-args-worktree/src/resolver/infer.rs
+copilot-rename-args-worktree/src/resolver/infer_tests.rs
+copilot-rename-args-worktree/src/resolver/mod.rs
+copilot-rename-args-worktree/src/resolver/tests.rs
+copilot-rename-args-worktree/src/rg.rs
+copilot-rename-args-worktree/src/rg_tests.rs
+copilot-rename-args-worktree/src/stdlib.rs
+copilot-rename-args-worktree/src/stdlib_tail.rs
+copilot-rename-args-worktree/src/str_ext.rs
+copilot-rename-args-worktree/src/str_ext_tests.rs
+copilot-rename-args-worktree/src/task_runner.rs
+copilot-rename-args-worktree/src/types.rs
+copilot-rename-args-worktree/tests
+copilot-rename-args-worktree/tests/fixtures
+copilot-rename-args-worktree/tests/fixtures/kotlin
+copilot-rename-args-worktree/tests/swift_grammar.rs
 demo
+demo/cli.cast
+demo/cli.gif
 demo/demo.cast
 demo/demo.gif
 demo/demo.tape
@@ -26,23 +149,44 @@ demo/demo_slowed.cast
 demo/demo_v2.cast
 demo/kotlin-lsp-demo-opt.gif
 demo/kotlin-lsp-demo.gif
+demo/vscode.png
 docs
 docs/architecture.md
 docs/codebase
 docs/codebase/.codebase-scan.txt
+docs/codebase/ARCHITECTURE.md
+docs/codebase/CONCERNS.md
+docs/codebase/CONVENTIONS.md
+docs/codebase/INTEGRATIONS.md
+docs/codebase/STACK.md
+docs/codebase/STRUCTURE.md
+docs/codebase/TESTING.md
 docs/copilot.md
 docs/editors.md
 docs/features.md
+docs/performance.md
 src
 src/backend
 src/backend/actions.rs
 src/backend/cursor.rs
 src/backend/format.rs
 src/backend/handlers.rs
+src/backend/handlers_tests.rs
 src/backend/helpers.rs
+src/backend/helpers_tests.rs
 src/backend/mod.rs
 src/backend/nav.rs
 src/backend/rename.rs
+src/backend/rename_tests.rs
+src/cli
+src/cli/args.rs
+src/cli/extract_sources.rs
+src/cli/hover.rs
+src/cli/mod.rs
+src/cli/output.rs
+src/cli/run.rs
+src/cli/sources.rs
+src/cli/tokens.rs
 src/indexer
 src/indexer/apply.rs
 src/indexer/apply_tests.rs
@@ -55,53 +199,7 @@ src/indexer/doc_tests.rs
 src/indexer/infer
 src/indexer/infer/args.rs
 src/indexer/infer/args_tests.rs
-src/indexer/infer/deps.rs
-src/indexer/infer/it_this.rs
-src/indexer/infer/it_this_tests.rs
-src/indexer/infer/lambda.rs
-src/indexer/infer/lambda_tests.rs
-src/indexer/infer/mod.rs
-src/indexer/infer/sig.rs
-src/indexer/infer/sig_tests.rs
-src/indexer/live_tree.rs
-src/indexer/live_tree_impl.rs
-src/indexer/live_tree_tests.rs
-src/indexer/lookup.rs
-src/indexer/lookup_tests.rs
-src/indexer/node_ext.rs
-src/indexer/resolution.rs
-src/indexer/scan.rs
-src/indexer/scan_tests.rs
-src/indexer/scope.rs
-src/indexer/scope_tests.rs
-src/indexer/test_helpers.rs
-src/indexer.rs
-src/indexer_tests.rs
-src/inlay_hints.rs
-src/lines_ext.rs
-src/main.rs
-src/parser.rs
-src/parser_tests.rs
-src/queries.rs
-src/resolver
-src/resolver/complete.rs
-src/resolver/find.rs
-src/resolver/infer.rs
-src/resolver/mod.rs
-src/resolver/tests.rs
-src/rg.rs
-src/rg_tests.rs
-src/stdlib.rs
-src/stdlib_tail.rs
-src/str_ext.rs
-src/task_runner.rs
-src/types.rs
-tests
-tests/fixtures
-tests/fixtures/kotlin
-tests/fixtures/kotlin/input
-tests/fixtures/kotlin/mvi
-tests/swift_grammar.rs
+src/indexer/infer/cst_cursor.rs
 
 === STACK DETECTION (manifest files) ===
 
@@ -109,6 +207,23 @@ tests/swift_grammar.rs
 # This file is automatically @generated by Cargo.
 # It is not intended for manual editing.
 version = 4
+
+[[package]]
+name = "adler2"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
+
+[[package]]
+name = "aes"
+version = "0.8.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b169f7a6d4742236a0a00c541b845991d0ac43e546831af1249753ab4c3aa3a0"
+dependencies = [
+ "cfg-if",
+ "cipher",
+ "cpufeatures",
+]
 
 [[package]]
 name = "aho-corasick"
@@ -169,32 +284,15 @@ dependencies = [
  "windows-sys",
 ]
 
-[[package]]
-name = "anyhow"
-version = "1.0.102"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
-[[package]]
-name = "async-trait"
-version = "0.1.89"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9035ad2d096bed7955a320ee7e2230574d28fd3c3a0f186cbea1ff3c7eed5dbb"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-
-[TRUNCATED] Showing first 80 of 1566 lines.
+[TRUNCATED] Showing first 80 of 2040 lines.
 --- Cargo.toml ---
 [workspace]
 members = ["."]
 
 [package]
 name        = "kotlin-lsp"
-version = "0.9.3"
+version = "0.12.0"
 edition     = "2021"
 description = "Fast, low-memory LSP server for Kotlin, Java, and Swift. Instant startup, dot-completion, go-to-definition, hover — no JVM required."
 license     = "MIT"
@@ -203,6 +301,7 @@ homepage    = "https://github.com/Hessesian/kotlin-lsp"
 readme      = "README.md"
 keywords    = ["lsp", "kotlin", "java", "swift", "language-server"]
 categories  = ["development-tools", "command-line-utilities"]
+exclude      = ["demo/*", "contrib/*", ".tours/*", "docs/*", ".github/*"]
 
 [[bin]]
 name = "kotlin-lsp"
@@ -239,7 +338,9 @@ serde      = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 bincode  = "1"
 sha2 = "0.10"
+zip = "2"
 futures = "0.3.32"
+lexopt = "0.3"
 
 [profile.release]
 opt-level = 3
@@ -247,13 +348,21 @@ lto       = "thin"
 codegen-units = 1
 strip     = true
 
+# Profiling: release speed + debug symbols for flamegraphs
+# Usage: cargo build --profile profiling && samply record ./target/profiling/kotlin-lsp index .
+[profile.profiling]
+inherits  = "release"
+debug     = 2
+strip     = false
+lto       = false
+
 [dev-dependencies]
 tempfile = "3"
 
 
-
 === ENTRY POINTS ===
 Found: src/main.rs
+Found: src/lib.rs
 
 === LINTING AND FORMATTING CONFIG ===
 No linting or formatting config files found in project root.
@@ -262,95 +371,116 @@ No linting or formatting config files found in project root.
 No .env.example or .env.template found. Identify required environment variables by searching the code and config for environment variable reads.
 
 === TODO / FIXME / HACK (production code only, test dirs excluded) ===
-src/stdlib.rs:220: StdlibEntry { name: "TODO",         signature: "fun TODO(reason: String = \"\"): Nothing",                                      is_extension: false },
-src/stdlib.rs:537: ("todo", "TODO stub", "TODO(\"${0:Not yet implemented}\")"),
-src/indexer_tests.rs:650: "fun send(channel: SendChannel): Unit = TODO()\n",
-src/indexer_tests.rs:669: "fun process(value: Item): Unit = TODO()\n",
-src/indexer_tests.rs:690: "fun process(value: Widget): Unit = TODO()\n",
-src/indexer_tests.rs:709: "fun pair(a: String, b: Number): Unit = TODO()\n",
-src/indexer_tests.rs:730: "    fun reduce(event: String, block: (String) -> String): Unit = TODO()\n",
-src/indexer_tests.rs:753: "fun withCtx(block: Ctx.() -> Unit): Unit = TODO()\n",
-src/resolver/tests.rs:107: "package com.example\nimport com.example.Target\nval x: Target = TODO()",
-src/resolver/tests.rs:123: "package com.example\nimport com.example.LongName as LN\nval x: LN = TODO()",
-src/resolver/tests.rs:140: idx.index_content(&b_uri, "package com.example\nval x: A = TODO()");
-src/resolver/tests.rs:182: idx.index_content(&host_uri, "package com.pkg\nval x: Outer.Inner = TODO()");
-src/resolver/tests.rs:202: idx.index_content(&host_uri, "package com.pkg\nval x: Root.Mid.Deep = TODO()");
-src/resolver/tests.rs:232: "val factory: DashboardProductsReducer.Factory = TODO()\n",
-src/resolver/tests.rs:950: "package com.example\nval retrofit = TODO()\nval api = retrofit.create(DashboardApi::class.java)\nfun test() { api.loadData() }");
-src/resolver/tests.rs:1043: idx.index_content(&caller_uri, "package a\nval key: ProductKey = TODO()");
-src/resolver/tests.rs:1072: "package com.example\nval resp: AccountDetailResponseBody = TODO()",
+src/stdlib.rs:255: description: "TODO stub",
+src/stdlib.rs:256: snippet_body: r#"TODO("${0:Not yet implemented}")"#,
+src/stdlib.rs:456: StdlibEntry { name: "TODO",         signature: "fun TODO(reason: String = \"\"): Nothing",                                      is_extension: false },
+src/indexer_tests.rs:647: "fun send(channel: SendChannel): Unit = TODO()\n",
+src/indexer_tests.rs:666: "fun process(value: Item): Unit = TODO()\n",
+src/indexer_tests.rs:687: "fun process(value: Widget): Unit = TODO()\n",
+src/indexer_tests.rs:706: "fun pair(a: String, b: Number): Unit = TODO()\n",
+src/indexer_tests.rs:727: "    fun reduce(event: String, block: (String) -> String): Unit = TODO()\n",
+src/indexer_tests.rs:750: "fun withCtx(block: Ctx.() -> Unit): Unit = TODO()\n",
+src/resolver/tests.rs:106: "package com.example\nimport com.example.Target\nval x: Target = TODO()",
+src/resolver/tests.rs:122: "package com.example\nimport com.example.LongName as LN\nval x: LN = TODO()",
+src/resolver/tests.rs:139: idx.index_content(&b_uri, "package com.example\nval x: A = TODO()");
+src/resolver/tests.rs:181: idx.index_content(&host_uri, "package com.pkg\nval x: Outer.Inner = TODO()");
+src/resolver/tests.rs:201: idx.index_content(&host_uri, "package com.pkg\nval x: Root.Mid.Deep = TODO()");
+src/resolver/tests.rs:231: "val factory: DashboardProductsReducer.Factory = TODO()\n",
+src/resolver/tests.rs:949: "package com.example\nval retrofit = TODO()\nval api = retrofit.create(DashboardApi::class.java)\nfun test() { api.loadData() }");
+src/resolver/tests.rs:1042: idx.index_content(&caller_uri, "package a\nval key: ProductKey = TODO()");
+src/resolver/tests.rs:1071: "package com.example\nval resp: AccountDetailResponseBody = TODO()",
+src/resolver/tests.rs:1664: "package a\nclass Base<T> {\n  fun get(): T = TODO()\n}",
+copilot-rename-args-worktree/src/indexer_tests.rs:650: "fun send(channel: SendChannel): Unit = TODO()\n",
+copilot-rename-args-worktree/src/indexer_tests.rs:669: "fun process(value: Item): Unit = TODO()\n",
+copilot-rename-args-worktree/src/indexer_tests.rs:690: "fun process(value: Widget): Unit = TODO()\n",
+copilot-rename-args-worktree/src/indexer_tests.rs:709: "fun pair(a: String, b: Number): Unit = TODO()\n",
+copilot-rename-args-worktree/src/indexer_tests.rs:730: "    fun reduce(event: String, block: (String) -> String): Unit = TODO()\n",
+copilot-rename-args-worktree/src/indexer_tests.rs:753: "fun withCtx(block: Ctx.() -> Unit): Unit = TODO()\n",
+copilot-rename-args-worktree/src/stdlib.rs:220: StdlibEntry { name: "TODO",         signature: "fun TODO(reason: String = \"\"): Nothing",                                      is_extension: false },
+copilot-rename-args-worktree/src/stdlib.rs:537: ("todo", "TODO stub", "TODO(\"${0:Not yet implemented}\")"),
+copilot-rename-args-worktree/src/resolver/tests.rs:106: "package com.example\nimport com.example.Target\nval x: Target = TODO()",
+copilot-rename-args-worktree/src/resolver/tests.rs:122: "package com.example\nimport com.example.LongName as LN\nval x: LN = TODO()",
+copilot-rename-args-worktree/src/resolver/tests.rs:139: idx.index_content(&b_uri, "package com.example\nval x: A = TODO()");
+copilot-rename-args-worktree/src/resolver/tests.rs:181: idx.index_content(&host_uri, "package com.pkg\nval x: Outer.Inner = TODO()");
+copilot-rename-args-worktree/src/resolver/tests.rs:201: idx.index_content(&host_uri, "package com.pkg\nval x: Root.Mid.Deep = TODO()");
+copilot-rename-args-worktree/src/resolver/tests.rs:231: "val factory: DashboardProductsReducer.Factory = TODO()\n",
+copilot-rename-args-worktree/src/resolver/tests.rs:949: "package com.example\nval retrofit = TODO()\nval api = retrofit.create(DashboardApi::class.java)\nfun test() { api.loadData() }");
+copilot-rename-args-worktree/src/resolver/tests.rs:1042: idx.index_content(&caller_uri, "package a\nval key: ProductKey = TODO()");
+copilot-rename-args-worktree/src/resolver/tests.rs:1071: "package com.example\nval resp: AccountDetailResponseBody = TODO()",
+copilot-rename-args-worktree/src/resolver/tests.rs:1664: "package a\nclass Base<T> {\n  fun get(): T = TODO()\n}",
 
 === GIT RECENT COMMITS (last 20) ===
-98559a5 refactor(scan): replace Option<Client> with ProgressReporter outbound port
-b4617d4 fix(review): move misplaced doc comment; avoid Vec alloc in SuperWalker
-9db8e65 refactor(visibility): downgrade unreachable pub to pub(crate) across binary crate
-5594124 refactor(anti-patterns): fix bare unwrap and double-ref patterns
-98e7894 fix(async): replace blocking std::fs::read_to_string with tokio::fs in spawned tasks
-d59cf9d refactor(phase12): replace bool/tuple returns with named structs
-9bdc028 refactor(phase12-prep): structural cleanup, selection_start rename, action fixes
-639a479 chore(fmt): apply cargo fmt to entire codebase
-dc1dc3d refactor(clippy): apply dead code removals and clippy fixes
-71cafb6 refactor(phase11): trait methods and context struct for SymbolEntry/FileData
-f411184 refactor(phase10): remove dead code from lookup.rs, add completion resolve tests
-297c0aa refactor(phase10): remove dead code from lookup.rs and add completion resolve tests
-057fad5 fix(complete): exclusive end for type-body symbol containment check
-c536aed fix(phase8): address Copilot review comments on enrich_at_line
-55c448a feat(phase8): migrate completion_resolve to resolution service
-166e9ee refactor(phase7): migrate inlay hints + hover to resolution::build_subst_map (#44)
-2a1648f refactor: migrate hover handler to resolution service (Phase 6) (#43)
-69d8a89 refactor: Language enum, FileData::containing_class_at, on-demand index fix (#42)
-ba1f82a Merge pull request #37 from Hessesian/refactor/unified-resolution-base
-b4380c7 Merge pull request #39 from Hessesian/feat/resolution-phase2
+382a007 chore: exclude demo/contrib/docs from crates.io package
+204d3ed ci: add workflow_dispatch; publish after build not release
+bec859e ci: publish to crates.io on release
+5b56e62 chore: release v0.12.0
+05ed9ef feat: extract-sources CLI subcommand (#69)
+34db603 feat: zero-config source root discovery (workspace.json + build layout + CLI) (#68)
+4163edf fix: shutdown non-blocking, extension robustness, top-level STATIC tokens
+cf5348e ci: use macos-14 for both macOS targets (macos-13 runners unavailable)
+a7ab2ef docs: update all docs for v0.11.0
+dec45ed docs: add VS Code screenshot
+db745a5 feat(vscode): add Swift language to activation and documentSelector
+7c5e983 docs: add VS Code screenshot to editors guide
+02f02d3 ci: add release workflow with cross-platform binaries + VS Code .vsix
+95b0fa6 feat: semantic tokens — full implementation
+aee7b0a merge main
+9c0a8a3 feat: semantic tokens — core classification + Phase 2 resolution
+0163e42 perf: tokens CLI defaults to CST-only, add --resolve flag
+a6f67bf fix: address PR review comments across all PRs
+13e91df chore: remove debug hacks, add --verbose flag
+7ff4315 refactor: split semantic_tokens.rs into module directory
 
 === HIGH-CHURN FILES (last 90 days, top 20) ===
-  85 src/indexer.rs
+  93 src/indexer.rs
+  53 src/parser.rs
   50 src/backend.rs
-  47 src/parser.rs
   41 src/resolver.rs
-  31 Cargo.toml
-  26 src/resolver/complete.rs
-  26 src/backend/handlers.rs
-  23 src/indexer/lookup.rs
-  23 src/indexer/resolution.rs
-  23 src/resolver/infer.rs
-  23 Cargo.lock
-  22 src/types.rs
-  20 src/indexer/infer/it_this.rs
-  19 src/main.rs
-  18 README.md
-  17 src/indexer/scan.rs
-  16 src/parser_tests.rs
-  16 src/resolver/tests.rs
-  15 src/backend/mod.rs
-  15 src/inlay_hints.rs
+  40 Cargo.toml
+  35 src/backend/handlers.rs
+  33 src/resolver/complete.rs
+  30 Cargo.lock
+  29 src/resolver/infer.rs
+  28 src/backend/mod.rs
+  27 src/indexer/resolution.rs
+  26 src/types.rs
+  26 src/indexer/lookup.rs
+  25 src/queries.rs
+  25 src/indexer/infer/it_this.rs
+  24 src/main.rs
+  21 README.md
+  21 src/inlay_hints.rs
+  20 src/parser_tests.rs
+  20 src/indexer/scan.rs
 
 === MONOREPO SIGNALS ===
 No monorepo signals detected.
 
 === CODE METRICS ===
-Total files scanned: 84
-Total lines of code: 30866
+Total files scanned: 231
+Total lines of code: 70269
 
 Files by language:
-  Rust: 59
-  Other: 21
-  Python: 2
-  Kotlin: 2
+  Rust: 155
+  Other: 67
+  Python: 4
+  Kotlin: 4
+  JavaScript: 1
 
 Top 10 largest files:
 demo/demo.gif: 2918.9KB
+copilot-rename-args-worktree/demo/demo.gif: 2918.9KB
 demo/kotlin-lsp-demo-opt.gif: 2887.9KB
+copilot-rename-args-worktree/demo/kotlin-lsp-demo-opt.gif: 2887.9KB
 demo/kotlin-lsp-demo.gif: 2479.4KB
+copilot-rename-args-worktree/demo/kotlin-lsp-demo.gif: 2479.4KB
+demo/cli.gif: 2016.6KB
+demo/vscode.png: 487.1KB
 demo/demo_slowed.cast: 469.1KB
-demo/demo_v2.cast: 469.1KB
-demo/demo.cast: 405.8KB
-src/indexer_tests.rs: 75.2KB
-src/parser.rs: 61.1KB
-src/resolver/tests.rs: 60.3KB
-src/indexer/resolution.rs: 44.2KB
+copilot-rename-args-worktree/demo/demo_slowed.cast: 469.1KB
 
 === CI/CD PIPELINES ===
-No CI/CD pipelines detected.
+CI/CD: GitHub Actions
 
 === CONTAINERS & ORCHESTRATION ===
 No containerization configs detected.

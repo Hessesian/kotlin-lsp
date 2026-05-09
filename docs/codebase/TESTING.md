@@ -15,7 +15,7 @@
 
 | Test Type | Location | Pattern | Count |
 |-----------|----------|---------|-------|
-| **Unit tests** | Inline `#[cfg(test)] mod tests` | Same file as code, at bottom | 664 total |
+| **Unit tests** | Companion `*_tests.rs` files next to source | `src/parser_tests.rs` next to `src/parser.rs`; stub `#[cfg(test)] #[path = "foo_tests.rs"] mod tests;` in source file | 776 total |
 | **Integration tests** | `tests/` directory | Whole-module test files | 2 (swift_grammar.rs, fixtures) |
 | **Fixtures** | `tests/fixtures/kotlin/`, `tests/fixtures/mvi/` | Kotlin source files for parsing tests | ~5 files |
 
@@ -68,7 +68,7 @@ No mocking framework; real `Indexer` populated with test code snippets.
 ### 5) Coverage and Test Gaps
 
 - **No coverage threshold:** No configured coverage enforcement
-- **Baseline:** 664 unit + integration tests passing
+- **Baseline:** 776 unit + 2 integration tests passing (v0.12.0)
 - **High-churn code well-tested:**
   - `resolver/tests.rs`: 60 KB (comprehensive)
   - `indexer_tests.rs`: 75 KB (workspace indexing, symbol extraction)
@@ -76,9 +76,12 @@ No mocking framework; real `Indexer` populated with test code snippets.
 
 ### 6) Continuous Integration
 
-- **CI/CD:** None currently configured (scan showed no GitHub Actions)
-- **Manual testing:** Developers run `cargo test` locally before pushing
-- **Clippy linting:** Applied in recent commits; not enforced by CI
+- **CI/CD:** GitHub Actions release workflow (`.github/workflows/release.yml`)
+  - Triggers on version tags (`v*.*.*`) and manual `workflow_dispatch`
+  - Jobs: `build` (cross-compile 4 targets) → `release` (GitHub Release assets) → `publish` (crates.io)
+  - **No automated test run in CI** — tests are run locally before tagging
+- **Manual testing:** Developers run `cargo test` and `cargo clippy` before pushing
+- **Clippy linting:** Required before every commit; `cargo clippy -- -W clippy::cognitive_complexity -W clippy::too_many_lines`
 
 ### 7) Evidence
 
@@ -86,7 +89,8 @@ No mocking framework; real `Indexer` populated with test code snippets.
 - src/resolver/tests.rs (resolution and completion tests)
 - src/parser_tests.rs (tree-sitter parsing tests)
 - tests/ directory (integration tests)
-- Recent commit: "refactor(clippy): apply dead code removals and clippy fixes"
+- .github/workflows/release.yml (CI pipeline definition)
+- `cargo test` output: "776 passed, 0 failed" (v0.12.0)
 
 ## Extended Sections (Optional)
 

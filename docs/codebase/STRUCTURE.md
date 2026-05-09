@@ -7,18 +7,25 @@
 | Path | Purpose | Evidence |
 |------|---------|----------|
 | `src/` | All production source code | Cargo.toml `[[bin]] path = "src/main.rs"` |
-| `src/main.rs` | Tokio runtime entry point, stdio setup | Binary entrypoint |
+| `src/main.rs` | Tokio runtime entry point, CLI dispatch, TCP transport | Binary entrypoint |
 | `src/backend/` | LSP protocol handlers (inbound adapters) | Handlers for LanguageServer trait |
+| `src/cli/` | CLI subcommand implementation (find, refs, hover, etc.) | Non-LSP usage of the same indexer |
 | `src/indexer/` | File discovery, parsing, in-memory index, cache | Core workspace indexing logic |
 | `src/parser.rs` | tree-sitter query execution, symbol extraction | Parser for Kotlin/Java/Swift |
 | `src/resolver/` | Definition resolution, completion scoring | Cross-file symbol resolution |
+| `src/semantic_tokens.rs` | Semantic token provider for highlight coloring | CST-based token classification |
+| `src/workspace_json.rs` | JetBrains workspace.json parser + build-layout auto-discovery | Source path discovery |
 | `src/rg.rs` | ripgrep wrapper for fallback text search | External CLI integration |
 | `src/types.rs` | Core types: `SymbolEntry`, `FileData`, `Visibility` | Domain model |
+| `src/stdlib.rs` / `src/stdlib_tail.rs` | Embedded Kotlin stdlib symbol table | Built-in completions |
+| `src/inlay_hints.rs` | Inlay hint generation (type hints for inferred variables) | Inlay hints support |
+| `src/queries.rs` | Named constants for all tree-sitter node kind strings | Node kind constants |
+| `src/task_runner.rs` | Background task orchestration utilities | Async task helpers |
 | `tests/` | Integration tests (e.g., tree-sitter grammar tests) | `tests/swift_grammar.rs` |
 | `tests/fixtures/` | Test data (Kotlin sources for fixtures) | Sample code for testing |
-| `contrib/` | External scripts (Python extract-sources utility) | Helper tools, not shipped |
+| `contrib/` | Legacy scripts (Python extract-sources is now built-in CLI) | Historical reference |
 | `docs/` | Architecture, editor setup, feature docs | Manual documentation |
-| `.github/` | Copilot CLI extension and instructions | Integration config |
+| `.github/` | GitHub Actions workflows, Copilot instructions, extension | CI/CD and tooling config |
 | `CHANGELOG.md` | Release notes and feature history | Release documentation |
 | `README.md` | Project overview, install, features, config | Public documentation |
 | `Cargo.toml` / `Cargo.lock` | Dependency manifest and lock | Build configuration |
@@ -26,27 +33,40 @@
 ### 2) Entry Points
 
 - **Main runtime entry:** `src/main.rs`
-  - Builds tokio runtime with custom blocking pool
-  - Calls `async_main()` which sets up tower-lsp service on stdin/stdout
-  - Single LSP binary, no CLI subcommands (though supports `--index-only` for initial indexing)
+  - Builds tokio runtime with 4 workers, 512 blocking threads
+  - In `async_main()`, dispatch order:
+    1. **CLI mode** — `cli::CliArgs::parse()` matches subcommands (`find`, `refs`, `hover`, `index`, `tokens`, `tree`, `sources`, `extract-sources`); if matched, runs and exits
+    2. **`--index-only <path>`** — build cache and exit (legacy flag, still supported)
+    3. **TCP transport** — `--port <N>` serves one LSP client over TCP (loopback only; useful for Android Studio / Sora Editor)
+    4. **Stdio LSP** — default: tower-lsp service on stdin/stdout
   
-- **Secondary entry points:**
-  - None (single-purpose LSP server)
+- **CLI subcommands** (`src/cli/`):
+  - `find <name>` — workspace symbol search
+  - `refs <name>` — find all references
+  - `hover <file> <line> <col>` — get hover info at position
+  - `index` — build workspace index and report stats
+  - `tokens <file>` — decode semantic tokens with human-readable positions
+  - `tree <file>` — dump tree-sitter CST
+  - `sources` — list detected source roots for a workspace
+  - `extract-sources` — unpack `*-sources.jar` from Gradle cache to `~/.kotlin-lsp/sources/`
   
 - **Entrypoint selection:**
-  - Hardcoded: `src/main.rs` is the only binary entry (see `Cargo.toml` `[[bin]]`)
+  - Hardcoded: `src/main.rs` is the only binary (see `Cargo.toml` `[[bin]]`)
 
 ### 3) Module Boundaries
 
 | Module | What belongs here | What must not be here |
 |--------|-------------------|------------------------|
 | `backend/` | LSP protocol adapters (LanguageServer impl, request handlers) | Domain business logic, parsing |
+| `cli/` | CLI subcommand handlers, argument parsing, human-readable output | LSP protocol types, background indexing |
 | `indexer/` | Index maintenance, file discovery, concurrent parsing, workspace state | LSP protocol types, external CLI execution |
 | `parser.rs` | tree-sitter grammar loading, CST traversal, symbol extraction | Index state, file I/O orchestration |
 | `resolver/` | Multi-hop resolution, type inference, symbol lookup by position | LSP handler code, index mutation |
+| `semantic_tokens.rs` | CST → semantic token conversion | LSP transport, index mutation |
+| `workspace_json.rs` | workspace.json parsing, build-layout detection | Index state, LSP types |
 | `rg.rs` | ripgrep CLI invocation, output parsing | Domain logic, index updates |
 | `types.rs` | Core domain types (SymbolEntry, FileData, Visibility, Language) | Framework-specific types (except lsp_types) |
-| `main.rs` | Tokio runtime setup, LSP service wiring | Business logic, index operations |
+| `main.rs` | Tokio runtime setup, transport selection (stdio/TCP), CLI dispatch | Business logic, index operations |
 
 ### 4) Naming and Organization Rules
 
@@ -68,12 +88,31 @@
 ### 5) Evidence
 
 - Cargo.toml (entry point `[[bin]] path = "src/main.rs"`)
-- src/main.rs (tokio runtime setup)
+- src/main.rs (tokio runtime, CLI dispatch, TCP transport at lines 83-105)
+- src/cli/mod.rs (subcommand list: find, refs, hover, index, tokens, tree, sources, extract-sources)
+- src/cli/run.rs (CLI index bootstrap, collect_cli_source_paths)
 - src/backend/mod.rs (LSP LanguageServer trait impl)
 - src/indexer.rs (module definitions: `pub mod scan`, `pub mod parser`, etc.)
 - src/types.rs (SymbolEntry, FileData, Visibility)
+- src/workspace_json.rs (load_source_paths, detect_build_layout_source_paths)
+- src/semantic_tokens.rs (semantic token provider)
 
 ## Extended Sections (Optional)
+
+### CLI Submodule Map
+
+The `src/cli/` directory contains:
+
+| Submodule | Purpose |
+|-----------|---------|
+| `mod.rs` | Subcommand enum, CliArgs parser, public `run()` dispatch |
+| `args.rs` | Argument parsing (lexopt-based) |
+| `run.rs` | `build_index()` bootstrap, `collect_cli_source_paths()` auto-discovery |
+| `hover.rs` | `hover` subcommand handler |
+| `sources.rs` | `sources` subcommand — list detected source roots |
+| `tokens.rs` | `tokens` and `tree` subcommands — decode semantic tokens, dump CST |
+| `extract_sources.rs` | `extract-sources` — walk Gradle cache, extract `*-sources.jar` |
+| `output.rs` | Shared output formatting utilities |
 
 ### Indexer Submodule Map
 
@@ -84,7 +123,6 @@ The `src/indexer/` directory contains:
 | `scan.rs` | Workspace scanning orchestration, entry points: `index_workspace*()` |
 | `discover.rs` | File discovery via `fd` or `walkdir` fallback |
 | `cache.rs` | Disk cache serialization/deserialization (bincode + SHA2) |
-| `parser.rs` | tree-sitter parsing and CST traversal (moved to top-level, symlink?) |
 | `live_tree.rs` / `live_tree_impl.rs` | Live parse tree maintenance for open documents |
 | `scope.rs` | Scope chain and variable shadowing analysis |
 | `lookup.rs` | Symbol lookup by position (used mainly in tests; production uses resolver) |
@@ -102,7 +140,7 @@ The `src/backend/` directory contains:
 
 | Submodule | Purpose |
 |-----------|---------|
-| `mod.rs` | LSP LanguageServer trait impl, progress types, adapter impl |
+| `mod.rs` | LSP LanguageServer trait impl, progress types, workspace root resolution |
 | `handlers.rs` | Individual LSP request handlers (hover, definition, completion, etc.) |
 | `actions.rs` | Workspace actions (rename, document edit assembly) |
 | `cursor.rs` | Cursor position utilities and conversions |
@@ -125,9 +163,9 @@ The `src/resolver/` directory contains:
 
 ### Hexagonal Architecture Alignment
 
-The codebase follows **Ports & Adapters** principles (as of Phase 12 refactor):
+The codebase follows **Ports & Adapters** principles:
 
-- **Inbound adapters:** `backend/` (receives LSP protocol messages, converts to domain calls)
+- **Inbound adapters:** `backend/` (receives LSP protocol messages, converts to domain calls); `cli/` (receives CLI args, converts to index queries)
 - **Outbound ports:** `ProgressReporter` trait (defined in `indexer/scan.rs`)
 - **Outbound adapters:** `LspProgressReporter` in `backend/mod.rs` (sends `$/progress` notifications); `rg.rs` wraps ripgrep CLI
 - **Domain layer:** `resolver/`, `parser.rs`, `types.rs` (pure symbol resolution, no framework imports)
