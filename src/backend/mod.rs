@@ -64,11 +64,7 @@ impl ProgressReporter for LspProgressReporter {
     }
 
     async fn report(&self, token: &NumberOrString, done: usize, total: usize) {
-        let pct = if total > 0 {
-            ((done * 100) / total) as u32
-        } else {
-            0
-        };
+        let pct = ((done * 100).checked_div(total).unwrap_or(0)) as u32;
         self.0
             .send_notification::<progress::KotlinProgress>(ProgressParams {
                 token: token.clone(),

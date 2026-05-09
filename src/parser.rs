@@ -443,10 +443,10 @@ fn is_fun_interface_error(node: &Node, bytes: &[u8]) -> bool {
                     for gc in child.children(&mut ec) {
                         match gc.kind() {
                             KIND_FUN => has_fun = true,
-                            KIND_USER_TYPE => {
-                                if gc.utf8_text(bytes).unwrap_or("") == "interface" {
-                                    has_interface = true;
-                                }
+                            KIND_USER_TYPE
+                                if gc.utf8_text(bytes).unwrap_or("") == "interface" =>
+                            {
+                                has_interface = true;
                             }
                             KIND_SIMPLE_IDENT => has_name = true,
                             _ => {}

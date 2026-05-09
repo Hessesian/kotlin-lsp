@@ -67,10 +67,8 @@ fn classify_kotlin(node: Node<'_>, src: &Source<'_>, out: &mut Vec<RawToken>) {
                 );
             }
         }
-        KIND_ANNOTATION | KIND_MULTI_ANNOTATION => {
-            if find_annotation_ident(node).is_some() {
-                push_token(node, type_index(&SemanticTokenType::DECORATOR), 0, src, out);
-            }
+        KIND_ANNOTATION | KIND_MULTI_ANNOTATION if find_annotation_ident(node).is_some() => {
+            push_token(node, type_index(&SemanticTokenType::DECORATOR), 0, src, out);
         }
         k if k == KIND_VALUE_ARG => {
             if let Some(label) = value_arg_label(node) {

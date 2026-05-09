@@ -127,8 +127,7 @@ fn cst_hints(
             KIND_LAMBDA_LIT => {
                 hint_lambda(&ctx, &node, &mut hints);
             }
-            KIND_SIMPLE_IDENT => {
-                if node.utf8_text(bytes) == Ok("it") {
+            KIND_SIMPLE_IDENT if node.utf8_text(bytes) == Ok("it") => {
                     let pos = ts_pos_to_lsp(node.start_position(), &starts, bytes);
                     if in_range(pos.line, range) {
                         let kind = ReceiverKind::Contextual {
@@ -144,7 +143,6 @@ fn cst_hints(
                         }
                     }
                 }
-            }
             KIND_THIS_EXPR => {
                 let pos = ts_pos_to_lsp(node.start_position(), &starts, bytes);
                 if in_range(pos.line, range) {

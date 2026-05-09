@@ -407,14 +407,11 @@ impl Indexer {
                 loop {
                     match cur.kind() {
                         KIND_CLASS_DECL | KIND_INTERFACE_DECL | KIND_OBJECT_DECL
-                        | KIND_COMPANION_OBJ => {
-                            // Preserve existing semantics: exclude the node if its
-                            // declaration starts on the query row (cursor is on the
-                            // class's own declaration line).
-                            if cur.start_position().row < row {
-                                if let Some(name) = cur.extract_type_name(&doc.bytes) {
-                                    return Some(name);
-                                }
+                        | KIND_COMPANION_OBJ
+                            if cur.start_position().row < row =>
+                        {
+                            if let Some(name) = cur.extract_type_name(&doc.bytes) {
+                                return Some(name);
                             }
                         }
                         _ => {}

@@ -2,6 +2,7 @@ use super::actions::is_non_call_keyword;
 use super::helpers::resolve_references_scope;
 use super::Backend;
 use crate::indexer::cst_cursor_is_local_var;
+use std::cmp::Reverse;
 #[cfg(test)]
 use crate::indexer::live_tree::utf16_col_to_byte;
 #[cfg(test)]
@@ -268,7 +269,7 @@ pub(super) fn rename_in_scope(
     }
 
     // Reverse so callers applying sequentially won't shift earlier positions.
-    edits.sort_by(|a, b| b.range.start.cmp(&a.range.start));
+    edits.sort_by_key(|a| Reverse(a.range.start));
     edits
 }
 
@@ -314,7 +315,7 @@ impl Backend {
         if file_edits.is_empty() {
             return None;
         }
-        file_edits.sort_by(|a, b| b.range.start.cmp(&a.range.start));
+        file_edits.sort_by_key(|a| Reverse(a.range.start));
 
         let mut changes = std::collections::HashMap::new();
         changes.insert(uri.clone(), file_edits);
@@ -421,7 +422,7 @@ impl Backend {
             if edits.is_empty() {
                 continue;
             }
-            edits.sort_by(|a, b| b.range.start.cmp(&a.range.start));
+            edits.sort_by_key(|a| Reverse(a.range.start));
             changes.insert(file_uri.clone(), edits);
         }
 
