@@ -2,7 +2,6 @@ use super::actions::is_non_call_keyword;
 use super::helpers::resolve_references_scope;
 use super::Backend;
 use crate::indexer::cst_cursor_is_local_var;
-use std::cmp::Reverse;
 #[cfg(test)]
 use crate::indexer::live_tree::utf16_col_to_byte;
 #[cfg(test)]
@@ -12,6 +11,7 @@ use crate::queries::{
     KIND_VAR_DECL,
 };
 use crate::StrExt;
+use std::cmp::Reverse;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 
