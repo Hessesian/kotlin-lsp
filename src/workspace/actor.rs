@@ -6,10 +6,12 @@
 //!
 //! # Invariants
 //!
-//! * Source discovery runs only in [`WorkspaceActor::handle_initialize`].
-//! * Only this actor writes `Indexer::source_paths_raw` and `Indexer::ignore_matcher`.
+//! * Only `WorkspaceActor` event handlers may call `resolve_sources()` and write
+//!   `Indexer::source_paths_raw` or `Indexer::ignore_matcher`.
 //! * The `Indexer` is long-lived; it is never replaced, so live-document state
 //!   accumulated in `live_lines`, `live_trees`, etc. survives reindex/root-switch.
+// Items unused until Wave 2 wires this into backend/CLI (ws-backend, ws-cli, ws-main).
+#![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -81,10 +83,8 @@ impl<R: ProgressReporter + 'static> WorkspaceActor<R> {
         self.set_root(root.clone());
         self.apply_ignore_patterns(&config.ignore_patterns, &root);
 
-        let sources = config.resolve_sources();
-        if !sources.is_empty() {
-            self.write_source_paths(sources);
-        }
+        // Always write source paths — even when empty — to clear any prior state.
+        self.write_source_paths(config.resolve_sources());
 
         self.spawn_scan(root, Vec::new()).await;
     }
@@ -101,16 +101,17 @@ impl<R: ProgressReporter + 'static> WorkspaceActor<R> {
     async fn handle_change_root(&self, root: PathBuf) {
         self.set_root(root.clone());
 
-        // Re-resolve source paths for the new root (workspace.json, build layout, etc.).
-        // Explicit source paths from initialization are intentionally dropped because
-        // they were relative to the old root and are typically editor-session-scoped.
+        // Clear stale ignore patterns from the previous root, then re-resolve
+        // source paths for the new root (workspace.json, build layout, etc.).
+        // Explicit source paths from initialization are intentionally dropped
+        // because they were relative to the old root and are editor-session-scoped.
         let config = WorkspaceConfig {
             root: root.clone(),
             explicit_source_paths: Vec::new(),
             ignore_patterns: Vec::new(),
         };
-        let sources = config.resolve_sources();
-        self.write_source_paths(sources);
+        self.apply_ignore_patterns(&config.ignore_patterns, &root);
+        self.write_source_paths(config.resolve_sources());
 
         self.indexer.reset_index_state();
         self.spawn_full_scan(root).await;
@@ -142,12 +143,12 @@ impl<R: ProgressReporter + 'static> WorkspaceActor<R> {
     }
 
     fn apply_ignore_patterns(&self, patterns: &[String], root: &Path) {
-        if patterns.is_empty() {
-            return;
-        }
         match self.indexer.ignore_matcher.write() {
             Ok(mut guard) => {
-                *guard = Some(Arc::new(IgnoreMatcher::new(patterns.to_vec(), root)));
+                // Always write — even when empty — to clear any stale matcher from
+                // a previous Initialize or root switch.
+                *guard = (!patterns.is_empty())
+                    .then(|| Arc::new(IgnoreMatcher::new(patterns.to_vec(), root)));
             }
             Err(err) => log::warn!("WorkspaceActor: failed to write ignore_matcher: {err}"),
         }

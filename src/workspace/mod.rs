@@ -12,31 +12,31 @@
 //! # Source discovery
 //!
 //! [`WorkspaceConfig::resolve_sources`] is the canonical source-path resolver.
-//! It must be called in exactly one place: `WorkspaceActor::handle_initialize`.
-//! No other code should write `Indexer::source_paths_raw`.
+//! Only `WorkspaceActor` event handlers may call it — no other code should write
+//! `Indexer::source_paths_raw`.
 //!
 //! # Wiring status
 //!
 //! Wave 1 (this PR) establishes the infrastructure.
 //! Wave 2 (todos: `ws-backend`, `ws-cli`, `ws-main`) wires the actor into the
-//! LSP backend and CLI runner.  Until then the items below are intentionally
+//! LSP backend and CLI runner.  Until then the re-exports below are intentionally
 //! unreachable from `main()`.
-// Suppress dead_code and unused_imports: this module is infrastructure for
-// Wave 2 wiring (todos: ws-backend, ws-cli, ws-main).  Once those are merged
-// the allows can be removed.  #[cfg(test)] cannot be used because the items
-// are needed in production code — they are simply not yet connected to a caller.
-#![allow(dead_code, unused_imports)]
 
 pub(crate) mod actor;
 pub(crate) mod event;
 
+// Re-exports are unused until Wave 2 wires this module in (ws-backend, ws-cli, ws-main).
+#[allow(unused_imports)]
 pub(crate) use actor::WorkspaceActor;
+#[allow(unused_imports)]
 pub(crate) use event::WorkspaceEvent;
 
 use std::path::PathBuf;
 
 // ─── WorkspaceConfig ─────────────────────────────────────────────────────────
 
+// WorkspaceConfig is unused until Wave 2 wires this module in (ws-backend, ws-cli, ws-main).
+#[allow(dead_code)]
 /// Immutable snapshot of workspace configuration collected at startup.
 ///
 /// Passed inside [`WorkspaceEvent::Initialize`]; not mutated after construction.
@@ -84,13 +84,16 @@ impl WorkspaceConfig {
         }
 
         // Auto-include the well-known `extract-sources` output directory if present.
+        // Skip entirely when HOME is unknown to avoid accidentally indexing the
+        // current working directory (matches existing backend behaviour).
         #[allow(deprecated)]
-        let home = std::env::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        let default_sources = home.join(".kotlin-lsp").join("sources");
-        if default_sources.is_dir() {
-            let s = default_sources.to_string_lossy().into_owned();
-            if !paths.contains(&s) {
-                paths.push(s);
+        if let Some(home) = std::env::home_dir() {
+            let default_sources = home.join(".kotlin-lsp").join("sources");
+            if default_sources.is_dir() {
+                let s = default_sources.to_string_lossy().into_owned();
+                if !paths.contains(&s) {
+                    paths.push(s);
+                }
             }
         }
 

@@ -3,6 +3,8 @@
 //! Every write to workspace state goes through one of these variants.
 //! Adding a new variant produces a compile error in [`WorkspaceActor::run`]
 //! until the handler is implemented — this is the key correctness invariant.
+// Items unused until Wave 2 wires this into backend/CLI (ws-backend, ws-cli, ws-main).
+#![allow(dead_code)]
 
 use std::path::PathBuf;
 

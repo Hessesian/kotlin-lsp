@@ -42,14 +42,14 @@ async fn initialize_sets_workspace_root() {
     .await
     .unwrap();
 
-    // Give the actor a moment to process
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
     let actual_root = indexer.workspace_root.read().unwrap().clone();
-    // The indexer's workspace_root is set by index_workspace_impl once the scan
-    // starts, not by the actor directly (scan takes ownership).  So we verify
-    // the actor at least didn't corrupt the indexer.
-    drop(actual_root);
+    assert_eq!(
+        actual_root.as_deref(),
+        Some(root.as_path()),
+        "workspace_root should be set synchronously by handle_initialize before scan starts"
+    );
 }
 
 #[tokio::test]
