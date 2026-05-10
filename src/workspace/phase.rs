@@ -1,35 +1,35 @@
-//! [`WorkspacePhase`] — lifecycle state of the workspace actor.
+//! [`State`] — lifecycle state of the workspace actor.
 //!
 //! Mirrors the `StoreState { Uninitialized | Ready<T> }` pattern from Moneta's
-//! MVI layer.  Before the first [`super::WorkspaceEvent::Initialize`] arrives
-//! the actor is `Uninitialized`; after it, `Ready(WorkspaceData)`.
+//! MVI layer.  Before the first [`super::Event::Initialize`] arrives
+//! the actor is `Uninitialized`; after it, `Ready(ReadyState)`.
 //!
-//! All code that needs workspace state should call [`WorkspacePhase::ready`]
+//! All code that needs workspace state should call [`State::ready`]
 //! and handle `None` (pre-init) explicitly — the named `Uninitialized` variant
 //! makes the pre-init case visible at every call site rather than a generic
 //! `Option<PathBuf>` whose meaning is unclear.
 
 use std::path::PathBuf;
 
-use super::WorkspaceConfig;
+use super::Config;
 
-// ─── WorkspaceData ────────────────────────────────────────────────────────────
+// ─── ReadyState ────────────────────────────────────────────────────────────
 
 /// Immutable snapshot of workspace state captured at initialisation time.
 ///
-/// Produced from a [`WorkspaceConfig`] the first time the actor processes a
-/// [`WorkspaceEvent::Initialize`] event, and updated on every
-/// [`WorkspaceEvent::ChangeRoot`].
+/// Produced from a [`Config`] the first time the actor processes a
+/// [`Event::Initialize`] event, and updated on every
+/// [`Event::ChangeRoot`].
 ///
 /// Carries the resolved (not raw) source-path list so that no caller ever has
 /// to re-run source discovery.
 #[derive(Debug, Clone)]
-pub(crate) struct WorkspaceData {
+pub(crate) struct ReadyState {
     /// Absolute path to the workspace root.
     pub root: PathBuf,
 
     /// Resolved, deduplicated list of source paths (output of
-    /// [`WorkspaceConfig::resolve_sources`]).
+    /// [`Config::resolve_sources`]).
     pub source_paths: Vec<String>,
 
     /// Ignore patterns in effect for this workspace.
@@ -38,8 +38,8 @@ pub(crate) struct WorkspaceData {
     pub ignore_patterns: Vec<String>,
 }
 
-impl WorkspaceData {
-    pub(crate) fn from_config(config: &WorkspaceConfig) -> Self {
+impl ReadyState {
+    pub(crate) fn from_config(config: &Config) -> Self {
         Self {
             root: config.root.clone(),
             source_paths: config.resolve_sources(),
@@ -48,37 +48,37 @@ impl WorkspaceData {
     }
 }
 
-// ─── WorkspacePhase ──────────────────────────────────────────────────────────
+// ─── State ──────────────────────────────────────────────────────────
 
 /// Lifecycle phase of the workspace actor.
 ///
 /// ```text
 /// ┌──────────────┐  Initialize  ┌────────────────────────┐
-/// │ Uninitialized│─────────────▶│  Ready(WorkspaceData)  │
+/// │ Uninitialized│─────────────▶│  Ready(ReadyState)  │
 /// └──────────────┘              └────────────────────────┘
 ///                                         │  ChangeRoot
 ///                                         ▼
 ///                               ┌────────────────────────┐
-///                               │  Ready(WorkspaceData') │
+///                               │  Ready(ReadyState') │
 ///                               └────────────────────────┘
 /// ```
 ///
 /// There is no transition back to `Uninitialized`.  A `ChangeRoot` replaces
 /// `Ready` with a fresh `Ready` for the new root.
 #[derive(Debug, Clone, Default)]
-pub(crate) enum WorkspacePhase {
+pub(crate) enum State {
     #[default]
     Uninitialized,
-    Ready(WorkspaceData),
+    Ready(ReadyState),
 }
 
-impl WorkspacePhase {
-    /// Return a reference to the inner [`WorkspaceData`], or `None` if the
+impl State {
+    /// Return a reference to the inner [`ReadyState`], or `None` if the
     /// workspace has not been initialised yet.
-    pub(crate) fn ready(&self) -> Option<&WorkspaceData> {
+    pub(crate) fn ready(&self) -> Option<&ReadyState> {
         match self {
-            WorkspacePhase::Ready(data) => Some(data),
-            WorkspacePhase::Uninitialized => None,
+            State::Ready(data) => Some(data),
+            State::Uninitialized => None,
         }
     }
 
@@ -86,16 +86,16 @@ impl WorkspacePhase {
     /// Returns `None` and does nothing when `Uninitialized`.
     // Used by Wave 3 read handlers; present here for the pattern to be complete.
     #[allow(dead_code)]
-    pub(crate) fn with_ready<F, T>(&self, f: F) -> Option<T>
+    pub(crate) fn ready_or_none<F, T>(&self, f: F) -> Option<T>
     where
-        F: FnOnce(&WorkspaceData) -> T,
+        F: FnOnce(&ReadyState) -> T,
     {
         self.ready().map(f)
     }
 
     /// Transition to `Ready` (or replace the current `Ready`).
-    pub(crate) fn set_ready(&mut self, data: WorkspaceData) {
-        *self = WorkspacePhase::Ready(data);
+    pub(crate) fn set_state(&mut self, data: ReadyState) {
+        *self = State::Ready(data);
     }
 }
 

@@ -11,7 +11,7 @@ use self::helpers::syntax_diagnostics;
 use crate::indexer::resolution::WorkspaceRead;
 use crate::indexer::{workspace_cache_path, IgnoreMatcher, Indexer, ProgressReporter};
 use crate::semantic_tokens;
-use crate::workspace::{WorkspaceConfig, WorkspaceEvent};
+use crate::workspace::{Config, Event};
 
 pub(crate) mod actions;
 pub(crate) mod cursor;
@@ -95,7 +95,7 @@ impl ProgressReporter for LspProgressReporter {
 pub(crate) struct Backend {
     pub(super) client: Client,
     pub(super) indexer: Arc<Indexer>,
-    event_tx: mpsc::Sender<WorkspaceEvent>,
+    event_tx: mpsc::Sender<Event>,
     /// True if the client advertised `snippetSupport: true` during initialize.
     /// Used to decide whether to send `InsertTextFormat::SNIPPET` in completions.
     pub(super) snippet_support: Arc<AtomicBool>,
@@ -105,7 +105,7 @@ impl Backend {
     pub(crate) fn new(
         client: Client,
         indexer: Arc<Indexer>,
-        event_tx: mpsc::Sender<WorkspaceEvent>,
+        event_tx: mpsc::Sender<Event>,
     ) -> Self {
         Self {
             client,
@@ -229,8 +229,8 @@ impl Backend {
             self.apply_initialization_options(params.initialization_options.as_ref());
         if self
             .event_tx
-            .send(WorkspaceEvent::Initialize {
-                config: WorkspaceConfig {
+            .send(Event::Initialize {
+                config: Config {
                     root: workspace_root.to_path_buf(),
                     explicit_source_paths,
                     ignore_patterns,
@@ -500,7 +500,7 @@ impl LanguageServer for Backend {
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let _ = self
             .event_tx
-            .send(WorkspaceEvent::FileOpened {
+            .send(Event::FileOpened {
                 uri: params.text_document.uri,
                 language_id: params.text_document.language_id,
                 content: params.text_document.text,
@@ -511,7 +511,7 @@ impl LanguageServer for Backend {
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let _ = self
             .event_tx
-            .send(WorkspaceEvent::FileChanged {
+            .send(Event::FileChanged {
                 uri: params.text_document.uri,
                 changes: params.content_changes,
             })
@@ -521,7 +521,7 @@ impl LanguageServer for Backend {
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
         let _ = self
             .event_tx
-            .send(WorkspaceEvent::FileClosed {
+            .send(Event::FileClosed {
                 uri: params.text_document.uri,
             })
             .await;
@@ -532,7 +532,7 @@ impl LanguageServer for Backend {
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
         let _ = self
             .event_tx
-            .send(WorkspaceEvent::FileSaved {
+            .send(Event::FileSaved {
                 uri: params.text_document.uri,
             })
             .await;

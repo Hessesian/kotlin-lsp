@@ -1,4 +1,4 @@
-//! [`WorkspaceActor`] — the single serialised writer of workspace state.
+//! [`Actor`] — the single serialised writer of workspace state.
 //!
 //! All workspace-level mutations (root, source paths, ignore patterns, scans)
 //! are processed here, one at a time, in arrival order. Request handlers that
@@ -6,13 +6,13 @@
 //!
 //! # Invariants
 //!
-//! * Only `WorkspaceActor` event handlers may call `resolve_sources()` and write
+//! * Only `Actor` event handlers may call `resolve_sources()` and write
 //!   `Indexer::source_paths_raw` or `Indexer::ignore_matcher`.
 //! * The `Indexer` is long-lived; it is never replaced, so live-document state
 //!   accumulated in `live_lines`, `live_trees`, etc. survives reindex/root-switch.
 //! * The actor's `phase` field is the authoritative lifecycle state. Before
-//!   `Initialize` fires it is `WorkspacePhase::Uninitialized`; after it is
-//!   `WorkspacePhase::Ready(WorkspaceData)`.
+//!   `Initialize` fires it is `State::Uninitialized`; after it is
+//!   `State::Ready(ReadyState)`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -28,10 +28,10 @@ use crate::backend::helpers::syntax_diagnostics;
 use crate::indexer::{Indexer, ProgressReporter};
 use crate::rg::IgnoreMatcher;
 
-use super::contract::{WorkspaceData, WorkspacePhase};
-use super::{WorkspaceConfig, WorkspaceEvent};
+use super::contract::{ReadyState, State};
+use super::{Config, Event};
 
-// ─── WorkspaceActor ──────────────────────────────────────────────────────────
+// ─── Actor ──────────────────────────────────────────────────────────
 
 /// MVI-style actor that owns all workspace write operations.
 ///
@@ -40,20 +40,20 @@ use super::{WorkspaceConfig, WorkspaceEvent};
 /// use [`NoopReporter`](crate::indexer::NoopReporter) — no heap allocation or
 /// vtable dispatch needed at the actor level.
 ///
-/// Construct with [`WorkspaceActor::new`] and drive with [`WorkspaceActor::run`].
-pub(crate) struct WorkspaceActor<R: ProgressReporter + 'static> {
+/// Construct with [`Actor::new`] and drive with [`Actor::run`].
+pub(crate) struct Actor<R: ProgressReporter + 'static> {
     indexer: Arc<Indexer>,
     reporter: Arc<R>,
-    rx: mpsc::Receiver<WorkspaceEvent>,
+    rx: mpsc::Receiver<Event>,
     client: Option<Client>,
     pending_reindex: HashMap<String, AbortHandle>,
     /// Lifecycle phase — `Uninitialized` until the first `Initialize` event.
     /// Shared so that read-path consumers can observe workspace state without
     /// touching Indexer's internal lock fields directly.
-    phase: Arc<RwLock<WorkspacePhase>>,
+    phase: Arc<RwLock<State>>,
 }
 
-impl<R: ProgressReporter + 'static> WorkspaceActor<R> {
+impl<R: ProgressReporter + 'static> Actor<R> {
     /// Create a new actor.
     ///
     /// `reporter` is used for every workspace scan triggered by this actor.
@@ -62,7 +62,7 @@ impl<R: ProgressReporter + 'static> WorkspaceActor<R> {
     pub(crate) fn new(
         indexer: Arc<Indexer>,
         reporter: Arc<R>,
-        rx: mpsc::Receiver<WorkspaceEvent>,
+        rx: mpsc::Receiver<Event>,
         client: Option<Client>,
     ) -> Self {
         Self {
@@ -71,40 +71,40 @@ impl<R: ProgressReporter + 'static> WorkspaceActor<R> {
             rx,
             client,
             pending_reindex: HashMap::new(),
-            phase: Arc::new(RwLock::new(WorkspacePhase::Uninitialized)),
+            phase: Arc::new(RwLock::new(State::Uninitialized)),
         }
     }
 
     /// Expose the shared phase handle for read-path consumers introduced in Wave 3.
     #[allow(dead_code)]
-    pub(crate) fn phase_handle(&self) -> Arc<RwLock<WorkspacePhase>> {
+    pub(crate) fn state_stream(&self) -> Arc<RwLock<State>> {
         Arc::clone(&self.phase)
     }
 
     /// Run the event loop until the sender side is dropped.
     ///
     /// The exhaustive `match` is the architectural guarantee: every new
-    /// [`WorkspaceEvent`] variant must be handled here or the code will not
+    /// [`Event`] variant must be handled here or the code will not
     /// compile.
     pub(crate) async fn run(mut self) {
         while let Some(event) = self.rx.recv().await {
             match event {
-                WorkspaceEvent::Initialize {
+                Event::Initialize {
                     config,
                     completion_tx,
                 } => self.handle_initialize(config, completion_tx).await,
-                WorkspaceEvent::Reindex => self.handle_reindex().await,
-                WorkspaceEvent::ChangeRoot { root } => self.handle_change_root(root).await,
-                WorkspaceEvent::FileOpened {
+                Event::Reindex => self.handle_reindex().await,
+                Event::ChangeRoot { root } => self.handle_change_root(root).await,
+                Event::FileOpened {
                     uri,
                     language_id,
                     content,
                 } => self.handle_file_opened(uri, language_id, content).await,
-                WorkspaceEvent::FileChanged { uri, changes } => {
+                Event::FileChanged { uri, changes } => {
                     self.handle_file_changed(uri, changes).await;
                 }
-                WorkspaceEvent::FileSaved { uri } => self.handle_file_saved(uri).await,
-                WorkspaceEvent::FileClosed { uri } => self.handle_file_closed(uri).await,
+                Event::FileSaved { uri } => self.handle_file_saved(uri).await,
+                Event::FileClosed { uri } => self.handle_file_closed(uri).await,
             }
         }
     }
@@ -113,10 +113,10 @@ impl<R: ProgressReporter + 'static> WorkspaceActor<R> {
 
     async fn handle_initialize(
         &mut self,
-        config: WorkspaceConfig,
+        config: Config,
         completion_tx: Option<oneshot::Sender<()>>,
     ) {
-        let data = WorkspaceData::from_config(&config);
+        let data = ReadyState::from_config(&config);
         let root = data.root.clone();
 
         // Set the root immediately so read-path handlers can see it without
@@ -134,7 +134,7 @@ impl<R: ProgressReporter + 'static> WorkspaceActor<R> {
 
     async fn handle_reindex(&mut self) {
         let Some(root) = self.current_root() else {
-            log::warn!("WorkspaceActor: Reindex received but no workspace root is set");
+            log::warn!("Actor: Reindex received but no workspace root is set");
             return;
         };
         self.indexer.reset_index_state();
@@ -146,12 +146,12 @@ impl<R: ProgressReporter + 'static> WorkspaceActor<R> {
         // source paths for the new root (workspace.json, build layout, etc.).
         // Explicit source paths from initialization are intentionally dropped
         // because they were relative to the old root and are editor-session-scoped.
-        let config = WorkspaceConfig {
+        let config = Config {
             root: root.clone(),
             explicit_source_paths: Vec::new(),
             ignore_patterns: Vec::new(),
         };
-        let data = WorkspaceData::from_config(&config);
+        let data = ReadyState::from_config(&config);
 
         self.apply_ignore_patterns(&config.ignore_patterns, &root);
         self.write_source_paths(data.source_paths.clone());
@@ -287,9 +287,9 @@ impl<R: ProgressReporter + 'static> WorkspaceActor<R> {
 
     // ── Phase management ──────────────────────────────────────────────────────
 
-    /// Atomically transition to `WorkspacePhase::Ready`.
-    async fn set_phase(&self, data: WorkspaceData) {
-        self.phase.write().await.set_ready(data);
+    /// Atomically transition to `State::Ready`.
+    async fn set_phase(&self, data: ReadyState) {
+        self.phase.write().await.set_state(data);
     }
 
     // ── Internal helpers ──────────────────────────────────────────────────────
@@ -306,14 +306,14 @@ impl<R: ProgressReporter + 'static> WorkspaceActor<R> {
         if let Ok(mut guard) = self.indexer.workspace_root.write() {
             *guard = Some(root);
         } else {
-            log::warn!("WorkspaceActor: failed to write workspace root");
+            log::warn!("Actor: failed to write workspace root");
         }
     }
 
     fn write_source_paths(&self, paths: Vec<String>) {
         match self.indexer.source_paths_raw.write() {
             Ok(mut guard) => *guard = paths,
-            Err(err) => log::warn!("WorkspaceActor: failed to write source_paths_raw: {err}"),
+            Err(err) => log::warn!("Actor: failed to write source_paths_raw: {err}"),
         }
     }
 
@@ -325,7 +325,7 @@ impl<R: ProgressReporter + 'static> WorkspaceActor<R> {
                 *guard = (!patterns.is_empty())
                     .then(|| Arc::new(IgnoreMatcher::new(patterns.to_vec(), root)));
             }
-            Err(err) => log::warn!("WorkspaceActor: failed to write ignore_matcher: {err}"),
+            Err(err) => log::warn!("Actor: failed to write ignore_matcher: {err}"),
         }
     }
 
@@ -413,12 +413,12 @@ impl<R: ProgressReporter + 'static> WorkspaceActor<R> {
         workspace_root: PathBuf,
         opened_file_path: Option<PathBuf>,
     ) {
-        let config = WorkspaceConfig {
+        let config = Config {
             root: workspace_root.clone(),
             explicit_source_paths: Vec::new(),
             ignore_patterns: Vec::new(),
         };
-        let data = WorkspaceData::from_config(&config);
+        let data = ReadyState::from_config(&config);
 
         self.apply_ignore_patterns(&config.ignore_patterns, &workspace_root);
         self.write_source_paths(data.source_paths.clone());

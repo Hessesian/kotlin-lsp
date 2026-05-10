@@ -1,4 +1,4 @@
-//! Integration tests for [`WorkspaceActor`].
+//! Integration tests for [`Actor`].
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -6,15 +6,15 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::indexer::{Indexer, NoopReporter};
-use crate::workspace::{WorkspaceActor, WorkspaceConfig, WorkspaceEvent};
+use crate::workspace::{Actor, Config, Event};
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
 fn make_actor(
     indexer: Arc<Indexer>,
-) -> (WorkspaceActor<NoopReporter>, mpsc::Sender<WorkspaceEvent>) {
+) -> (Actor<NoopReporter>, mpsc::Sender<Event>) {
     let (tx, rx) = mpsc::channel(16);
-    let actor = WorkspaceActor::new(indexer, Arc::new(NoopReporter), rx, None);
+    let actor = Actor::new(indexer, Arc::new(NoopReporter), rx, None);
     (actor, tx)
 }
 
@@ -47,8 +47,8 @@ async fn initialize_sets_workspace_root() {
     let (actor, tx) = make_actor(Arc::clone(&indexer));
     tokio::spawn(actor.run());
 
-    tx.send(WorkspaceEvent::Initialize {
-        config: WorkspaceConfig {
+    tx.send(Event::Initialize {
+        config: Config {
             root: root.clone(),
             explicit_source_paths: Vec::new(),
             ignore_patterns: Vec::new(),
@@ -93,8 +93,8 @@ async fn initialize_writes_explicit_source_paths() {
     tokio::spawn(actor.run());
 
     let (completion_tx, completion_rx) = oneshot::channel();
-    tx.send(WorkspaceEvent::Initialize {
-        config: WorkspaceConfig {
+    tx.send(Event::Initialize {
+        config: Config {
             root: root.clone(),
             explicit_source_paths: vec!["/some/lib".to_string()],
             ignore_patterns: Vec::new(),
@@ -138,7 +138,7 @@ async fn change_root_updates_workspace_root() {
     tokio::spawn(actor.run());
 
     // Send ChangeRoot without a prior Initialize — the actor must set root directly.
-    tx.send(WorkspaceEvent::ChangeRoot { root: root.clone() })
+    tx.send(Event::ChangeRoot { root: root.clone() })
         .await
         .unwrap();
 

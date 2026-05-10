@@ -3,7 +3,7 @@
 //! # Architecture
 //!
 //! All workspace-level state mutations (root, source paths, ignore patterns, scans)
-//! flow through [`WorkspaceActor`] via [`WorkspaceEvent`]s sent on an `mpsc` channel.
+//! flow through [`Actor`] via [`Event`]s sent on an `mpsc` channel.
 //! This serialises writes and gives a single, exhaustive `match` as the authority on
 //! what can happen to the workspace.
 //!
@@ -11,8 +11,8 @@
 //!
 //! # Source discovery
 //!
-//! [`WorkspaceConfig::resolve_sources`] is the canonical source-path resolver.
-//! Only `WorkspaceActor` event handlers may call it — no other code should write
+//! [`Config::resolve_sources`] is the canonical source-path resolver.
+//! Only `Actor` event handlers may call it — no other code should write
 //! `Indexer::source_paths_raw`.
 //!
 //! # Wiring status
@@ -29,22 +29,22 @@ pub(crate) mod phase;
 
 // Re-exports are unused until Wave 2 wires this module in (ws-backend, ws-cli, ws-main).
 #[allow(unused_imports)]
-pub(crate) use actor::WorkspaceActor;
+pub(crate) use actor::Actor;
 #[allow(unused_imports)]
-pub(crate) use contract::{WorkspaceData, WorkspaceEffect, WorkspacePhase};
+pub(crate) use contract::{ReadyState, Effect, State};
 #[allow(unused_imports)]
-pub(crate) use event::WorkspaceEvent;
+pub(crate) use event::Event;
 
 use std::path::PathBuf;
 
-// ─── WorkspaceConfig ─────────────────────────────────────────────────────────
+// ─── Config ─────────────────────────────────────────────────────────
 
-// WorkspaceConfig is unused until Wave 2 wires this module in (ws-backend, ws-cli, ws-main).
+// Config is unused until Wave 2 wires this module in (ws-backend, ws-cli, ws-main).
 #[allow(dead_code)]
 /// Immutable snapshot of workspace configuration collected at startup.
 ///
-/// Passed inside [`WorkspaceEvent::Initialize`]; not mutated after construction.
-pub(crate) struct WorkspaceConfig {
+/// Passed inside [`Event::Initialize`]; not mutated after construction.
+pub(crate) struct Config {
     /// Absolute path to the workspace root (nearest `.git` ancestor of the opened file,
     /// or an explicit `--root` flag in CLI mode, or the LSP `rootUri`).
     pub root: PathBuf,
@@ -58,7 +58,7 @@ pub(crate) struct WorkspaceConfig {
     pub ignore_patterns: Vec<String>,
 }
 
-impl WorkspaceConfig {
+impl Config {
     /// Return the deduplicated, ordered list of source paths to index.
     ///
     /// Discovery priority (first win for deduplication):
@@ -68,7 +68,7 @@ impl WorkspaceConfig {
     ///    only attempted when `workspace.json` is absent
     /// 4. `~/.kotlin-lsp/sources` (default `extract-sources` output dir)
     ///
-    /// Called only from `WorkspaceActor` event handlers (`handle_initialize`,
+    /// Called only from `Actor` event handlers (`handle_initialize`,
     /// `handle_change_root`).  No other code should call this method.
     pub(crate) fn resolve_sources(&self) -> Vec<String> {
         use std::collections::HashSet;

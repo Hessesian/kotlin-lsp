@@ -1,22 +1,22 @@
-//! Unit tests for [`WorkspaceConfig::resolve_sources`].
+//! Unit tests for [`Config::resolve_sources`].
 
 use std::fs;
 use std::path::Path;
 
-use super::WorkspaceConfig;
+use super::Config;
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
-fn config(root: &Path) -> WorkspaceConfig {
-    WorkspaceConfig {
+fn config(root: &Path) -> Config {
+    Config {
         root: root.to_path_buf(),
         explicit_source_paths: Vec::new(),
         ignore_patterns: Vec::new(),
     }
 }
 
-fn config_with_explicit(root: &Path, explicit: &[&str]) -> WorkspaceConfig {
-    WorkspaceConfig {
+fn config_with_explicit(root: &Path, explicit: &[&str]) -> Config {
+    Config {
         root: root.to_path_buf(),
         explicit_source_paths: explicit.iter().map(|s| s.to_string()).collect(),
         ignore_patterns: Vec::new(),

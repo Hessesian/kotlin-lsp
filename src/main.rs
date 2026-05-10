@@ -41,7 +41,7 @@ fn main() {
 fn make_backend(client: tower_lsp::Client) -> backend::Backend {
     let indexer = Arc::new(indexer::Indexer::new());
     let (event_tx, event_rx) = mpsc::channel(64);
-    let actor = workspace::WorkspaceActor::new(
+    let actor = workspace::Actor::new(
         Arc::clone(&indexer),
         Arc::new(backend::LspProgressReporter(client.clone())),
         event_rx,

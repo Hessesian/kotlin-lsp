@@ -8,29 +8,29 @@
 //!
 //! | Type | Role |
 //! |---|---|
-//! | [`WorkspaceEvent`] | Inputs — every write to workspace state |
-//! | [`WorkspacePhase`] | State — `Uninitialized` or `Ready(WorkspaceData)` |
-//! | [`WorkspaceEffect`] | Outputs — one-shot side-effects from the actor |
+//! | [`Event`] | Inputs — every write to workspace state |
+//! | [`State`] | State — `Uninitialized` or `Ready(ReadyState)` |
+//! | [`Effect`] | Outputs — one-shot side-effects from the actor |
 //!
 //! # Compiler enforcement
 //!
-//! * Adding a [`WorkspaceEvent`] variant → compile error in `WorkspaceActor::run`
+//! * Adding a [`Event`] variant → compile error in `Actor::run`
 //!   until the handler is implemented.
-//! * Adding a [`WorkspaceEffect`] variant → compile error in every site that
+//! * Adding a [`Effect`] variant → compile error in every site that
 //!   matches on the effect channel.
-//! * Accessing [`WorkspacePhase::Ready`] data requires an explicit `match` or
-//!   a call to [`WorkspacePhase::ready`] — there is no way to get a
-//!   `&WorkspaceData` without acknowledging the `Uninitialized` case.
+//! * Accessing [`State::Ready`] data requires an explicit `match` or
+//!   a call to [`State::ready`] — there is no way to get a
+//!   `&ReadyState` without acknowledging the `Uninitialized` case.
 
 // Items re-exported here are the single source of truth for the workspace
 // public surface.  Individual types are unused at the re-export site until
 // Wave 2/3 wires backend and CLI through this contract.
 #[allow(unused_imports)]
-pub(crate) use super::event::WorkspaceEvent;
+pub(crate) use super::event::Event;
 #[allow(unused_imports)]
-pub(crate) use super::phase::{WorkspaceData, WorkspacePhase};
+pub(crate) use super::phase::{ReadyState, State};
 
-// ─── WorkspaceEffect ─────────────────────────────────────────────────────────
+// ─── Effect ─────────────────────────────────────────────────────────
 
 /// One-shot effects emitted by the workspace actor.
 ///
@@ -40,7 +40,7 @@ pub(crate) use super::phase::{WorkspaceData, WorkspacePhase};
 /// This mirrors `BusinessEffect` / `UiEffect` from Moneta: the actor sends
 /// effects for transient events that don't belong in the persistent state.
 #[allow(dead_code)] // consumed by Wave 3 CLI and test subscribers
-pub(crate) enum WorkspaceEffect {
+pub(crate) enum Effect {
     /// Emitted when a workspace scan finishes (initial or reindex).
     ///
     /// CLI mode waits for this before returning to the interactive prompt.
