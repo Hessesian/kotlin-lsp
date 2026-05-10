@@ -8,22 +8,25 @@
 
 use std::path::PathBuf;
 
+use tokio::sync::oneshot;
+use tower_lsp::lsp_types::{TextDocumentContentChangeEvent, Url};
+
 use super::WorkspaceConfig;
 
 /// All workspace-level mutations, serialised through [`WorkspaceActor`].
-///
-/// File-level events (textDocument/didOpen, didChange, etc.) are handled
-/// directly by the LSP backend for now; they will migrate here in a later phase.
 pub(crate) enum WorkspaceEvent {
     /// Configure the workspace and start an initial scan.
     ///
-    /// Must be the first event sent to a fresh actor.  Subsequent `Initialize`
+    /// Must be the first event sent to a fresh actor. Subsequent `Initialize`
     /// events switch the root and restart the scan, discarding old source paths.
-    Initialize { config: WorkspaceConfig },
+    Initialize {
+        config: WorkspaceConfig,
+        completion_tx: Option<oneshot::Sender<()>>,
+    },
 
     /// Re-scan the current workspace from scratch.
     ///
-    /// Equivalent to the `kotlin-lsp/reindex` execute-command.  Keeps the
+    /// Equivalent to the `kotlin-lsp/reindex` execute-command. Keeps the
     /// long-lived `Indexer` so live-document state is preserved.
     Reindex,
 
@@ -33,4 +36,23 @@ pub(crate) enum WorkspaceEvent {
     /// the new root. Existing explicit `source_paths_raw` are discarded because
     /// they were relative to the old root.
     ChangeRoot { root: PathBuf },
+
+    /// Store live document state and schedule indexing for a newly opened file.
+    FileOpened {
+        uri: Url,
+        language_id: String,
+        content: String,
+    },
+
+    /// Update live document state and debounce re-indexing after edits.
+    FileChanged {
+        uri: Url,
+        changes: Vec<TextDocumentContentChangeEvent>,
+    },
+
+    /// Re-index the current on-disk content for a saved file.
+    FileSaved { uri: Url },
+
+    /// Drop live document state for a closed file.
+    FileClosed { uri: Url },
 }

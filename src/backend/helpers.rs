@@ -45,7 +45,7 @@ pub(super) fn resolve_references_scope(
     (parent, pkg)
 }
 
-pub(super) fn syntax_diagnostics(errors: &[SyntaxError]) -> Vec<Diagnostic> {
+pub(crate) fn syntax_diagnostics(errors: &[SyntaxError]) -> Vec<Diagnostic> {
     errors
         .iter()
         .map(|e| Diagnostic {

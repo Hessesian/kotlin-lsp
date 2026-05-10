@@ -1,8 +1,9 @@
 //! Integration tests for [`WorkspaceActor`].
 
 use std::sync::Arc;
+use std::time::Duration;
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::indexer::{Indexer, NoopReporter};
 use crate::workspace::{WorkspaceActor, WorkspaceConfig, WorkspaceEvent};
@@ -13,7 +14,7 @@ fn make_actor(
     indexer: Arc<Indexer>,
 ) -> (WorkspaceActor<NoopReporter>, mpsc::Sender<WorkspaceEvent>) {
     let (tx, rx) = mpsc::channel(16);
-    let actor = WorkspaceActor::new(indexer, Arc::new(NoopReporter), rx);
+    let actor = WorkspaceActor::new(indexer, Arc::new(NoopReporter), rx, None);
     (actor, tx)
 }
 
@@ -21,16 +22,18 @@ fn temp_dir() -> tempfile::TempDir {
     tempfile::tempdir().unwrap()
 }
 
-/// Poll `pred` every 10 ms until it returns `true` or 500 ms elapse.
-/// Returns whether the predicate became true within the timeout.
-async fn poll_until(pred: impl Fn() -> bool) -> bool {
-    for _ in 0..50 {
-        if pred() {
-            return true;
+/// Poll `condition` every yield until it returns `true` or `timeout` elapses.
+async fn poll_until<F: Fn() -> bool>(condition: F, timeout: Duration) {
+    tokio::time::timeout(timeout, async {
+        loop {
+            if condition() {
+                break;
+            }
+            tokio::task::yield_now().await;
         }
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-    }
-    pred()
+    })
+    .await
+    .expect("condition not met within timeout");
 }
 
 // ─── actor tests ─────────────────────────────────────────────────────────────
@@ -50,20 +53,33 @@ async fn initialize_sets_workspace_root() {
             explicit_source_paths: Vec::new(),
             ignore_patterns: Vec::new(),
         },
+        completion_tx: None,
     })
     .await
     .unwrap();
 
-    let ready = poll_until(|| {
-        indexer.workspace_root.read().unwrap().is_some()
-    }).await;
-    assert!(ready, "workspace_root not set within timeout");
+    // workspace_root is set synchronously in handle_initialize before the scan
+    // spawns, so polling for it is deterministic and avoids the full scan latency.
+    let expected = root.clone();
+    let idx = Arc::clone(&indexer);
+    poll_until(
+        move || {
+            idx.workspace_root
+                .read()
+                .ok()
+                .and_then(|g| g.clone())
+                .map(|r| r == expected)
+                .unwrap_or(false)
+        },
+        Duration::from_secs(2),
+    )
+    .await;
 
     let actual_root = indexer.workspace_root.read().unwrap().clone();
     assert_eq!(
         actual_root.as_deref(),
         Some(root.as_path()),
-        "workspace_root should be set by handle_initialize"
+        "workspace_root should be set synchronously by handle_initialize before scan starts"
     );
 }
 
@@ -76,20 +92,34 @@ async fn initialize_writes_explicit_source_paths() {
     let (actor, tx) = make_actor(Arc::clone(&indexer));
     tokio::spawn(actor.run());
 
+    let (completion_tx, completion_rx) = oneshot::channel();
     tx.send(WorkspaceEvent::Initialize {
         config: WorkspaceConfig {
             root: root.clone(),
             explicit_source_paths: vec!["/some/lib".to_string()],
             ignore_patterns: Vec::new(),
         },
+        completion_tx: Some(completion_tx),
     })
     .await
     .unwrap();
 
-    let ready = poll_until(|| {
-        !indexer.source_paths_raw.read().unwrap().is_empty()
-    }).await;
-    assert!(ready, "source_paths_raw not populated within timeout");
+    // source_paths_raw is written synchronously in handle_initialize; the
+    // completion_tx fires when the background scan also finishes.  Poll the
+    // paths directly so the test doesn't wait for the full scan.
+    let idx = Arc::clone(&indexer);
+    poll_until(
+        move || {
+            idx.source_paths_raw
+                .read()
+                .ok()
+                .map(|g| g.contains(&"/some/lib".to_string()))
+                .unwrap_or(false)
+        },
+        Duration::from_secs(2),
+    )
+    .await;
+    drop(completion_rx); // not needed; poll was deterministic
 
     let paths = indexer.source_paths_raw.read().unwrap().clone();
     assert!(
@@ -112,10 +142,20 @@ async fn change_root_updates_workspace_root() {
         .await
         .unwrap();
 
-    let ready = poll_until(|| {
-        indexer.workspace_root.read().unwrap().is_some()
-    }).await;
-    assert!(ready, "workspace_root not set within timeout");
+    let expected = root.clone();
+    let idx = Arc::clone(&indexer);
+    poll_until(
+        move || {
+            idx.workspace_root
+                .read()
+                .ok()
+                .and_then(|g| g.clone())
+                .map(|r| r == expected)
+                .unwrap_or(false)
+        },
+        Duration::from_secs(2),
+    )
+    .await;
 
     let actual = indexer.workspace_root.read().unwrap().clone();
     assert_eq!(
@@ -134,7 +174,7 @@ async fn actor_stops_when_sender_dropped() {
     drop(tx);
 
     // Actor should exit cleanly once the sender is dropped
-    tokio::time::timeout(tokio::time::Duration::from_secs(2), handle)
+    tokio::time::timeout(Duration::from_secs(2), handle)
         .await
         .expect("actor did not stop within 2s after sender drop")
         .unwrap();
