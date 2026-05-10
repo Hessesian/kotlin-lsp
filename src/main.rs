@@ -3,6 +3,7 @@ mod backend;
 mod cli;
 mod indexer;
 mod inlay_hints;
+mod language;
 mod lines_ext;
 mod parser;
 mod queries;

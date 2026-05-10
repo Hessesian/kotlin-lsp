@@ -11,22 +11,28 @@ pub(crate) enum Language {
 }
 
 impl Language {
+    /// All languages, in priority order for extension matching.
+    const ALL: [Language; 3] = [Language::Java, Language::Swift, Language::Kotlin];
+
     pub(crate) fn from_path(path: &str) -> Self {
-        if path.ends_with(".java") {
-            Language::Java
-        } else if path.ends_with(".swift") {
-            Language::Swift
-        } else {
-            Language::Kotlin
-        }
+        Self::ALL
+            .into_iter()
+            .find(|lang| {
+                lang.parser()
+                    .file_extensions()
+                    .iter()
+                    .any(|ext| path.ends_with(&format!(".{ext}")))
+            })
+            .unwrap_or(Language::Kotlin)
+    }
+
+    /// LSP language identifier; delegates to the language's provider.
+    pub(crate) fn language_id(self) -> &'static str {
+        self.parser().language_id()
     }
 
     pub(crate) fn code_fence(self) -> &'static str {
-        match self {
-            Language::Kotlin => "kotlin",
-            Language::Java => "java",
-            Language::Swift => "swift",
-        }
+        self.language_id()
     }
 
     pub(crate) fn needs_semicolons(self) -> bool {
@@ -37,6 +43,18 @@ impl Language {
         match self {
             Language::Swift => "let",
             _ => "val",
+        }
+    }
+
+    /// Return the stateless [`LanguageParser`] singleton for this language.
+    ///
+    /// This is the single authoritative dispatch point: use it instead of
+    /// matching on the enum or calling `parse_by_extension` directly.
+    pub(crate) fn parser(self) -> &'static dyn crate::language::LanguageParser {
+        match self {
+            Language::Kotlin => &crate::language::kotlin::KotlinParser,
+            Language::Java => &crate::language::java::JavaParser,
+            Language::Swift => &crate::language::swift::SwiftParser,
         }
     }
 }

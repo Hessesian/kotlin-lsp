@@ -151,13 +151,14 @@ pub(crate) fn symbol_kw(kind: SymbolKind) -> &'static str {
 }
 
 pub(crate) fn symbol_kw_for_lang(kind: SymbolKind, lang: &str) -> &'static str {
-    let kw = symbol_kw(kind);
-    // Swift uses `func`, not `fun`.
-    if lang == "swift" && kw == "fun" {
-        "func"
-    } else {
-        kw
-    }
+    // Resolve to a Language and delegate to its provider so keyword logic stays
+    // in one place. Unknown lang strings fall back to Kotlin (default path).
+    let language = match lang {
+        "java" => crate::Language::Java,
+        "swift" => crate::Language::Swift,
+        _ => crate::Language::Kotlin,
+    };
+    language.parser().symbol_keyword(kind)
 }
 
 pub(crate) fn lang_str(path: &str) -> &'static str {
