@@ -331,6 +331,50 @@ type they support.
 Default to module-private (`fn`, `struct`). Widen to `pub(crate)` only when a sibling module
 requires it; widen to `pub` only for items that form part of the external API surface.
 
+### 12. Search before you write
+
+Before implementing any new function that collects, resolves, discovers, or transforms data,
+search the codebase for an existing implementation first:
+
+```sh
+rg -n "fn <keyword>" src/
+```
+
+Examples of duplication caught too late in this project:
+
+- `collect_cli_source_paths()` in `cli/run.rs` duplicated `WorkspaceConfig::resolve_sources()` exactly — doing the same workspace.json + build-layout + user-sources discovery, then passing the result as `explicit_source_paths` so `resolve_sources()` ran it again.
+- `cli/sources.rs::discover()` calls the same two `workspace_json` functions in the same order as `resolve_sources()` — still partly duplicated.
+- `home_dir` resolved four different ways across four files; no shared helper existed.
+- `poll_until` invented independently in two test modules during the same refactor wave.
+
+**Rule:** if you are about to write a function that discovers paths, resolves symbols, reads
+config, or deduplicates a collection — grep for the concept first. If a function already
+exists, call it or extend it; don't write a parallel one.
+
+### 13. Start traits minimal (YAGNI)
+
+Do not add methods to a trait "in case" they are needed later. Start with the smallest
+interface that makes the current feature work. Adding methods is cheap; removing them from a
+public trait is a breaking change.
+
+Lesson: `WorkspaceRead` was introduced with 9 methods, all unused in production. A reviewer
+caught this. It was trimmed to 1 method. The time spent designing and suppressing dead-code
+warnings on the other 8 was wasted.
+
+### 14. Module-level `#![allow(dead_code)]` is always wrong
+
+A module-level allow hides real dead-code warnings across the entire module, including bugs.
+Use per-item `#[allow(dead_code)]` with a comment referencing what will use the item:
+
+```rust
+// Used by Wave 3 read-handlers (read-handlers todo)
+#[allow(dead_code)]
+pub(crate) fn with_ready(&self) -> Option<&WorkspaceData> { … }
+```
+
+Remove the allow when the consuming code lands. If the consuming code never lands, the item
+should be deleted.
+
 ## Known limitations
 
 - **No type resolution** — tree-sitter gives structure, not type-checked references
