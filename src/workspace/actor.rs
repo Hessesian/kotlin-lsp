@@ -37,7 +37,7 @@ use super::{Config, Event};
 /// MVI-style actor that owns all workspace write operations.
 ///
 /// Generic over `R` (the progress reporter) so that LSP mode uses
-/// [`LspProgressReporter`](crate::indexer::ProgressReporter) and CLI / tests
+/// [`LspProgressReporter`](crate::backend::LspProgressReporter) and CLI / tests
 /// use [`NoopReporter`](crate::indexer::NoopReporter) — no heap allocation or
 /// vtable dispatch needed at the actor level.
 ///
@@ -92,9 +92,9 @@ impl<R: ProgressReporter + 'static> Actor<R> {
         }
     }
 
-    /// Expose the shared phase handle for read-path consumers introduced in Wave 3.
+    /// Expose the shared state handle for read-path consumers introduced in Wave 3.
     #[allow(dead_code)]
-    pub(crate) fn state_stream(&self) -> Arc<RwLock<State>> {
+    pub(crate) fn state_handle(&self) -> Arc<RwLock<State>> {
         Arc::clone(&self.phase)
     }
 
@@ -186,7 +186,7 @@ impl<R: ProgressReporter + 'static> Actor<R> {
         // Always write source paths — even when empty — to clear any prior state.
         let source_paths = data.source_paths.clone();
         self.write_source_paths(source_paths.clone());
-        self.set_phase(data).await;
+        self.set_state(data).await;
 
         let args = ScanArgs {
             root,
@@ -236,7 +236,7 @@ impl<R: ProgressReporter + 'static> Actor<R> {
         self.apply_ignore_patterns(&config.ignore_patterns, &root);
         self.write_source_paths(data.source_paths.clone());
         self.set_root(root.clone());
-        self.set_phase(data.clone()).await;
+        self.set_state(data.clone()).await;
 
         self.indexer.reset_index_state();
         let args = ScanArgs {
@@ -371,10 +371,10 @@ impl<R: ProgressReporter + 'static> Actor<R> {
         }
     }
 
-    // ── Phase management ──────────────────────────────────────────────────────
+    // ── State management ──────────────────────────────────────────────────────
 
     /// Atomically transition to `State::Ready`.
-    async fn set_phase(&self, data: ReadyState) {
+    async fn set_state(&self, data: ReadyState) {
         self.phase.write().await.set_state(data);
     }
 
@@ -510,7 +510,7 @@ impl<R: ProgressReporter + 'static> Actor<R> {
         let source_paths = data.source_paths.clone();
         self.write_source_paths(source_paths.clone());
         self.set_root(workspace_root.clone());
-        self.set_phase(data).await;
+        self.set_state(data).await;
         self.indexer.workspace_pinned.store(true, Ordering::Relaxed);
         self.indexer.root_generation.fetch_add(1, Ordering::SeqCst);
         self.indexer.reset_index_state();
