@@ -23,11 +23,15 @@
 //! unreachable from `main()`.
 
 pub(crate) mod actor;
+pub(crate) mod contract;
 pub(crate) mod event;
+pub(crate) mod phase;
 
 // Re-exports are unused until Wave 2 wires this module in (ws-backend, ws-cli, ws-main).
 #[allow(unused_imports)]
 pub(crate) use actor::WorkspaceActor;
+#[allow(unused_imports)]
+pub(crate) use contract::{WorkspaceData, WorkspaceEffect, WorkspacePhase};
 #[allow(unused_imports)]
 pub(crate) use event::WorkspaceEvent;
 
