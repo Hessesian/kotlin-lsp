@@ -118,6 +118,28 @@ pub(crate) trait IndexRead {
     fn ensure_indexed_on_demand(&self, _uri: &str) {}
 }
 
+/// Read-only workspace surface extending [`IndexRead`].
+///
+/// The single method here (`find_definition_qualified`) is already called from
+/// `Backend::resolve_with_receiver_fallback`. It uses `resolve_locations` with
+/// `allow_rg = true`, ensuring that rg-discovered files are indexed before
+/// callers access their `FileData` — a property the inherent `Indexer` method
+/// does not provide.
+///
+/// Wave 3 will extend this trait with `file_symbols`, `workspace_root`,
+/// `source_paths`, and further read-only accessors as handlers are migrated to
+/// `impl WorkspaceRead`.
+pub(crate) trait WorkspaceRead: IndexRead {
+    fn find_definition_qualified(
+        &self,
+        name: &str,
+        qualifier: Option<&str>,
+        from_uri: &Url,
+    ) -> Vec<Location> {
+        self.resolve_locations(name, qualifier, from_uri, true)
+    }
+}
+
 // ─── Pipeline Entry Point (thin coordinator) ───────────────────────────────
 
 /// Core resolution pipeline: locate → load → enrich → substitute → extract.
@@ -636,6 +658,46 @@ impl IndexRead for super::Indexer {
         }
     }
 }
+
+impl IndexRead for Arc<super::Indexer> {
+    fn get_definitions(&self, name: &str) -> Option<Vec<Location>> {
+        <super::Indexer as IndexRead>::get_definitions(self.as_ref(), name)
+    }
+
+    fn get_file_data(&self, uri: &str) -> Option<Arc<FileData>> {
+        <super::Indexer as IndexRead>::get_file_data(self.as_ref(), uri)
+    }
+
+    fn resolve_locations(
+        &self,
+        name: &str,
+        qualifier: Option<&str>,
+        from_uri: &Url,
+        allow_rg: bool,
+    ) -> Vec<Location> {
+        <super::Indexer as IndexRead>::resolve_locations(
+            self.as_ref(),
+            name,
+            qualifier,
+            from_uri,
+            allow_rg,
+        )
+    }
+
+    fn infer_variable_type_for(&self, name: &str, uri: &Url) -> Option<String> {
+        <super::Indexer as IndexRead>::infer_variable_type_for(self.as_ref(), name, uri)
+    }
+
+    fn ensure_indexed_on_demand(&self, uri: &str) {
+        <super::Indexer as IndexRead>::ensure_indexed_on_demand(self.as_ref(), uri);
+    }
+}
+
+impl WorkspaceRead for Arc<super::Indexer> {}
+
+#[cfg(test)]
+#[path = "workspace_read_tests.rs"]
+mod workspace_read_tests;
 
 #[cfg(test)]
 #[path = "resolution_tests.rs"]

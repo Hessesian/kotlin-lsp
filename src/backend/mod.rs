@@ -9,6 +9,7 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{async_trait, Client, LanguageServer};
 
 use self::helpers::syntax_diagnostics;
+use crate::indexer::resolution::WorkspaceRead;
 use crate::indexer::{workspace_cache_path, IgnoreMatcher, Indexer, ProgressReporter};
 use crate::semantic_tokens;
 
@@ -146,12 +147,14 @@ impl Backend {
         rt: &crate::resolver::ReceiverType,
         uri: &Url,
     ) -> Vec<Location> {
-        let locs = self
-            .indexer
-            .find_definition_qualified(word, Some(&rt.qualified), uri);
+        let locs = WorkspaceRead::find_definition_qualified(
+            &self.indexer,
+            word,
+            Some(&rt.qualified),
+            uri,
+        );
         if locs.is_empty() && rt.leaf != rt.qualified {
-            self.indexer
-                .find_definition_qualified(word, Some(&rt.leaf), uri)
+            WorkspaceRead::find_definition_qualified(&self.indexer, word, Some(&rt.leaf), uri)
         } else {
             locs
         }

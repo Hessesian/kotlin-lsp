@@ -26,7 +26,6 @@ fn malformed_json_returns_empty() {
 #[test]
 fn extracts_java_source_and_java_test() {
     let dir = TempDir::new().unwrap();
-    let ws = dir.path().to_string_lossy();
     let json = format!(
         r#"{{
             "modules": [{{
