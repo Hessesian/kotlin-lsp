@@ -13,7 +13,7 @@ fn make_actor(
     indexer: Arc<Indexer>,
 ) -> (WorkspaceActor<NoopReporter>, mpsc::Sender<WorkspaceEvent>) {
     let (tx, rx) = mpsc::channel(16);
-    let actor = WorkspaceActor::new(indexer, Arc::new(NoopReporter), rx);
+    let actor = WorkspaceActor::new(indexer, Arc::new(NoopReporter), rx, None);
     (actor, tx)
 }
 
@@ -50,6 +50,7 @@ async fn initialize_sets_workspace_root() {
             explicit_source_paths: Vec::new(),
             ignore_patterns: Vec::new(),
         },
+        completion_tx: None,
     })
     .await
     .unwrap();
@@ -82,6 +83,7 @@ async fn initialize_writes_explicit_source_paths() {
             explicit_source_paths: vec!["/some/lib".to_string()],
             ignore_patterns: Vec::new(),
         },
+        completion_tx: None,
     })
     .await
     .unwrap();

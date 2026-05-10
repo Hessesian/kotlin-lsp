@@ -22,6 +22,9 @@ pub(crate) use lines_ext::LinesExt;
 pub(crate) use str_ext::StrExt;
 pub(crate) use types::Language;
 
+use std::sync::Arc;
+
+use tokio::sync::mpsc;
 use tower_lsp::{LspService, Server};
 
 fn main() {
@@ -33,6 +36,19 @@ fn main() {
         .build()
         .unwrap()
         .block_on(async_main());
+}
+
+fn make_backend(client: tower_lsp::Client) -> backend::Backend {
+    let indexer = Arc::new(indexer::Indexer::new());
+    let (event_tx, event_rx) = mpsc::channel(64);
+    let actor = workspace::WorkspaceActor::new(
+        Arc::clone(&indexer),
+        Arc::new(indexer::NoopReporter),
+        event_rx,
+        Some(client.clone()),
+    );
+    tokio::spawn(actor.run());
+    backend::Backend::new(client, indexer, event_tx)
 }
 
 async fn async_main() {
@@ -114,7 +130,7 @@ async fn async_main() {
             });
             eprintln!("Client connected: {peer}");
             let (reader, writer) = tokio::io::split(stream);
-            let (service, socket) = LspService::new(backend::Backend::new);
+            let (service, socket) = LspService::new(make_backend);
             Server::new(reader, writer, socket).serve(service).await;
             eprintln!("Client disconnected, waiting for next connection…");
         }
@@ -123,6 +139,6 @@ async fn async_main() {
     // Default: stdio transport
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
-    let (service, socket) = LspService::new(backend::Backend::new);
+    let (service, socket) = LspService::new(make_backend);
     Server::new(stdin, stdout, socket).serve(service).await;
 }

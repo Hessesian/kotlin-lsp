@@ -3,10 +3,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use tokio::sync::{mpsc, oneshot};
 use tower_lsp::lsp_types::Location;
 
 use crate::indexer::{Indexer, NoopReporter};
 use crate::rg::{rg_find_definition, rg_word_search, RgSearchRequest};
+use crate::workspace::{WorkspaceActor, WorkspaceConfig, WorkspaceEvent};
 
 use super::args::{CliArgs, Mode, OutputFmt, Subcommand};
 use super::hover::hover_at;
@@ -42,24 +44,32 @@ fn cache_exists(root: &Path) -> bool {
 
 // ── Indexer bootstrap ─────────────────────────────────────────────────────────
 
-/// Build (or load from cache) a full workspace index.  Reports progress to stderr.
+/// Build (or load from cache) a full workspace index. Reports progress to stderr.
 ///
 /// Source paths are collected from:
 /// 1. `workspace.json` (JetBrains IDE format) at the workspace root
 /// 2. Build-layout auto-detection (Gradle/Maven src dirs), if no workspace.json
 /// 3. `~/.kotlin-lsp/sources` — the default `extract-sources` output dir
 async fn build_index(root: &Path) -> Arc<Indexer> {
-    let idx = Arc::new(Indexer::new());
+    let indexer = Arc::new(Indexer::new());
+    let (event_tx, event_rx) = mpsc::channel(16);
+    let (completion_tx, completion_rx) = oneshot::channel();
+    let actor = WorkspaceActor::new(Arc::clone(&indexer), Arc::new(NoopReporter), event_rx, None);
+    tokio::spawn(actor.run());
 
-    let source_paths = collect_cli_source_paths(root);
-    if !source_paths.is_empty() {
-        *idx.source_paths_raw.write().unwrap() = source_paths;
-    }
-
-    Arc::clone(&idx)
-        .index_workspace_full(root, Arc::new(NoopReporter))
+    let _ = event_tx
+        .send(WorkspaceEvent::Initialize {
+            config: WorkspaceConfig {
+                root: root.to_path_buf(),
+                explicit_source_paths: collect_cli_source_paths(root),
+                ignore_patterns: Vec::new(),
+            },
+            completion_tx: Some(completion_tx),
+        })
         .await;
-    idx
+    let _ = completion_rx.await;
+
+    indexer
 }
 
 /// Collect source paths for CLI indexing: workspace.json + build-layout + default extract dir.

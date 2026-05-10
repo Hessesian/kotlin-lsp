@@ -2,15 +2,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use dashmap::DashMap;
-use tokio::task::AbortHandle;
+use tokio::sync::mpsc;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{async_trait, Client, LanguageServer};
 
-use self::helpers::syntax_diagnostics;
 use crate::indexer::{workspace_cache_path, IgnoreMatcher, Indexer, ProgressReporter};
 use crate::semantic_tokens;
+use crate::workspace::{WorkspaceConfig, WorkspaceEvent};
 
 pub(crate) mod actions;
 pub(crate) mod cursor;
@@ -94,40 +93,22 @@ impl ProgressReporter for LspProgressReporter {
 pub(crate) struct Backend {
     pub(super) client: Client,
     pub(super) indexer: Arc<Indexer>,
-    /// Per-URI abort handle for the pending debounced reindex task.
-    /// When a new change arrives we abort the previous pending task so only
-    /// the latest content is ever parsed.
-    pub(super) pending_reindex: DashMap<String, AbortHandle>,
+    event_tx: mpsc::Sender<WorkspaceEvent>,
     /// True if the client advertised `snippetSupport: true` during initialize.
     /// Used to decide whether to send `InsertTextFormat::SNIPPET` in completions.
     pub(super) snippet_support: Arc<AtomicBool>,
 }
 
-#[derive(Clone)]
-struct OpenedDocumentContext {
-    uri: Url,
-    text: String,
-    opened_file_path: Option<PathBuf>,
-}
-
-impl OpenedDocumentContext {
-    fn from_open_params(params: DidOpenTextDocumentParams) -> Self {
-        let uri = params.text_document.uri;
-        let opened_file_path = uri.to_file_path().ok();
-        Self {
-            uri,
-            text: params.text_document.text,
-            opened_file_path,
-        }
-    }
-}
-
 impl Backend {
-    pub(crate) fn new(client: Client) -> Self {
+    pub(crate) fn new(
+        client: Client,
+        indexer: Arc<Indexer>,
+        event_tx: mpsc::Sender<WorkspaceEvent>,
+    ) -> Self {
         Self {
             client,
-            indexer: Arc::new(Indexer::new()),
-            pending_reindex: DashMap::new(),
+            indexer,
+            event_tx,
             snippet_support: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -231,89 +212,49 @@ impl Backend {
             .filter(|workspace_root| workspace_root.is_dir())
     }
 
-    fn configure_initialized_workspace(
+    async fn configure_initialized_workspace(
         &self,
         params: &InitializeParams,
         workspace_root: &Path,
         workspace_pinned: bool,
     ) {
-        self.set_workspace_root(workspace_root.to_path_buf());
         if workspace_pinned {
             self.indexer.workspace_pinned.store(true, Ordering::Relaxed);
         }
-        self.apply_initialization_options(params.initialization_options.as_ref(), workspace_root);
-        self.spawn_workspace_indexing(workspace_root.to_path_buf(), Vec::new());
+        let (explicit_source_paths, ignore_patterns) =
+            self.apply_initialization_options(params.initialization_options.as_ref());
+        let _ = self
+            .event_tx
+            .send(WorkspaceEvent::Initialize {
+                config: WorkspaceConfig {
+                    root: workspace_root.to_path_buf(),
+                    explicit_source_paths,
+                    ignore_patterns,
+                },
+                completion_tx: None,
+            })
+            .await;
     }
 
     fn apply_initialization_options(
         &self,
         initialization_options: Option<&serde_json::Value>,
-        workspace_root: &Path,
-    ) {
-        if let Some(ignore_patterns) =
+    ) -> (Vec<String>, Vec<String>) {
+        let ignore_patterns =
             Self::collect_indexing_option_strings(initialization_options, "ignorePatterns")
-        {
+                .unwrap_or_default();
+        if !ignore_patterns.is_empty() {
             log::info!("ignorePatterns: {:?}", ignore_patterns);
-            match self.indexer.ignore_matcher.write() {
-                Ok(mut ignore_matcher) => {
-                    *ignore_matcher = Some(Arc::new(IgnoreMatcher::new(
-                        ignore_patterns,
-                        workspace_root,
-                    )));
-                }
-                Err(error) => {
-                    log::warn!("Failed to update ignore matcher: {error}");
-                }
-            }
         }
 
-        let mut all_source_paths: Vec<String> =
+        let explicit_source_paths =
             Self::collect_indexing_option_strings(initialization_options, "sourcePaths")
                 .unwrap_or_default();
-
-        // Auto-discover source roots from workspace.json (JetBrains Gradle/Maven format).
-        // Discovered paths are merged with any user-configured sourcePaths.
-        let workspace_json_paths = crate::workspace_json::load_source_paths(workspace_root);
-        for path in &workspace_json_paths {
-            let path_str = path.to_string_lossy().into_owned();
-            if !all_source_paths.contains(&path_str) {
-                all_source_paths.push(path_str);
-            }
+        if !explicit_source_paths.is_empty() {
+            log::info!("sourcePaths: {:?}", explicit_source_paths);
         }
 
-        // Fallback: if workspace.json wasn't present, probe standard Maven/Gradle layouts.
-        if workspace_json_paths.is_empty() {
-            for path in crate::workspace_json::detect_build_layout_source_paths(workspace_root) {
-                let path_str = path.to_string_lossy().into_owned();
-                if !all_source_paths.contains(&path_str) {
-                    all_source_paths.push(path_str);
-                }
-            }
-        }
-
-        // Auto-include ~/.kotlin-lsp/sources if present (default extract-sources output dir).
-        #[allow(deprecated)]
-        if let Some(home) = std::env::home_dir() {
-            let default_sources = home.join(".kotlin-lsp").join("sources");
-            if default_sources.is_dir() {
-                let path_str = default_sources.to_string_lossy().into_owned();
-                if !all_source_paths.contains(&path_str) {
-                    all_source_paths.push(path_str);
-                }
-            }
-        }
-
-        if !all_source_paths.is_empty() {
-            log::info!("sourcePaths (combined): {:?}", all_source_paths);
-            match self.indexer.source_paths_raw.write() {
-                Ok(mut source_paths_raw) => {
-                    *source_paths_raw = all_source_paths;
-                }
-                Err(error) => {
-                    log::warn!("Failed to update source paths: {error}");
-                }
-            }
-        }
+        (explicit_source_paths, ignore_patterns)
     }
 
     fn collect_indexing_option_strings(
@@ -329,220 +270,6 @@ impl Backend {
             .filter_map(|value| value.as_str().map(str::to_owned))
             .collect();
         (!collected_values.is_empty()).then_some(collected_values)
-    }
-
-    fn set_workspace_root(&self, workspace_root: PathBuf) {
-        match self.indexer.workspace_root.write() {
-            Ok(mut current_workspace_root) => {
-                *current_workspace_root = Some(workspace_root);
-            }
-            Err(error) => {
-                log::warn!("Failed to update workspace root: {error}");
-            }
-        }
-    }
-
-    fn current_workspace_root(&self) -> Option<PathBuf> {
-        match self.indexer.workspace_root.read() {
-            Ok(current_workspace_root) => current_workspace_root.clone(),
-            Err(error) => {
-                log::warn!("Failed to read workspace root: {error}");
-                None
-            }
-        }
-    }
-
-    fn spawn_workspace_indexing(&self, workspace_root: PathBuf, prioritized_paths: Vec<PathBuf>) {
-        let indexer = Arc::clone(&self.indexer);
-        let client = self.client.clone();
-        tokio::spawn(async move {
-            indexer
-                .index_workspace_prioritized(
-                    &workspace_root,
-                    prioritized_paths,
-                    Arc::new(LspProgressReporter(client)),
-                )
-                .await;
-        });
-    }
-
-    fn detect_workspace_root_switch(
-        &self,
-        workspace_pinned: bool,
-        opened_file_path: Option<&Path>,
-    ) -> Option<PathBuf> {
-        if workspace_pinned {
-            return None;
-        }
-
-        let opened_file_path = opened_file_path?;
-        let candidate_workspace_root = Self::auto_detect_workspace_root(opened_file_path)?;
-        self.should_switch_workspace_root(opened_file_path, &candidate_workspace_root)
-            .then_some(candidate_workspace_root)
-    }
-
-    fn auto_detect_workspace_root(opened_file_path: &Path) -> Option<PathBuf> {
-        let strong_markers = [
-            "build.gradle",
-            "settings.gradle",
-            "build.gradle.kts",
-            "Cargo.toml",
-            "pom.xml",
-            "settings.gradle.kts",
-        ];
-        let weak_markers = ["Package.swift"];
-        let mut current_directory = opened_file_path.parent().map(Path::to_path_buf);
-        let mut nearest_strong_marker_root: Option<PathBuf> = None;
-        let mut git_root: Option<PathBuf> = None;
-        let mut nearest_weak_marker_root: Option<PathBuf> = None;
-
-        while let Some(directory) = current_directory {
-            if nearest_strong_marker_root.is_none()
-                && strong_markers
-                    .iter()
-                    .any(|marker| directory.join(marker).exists())
-            {
-                nearest_strong_marker_root = Some(directory.clone());
-            }
-            if directory.join(".git").exists() {
-                git_root = Some(directory.clone());
-                break;
-            }
-            if nearest_weak_marker_root.is_none()
-                && weak_markers
-                    .iter()
-                    .any(|marker| directory.join(marker).exists())
-            {
-                nearest_weak_marker_root = Some(directory.clone());
-            }
-            current_directory = directory.parent().map(Path::to_path_buf);
-        }
-
-        nearest_strong_marker_root
-            .or(git_root)
-            .or(nearest_weak_marker_root)
-            .or_else(|| opened_file_path.parent().map(Path::to_path_buf))
-    }
-
-    fn should_switch_workspace_root(
-        &self,
-        opened_file_path: &Path,
-        candidate_workspace_root: &Path,
-    ) -> bool {
-        let candidate_workspace_root = Self::canonicalize_or_clone(candidate_workspace_root);
-        match self.current_workspace_root() {
-            None => true,
-            Some(current_workspace_root) => {
-                let current_workspace_root = Self::canonicalize_or_clone(&current_workspace_root);
-                let opened_file_path = Self::canonicalize_or_clone(opened_file_path);
-                !opened_file_path.starts_with(&current_workspace_root)
-                    && candidate_workspace_root != current_workspace_root
-            }
-        }
-    }
-
-    fn canonicalize_or_clone(path: &Path) -> PathBuf {
-        std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
-    }
-
-    fn switch_workspace_root_for_opened_document(
-        &self,
-        workspace_root: PathBuf,
-        opened_file_path: Option<PathBuf>,
-    ) {
-        self.set_workspace_root(workspace_root.clone());
-        self.indexer.workspace_pinned.store(true, Ordering::Relaxed);
-        self.indexer.root_generation.fetch_add(1, Ordering::SeqCst);
-        self.indexer.reset_index_state();
-        log::info!(
-            "Auto-detected workspace root (now pinned): {}",
-            workspace_root.display()
-        );
-        self.spawn_workspace_indexing(workspace_root, opened_file_path.into_iter().collect());
-    }
-
-    fn is_outside_pinned_workspace_root(
-        &self,
-        workspace_pinned: bool,
-        opened_file_path: Option<&Path>,
-    ) -> bool {
-        if !workspace_pinned {
-            return false;
-        }
-
-        match (opened_file_path, self.current_workspace_root()) {
-            (Some(opened_file_path), Some(current_workspace_root)) => {
-                let opened_file_path = Self::canonicalize_or_clone(opened_file_path);
-                let current_workspace_root =
-                    Self::canonicalize_or_clone(current_workspace_root.as_path());
-                !opened_file_path.starts_with(&current_workspace_root)
-            }
-            _ => false,
-        }
-    }
-
-    async fn store_live_document_state(&self, opened_document: &OpenedDocumentContext) {
-        self.indexer
-            .set_live_lines(&opened_document.uri, &opened_document.text);
-
-        let indexer = Arc::clone(&self.indexer);
-        let uri = opened_document.uri.clone();
-        let text = opened_document.text.clone();
-        let _ = tokio::task::spawn_blocking(move || indexer.store_live_tree(&uri, &text)).await;
-    }
-
-    fn spawn_outside_root_document_indexing(&self, opened_document: OpenedDocumentContext) {
-        let indexer = Arc::clone(&self.indexer);
-        let semaphore = indexer.parse_sem();
-        tokio::task::spawn(async move {
-            if let Ok(permit) = semaphore.acquire_owned().await {
-                let uri = opened_document.uri;
-                let text = opened_document.text;
-                let _ = tokio::task::spawn_blocking(move || {
-                    let _permit = permit;
-                    indexer.index_content(&uri, &text);
-                })
-                .await;
-            }
-        });
-    }
-
-    fn spawn_open_document_indexing(&self, opened_document: OpenedDocumentContext) {
-        let indexer = Arc::clone(&self.indexer);
-        let semaphore = indexer.parse_sem();
-        let client = self.client.clone();
-        let cached_indexer = Arc::clone(&self.indexer);
-        tokio::task::spawn(async move {
-            let uri = opened_document.uri;
-            let text = opened_document.text;
-            let uri_for_diagnostics = uri.clone();
-            let Ok(permit) = semaphore.acquire_owned().await else {
-                return;
-            };
-            let result = tokio::task::spawn_blocking(move || {
-                let _permit = permit;
-                let data = indexer.index_content(&uri, &text);
-                Arc::clone(&indexer).prewarm_completion_cache(&uri);
-                data
-            })
-            .await;
-
-            let diagnostics = match result {
-                Ok(Some(indexed_file_data)) => syntax_diagnostics(&indexed_file_data.syntax_errors),
-                Ok(None) => {
-                    let uri_string = uri_for_diagnostics.to_string();
-                    cached_indexer
-                        .files
-                        .get(&uri_string)
-                        .map(|file_data| syntax_diagnostics(&file_data.syntax_errors))
-                        .unwrap_or_default()
-                }
-                Err(_) => Vec::new(),
-            };
-            client
-                .publish_diagnostics(uri_for_diagnostics, diagnostics, None)
-                .await;
-        });
     }
 }
 
@@ -616,7 +343,8 @@ impl LanguageServer for Backend {
         let resolved_workspace_root = Self::resolve_workspace_root(&params);
         let workspace_pinned = resolved_workspace_root.is_some();
         if let Some(workspace_root) = resolved_workspace_root {
-            self.configure_initialized_workspace(&params, &workspace_root, workspace_pinned);
+            self.configure_initialized_workspace(&params, &workspace_root, workspace_pinned)
+                .await;
         }
 
         Ok(InitializeResult {
@@ -759,132 +487,44 @@ impl LanguageServer for Backend {
     // ── document sync ────────────────────────────────────────────────────────
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
-        let opened_document = OpenedDocumentContext::from_open_params(params);
-        let workspace_pinned = self.indexer.workspace_pinned.load(Ordering::Relaxed);
-
-        if let Some(workspace_root) = self.detect_workspace_root_switch(
-            workspace_pinned,
-            opened_document.opened_file_path.as_deref(),
-        ) {
-            self.switch_workspace_root_for_opened_document(
-                workspace_root,
-                opened_document.opened_file_path.clone(),
-            );
-        }
-
-        if self.is_outside_pinned_workspace_root(
-            workspace_pinned,
-            opened_document.opened_file_path.as_deref(),
-        ) {
-            log::info!(
-                "Outside-root file — indexing content only: {}",
-                opened_document
-                    .opened_file_path
-                    .as_deref()
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_default()
-            );
-            self.store_live_document_state(&opened_document).await;
-            self.spawn_outside_root_document_indexing(opened_document);
-            return;
-        }
-
-        self.store_live_document_state(&opened_document).await;
-        self.spawn_open_document_indexing(opened_document);
+        let _ = self
+            .event_tx
+            .send(WorkspaceEvent::FileOpened {
+                uri: params.text_document.uri,
+                language_id: params.text_document.language_id,
+                content: params.text_document.text,
+            })
+            .await;
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
-        if let Some(change) = params.content_changes.into_iter().last() {
-            let uri = params.text_document.uri;
-            let text = change.text;
-            let idx = Arc::clone(&self.indexer);
-
-            // Update live_lines immediately (no debounce) so completions()
-            // always sees the current line text even before re-indexing.
-            self.indexer.set_live_lines(&uri, &text);
-            // Parsing is CPU-bound; run on the blocking pool to avoid
-            // stalling the Tokio worker thread on large files.
-            {
-                let idx2 = Arc::clone(&self.indexer);
-                let uri2 = uri.clone();
-                let text2 = text.clone();
-                let _ =
-                    tokio::task::spawn_blocking(move || idx2.store_live_tree(&uri2, &text2)).await;
-            }
-
-            // True debounce: cancel any pending reindex for this file.
-            let key = uri.to_string();
-            if let Some((_, handle)) = self.pending_reindex.remove(&key) {
-                handle.abort();
-            }
-
-            let client = self.client.clone();
-            let sem = idx.parse_sem();
-            let handle = tokio::spawn(async move {
-                tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
-                let permit = sem.acquire_owned().await;
-                let uri2 = uri.clone();
-                // Move the permit INTO spawn_blocking so it's held for the
-                // entire index_content call.  If this async task is aborted
-                // (debounce cancelled), spawn_blocking still runs to
-                // completion holding the permit — preventing a concurrent
-                // reindex for the same file from corrupting the shared maps.
-                let result = tokio::task::spawn_blocking(move || {
-                    let data = idx.index_content(&uri, &text);
-                    drop(permit);
-                    data
-                })
-                .await;
-
-                if let Ok(Some(data)) = result {
-                    let diags = syntax_diagnostics(&data.syntax_errors);
-                    client.publish_diagnostics(uri2, diags, None).await;
-                }
-            });
-            self.pending_reindex.insert(key, handle.abort_handle());
-        }
+        let _ = self
+            .event_tx
+            .send(WorkspaceEvent::FileChanged {
+                uri: params.text_document.uri,
+                changes: params.content_changes,
+            })
+            .await;
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
-        let uri = &params.text_document.uri;
-
-        // Cancel any pending debounced reindex so it cannot re-publish
-        // diagnostics after the file has been closed.
-        let key = uri.to_string();
-        if let Some((_, handle)) = self.pending_reindex.remove(&key) {
-            handle.abort();
-        }
-
-        self.indexer.remove_live_tree(uri);
-        self.indexer.remove_live_lines(uri);
-        // Clear diagnostics so stale errors don't linger after the file is closed.
-        self.client
-            .publish_diagnostics(params.text_document.uri, Vec::new(), None)
+        let _ = self
+            .event_tx
+            .send(WorkspaceEvent::FileClosed {
+                uri: params.text_document.uri,
+            })
             .await;
     }
 
     // ── textDocument/didSave ─────────────────────────────────────────────────
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
-        // Re-index the saved file so the symbol index stays consistent with
-        // what is on disk (e.g. after an external format or code-gen step).
-        let uri = params.text_document.uri;
-        let idx = Arc::clone(&self.indexer);
-        let sem = idx.parse_sem();
-        tokio::task::spawn(async move {
-            if let Ok(path) = uri.to_file_path() {
-                if let Ok(content) = tokio::fs::read_to_string(&path).await {
-                    if let Ok(permit) = sem.acquire_owned().await {
-                        tokio::task::spawn_blocking(move || {
-                            let _permit = permit;
-                            idx.index_content(&uri, &content);
-                        })
-                        .await
-                        .ok();
-                    }
-                }
-            }
-        });
+        let _ = self
+            .event_tx
+            .send(WorkspaceEvent::FileSaved {
+                uri: params.text_document.uri,
+            })
+            .await;
     }
 
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
