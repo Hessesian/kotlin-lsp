@@ -223,7 +223,7 @@ impl Backend {
         }
         let (explicit_source_paths, ignore_patterns) =
             self.apply_initialization_options(params.initialization_options.as_ref());
-        let _ = self
+        if self
             .event_tx
             .send(WorkspaceEvent::Initialize {
                 config: WorkspaceConfig {
@@ -233,7 +233,14 @@ impl Backend {
                 },
                 completion_tx: None,
             })
-            .await;
+            .await
+            .is_err()
+        {
+            log::error!(
+                "configure_initialized_workspace: workspace actor channel closed; \
+                 indexing will not start"
+            );
+        }
     }
 
     fn apply_initialization_options(

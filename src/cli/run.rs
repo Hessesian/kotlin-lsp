@@ -46,7 +46,7 @@ fn cache_exists(root: &Path) -> bool {
 
 /// Build (or load from cache) a full workspace index. Reports progress to stderr.
 ///
-/// Source paths are collected from:
+/// Source paths are resolved by [`WorkspaceConfig::resolve_sources`] inside the actor:
 /// 1. `workspace.json` (JetBrains IDE format) at the workspace root
 /// 2. Build-layout auto-detection (Gradle/Maven src dirs), if no workspace.json
 /// 3. `~/.kotlin-lsp/sources` — the default `extract-sources` output dir
@@ -57,54 +57,40 @@ async fn build_index(root: &Path) -> Arc<Indexer> {
     let actor = WorkspaceActor::new(Arc::clone(&indexer), Arc::new(NoopReporter), event_rx, None);
     tokio::spawn(actor.run());
 
-    let _ = event_tx
+    if event_tx
         .send(WorkspaceEvent::Initialize {
             config: WorkspaceConfig {
                 root: root.to_path_buf(),
-                explicit_source_paths: collect_cli_source_paths(root),
+                // Source discovery is performed by resolve_sources() inside the actor;
+                // passing an empty list here avoids duplicating the filesystem work.
+                explicit_source_paths: Vec::new(),
                 ignore_patterns: Vec::new(),
             },
             completion_tx: Some(completion_tx),
         })
-        .await;
-    let _ = completion_rx.await;
+        .await
+        .is_err()
+    {
+        log::error!("CLI: workspace actor channel closed; indexing will not start");
+        return indexer;
+    }
+
+    match tokio::time::timeout(
+        tokio::time::Duration::from_secs(120),
+        completion_rx,
+    )
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(_)) => {
+            log::warn!("CLI: workspace scan ended without sending completion signal");
+        }
+        Err(_) => {
+            log::warn!("CLI: workspace scan did not complete within 120 s; proceeding with partial index");
+        }
+    }
 
     indexer
-}
-
-/// Collect source paths for CLI indexing: workspace.json + build-layout + default extract dir.
-fn collect_cli_source_paths(root: &Path) -> Vec<String> {
-    let mut paths: Vec<String> = Vec::new();
-
-    let json_paths = crate::workspace_json::load_source_paths(root);
-    for p in &json_paths {
-        let s = p.to_string_lossy().into_owned();
-        if !paths.contains(&s) {
-            paths.push(s);
-        }
-    }
-
-    if json_paths.is_empty() {
-        for p in crate::workspace_json::detect_build_layout_source_paths(root) {
-            let s = p.to_string_lossy().into_owned();
-            if !paths.contains(&s) {
-                paths.push(s);
-            }
-        }
-    }
-
-    // Auto-include the well-known `extract-sources` output dir if present.
-    #[allow(deprecated)]
-    let home = std::env::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    let default_sources = home.join(".kotlin-lsp").join("sources");
-    if default_sources.is_dir() {
-        let s = default_sources.to_string_lossy().into_owned();
-        if !paths.contains(&s) {
-            paths.push(s);
-        }
-    }
-
-    paths
 }
 
 // ── Location helpers ─────────────────────────────────────────────────────────

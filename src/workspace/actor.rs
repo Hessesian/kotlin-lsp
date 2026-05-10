@@ -192,7 +192,15 @@ impl<R: ProgressReporter + 'static> WorkspaceActor<R> {
             let indexer = Arc::clone(&self.indexer);
             let uri = uri.clone();
             let text = text.clone();
-            let _ = tokio::task::spawn_blocking(move || indexer.store_live_tree(&uri, &text)).await;
+            // Fire-and-forget: live-tree parse runs on a blocking thread but we
+            // do not await it in the actor loop to avoid blocking subsequent events.
+            // The 300 ms debounce below provides ample time for the parse to finish
+            // before index_content consumes the updated live tree.
+            // Dropping the JoinHandle detaches from the task; the blocking thread
+            // continues and cannot be cancelled.
+            drop(tokio::task::spawn_blocking(move || {
+                indexer.store_live_tree(&uri, &text);
+            }));
         }
 
         let key = uri.to_string();
