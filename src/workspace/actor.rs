@@ -29,6 +29,7 @@ use crate::indexer::{Indexer, ProgressReporter};
 use crate::rg::IgnoreMatcher;
 
 use super::contract::{ReadyState, State};
+use super::scan_queue::{ScanArgs, ScanKind, ScanQueue};
 use super::{Config, Event};
 
 // ─── Actor ──────────────────────────────────────────────────────────
@@ -51,6 +52,17 @@ pub(crate) struct Actor<R: ProgressReporter + 'static> {
     /// Shared so that read-path consumers can observe workspace state without
     /// touching Indexer's internal lock fields directly.
     phase: Arc<RwLock<State>>,
+    /// Coalescing queue for full-workspace scans (Initialize / Reindex / ChangeRoot).
+    /// At most one scan runs at a time; newer requests replace pending ones.
+    scan_queue: ScanQueue,
+    /// Signals the actor's `run()` loop when a scan task finishes (or panics).
+    scan_done_tx: mpsc::Sender<()>,
+    scan_done_rx: mpsc::Receiver<()>,
+    /// Single-slot pushback for the FileChanged drain loop.
+    /// When a non-FileChanged event is encountered while draining, it is stored
+    /// here so it is processed at the start of the next loop iteration.
+    /// Invariant: at most one event is stored at any time.
+    pushback: Option<Event>,
 }
 
 impl<R: ProgressReporter + 'static> Actor<R> {
@@ -65,6 +77,7 @@ impl<R: ProgressReporter + 'static> Actor<R> {
         rx: mpsc::Receiver<Event>,
         client: Option<Client>,
     ) -> Self {
+        let (scan_done_tx, scan_done_rx) = mpsc::channel(8);
         Self {
             indexer,
             reporter,
@@ -72,6 +85,10 @@ impl<R: ProgressReporter + 'static> Actor<R> {
             client,
             pending_reindex: HashMap::new(),
             phase: Arc::new(RwLock::new(State::Uninitialized)),
+            scan_queue: ScanQueue::new(),
+            scan_done_tx,
+            scan_done_rx,
+            pushback: None,
         }
     }
 
@@ -87,7 +104,26 @@ impl<R: ProgressReporter + 'static> Actor<R> {
     /// [`Event`] variant must be handled here or the code will not
     /// compile.
     pub(crate) async fn run(mut self) {
-        while let Some(event) = self.rx.recv().await {
+        loop {
+            // Drain the pushback buffer before waiting on channels.
+            let event = if let Some(ev) = self.pushback.take() {
+                ev
+            } else {
+                tokio::select! {
+                    maybe_ev = self.rx.recv() => match maybe_ev {
+                        None => break,
+                        Some(ev) => ev,
+                    },
+                    Some(()) = self.scan_done_rx.recv() => {
+                        self.scan_queue.completed();
+                        if let Some(args) = self.scan_queue.try_start() {
+                            self.execute_scan(args);
+                        }
+                        continue;
+                    },
+                }
+            };
+
             match event {
                 Event::Initialize {
                     config,
@@ -101,7 +137,29 @@ impl<R: ProgressReporter + 'static> Actor<R> {
                     content,
                 } => self.handle_file_opened(uri, language_id, content).await,
                 Event::FileChanged { uri, changes } => {
-                    self.handle_file_changed(uri, changes).await;
+                    // Coalesce: drain all immediately available FileChanged events.
+                    // Last change per URI wins (HashMap deduplication).
+                    let mut batch: HashMap<
+                        String,
+                        (Url, Vec<tower_lsp::lsp_types::TextDocumentContentChangeEvent>),
+                    > = HashMap::new();
+                    batch.insert(uri.to_string(), (uri, changes));
+                    loop {
+                        match self.rx.try_recv() {
+                            Ok(Event::FileChanged { uri, changes }) => {
+                                batch.insert(uri.to_string(), (uri, changes));
+                            }
+                            Ok(other) => {
+                                // Non-FileChanged event — push back and stop draining.
+                                self.pushback = Some(other);
+                                break;
+                            }
+                            Err(_) => break, // channel empty or closed
+                        }
+                    }
+                    for (_, (uri, changes)) in batch {
+                        self.handle_file_changed(uri, changes).await;
+                    }
                 }
                 Event::FileSaved { uri } => self.handle_file_saved(uri).await,
                 Event::FileClosed { uri } => self.handle_file_closed(uri).await,
@@ -126,10 +184,19 @@ impl<R: ProgressReporter + 'static> Actor<R> {
         self.apply_ignore_patterns(&config.ignore_patterns, &root);
 
         // Always write source paths — even when empty — to clear any prior state.
-        self.write_source_paths(data.source_paths.clone());
+        let source_paths = data.source_paths.clone();
+        self.write_source_paths(source_paths.clone());
         self.set_phase(data).await;
 
-        self.spawn_scan(root, Vec::new(), completion_tx).await;
+        let args = ScanArgs {
+            root,
+            kind: ScanKind::Prioritized {
+                initial_paths: Vec::new(),
+            },
+            source_paths,
+            completion_tx,
+        };
+        self.enqueue_and_start_scan(args);
     }
 
     async fn handle_reindex(&mut self) {
@@ -138,7 +205,20 @@ impl<R: ProgressReporter + 'static> Actor<R> {
             return;
         };
         self.indexer.reset_index_state();
-        self.spawn_full_scan(root).await;
+        let source_paths = self
+            .indexer
+            .source_paths_raw
+            .read()
+            .ok()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+        let args = ScanArgs {
+            root,
+            kind: ScanKind::Full,
+            source_paths,
+            completion_tx: None,
+        };
+        self.enqueue_and_start_scan(args);
     }
 
     async fn handle_change_root(&mut self, root: PathBuf) {
@@ -156,10 +236,16 @@ impl<R: ProgressReporter + 'static> Actor<R> {
         self.apply_ignore_patterns(&config.ignore_patterns, &root);
         self.write_source_paths(data.source_paths.clone());
         self.set_root(root.clone());
-        self.set_phase(data).await;
+        self.set_phase(data.clone()).await;
 
         self.indexer.reset_index_state();
-        self.spawn_full_scan(root).await;
+        let args = ScanArgs {
+            root,
+            kind: ScanKind::Full,
+            source_paths: data.source_paths,
+            completion_tx: None,
+        };
+        self.enqueue_and_start_scan(args);
     }
 
     async fn handle_file_opened(&mut self, uri: Url, _language_id: String, content: String) {
@@ -421,7 +507,8 @@ impl<R: ProgressReporter + 'static> Actor<R> {
         let data = ReadyState::from_config(&config);
 
         self.apply_ignore_patterns(&config.ignore_patterns, &workspace_root);
-        self.write_source_paths(data.source_paths.clone());
+        let source_paths = data.source_paths.clone();
+        self.write_source_paths(source_paths.clone());
         self.set_root(workspace_root.clone());
         self.set_phase(data).await;
         self.indexer.workspace_pinned.store(true, Ordering::Relaxed);
@@ -431,8 +518,15 @@ impl<R: ProgressReporter + 'static> Actor<R> {
             "Auto-detected workspace root (now pinned): {}",
             workspace_root.display()
         );
-        self.spawn_scan(workspace_root, opened_file_path.into_iter().collect(), None)
-            .await;
+        let args = ScanArgs {
+            root: workspace_root,
+            kind: ScanKind::Prioritized {
+                initial_paths: opened_file_path.into_iter().collect(),
+            },
+            source_paths,
+            completion_tx: None,
+        };
+        self.enqueue_and_start_scan(args);
     }
 
     fn is_outside_pinned_workspace_root(
@@ -513,32 +607,61 @@ impl<R: ProgressReporter + 'static> Actor<R> {
         });
     }
 
-    /// Spawn a prioritized bounded scan in the background.
-    /// `initial_paths` are indexed first (empty = no prioritization).
-    async fn spawn_scan(
-        &self,
-        root: PathBuf,
-        initial_paths: Vec<PathBuf>,
-        completion_tx: Option<oneshot::Sender<()>>,
-    ) {
-        let indexer = Arc::clone(&self.indexer);
-        let reporter = Arc::clone(&self.reporter);
-        tokio::spawn(async move {
-            indexer
-                .index_workspace_prioritized(&root, initial_paths, reporter)
-                .await;
-            if let Some(completion_tx) = completion_tx {
-                let _ = completion_tx.send(());
-            }
-        });
+    // ── Scan queue management ─────────────────────────────────────────────────
+
+    /// Queue a scan request and start it immediately if no scan is in progress.
+    ///
+    /// If a scan is already running, bump `root_generation` to invalidate it
+    /// (so stale results are discarded) and store the new request as pending.
+    fn enqueue_and_start_scan(&mut self, args: ScanArgs) {
+        if self.scan_queue.is_in_progress() {
+            // Invalidate the in-flight scan so it discards its (now-stale) results.
+            self.indexer.root_generation.fetch_add(1, Ordering::SeqCst);
+        }
+        self.scan_queue.request(args);
+        if let Some(args) = self.scan_queue.try_start() {
+            self.execute_scan(args);
+        }
     }
 
-    /// Spawn an unbounded full scan (used by Reindex and ChangeRoot).
-    async fn spawn_full_scan(&self, root: PathBuf) {
+    /// Spawn a workspace scan task.
+    ///
+    /// Sends to `scan_done_tx` when the task finishes — even on panic — so the
+    /// actor's `run()` loop always clears `in_progress` and can start queued work.
+    fn execute_scan(&self, args: ScanArgs) {
         let indexer = Arc::clone(&self.indexer);
         let reporter = Arc::clone(&self.reporter);
+        let scan_done_tx = self.scan_done_tx.clone();
+
+        let scan_handle = tokio::spawn(async move {
+            // Claim this scan's source paths right before running.  By the time
+            // this task executes, the actor may have processed later events that
+            // overwrote source_paths_raw.  Writing here ensures finalize_workspace_scan
+            // uses the paths that were configured when this scan was enqueued.
+            if let Ok(mut guard) = indexer.source_paths_raw.write() {
+                *guard = args.source_paths.clone();
+            }
+            match args.kind {
+                ScanKind::Full => {
+                    indexer.index_workspace_full(&args.root, reporter).await;
+                }
+                ScanKind::Prioritized { initial_paths } => {
+                    indexer
+                        .index_workspace_prioritized(&args.root, initial_paths, reporter)
+                        .await;
+                }
+            }
+            args.completion_tx
+        });
+
+        // Watcher task: forwards completion_tx signal and notifies actor.
+        // Runs even if the scan task panics (JoinError path).
         tokio::spawn(async move {
-            indexer.index_workspace_full(&root, reporter).await;
+            let completion_tx = scan_handle.await.ok().flatten();
+            if let Some(tx) = completion_tx {
+                let _ = tx.send(());
+            }
+            let _ = scan_done_tx.send(()).await;
         });
     }
 }

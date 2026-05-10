@@ -26,6 +26,7 @@ pub(crate) mod actor;
 pub(crate) mod contract;
 pub(crate) mod event;
 pub(crate) mod phase;
+pub(crate) mod scan_queue;
 
 // Re-exports are unused until Wave 2 wires this module in (ws-backend, ws-cli, ws-main).
 #[allow(unused_imports)]
@@ -100,6 +101,9 @@ impl Config {
         // Auto-include the well-known `extract-sources` output directory if present.
         // Skip entirely when HOME is unknown to avoid accidentally indexing the
         // current working directory (matches existing backend behaviour).
+        // Skipped in test builds so actor tests don't accidentally index the
+        // developer's local library sources and time out.
+        #[cfg(not(test))]
         #[allow(deprecated)]
         if let Some(home) = std::env::home_dir() {
             let default_sources = home.join(".kotlin-lsp").join("sources");

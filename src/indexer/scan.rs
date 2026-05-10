@@ -821,8 +821,6 @@ impl Indexer {
         }
         Arc::clone(&self).run_pending_reindex(reporter).await;
     }
-
-    /// If a reindex was queued while a scan was in progress, run it now.
     ///
     /// Called at the end of every public scan function, after the full workflow
     /// (impl + apply + source_paths + save_cache) completes. Mirrors RA's
