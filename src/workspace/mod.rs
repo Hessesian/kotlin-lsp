@@ -24,14 +24,17 @@
 
 pub(crate) mod actor;
 pub(crate) mod contract;
+pub(crate) mod document_handler;
 pub(crate) mod event;
+pub(crate) mod file_change_handler;
 pub(crate) mod phase;
+pub(crate) mod scan_handler;
 
 // Re-exports are unused until Wave 2 wires this module in (ws-backend, ws-cli, ws-main).
 #[allow(unused_imports)]
 pub(crate) use actor::Actor;
 #[allow(unused_imports)]
-pub(crate) use contract::{ReadyState, Effect, State};
+pub(crate) use contract::{Effect, ReadyState, State};
 #[allow(unused_imports)]
 pub(crate) use event::Event;
 
@@ -47,15 +50,18 @@ use std::path::PathBuf;
 pub(crate) struct Config {
     /// Absolute path to the workspace root (nearest `.git` ancestor of the opened file,
     /// or an explicit `--root` flag in CLI mode, or the LSP `rootUri`).
-    pub root: PathBuf,
+    pub(crate) root: PathBuf,
 
     /// Source paths explicitly configured by the caller (e.g. LSP
     /// `initializationOptions.indexingOptions.sourcePaths`).
     /// These are merged with auto-discovered paths by [`resolve_sources`].
-    pub explicit_source_paths: Vec<String>,
+    pub(crate) explicit_source_paths: Vec<String>,
 
     /// Glob-style ignore patterns from LSP `initializationOptions.indexingOptions.ignorePatterns`.
-    pub ignore_patterns: Vec<String>,
+    pub(crate) ignore_patterns: Vec<String>,
+
+    /// Whether the workspace root should be pinned against didOpen auto-detection.
+    pub(crate) pin_workspace: bool,
 }
 
 impl Config {
