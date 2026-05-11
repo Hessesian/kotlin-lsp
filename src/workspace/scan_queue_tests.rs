@@ -60,8 +60,11 @@ fn completion_tx_dropped_when_superseded() {
     // /b pending is now replaced by /c, dropping tx1
     q.request(dummy_args("/c"));
 
-    // tx1 was dropped — receiver sees closed
-    assert!(rx1.try_recv().is_err());
+    // tx1 was dropped when /b was superseded — receiver must see Closed, not just Empty
+    assert!(matches!(
+        rx1.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+    ));
 }
 
 #[test]

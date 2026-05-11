@@ -651,7 +651,7 @@ impl<R: ProgressReporter + 'static> Actor<R> {
         // Runs even if the scan task panics (JoinError path).
         tokio::spawn(async move {
             let completion_tx = scan_handle.await.ok().flatten();
-            completion_tx.map(|tx| tx.send(()));
+            let _ = completion_tx.map(|tx| tx.send(()));
             let _ = scan_done_tx.send(()).await;
         });
     }
