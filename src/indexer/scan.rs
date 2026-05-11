@@ -706,7 +706,6 @@ impl Indexer {
         root: &Path,
         reporter: Arc<R>,
     ) {
-        // The workspace actor already updated workspace_root before scheduling this scan.
         let max = resolve_max_files(DEFAULT_MAX_INDEX_FILES);
         let (result, guard_opt) = Arc::clone(&self)
             .index_workspace_impl(root, max, Arc::clone(&reporter))

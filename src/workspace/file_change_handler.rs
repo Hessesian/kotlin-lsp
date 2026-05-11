@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tokio::task::AbortHandle;
+use tokio::task::JoinHandle;
 use tower_lsp::lsp_types::{TextDocumentContentChangeEvent, Url};
 use tower_lsp::Client;
 
@@ -11,7 +11,7 @@ use crate::indexer::Indexer;
 pub(crate) struct FileChangeHandler {
     indexer: Arc<Indexer>,
     client: Option<Client>,
-    pending_reindex: HashMap<String, AbortHandle>,
+    pending_reindex: HashMap<String, JoinHandle<()>>,
 }
 
 impl FileChangeHandler {
@@ -60,6 +60,8 @@ impl FileChangeHandler {
     }
 
     fn reschedule_debounced_reindex(&mut self, uri: Url, text: String) {
+        self.pending_reindex.retain(|_, h| !h.is_finished());
+
         let key = uri.to_string();
         if let Some(handle) = self.pending_reindex.remove(&key) {
             handle.abort();
@@ -88,7 +90,7 @@ impl FileChangeHandler {
                     .await;
             }
         });
-        self.pending_reindex.insert(key, handle.abort_handle());
+        self.pending_reindex.insert(key, handle);
     }
 
     pub(crate) fn cancel_pending_reindex(&mut self, uri: &Url) {

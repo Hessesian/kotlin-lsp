@@ -537,12 +537,16 @@ impl LanguageServer for Backend {
         for change in params.changes {
             if change.typ == FileChangeType::DELETED {
                 // Remove from index; definition map cleanup is handled lazily.
-                let _ = self
+                if self
                     .event_tx
                     .send(Event::FileDeleted {
                         uri: change.uri.clone(),
                     })
-                    .await;
+                    .await
+                    .is_err()
+                {
+                    log::warn!("FileDeleted event dropped: workspace actor channel closed");
+                }
                 continue;
             }
             let uri = change.uri;

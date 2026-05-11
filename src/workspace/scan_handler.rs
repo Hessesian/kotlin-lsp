@@ -61,7 +61,7 @@ impl<R: ProgressReporter + 'static> ScanHandler<R> {
             root: root.clone(),
             explicit_source_paths: Vec::new(),
             ignore_patterns: Vec::new(),
-            pin_workspace: false,
+            pin_workspace: true,
         };
         let data = ReadyState::from_config(&config);
 
@@ -70,7 +70,7 @@ impl<R: ProgressReporter + 'static> ScanHandler<R> {
         self.set_root(root.clone());
         self.indexer
             .workspace_pinned
-            .store(config.pin_workspace, std::sync::atomic::Ordering::Relaxed);
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         self.set_phase(data).await;
 
         self.indexer.reset_index_state();
@@ -97,9 +97,6 @@ impl<R: ProgressReporter + 'static> ScanHandler<R> {
         self.indexer
             .workspace_pinned
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        self.indexer
-            .root_generation
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.indexer.reset_index_state();
         log::info!(
             "Auto-detected workspace root (now pinned): {}",
@@ -126,7 +123,11 @@ impl<R: ProgressReporter + 'static> ScanHandler<R> {
             *guard = Some(root);
         } else {
             log::warn!("Actor: failed to write workspace root");
+            return;
         }
+        self.indexer
+            .root_generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn write_source_paths(&self, paths: Vec<String>) {
