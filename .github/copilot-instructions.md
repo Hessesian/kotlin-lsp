@@ -411,6 +411,28 @@ If a match arm body grows beyond one line, it belongs in a named method on the a
 
 **Contrast — old `actor.rs`** had `handle_file_changed` (60 lines, 4-level nesting) directly in the Actor, with comments separating phases (`// batch drain`, `// spawn live-tree update`, `// reschedule debounce`). The comments were implicit function names; the refactor made them real.
 
+### 16. Side effects belong at the write site, not scattered at call sites
+
+When a mutation always has a companion side effect (e.g., writing X always invalidates Y), put the side effect *inside the write helper*, not at each call site. Call sites forget; the write helper cannot.
+
+**Good example — `ScanHandler::set_root()` (`src/workspace/scan_handler.rs`):**
+```rust
+fn set_root(&self, root: PathBuf) {
+    if let Ok(mut guard) = self.indexer.workspace_root.write() {
+        *guard = Some(root);
+    } else {
+        log::warn!("Actor: failed to write workspace root");
+        return;   // ← don't bump if write failed
+    }
+    // Every root change invalidates in-flight scans — this cannot be forgotten.
+    self.indexer.root_generation.fetch_add(1, Ordering::SeqCst);
+}
+```
+
+Three callers (`handle_initialize`, `handle_change_root`, `switch_workspace_root_for_opened_document`) previously each bumped `root_generation` manually. One caller had missed it entirely (the bug). Moving the bump into `set_root` makes forgetting impossible.
+
+**Contrast — before:** `root_generation.fetch_add(…)` repeated at three call sites; one was missing, causing a race window.
+
 ## SOLID principles (Rust mapping)
 
 These are mapped to Rust idioms. Good examples are added here as they emerge from refactoring — when you write code that cleanly illustrates a principle, add it below.
