@@ -65,6 +65,7 @@ async fn build_index(root: &Path) -> Arc<Indexer> {
                 // passing an empty list here avoids duplicating the filesystem work.
                 explicit_source_paths: Vec::new(),
                 ignore_patterns: Vec::new(),
+                pin_workspace: false,
             },
             completion_tx: Some(completion_tx),
         })
@@ -75,18 +76,15 @@ async fn build_index(root: &Path) -> Arc<Indexer> {
         return indexer;
     }
 
-    match tokio::time::timeout(
-        tokio::time::Duration::from_secs(120),
-        completion_rx,
-    )
-    .await
-    {
+    match tokio::time::timeout(tokio::time::Duration::from_secs(120), completion_rx).await {
         Ok(Ok(())) => {}
         Ok(Err(_)) => {
             log::warn!("CLI: workspace scan ended without sending completion signal");
         }
         Err(_) => {
-            log::warn!("CLI: workspace scan did not complete within 120 s; proceeding with partial index");
+            log::warn!(
+                "CLI: workspace scan did not complete within 120 s; proceeding with partial index"
+            );
         }
     }
 

@@ -12,6 +12,7 @@ fn config(root: &Path) -> Config {
         root: root.to_path_buf(),
         explicit_source_paths: Vec::new(),
         ignore_patterns: Vec::new(),
+        pin_workspace: false,
     }
 }
 
@@ -20,6 +21,7 @@ fn config_with_explicit(root: &Path, explicit: &[&str]) -> Config {
         root: root.to_path_buf(),
         explicit_source_paths: explicit.iter().map(|s| s.to_string()).collect(),
         ignore_patterns: Vec::new(),
+        pin_workspace: false,
     }
 }
 
@@ -48,8 +50,8 @@ fn no_workspace_json_no_build_file_no_layout_paths() {
 #[test]
 fn explicit_paths_are_included() {
     let dir = tempfile::tempdir().unwrap();
-    let sources = config_with_explicit(dir.path(), &["/some/external/lib", "/another/lib"])
-        .resolve_sources();
+    let sources =
+        config_with_explicit(dir.path(), &["/some/external/lib", "/another/lib"]).resolve_sources();
     assert!(sources.contains(&"/some/external/lib".to_string()));
     assert!(sources.contains(&"/another/lib".to_string()));
 }
@@ -71,9 +73,7 @@ fn explicit_paths_come_first() {
         .expect("explicit path missing");
     let layout_pos = sources
         .iter()
-        .position(|s| {
-            std::path::Path::new(s).ends_with(std::path::Path::new("src/main/kotlin"))
-        })
+        .position(|s| std::path::Path::new(s).ends_with(std::path::Path::new("src/main/kotlin")))
         .expect("layout path missing");
 
     assert!(
@@ -129,4 +129,3 @@ fn workspace_json_paths_are_included() {
         "Expected workspace.json path in sources, got: {sources:?}"
     );
 }
-

@@ -39,7 +39,13 @@ async fn handle_initialize_updates_root_and_source_paths() {
         indexer.workspace_root.read().unwrap().as_deref(),
         Some(root.as_path())
     );
-    let source_paths = handler.current_source_paths().await;
+    let state = handler.state_stream();
+    let source_paths = state
+        .read()
+        .await
+        .ready()
+        .map(|ready| ready.source_paths.clone())
+        .unwrap_or_default();
     assert!(source_paths.contains(&"/some/lib".to_string()));
     assert!(indexer
         .source_paths_raw

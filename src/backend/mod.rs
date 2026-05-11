@@ -220,9 +220,6 @@ impl Backend {
         workspace_root: &Path,
         workspace_pinned: bool,
     ) {
-        if workspace_pinned {
-            self.indexer.workspace_pinned.store(true, Ordering::Relaxed);
-        }
         let (explicit_source_paths, ignore_patterns) =
             self.apply_initialization_options(params.initialization_options.as_ref());
         if self
@@ -232,6 +229,7 @@ impl Backend {
                     root: workspace_root.to_path_buf(),
                     explicit_source_paths,
                     ignore_patterns,
+                    pin_workspace: workspace_pinned,
                 },
                 completion_tx: None,
             })

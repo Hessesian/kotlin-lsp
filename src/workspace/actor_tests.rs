@@ -10,9 +10,7 @@ use crate::workspace::{Actor, Config, Event};
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
-fn make_actor(
-    indexer: Arc<Indexer>,
-) -> (Actor<NoopReporter>, mpsc::Sender<Event>) {
+fn make_actor(indexer: Arc<Indexer>) -> (Actor<NoopReporter>, mpsc::Sender<Event>) {
     let (tx, rx) = mpsc::channel(16);
     let actor = Actor::new(indexer, Arc::new(NoopReporter), rx, None);
     (actor, tx)
@@ -52,6 +50,7 @@ async fn initialize_sets_workspace_root() {
             root: root.clone(),
             explicit_source_paths: Vec::new(),
             ignore_patterns: Vec::new(),
+            pin_workspace: false,
         },
         completion_tx: None,
     })
@@ -98,6 +97,7 @@ async fn initialize_writes_explicit_source_paths() {
             root: root.clone(),
             explicit_source_paths: vec!["/some/lib".to_string()],
             ignore_patterns: Vec::new(),
+            pin_workspace: false,
         },
         completion_tx: Some(completion_tx),
     })

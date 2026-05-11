@@ -33,9 +33,18 @@ impl<R: ProgressReporter + 'static> ScanHandler<R> {
         config: Config,
         completion_tx: Option<oneshot::Sender<()>>,
     ) {
-        let root = config.root.clone();
-        self.apply_root_switch_config(&config).await;
-        self.enqueue_and_start_scan(root, Vec::new(), false, completion_tx);
+        let data = ReadyState::from_config(&config);
+        let root = data.root.clone();
+
+        self.set_root(root.clone());
+        self.apply_ignore_patterns(&config.ignore_patterns, &root);
+        self.indexer
+            .workspace_pinned
+            .store(config.pin_workspace, std::sync::atomic::Ordering::Relaxed);
+        self.write_source_paths(data.source_paths.clone());
+        self.set_phase(data).await;
+
+        self.spawn_scan(root, Vec::new(), completion_tx).await;
     }
 
     pub(crate) async fn handle_reindex(&self) {
@@ -43,9 +52,8 @@ impl<R: ProgressReporter + 'static> ScanHandler<R> {
             log::warn!("Actor: Reindex received but no workspace root is set");
             return;
         };
-
         self.indexer.reset_index_state();
-        self.enqueue_and_start_scan(root, Vec::new(), true, None);
+        self.spawn_full_scan(root).await;
     }
 
     pub(crate) async fn handle_change_root(&self, root: PathBuf) {
@@ -53,12 +61,20 @@ impl<R: ProgressReporter + 'static> ScanHandler<R> {
             root: root.clone(),
             explicit_source_paths: Vec::new(),
             ignore_patterns: Vec::new(),
-            pin_workspace: true,
+            pin_workspace: false,
         };
+        let data = ReadyState::from_config(&config);
 
-        self.apply_root_switch_config(&config).await;
+        self.apply_ignore_patterns(&config.ignore_patterns, &root);
+        self.write_source_paths(data.source_paths.clone());
+        self.set_root(root.clone());
+        self.indexer
+            .workspace_pinned
+            .store(config.pin_workspace, std::sync::atomic::Ordering::Relaxed);
+        self.set_phase(data).await;
+
         self.indexer.reset_index_state();
-        self.enqueue_and_start_scan(root, Vec::new(), true, None);
+        self.spawn_full_scan(root).await;
     }
 
     pub(crate) async fn switch_workspace_root_for_opened_document(
@@ -72,8 +88,12 @@ impl<R: ProgressReporter + 'static> ScanHandler<R> {
             ignore_patterns: Vec::new(),
             pin_workspace: true,
         };
+        let data = ReadyState::from_config(&config);
 
-        self.apply_root_switch_config(&config).await;
+        self.apply_ignore_patterns(&config.ignore_patterns, &workspace_root);
+        self.write_source_paths(data.source_paths.clone());
+        self.set_root(workspace_root.clone());
+        self.set_phase(data).await;
         self.indexer
             .workspace_pinned
             .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -85,62 +105,28 @@ impl<R: ProgressReporter + 'static> ScanHandler<R> {
             "Auto-detected workspace root (now pinned): {}",
             workspace_root.display()
         );
-        self.enqueue_and_start_scan(
-            workspace_root,
-            opened_file_path.into_iter().collect(),
-            false,
-            None,
-        );
+        self.spawn_scan(workspace_root, opened_file_path.into_iter().collect(), None)
+            .await;
     }
 
-    fn enqueue_and_start_scan(
-        &self,
-        root: PathBuf,
-        initial_paths: Vec<PathBuf>,
-        full_scan: bool,
-        completion_tx: Option<oneshot::Sender<()>>,
-    ) {
-        self.execute_scan(root, initial_paths, full_scan, completion_tx);
+    pub(crate) async fn set_phase(&self, data: ReadyState) {
+        self.state.write().await.set_state(data);
     }
 
-    fn execute_scan(
-        &self,
-        root: PathBuf,
-        initial_paths: Vec<PathBuf>,
-        full_scan: bool,
-        completion_tx: Option<oneshot::Sender<()>>,
-    ) {
-        let indexer = Arc::clone(&self.indexer);
-        let reporter = Arc::clone(&self.reporter);
-        tokio::spawn(async move {
-            if full_scan {
-                indexer.index_workspace_full(&root, reporter).await;
-            } else {
-                indexer
-                    .index_workspace_prioritized(&root, initial_paths, reporter)
-                    .await;
-            }
-            Self::on_scan_completed(completion_tx);
-        });
-    }
-
-    fn on_scan_completed(completion_tx: Option<oneshot::Sender<()>>) {
-        if let Some(completion_tx) = completion_tx {
-            let _ = completion_tx.send(());
-        }
-    }
-
-    async fn apply_root_switch_config(&self, config: &Config) {
-        let data = ReadyState::from_config(config);
-        let root = data.root.clone();
-
-        self.set_root(root.clone());
+    pub(crate) fn current_root(&self) -> Option<PathBuf> {
         self.indexer
-            .workspace_pinned
-            .store(config.pin_workspace, std::sync::atomic::Ordering::Relaxed);
-        self.apply_ignore_patterns(&config.ignore_patterns, &root);
-        self.set_state(data).await;
-        self.write_source_paths(self.current_source_paths().await);
+            .workspace_root
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone())
+    }
+
+    fn set_root(&self, root: PathBuf) {
+        if let Ok(mut guard) = self.indexer.workspace_root.write() {
+            *guard = Some(root);
+        } else {
+            log::warn!("Actor: failed to write workspace root");
+        }
     }
 
     fn write_source_paths(&self, paths: Vec<String>) {
@@ -160,33 +146,30 @@ impl<R: ProgressReporter + 'static> ScanHandler<R> {
         }
     }
 
-    fn set_root(&self, root: PathBuf) {
-        if let Ok(mut guard) = self.indexer.workspace_root.write() {
-            *guard = Some(root);
-        } else {
-            log::warn!("Actor: failed to write workspace root");
-        }
+    async fn spawn_scan(
+        &self,
+        root: PathBuf,
+        initial_paths: Vec<PathBuf>,
+        completion_tx: Option<oneshot::Sender<()>>,
+    ) {
+        let indexer = Arc::clone(&self.indexer);
+        let reporter = Arc::clone(&self.reporter);
+        tokio::spawn(async move {
+            indexer
+                .index_workspace_prioritized(&root, initial_paths, reporter)
+                .await;
+            if let Some(completion_tx) = completion_tx {
+                let _ = completion_tx.send(());
+            }
+        });
     }
 
-    async fn set_state(&self, data: ReadyState) {
-        self.state.write().await.set_state(data);
-    }
-
-    async fn current_source_paths(&self) -> Vec<String> {
-        self.state
-            .read()
-            .await
-            .ready()
-            .map(|ready| ready.source_paths.clone())
-            .unwrap_or_default()
-    }
-
-    fn current_root(&self) -> Option<PathBuf> {
-        self.indexer
-            .workspace_root
-            .read()
-            .ok()
-            .and_then(|guard| guard.clone())
+    async fn spawn_full_scan(&self, root: PathBuf) {
+        let indexer = Arc::clone(&self.indexer);
+        let reporter = Arc::clone(&self.reporter);
+        tokio::spawn(async move {
+            indexer.index_workspace_full(&root, reporter).await;
+        });
     }
 }
 
