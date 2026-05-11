@@ -292,13 +292,25 @@ impl Backend {
         }
 
         // Auto-include ~/.kotlin-lsp/sources if present (default extract-sources output dir).
-        #[allow(deprecated)]
-        if let Some(home) = std::env::home_dir() {
-            let default_sources = home.join(".kotlin-lsp").join("sources");
-            if default_sources.is_dir() {
-                let path_str = default_sources.to_string_lossy().into_owned();
+        // Skipped when workspace.json declares an explicit `sourcePaths` key.
+        if let Some(configured) =
+            crate::workspace_json::load_configured_source_paths(workspace_root)
+        {
+            for p in configured {
+                let path_str = p.to_string_lossy().into_owned();
                 if !all_source_paths.contains(&path_str) {
                     all_source_paths.push(path_str);
+                }
+            }
+        } else {
+            #[allow(deprecated)]
+            if let Some(home) = std::env::home_dir() {
+                let default_sources = home.join(".kotlin-lsp").join("sources");
+                if default_sources.is_dir() {
+                    let path_str = default_sources.to_string_lossy().into_owned();
+                    if !all_source_paths.contains(&path_str) {
+                        all_source_paths.push(path_str);
+                    }
                 }
             }
         }

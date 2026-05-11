@@ -203,6 +203,89 @@ const session = await joinSession({
       },
     },
     {
+      name: "kotlin_lsp_complete",
+      description: [
+        "List completion candidates at a file position.",
+        "Useful for discovering what functions, classes, or properties are available in scope",
+        "without knowing the exact name upfront — e.g. after typing a partial identifier or",
+        "after a dot. Returns label, kind (class/fun/method/var/…), detail qualifier, and",
+        "the auto-import text that the editor would insert.",
+        "FILE must be an absolute path. LINE is 1-based.",
+        "Use dot=true to auto-place cursor after the last '.' on the line (no col needed).",
+        "Use eol=true to auto-place cursor at end of trimmed line content (no col needed).",
+        "Use no_stdlib=true to skip ~/.kotlin-lsp/sources and return only workspace symbols.",
+        "This makes completion ~5x faster (~1s vs ~10s) and is sufficient for project types,",
+        "sealed classes, and enum members. Omit no_stdlib when stdlib/library completions matter.",
+        "Requires the workspace index to be built (run `kotlin-lsp index` first, or trigger",
+        "indexing via `lsp documentSymbol` if the server is running).",
+        "Returns JSON: [{label, kind, detail?, import?}, …].",
+      ].join(" "),
+      parameters: {
+        type: "object",
+        properties: {
+          file: {
+            type: "string",
+            description: "Absolute path to the Kotlin/Java file",
+          },
+          line: {
+            type: "integer",
+            description: "1-based line number",
+          },
+          col: {
+            type: "integer",
+            description: "1-based column number. Optional when dot or eol is true.",
+          },
+          dot: {
+            type: "boolean",
+            description: "Auto-place cursor just after the last '.' on the line. Overrides col.",
+          },
+          eol: {
+            type: "boolean",
+            description: "Auto-place cursor at end of trimmed line content. Overrides col.",
+          },
+          no_stdlib: {
+            type: "boolean",
+            description: "Skip ~/.kotlin-lsp/sources (extracted stdlib/libraries). Returns only workspace symbols. Much faster (~1s vs ~10s). Recommended for project-type completion.",
+          },
+          root: {
+            type: "string",
+            description: "Optional workspace root (default: nearest .git parent of file)",
+          },
+        },
+        required: ["file", "line"],
+      },
+      handler: async (args) => {
+        const file = path.resolve(args.file);
+        const line = Number(args.line);
+        const dot = args.dot === true;
+        const eol = args.eol === true;
+        const noStdlib = args.no_stdlib === true;
+
+        if (!Number.isInteger(line) || line < 1) return "Error: line must be a positive integer";
+
+        let colArg = "";
+        if (dot) {
+          colArg = "--dot";
+        } else if (eol) {
+          colArg = "--eol";
+        } else {
+          const col = Number(args.col);
+          if (!Number.isInteger(col) || col < 1) return "Error: col must be a positive integer (or use dot/eol)";
+          colArg = String(col);
+        }
+
+        const rootFlag = args.root ? `--root ${JSON.stringify(path.resolve(args.root))}` : "";
+        const noStdlibFlag = noStdlib ? "--no-stdlib" : "";
+        const cmd = `kotlin-lsp complete ${JSON.stringify(file)} ${line} ${colArg} --json ${noStdlibFlag} ${rootFlag}`.trim();
+        const { code, stdout, stderr } = await runShell(cmd, 30000);
+
+        if (code !== 0 && !stdout.trim()) {
+          return `No completions at ${file}:${line}${stderr ? `\n${stderr}` : ""}`;
+        }
+        return stdout.trim() || `No completions at ${file}:${line}`;
+      },
+    },
+    {
       name: "kotlin_lsp_status",
       description: [
         "Check kotlin-lsp server status: active workspace, indexing phase, symbol count.",

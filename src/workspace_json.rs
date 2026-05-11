@@ -23,6 +23,11 @@ const WORKSPACE_PLACEHOLDER: &str = "<WORKSPACE>";
 struct WorkspaceData {
     #[serde(default)]
     modules: Vec<ModuleData>,
+    /// Optional list of external library source directories.
+    /// When present (even as `[]`), these override the global `~/.kotlin-lsp/sources` default.
+    /// Supports the `<WORKSPACE>` placeholder (substituted with the workspace root path).
+    #[serde(default, rename = "sourcePaths")]
+    source_paths: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -97,7 +102,33 @@ pub(crate) fn load_source_paths(workspace_root: &Path) -> Vec<PathBuf> {
     paths
 }
 
-/// Detects standard Maven/Gradle source layouts without requiring `workspace.json`.
+/// Reads the `sourcePaths` key from `<workspace_root>/workspace.json`.
+///
+/// Returns `Some(paths)` when the key is present (even if the list is empty —
+/// an empty list is an explicit "use no library sources").  Returns `None` when
+/// the file is absent or the key is not present, so callers can fall back to
+/// the global `~/.kotlin-lsp/sources` default.
+pub(crate) fn load_configured_source_paths(workspace_root: &Path) -> Option<Vec<PathBuf>> {
+    let json_path = workspace_root.join("workspace.json");
+    if !json_path.exists() {
+        return None;
+    }
+
+    let content = std::fs::read_to_string(&json_path).ok()?;
+    let data: WorkspaceData = serde_json::from_str(&content).ok()?;
+
+    // `None` means key was absent → caller applies global default.
+    // `Some([])` means key present but empty → explicit "no library sources".
+    let source_paths = data.source_paths?;
+
+    let workspace_str = workspace_root.to_string_lossy();
+    let paths = source_paths
+        .iter()
+        .map(|p| PathBuf::from(p.replace(WORKSPACE_PLACEHOLDER, &workspace_str)))
+        .collect();
+
+    Some(paths)
+}
 ///
 /// Activates when a build file (`build.gradle.kts`, `build.gradle`, `pom.xml`, …) exists
 /// at the workspace root. Probes well-known source directories; returns only those that

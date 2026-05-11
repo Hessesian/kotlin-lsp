@@ -271,6 +271,147 @@ pub(super) fn save_cache(
     }
 }
 
+// ─── Library cache ────────────────────────────────────────────────────────────
+
+/// Deterministic cache path for a set of library source paths.
+///
+/// Keyed by a hash of the (sorted) source path strings so the same
+/// `~/.kotlin-lsp/sources` directory shares one cache file across all workspaces.
+pub(super) fn library_cache_path(source_paths: &[String]) -> PathBuf {
+    let mut sorted = source_paths.to_vec();
+    sorted.sort();
+    let hash = {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        for p in &sorted {
+            hasher.update(p.as_bytes());
+            hasher.update(b"\0");
+        }
+        let digest = hasher.finalize();
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(&digest[..8]);
+        u64::from_be_bytes(bytes)
+    };
+    xdg_cache_base()
+        .join("kotlin-lsp")
+        .join(format!("library-{hash:016x}.bin"))
+}
+
+/// Returns `true` if the library cache file is newer than all source directories,
+/// meaning no files were added/removed since the cache was built.
+///
+/// When this returns `true`, the caller can restore all cache entries directly
+/// without re-scanning the directories for new/deleted files.
+pub(super) fn library_cache_is_fresh(source_paths: &[PathBuf], cache_path: &Path) -> bool {
+    let cache_mtime = match std::fs::metadata(cache_path)
+        .and_then(|m| m.modified())
+    {
+        Ok(t) => t,
+        Err(_) => return false,
+    };
+    source_paths.iter().all(|p| {
+        std::fs::metadata(p)
+            .and_then(|m| m.modified())
+            .map(|dir_mtime| cache_mtime >= dir_mtime)
+            .unwrap_or(false)
+    })
+}
+
+/// Load the library cache for the given source paths.
+/// Returns `None` if absent, corrupt, or version-mismatched.
+pub(super) fn try_load_library_cache(
+    source_paths: &[String],
+) -> Option<HashMap<String, FileCacheEntry>> {
+    let path = library_cache_path(source_paths);
+    let bytes = std::fs::read(&path).ok()?;
+    let cache: IndexCache = bincode::deserialize(&bytes).ok()?;
+    if cache.version != CACHE_VERSION {
+        return None;
+    }
+    log::info!(
+        "Loaded library cache ({} files) from {}",
+        cache.entries.len(),
+        path.display()
+    );
+    Some(cache.entries)
+}
+
+/// Save the library cache for the given source paths.
+///
+/// Only writes entries whose URI is in `library_uris`.
+pub(super) fn save_library_cache(
+    source_paths: &[String],
+    files: &DashMap<String, Arc<FileData>>,
+    content_hashes: &DashMap<String, u64>,
+    library_uris: &DashSet<String>,
+) {
+    let cache_path = library_cache_path(source_paths);
+    if let Some(parent) = cache_path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            log::warn!("Library cache: could not create directory: {e}");
+            return;
+        }
+    }
+
+    let mut entries: HashMap<String, FileCacheEntry> = HashMap::new();
+    for file_ref in files.iter() {
+        let uri_str = file_ref.key();
+        if !library_uris.contains(uri_str) {
+            continue;
+        }
+        let data = file_ref.value();
+        let hash = content_hashes.get(uri_str).map(|h| *h).unwrap_or(0);
+        if let Ok(url) = uri_str.parse::<Url>() {
+            if let Ok(path_buf) = url.to_file_path() {
+                let meta = std::fs::metadata(&path_buf);
+                let mtime = meta
+                    .as_ref()
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let file_size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+                entries.insert(
+                    path_buf.to_string_lossy().to_string(),
+                    FileCacheEntry {
+                        mtime_secs: mtime,
+                        file_size,
+                        content_hash: hash,
+                        file_data: (**data).clone(),
+                    },
+                );
+            }
+        }
+    }
+
+    let cache = IndexCache {
+        version: CACHE_VERSION,
+        complete_scan: true,
+        entries,
+    };
+    match bincode::serialize(&cache) {
+        Ok(bytes) => {
+            let tmp_path = cache_path.with_extension("bin.tmp");
+            let write_ok = std::fs::write(&tmp_path, &bytes)
+                .and_then(|()| std::fs::rename(&tmp_path, &cache_path))
+                .is_ok();
+            if write_ok {
+                log::info!(
+                    "Library cache saved ({} files, {} KB) → {}",
+                    cache.entries.len(),
+                    bytes.len() / 1024,
+                    cache_path.display()
+                );
+            } else {
+                let _ = std::fs::remove_file(&tmp_path);
+                log::warn!("Library cache write failed for {}", cache_path.display());
+            }
+        }
+        Err(e) => log::warn!("Library cache serialize failed: {e}"),
+    }
+}
+
 #[cfg(test)]
 #[path = "cache_tests.rs"]
 mod tests;

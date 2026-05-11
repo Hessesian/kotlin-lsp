@@ -902,9 +902,15 @@ impl Indexer {
         self.last_scan_complete
             .store(result.complete_scan, std::sync::atomic::Ordering::Release);
         let root = result.workspace_root.clone();
+        let files_parsed = result.stats.files_parsed;
         self.apply_workspace_result(&result);
         Arc::clone(&self).index_source_paths(root).await;
-        self.save_cache_to_disk();
+        // Skip workspace cache re-save when nothing changed (all cache hits).
+        if files_parsed > 0 {
+            self.save_cache_to_disk();
+        } else {
+            log::info!("Workspace unchanged (all cache hits), skipping workspace cache save");
+        }
         // _guard dropped here → indexing_in_progress cleared
     }
 
