@@ -351,6 +351,22 @@ Examples of duplication caught too late in this project:
 config, or deduplicates a collection — grep for the concept first. If a function already
 exists, call it or extend it; don't write a parallel one.
 
+### 12a. Refactoring tasks move code — they don't rewrite it
+
+When a task says "extract X into its own module/struct", the implementation is:
+1. **Read** the source file in full before touching anything
+2. **Copy** the exact function body verbatim into the new location
+3. **Adjust** only `self.` references to match the new struct's fields
+4. **Delete** from the original location
+5. **Verify** with `cargo test` that behaviour is identical
+
+Do not rewrite logic, do not guess function signatures, do not invent helper names.
+If a function name used in a task description does not appear in `rg -n "fn <name>" src/`,
+stop and search for what actually exists — the name is wrong, not the codebase.
+
+This applies especially to MVI actor refactoring: `src/workspace/actor.rs` already contains
+all handler functions. Wave 5b extracts them into handler structs — it does not create new logic.
+
 ### 13. Start traits minimal (YAGNI)
 
 Do not add methods to a trait "in case" they are needed later. Start with the smallest
