@@ -4,7 +4,7 @@ use super::format::{format_contextual_hover, format_symbol_hover};
 use super::helpers::resolve_references_scope;
 use super::Backend;
 use crate::indexer::resolution::{
-    enrich_at_location, resolve_symbol_info, ResolveOptions, SubstitutionContext,
+    enrich_at_location, resolve_symbol_info, ResolveOptions, SubstitutionContext, WorkspaceRead,
 };
 use crate::indexer::{apply_type_subst, cst_call_info, find_fun_signature_with_receiver, CallInfo};
 use crate::inlay_hints::compute_inlay_hints;
@@ -20,26 +20,28 @@ impl Backend {
         let pp = params.text_document_position_params;
         let uri = &pp.text_document.uri;
         let position = pp.position;
+        let workspace = self.indexer.as_ref();
 
         let Some(ctx) = CursorContext::build(&self.indexer, uri, position) else {
             return Ok(None);
         };
 
-        if let Some(hover) = self.contextual_lambda_hover(&ctx, uri, position) {
+        if let Some(hover) = self.contextual_lambda_hover(workspace, &ctx, uri, position) {
             return Ok(Some(hover));
         }
         if ctx.qualifier.is_none() && ctx.lambda_decl.is_some() {
             return Ok(None);
         }
-        if let Some(hover) = self.contextual_receiver_hover(&ctx, uri, position) {
+        if let Some(hover) = self.contextual_receiver_hover(workspace, &ctx, uri, position) {
             return Ok(Some(hover));
         }
 
-        Ok(self.regular_symbol_hover(&ctx, uri, position))
+        Ok(self.regular_symbol_hover(workspace, &ctx, uri, position))
     }
 
-    fn contextual_lambda_hover(
+    fn contextual_lambda_hover<W: WorkspaceRead>(
         &self,
+        workspace: &W,
         ctx: &CursorContext,
         uri: &Url,
         position: Position,
@@ -48,11 +50,12 @@ impl Backend {
             return None;
         }
         let receiver_type = ctx.contextual.as_ref()?;
-        let type_name = self.contextual_hover_type_name(receiver_type, uri, position.line);
+        let type_name =
+            self.contextual_hover_type_name(workspace, receiver_type, uri, position.line);
         let leaf = type_name.rsplit('.').next().unwrap_or(type_name.as_str());
         let signature = format!("{} {}: {type_name}", hover_binding_keyword(uri), ctx.word);
         let detail = self
-            .resolve_hover_markdown(leaf, None, uri, position.line)
+            .resolve_hover_markdown(workspace, leaf, None, uri, position.line)
             .or_else(|| crate::stdlib::hover(leaf));
         Some(make_markdown_hover(format_contextual_hover(
             &signature,
@@ -61,22 +64,23 @@ impl Backend {
         )))
     }
 
-    fn contextual_hover_type_name(
+    fn contextual_hover_type_name<W: WorkspaceRead>(
         &self,
+        workspace: &W,
         receiver_type: &crate::resolver::ReceiverType,
         uri: &Url,
         line: u32,
     ) -> String {
-        let subst =
-            crate::indexer::resolution::build_subst_map(self.indexer.as_ref(), uri.as_str(), line);
+        let subst = crate::indexer::resolution::build_subst_map(workspace, uri.as_str(), line);
         if subst.is_empty() {
             return receiver_type.raw.clone();
         }
         apply_type_subst(&receiver_type.raw, &subst)
     }
 
-    fn contextual_receiver_hover(
+    fn contextual_receiver_hover<W: WorkspaceRead>(
         &self,
+        workspace: &W,
         ctx: &CursorContext,
         uri: &Url,
         position: Position,
@@ -84,11 +88,11 @@ impl Backend {
         let receiver_type = ctx.contextual.as_ref()?;
         ctx.qualifier.as_ref()?;
         let location = self
-            .resolve_with_receiver_fallback(&ctx.word, receiver_type, uri)
+            .resolve_with_receiver_fallback(workspace, &ctx.word, receiver_type, uri)
             .first()?
             .clone();
         let info = enrich_at_location(
-            self.indexer.as_ref(),
+            workspace,
             &location,
             &ctx.word,
             hover_substitution_context(uri, position.line),
@@ -97,27 +101,35 @@ impl Backend {
         Some(make_markdown_hover(format_symbol_hover(&info, uri.path())))
     }
 
-    fn regular_symbol_hover(
+    fn regular_symbol_hover<W: WorkspaceRead>(
         &self,
+        workspace: &W,
         ctx: &CursorContext,
         uri: &Url,
         position: Position,
     ) -> Option<Hover> {
         let markdown = self
-            .resolve_hover_markdown(&ctx.word, ctx.qualifier.as_deref(), uri, position.line)
+            .resolve_hover_markdown(
+                workspace,
+                &ctx.word,
+                ctx.qualifier.as_deref(),
+                uri,
+                position.line,
+            )
             .or_else(|| crate::stdlib::hover(&ctx.word))?;
         Some(make_markdown_hover(markdown))
     }
 
-    fn resolve_hover_markdown(
+    fn resolve_hover_markdown<W: WorkspaceRead>(
         &self,
+        workspace: &W,
         word: &str,
         qualifier: Option<&str>,
         uri: &Url,
         line: u32,
     ) -> Option<String> {
         resolve_symbol_info(
-            self.indexer.as_ref(),
+            workspace,
             word,
             qualifier,
             uri,

@@ -1,5 +1,6 @@
 use super::cursor::CursorContext;
 use super::Backend;
+use crate::indexer::resolution::WorkspaceRead;
 use crate::parser::parse_by_extension;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
@@ -32,6 +33,7 @@ impl Backend {
         let pp = params.text_document_position_params;
         let uri = &pp.text_document.uri;
         let position = pp.position;
+        let workspace = self.indexer.as_ref();
 
         let Some(ctx) = CursorContext::build(&self.indexer, uri, position) else {
             return Ok(None);
@@ -39,10 +41,8 @@ impl Backend {
 
         // Special case: `this` keyword — navigate to the enclosing class definition.
         if ctx.qualifier.is_none() && ctx.word == "this" {
-            if let Some(class_name) = self.indexer.enclosing_class_at(uri, position.line) {
-                let locs = self
-                    .indexer
-                    .find_definition_qualified(&class_name, None, uri);
+            if let Some(class_name) = workspace.enclosing_class_at(uri, position.line) {
+                let locs = workspace.find_definition_qualified(&class_name, None, uri);
                 if !locs.is_empty() {
                     return Ok(Some(locs_to_response(locs)));
                 }
@@ -52,7 +52,7 @@ impl Backend {
 
         // Special case: `super` keyword — navigate to the enclosing class's first supertype.
         if ctx.qualifier.is_none() && ctx.word == "super" {
-            if let Some(result) = self.goto_super_class(uri, position.line).await {
+            if let Some(result) = self.goto_super_class(workspace, uri, position.line).await {
                 return Ok(Some(result));
             }
             return Ok(None);
@@ -60,7 +60,10 @@ impl Backend {
 
         // Special case: `super.method(...)` — resolve `method` in the parent class.
         if ctx.qualifier.as_deref() == Some("super") {
-            if let Some(result) = self.goto_super_method(uri, position.line, &ctx.word).await {
+            if let Some(result) = self
+                .goto_super_method(workspace, uri, position.line, &ctx.word)
+                .await
+            {
                 return Ok(Some(result));
             }
             return Ok(None);
@@ -70,7 +73,7 @@ impl Backend {
         if ctx.qualifier.is_none() {
             if let Some(ref rt) = ctx.contextual {
                 let lookup = rt.leaf.as_str();
-                let locs = self.indexer.find_definition_qualified(lookup, None, uri);
+                let locs = workspace.find_definition_qualified(lookup, None, uri);
                 if !locs.is_empty() {
                     return Ok(Some(locs_to_response(locs)));
                 }
@@ -85,16 +88,14 @@ impl Backend {
         // so lookup finds the member in the correct class.
         if ctx.qualifier.is_some() {
             if let Some(ref rt) = ctx.contextual {
-                let locs = self.resolve_with_receiver_fallback(&ctx.word, rt, uri);
+                let locs = self.resolve_with_receiver_fallback(workspace, &ctx.word, rt, uri);
                 if !locs.is_empty() {
                     return Ok(Some(locs_to_response(locs)));
                 }
             }
         }
 
-        let locs = self
-            .indexer
-            .find_definition_qualified(&ctx.word, ctx.qualifier.as_deref(), uri);
+        let locs = workspace.find_definition_qualified(&ctx.word, ctx.qualifier.as_deref(), uri);
         if !locs.is_empty() {
             return Ok(locs_to_opt_response(locs));
         }
@@ -198,37 +199,35 @@ impl Backend {
     }
 
     /// Collect the parent class names for the class enclosing `row` in `uri`.
-    pub(super) fn super_names_at(&self, uri: &Url, row: u32) -> Vec<String> {
-        let class_name = match self.indexer.enclosing_class_at(uri, row) {
-            Some(n) => n,
-            None => return vec![],
+    pub(super) fn super_names_at<W: WorkspaceRead>(
+        &self,
+        workspace: &W,
+        uri: &Url,
+        row: u32,
+    ) -> Vec<String> {
+        let Some(class_name) = workspace.enclosing_class_at(uri, row) else {
+            return vec![];
         };
-        let locs = self
-            .indexer
-            .definitions
-            .get(&class_name)
-            .map(|v| v.clone())
-            .unwrap_or_default();
-        for loc in &locs {
-            if let Some(file) = self.indexer.files.get(loc.uri.as_str()) {
-                let names: Vec<String> = file
-                    .supers
-                    .iter()
-                    .filter(|(l, _, _)| *l == loc.range.start.line)
-                    .map(|(_, n, _)| n.clone())
-                    .collect();
-                if !names.is_empty() {
-                    return names;
-                }
+        for loc in workspace.get_definitions(&class_name).unwrap_or_default() {
+            let Some(file) = workspace.get_file_data(loc.uri.as_str()) else {
+                continue;
+            };
+            let names: Vec<String> = file
+                .supers
+                .iter()
+                .filter(|(line, _, _)| *line == loc.range.start.line)
+                .map(|(_, name, _)| name.clone())
+                .collect();
+            if !names.is_empty() {
+                return names;
             }
         }
-        // Fallback: parse live_lines for the open file itself.
-        if let Some(lines) = self.indexer.live_lines.get(uri.as_str()) {
+        if let Some(lines) = workspace.mem_lines_for(uri.as_str()) {
             let content = lines.join("\n");
             let names: Vec<String> = parse_by_extension(uri.path(), &content)
                 .supers
                 .into_iter()
-                .map(|(_, n, _)| n)
+                .map(|(_, name, _)| name)
                 .collect();
             if !names.is_empty() {
                 return names;
@@ -250,15 +249,14 @@ impl Backend {
         .unwrap_or_default()
     }
 
-    pub(super) async fn goto_super_class(
+    pub(super) async fn goto_super_class<W: WorkspaceRead>(
         &self,
+        workspace: &W,
         uri: &Url,
         row: u32,
     ) -> Option<GotoDefinitionResponse> {
-        for super_name in &self.super_names_at(uri, row) {
-            let locs = self
-                .indexer
-                .find_definition_qualified(super_name, None, uri);
+        for super_name in &self.super_names_at(workspace, uri, row) {
+            let locs = workspace.find_definition_qualified(super_name, None, uri);
             if !locs.is_empty() {
                 return Some(locs_to_response(locs));
             }
@@ -270,21 +268,20 @@ impl Backend {
         None
     }
 
-    pub(super) async fn goto_super_method(
+    pub(super) async fn goto_super_method<W: WorkspaceRead>(
         &self,
+        workspace: &W,
         uri: &Url,
         row: u32,
         method: &str,
     ) -> Option<GotoDefinitionResponse> {
         // resolve_qualified already handles root=="super" via resolve_from_class_hierarchy.
-        let locs = self
-            .indexer
-            .find_definition_qualified(method, Some("super"), uri);
+        let locs = workspace.find_definition_qualified(method, Some("super"), uri);
         if !locs.is_empty() {
             return Some(locs_to_response(locs));
         }
         // Method not found in indexed hierarchy (e.g. Android SDK parent).
         // Fall back to navigating to the parent class itself.
-        self.goto_super_class(uri, row).await
+        self.goto_super_class(workspace, uri, row).await
     }
 }

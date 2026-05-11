@@ -122,20 +122,16 @@ impl Backend {
 
     /// Try `find_definition_qualified` with `rt.qualified`, falling back to `rt.leaf`
     /// when the first lookup is empty and the two names differ.
-    pub(super) fn resolve_with_receiver_fallback(
+    pub(super) fn resolve_with_receiver_fallback<W: WorkspaceRead>(
         &self,
+        workspace: &W,
         word: &str,
         rt: &crate::resolver::ReceiverType,
         uri: &Url,
     ) -> Vec<Location> {
-        let locs = WorkspaceRead::find_definition_qualified(
-            &self.indexer,
-            word,
-            Some(&rt.qualified),
-            uri,
-        );
+        let locs = workspace.find_definition_qualified(word, Some(&rt.qualified), uri);
         if locs.is_empty() && rt.leaf != rt.qualified {
-            WorkspaceRead::find_definition_qualified(&self.indexer, word, Some(&rt.leaf), uri)
+            workspace.find_definition_qualified(word, Some(&rt.leaf), uri)
         } else {
             locs
         }
