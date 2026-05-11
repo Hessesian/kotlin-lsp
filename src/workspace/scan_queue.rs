@@ -35,6 +35,11 @@ pub(crate) struct ScanArgs {
     /// Fired when the scan completes. `None` if the caller does not need notification.
     /// Dropped (without signalling) if this request is superseded before it starts.
     pub(crate) completion_tx: Option<oneshot::Sender<()>>,
+    /// The value of `Indexer::root_generation` at the moment this scan was
+    /// enqueued.  The scan task checks this before writing shared state and
+    /// before signalling `completion_tx`; if the current generation no longer
+    /// matches, the scan has been superseded and should discard its results.
+    pub(crate) expected_generation: u64,
 }
 
 // ─── ScanQueue ───────────────────────────────────────────────────────────────

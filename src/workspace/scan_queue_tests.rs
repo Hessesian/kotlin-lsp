@@ -11,6 +11,7 @@ fn dummy_args(root: &str) -> ScanArgs {
         kind: ScanKind::Full,
         source_paths: Vec::new(),
         completion_tx: None,
+        expected_generation: 0,
     }
 }
 
@@ -56,6 +57,7 @@ fn completion_tx_dropped_when_superseded() {
         kind: ScanKind::Full,
         source_paths: Vec::new(),
         completion_tx: Some(tx1),
+        expected_generation: 0,
     });
     // /b pending is now replaced by /c, dropping tx1
     q.request(dummy_args("/c"));

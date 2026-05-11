@@ -179,6 +179,7 @@ impl<R: ProgressReporter + 'static> Actor<R> {
             },
             source_paths,
             completion_tx,
+            expected_generation: 0, // stamped by enqueue_and_start_scan
         };
         self.enqueue_and_start_scan(args);
     }
@@ -194,6 +195,7 @@ impl<R: ProgressReporter + 'static> Actor<R> {
             kind: ScanKind::Full,
             source_paths: self.current_source_paths(),
             completion_tx: None,
+            expected_generation: 0, // stamped by enqueue_and_start_scan
         };
         self.enqueue_and_start_scan(args);
     }
@@ -208,6 +210,7 @@ impl<R: ProgressReporter + 'static> Actor<R> {
             kind: ScanKind::Full,
             source_paths: data.source_paths,
             completion_tx: None,
+            expected_generation: 0, // stamped by enqueue_and_start_scan
         };
         self.enqueue_and_start_scan(args);
     }
@@ -519,6 +522,7 @@ impl<R: ProgressReporter + 'static> Actor<R> {
             },
             source_paths: data.source_paths,
             completion_tx: None,
+            expected_generation: 0, // stamped by enqueue_and_start_scan
         };
         self.enqueue_and_start_scan(args);
     }
@@ -613,6 +617,12 @@ impl<R: ProgressReporter + 'static> Actor<R> {
             // Invalidate the in-flight scan so it discards its (now-stale) results.
             self.indexer.root_generation.fetch_add(1, Ordering::SeqCst);
         }
+        // Stamp the generation *after* any bump so the task knows which
+        // generation it was enqueued for.
+        let args = ScanArgs {
+            expected_generation: self.indexer.root_generation.load(Ordering::SeqCst),
+            ..args
+        };
         self.scan_queue.request(args);
         if let Some(args) = self.scan_queue.try_start() {
             self.execute_scan(args);
@@ -627,8 +637,14 @@ impl<R: ProgressReporter + 'static> Actor<R> {
         let indexer = Arc::clone(&self.indexer);
         let reporter = Arc::clone(&self.reporter);
         let scan_done_tx = self.scan_done_tx.clone();
+        let expected_gen = args.expected_generation;
 
         let scan_handle = tokio::spawn(async move {
+            // Bail out immediately if a newer scan superseded this one before
+            // the task even started running.
+            if indexer.root_generation.load(Ordering::SeqCst) != expected_gen {
+                return None;
+            }
             // Claim this scan's source paths right before running.  By the time
             // this task executes, the actor may have processed later events that
             // overwrote source_paths_raw.  Writing here ensures finalize_workspace_scan
@@ -636,6 +652,9 @@ impl<R: ProgressReporter + 'static> Actor<R> {
             if let Ok(mut guard) = indexer.source_paths_raw.write() {
                 *guard = args.source_paths.clone();
             }
+            // Clone before the match so we can check generation after the scan
+            // even if index_workspace_full moves the Arc.
+            let generation_ref = Arc::clone(&indexer);
             match args.kind {
                 ScanKind::Full => indexer.index_workspace_full(&args.root, reporter).await,
                 ScanKind::Prioritized { initial_paths } => {
@@ -644,7 +663,13 @@ impl<R: ProgressReporter + 'static> Actor<R> {
                         .await;
                 }
             }
-            args.completion_tx
+            // Only signal completion if this scan is still the current one.
+            // A newer request may have arrived while the scan was running.
+            if generation_ref.root_generation.load(Ordering::SeqCst) == expected_gen {
+                args.completion_tx
+            } else {
+                None
+            }
         });
 
         // Watcher task: forwards completion_tx signal and notifies actor.
