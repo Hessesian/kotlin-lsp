@@ -1,0 +1,20 @@
+[extension]
+id = "kotlin-lsp"
+name = "Kotlin LSP"
+version = "0.1.0"
+schema_version = 1
+description = "Kotlin, Java and Swift language support via kotlin-lsp (tree-sitter, no JVM)."
+authors = ["kotlin-lsp contributors"]
+repository = "https://github.com/Hessesian/kotlin-lsp"
+
+[language_servers.kotlin-lsp]
+name = "kotlin-lsp"
+language = "Kotlin"
+
+[language_servers.kotlin-lsp-java]
+name = "kotlin-lsp"
+language = "Java"
+
+[language_servers.kotlin-lsp-swift]
+name = "kotlin-lsp"
+language = "Swift"
