@@ -115,10 +115,7 @@ impl<R: ProgressReporter + 'static> Actor<R> {
                         Some(ev) => ev,
                     },
                     Some(()) = self.scan_done_rx.recv() => {
-                        self.scan_queue.completed();
-                        if let Some(args) = self.scan_queue.try_start() {
-                            self.execute_scan(args);
-                        }
+                        self.on_scan_completed();
                         continue;
                     },
                 }
@@ -137,29 +134,7 @@ impl<R: ProgressReporter + 'static> Actor<R> {
                     content,
                 } => self.handle_file_opened(uri, language_id, content).await,
                 Event::FileChanged { uri, changes } => {
-                    // Coalesce: drain all immediately available FileChanged events.
-                    // Last change per URI wins (HashMap deduplication).
-                    let mut batch: HashMap<
-                        String,
-                        (Url, Vec<tower_lsp::lsp_types::TextDocumentContentChangeEvent>),
-                    > = HashMap::new();
-                    batch.insert(uri.to_string(), (uri, changes));
-                    loop {
-                        match self.rx.try_recv() {
-                            Ok(Event::FileChanged { uri, changes }) => {
-                                batch.insert(uri.to_string(), (uri, changes));
-                            }
-                            Ok(other) => {
-                                // Non-FileChanged event — push back and stop draining.
-                                self.pushback = Some(other);
-                                break;
-                            }
-                            Err(_) => break, // channel empty or closed
-                        }
-                    }
-                    for (_, (uri, changes)) in batch {
-                        self.handle_file_changed(uri, changes).await;
-                    }
+                    self.drain_and_apply_file_changes(uri, changes).await;
                 }
                 Event::FileSaved { uri } => self.handle_file_saved(uri).await,
                 Event::FileClosed { uri } => self.handle_file_closed(uri).await,
@@ -205,38 +180,18 @@ impl<R: ProgressReporter + 'static> Actor<R> {
             return;
         };
         self.indexer.reset_index_state();
-        let source_paths = self
-            .indexer
-            .source_paths_raw
-            .read()
-            .ok()
-            .map(|g| g.clone())
-            .unwrap_or_default();
         let args = ScanArgs {
             root,
             kind: ScanKind::Full,
-            source_paths,
+            source_paths: self.current_source_paths(),
             completion_tx: None,
         };
         self.enqueue_and_start_scan(args);
     }
 
     async fn handle_change_root(&mut self, root: PathBuf) {
-        // Clear stale ignore patterns from the previous root, then re-resolve
-        // source paths for the new root (workspace.json, build layout, etc.).
-        // Explicit source paths from initialization are intentionally dropped
-        // because they were relative to the old root and are editor-session-scoped.
-        let config = Config {
-            root: root.clone(),
-            explicit_source_paths: Vec::new(),
-            ignore_patterns: Vec::new(),
-        };
-        let data = ReadyState::from_config(&config);
-
-        self.apply_ignore_patterns(&config.ignore_patterns, &root);
-        self.write_source_paths(data.source_paths.clone());
-        self.set_root(root.clone());
-        self.set_state(data.clone()).await;
+        let config = Config::for_root(root.clone());
+        let data = self.apply_root_switch_config(&config).await;
 
         self.indexer.reset_index_state();
         let args = ScanArgs {
@@ -288,52 +243,12 @@ impl<R: ProgressReporter + 'static> Actor<R> {
             return;
         };
         let text = change.text;
-        let indexer = Arc::clone(&self.indexer);
 
         self.indexer.set_live_lines(&uri, &text);
-        {
-            let indexer = Arc::clone(&self.indexer);
-            let uri = uri.clone();
-            let text = text.clone();
-            // Fire-and-forget: live-tree parse runs on a blocking thread but we
-            // do not await it in the actor loop to avoid blocking subsequent events.
-            // The 300 ms debounce below provides ample time for the parse to finish
-            // before index_content consumes the updated live tree.
-            // Dropping the JoinHandle detaches from the task; the blocking thread
-            // continues and cannot be cancelled.
-            drop(tokio::task::spawn_blocking(move || {
-                indexer.store_live_tree(&uri, &text);
-            }));
-        }
-
-        let key = uri.to_string();
-        if let Some(handle) = self.pending_reindex.remove(&key) {
-            handle.abort();
-        }
-
-        let client = self.client.clone();
-        let sem = indexer.parse_sem();
-        let handle = tokio::spawn(async move {
-            tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
-            let Ok(permit) = sem.acquire_owned().await else {
-                return;
-            };
-            let diagnostics_uri = uri.clone();
-            let result = tokio::task::spawn_blocking(move || {
-                let data = indexer.index_content(&uri, &text);
-                drop(permit); // release semaphore after index_content completes
-                data
-            })
-            .await;
-
-            if let (Some(client), Ok(Some(data))) = (client, result) {
-                let diagnostics = syntax_diagnostics(&data.syntax_errors);
-                client
-                    .publish_diagnostics(diagnostics_uri, diagnostics, None)
-                    .await;
-            }
-        });
-        self.pending_reindex.insert(key, handle.abort_handle());
+        // Fire-and-forget: live-tree parse must finish before the 300ms debounce
+        // below fires index_content — that window is the correctness coupling.
+        self.spawn_live_tree_update(uri.clone(), text.clone());
+        self.reschedule_debounced_reindex(uri, text);
     }
 
     async fn handle_file_saved(&mut self, uri: Url) {
@@ -380,6 +295,93 @@ impl<R: ProgressReporter + 'static> Actor<R> {
 
     // ── Internal helpers ──────────────────────────────────────────────────────
 
+    /// Coalesce all immediately available `FileChanged` events before applying.
+    ///
+    /// Drains the channel via `try_recv`, deduplicating by URI (last write wins).
+    /// A non-`FileChanged` event encountered during the drain is pushed back for
+    /// the next loop iteration.
+    async fn drain_and_apply_file_changes(
+        &mut self,
+        uri: Url,
+        changes: Vec<tower_lsp::lsp_types::TextDocumentContentChangeEvent>,
+    ) {
+        let mut batch: HashMap<
+            String,
+            (Url, Vec<tower_lsp::lsp_types::TextDocumentContentChangeEvent>),
+        > = HashMap::new();
+        batch.insert(uri.to_string(), (uri, changes));
+        loop {
+            match self.rx.try_recv() {
+                Ok(Event::FileChanged { uri, changes }) => {
+                    batch.insert(uri.to_string(), (uri, changes));
+                }
+                Ok(other) => {
+                    self.pushback = Some(other);
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+        for (_, (uri, changes)) in batch {
+            self.handle_file_changed(uri, changes).await;
+        }
+    }
+
+    /// Apply a root-switch config (no explicit source paths or ignore patterns).
+    ///
+    /// Shared by `handle_change_root` and `switch_workspace_root_for_opened_document`.
+    /// *Not* used by `handle_initialize`, which preserves editor-provided
+    /// `explicit_source_paths`/`ignore_patterns` and has a stricter root-first ordering.
+    async fn apply_root_switch_config(&mut self, config: &Config) -> ReadyState {
+        let data = ReadyState::from_config(config);
+        self.apply_ignore_patterns(&config.ignore_patterns, &data.root);
+        self.write_source_paths(data.source_paths.clone());
+        self.set_root(data.root.clone());
+        self.set_state(data.clone()).await;
+        data
+    }
+
+    /// Fire-and-forget: update the live parse tree on a blocking thread.
+    ///
+    /// The 300 ms debounce in `reschedule_debounced_reindex` provides ample time
+    /// for this to finish before `index_content` consumes the updated tree.
+    fn spawn_live_tree_update(&self, uri: Url, text: String) {
+        let indexer = Arc::clone(&self.indexer);
+        drop(tokio::task::spawn_blocking(move || {
+            indexer.store_live_tree(&uri, &text);
+        }));
+    }
+
+    /// Cancel any in-flight reindex for `uri` and schedule a fresh one after 300 ms.
+    fn reschedule_debounced_reindex(&mut self, uri: Url, text: String) {
+        let key = uri.to_string();
+        if let Some(handle) = self.pending_reindex.remove(&key) {
+            handle.abort();
+        }
+        let indexer = Arc::clone(&self.indexer);
+        let client = self.client.clone();
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+            let Ok(permit) = indexer.parse_sem().acquire_owned().await else {
+                return;
+            };
+            let diagnostics_uri = uri.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                let data = indexer.index_content(&uri, &text);
+                drop(permit); // release semaphore after index_content completes
+                data
+            })
+            .await;
+            if let (Some(client), Ok(Some(data))) = (client, result) {
+                let diagnostics = syntax_diagnostics(&data.syntax_errors);
+                client
+                    .publish_diagnostics(diagnostics_uri, diagnostics, None)
+                    .await;
+            }
+        });
+        self.pending_reindex.insert(key, handle.abort_handle());
+    }
+
     fn current_root(&self) -> Option<PathBuf> {
         self.indexer
             .workspace_root
@@ -401,6 +403,15 @@ impl<R: ProgressReporter + 'static> Actor<R> {
             Ok(mut guard) => *guard = paths,
             Err(err) => log::warn!("Actor: failed to write source_paths_raw: {err}"),
         }
+    }
+
+    fn current_source_paths(&self) -> Vec<String> {
+        self.indexer
+            .source_paths_raw
+            .read()
+            .ok()
+            .map(|guard| guard.clone())
+            .unwrap_or_default()
     }
 
     fn apply_ignore_patterns(&self, patterns: &[String], root: &Path) {
@@ -499,18 +510,9 @@ impl<R: ProgressReporter + 'static> Actor<R> {
         workspace_root: PathBuf,
         opened_file_path: Option<PathBuf>,
     ) {
-        let config = Config {
-            root: workspace_root.clone(),
-            explicit_source_paths: Vec::new(),
-            ignore_patterns: Vec::new(),
-        };
-        let data = ReadyState::from_config(&config);
+        let config = Config::for_root(workspace_root.clone());
+        let data = self.apply_root_switch_config(&config).await;
 
-        self.apply_ignore_patterns(&config.ignore_patterns, &workspace_root);
-        let source_paths = data.source_paths.clone();
-        self.write_source_paths(source_paths.clone());
-        self.set_root(workspace_root.clone());
-        self.set_state(data).await;
         self.indexer.workspace_pinned.store(true, Ordering::Relaxed);
         self.indexer.root_generation.fetch_add(1, Ordering::SeqCst);
         self.indexer.reset_index_state();
@@ -523,7 +525,7 @@ impl<R: ProgressReporter + 'static> Actor<R> {
             kind: ScanKind::Prioritized {
                 initial_paths: opened_file_path.into_iter().collect(),
             },
-            source_paths,
+            source_paths: data.source_paths,
             completion_tx: None,
         };
         self.enqueue_and_start_scan(args);
@@ -608,6 +610,13 @@ impl<R: ProgressReporter + 'static> Actor<R> {
     }
 
     // ── Scan queue management ─────────────────────────────────────────────────
+
+    fn on_scan_completed(&mut self) {
+        self.scan_queue.completed();
+        if let Some(args) = self.scan_queue.try_start() {
+            self.execute_scan(args);
+        }
+    }
 
     /// Queue a scan request and start it immediately if no scan is in progress.
     ///

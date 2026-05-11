@@ -60,6 +60,19 @@ pub(crate) struct Config {
 }
 
 impl Config {
+    /// Convenience constructor for a clean root-switch config with no
+    /// editor-provided overrides.  Used by `handle_change_root` and the
+    /// auto-detect workspace root path — explicitly *not* used by
+    /// `handle_initialize`, which may carry session-level `explicit_source_paths`
+    /// and `ignore_patterns`.
+    pub(crate) fn for_root(root: PathBuf) -> Self {
+        Self {
+            root,
+            explicit_source_paths: Vec::new(),
+            ignore_patterns: Vec::new(),
+        }
+    }
+
     /// Return the deduplicated, ordered list of source paths to index.
     ///
     /// Discovery priority (first win for deduplication):
