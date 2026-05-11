@@ -9,6 +9,7 @@ use crate::indexer::{Indexer, NoopReporter};
 use crate::rg::{rg_find_definition, rg_word_search, RgSearchRequest};
 
 use super::args::{CliArgs, Mode, OutputFmt, Subcommand};
+use super::complete::completions_at;
 use super::hover::hover_at;
 use super::output::{print_results, CliResult};
 use super::tokens::{dump_tree, print_token_rows, token_rows, token_rows_phases};
@@ -21,17 +22,89 @@ fn resolve_root(explicit: Option<&Path>) -> PathBuf {
         return r.to_path_buf();
     }
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let mut cur = cwd.as_path();
+    find_git_root(&cwd).unwrap_or(cwd)
+}
+
+/// Walk up from `start` looking for a `.git` directory.
+fn find_git_root(start: &Path) -> Option<PathBuf> {
+    let mut cur = start;
     loop {
         if cur.join(".git").exists() {
-            return cur.to_path_buf();
+            return Some(cur.to_path_buf());
         }
-        match cur.parent() {
-            Some(p) => cur = p,
-            None => break,
-        }
+        cur = cur.parent()?;
     }
-    cwd
+}
+
+/// Resolve workspace root for file-centric commands: tries explicit root first,
+/// then walks up from the file's directory, then falls back to CWD-based detection.
+fn resolve_root_for_file(explicit: Option<&Path>, file: &Path) -> PathBuf {
+    if let Some(r) = explicit {
+        return r.to_path_buf();
+    }
+    let file_dir = file
+        .canonicalize()
+        .unwrap_or_else(|_| file.to_path_buf());
+    let file_dir = file_dir.parent().unwrap_or(&file_dir);
+    if let Some(root) = find_git_root(file_dir) {
+        return root;
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    find_git_root(&cwd).unwrap_or(cwd)
+}
+
+// ── Column resolution helpers ─────────────────────────────────────────────────
+
+/// Resolve a 1-based UTF-16 column for `complete`, applying `--dot` / `--eol`
+/// when an explicit col is absent or when the flags are set.
+///
+/// - `--dot` (`dot=true`): position just after the last `.` on the line.
+/// - `--eol` (`eol=true`): position after the last non-whitespace character
+///   (useful for bare-word prefix completion).
+/// - explicit col: used as-is.
+/// - fallback (no flags, no col): col 1 (beginning of line).
+fn resolve_col(file: &Path, line: u32, col: Option<u32>, dot: bool, eol: bool) -> u32 {
+    if !dot && !eol {
+        return col.unwrap_or(1);
+    }
+    let line_text = read_line(file, line).unwrap_or_default();
+    if dot {
+        col_after_last_dot(&line_text).unwrap_or_else(|| col.unwrap_or(1))
+    } else {
+        col_after_last_nonws(&line_text).unwrap_or_else(|| col.unwrap_or(1))
+    }
+}
+
+/// Read line `line` (1-based) from `file`. Returns `None` on I/O error or
+/// out-of-range line.
+fn read_line(file: &Path, line: u32) -> Option<String> {
+    let content = std::fs::read_to_string(file).ok()?;
+    content
+        .lines()
+        .nth((line as usize).saturating_sub(1))
+        .map(|s| s.to_owned())
+}
+
+/// Return 1-based UTF-16 column just after the last `.` in `text`, or `None`
+/// if there is no dot.
+fn col_after_last_dot(text: &str) -> Option<u32> {
+    // byte index of last '.'
+    let dot_byte = text.rfind('.')?;
+    // UTF-16 length up to and including the dot, then +1 for "after the dot"
+    let utf16_before: usize = text[..dot_byte].encode_utf16().count();
+    // +2: +1 for the dot itself, +1 for 1-based
+    Some((utf16_before + 2) as u32)
+}
+
+/// Return 1-based UTF-16 column just after the last non-whitespace character,
+/// or `None` if the line is blank.
+fn col_after_last_nonws(text: &str) -> Option<u32> {
+    let trimmed = text.trim_end();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let utf16_len = trimmed.encode_utf16().count();
+    Some((utf16_len + 1) as u32)
 }
 
 // ── Cache probe ───────────────────────────────────────────────────────────────
@@ -48,34 +121,69 @@ fn cache_exists(root: &Path) -> bool {
 /// 1. `workspace.json` (JetBrains IDE format) at the workspace root
 /// 2. Build-layout auto-detection (Gradle/Maven src dirs), if no workspace.json
 /// 3. `~/.kotlin-lsp/sources` — the default `extract-sources` output dir
-async fn build_index(root: &Path) -> Arc<Indexer> {
-    let idx = Arc::new(Indexer::new());
+///    (skipped when `no_stdlib` is true)
+async fn build_index(root: &Path, no_stdlib: bool) -> Arc<Indexer> {
+    build_index_inner(root, collect_cli_source_paths(root, no_stdlib)).await
+}
 
-    let source_paths = collect_cli_source_paths(root);
+/// Build a full workspace index with explicitly provided source paths.
+/// Bypasses all workspace.json / global-default discovery — for tests.
+#[cfg(test)]
+pub(crate) async fn build_index_with_sources(
+    root: &Path,
+    source_paths: Vec<std::path::PathBuf>,
+) -> Arc<Indexer> {
+    let strs: Vec<String> = source_paths
+        .into_iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    build_index_inner(root, strs).await
+}
+
+async fn build_index_inner(root: &Path, source_paths: Vec<String>) -> Arc<Indexer> {
+    let idx = Arc::new(Indexer::new());
     if !source_paths.is_empty() {
         *idx.source_paths_raw.write().unwrap() = source_paths;
     }
-
     Arc::clone(&idx)
         .index_workspace_full(root, Arc::new(NoopReporter))
         .await;
     idx
 }
 
-/// Collect source paths for CLI indexing: workspace.json + build-layout + default extract dir.
-fn collect_cli_source_paths(root: &Path) -> Vec<String> {
+/// Collect source paths for CLI indexing: workspace.json + default extract dir.
+///
+/// Build-layout paths auto-detected under `root` are intentionally excluded —
+/// those files are already covered by `index_workspace_full`'s workspace scan.
+/// Only paths that live *outside* the workspace root need a separate indexing pass.
+///
+/// When `no_stdlib` is true, `~/.kotlin-lsp/sources` is excluded regardless of
+/// whether it appears in `workspace.json` or is auto-detected. Use this for fast
+/// workspace-only completions (~2s vs ~10s).
+fn collect_cli_source_paths(root: &Path, no_stdlib: bool) -> Vec<String> {
+    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+
+    #[allow(deprecated)]
+    let home = std::env::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let default_sources = home.join(".kotlin-lsp").join("sources");
+    let canonical_default_sources = default_sources
+        .canonicalize()
+        .unwrap_or_else(|_| default_sources.clone());
+
+    let is_external = |p: &std::path::PathBuf| -> bool {
+        let canonical = p.canonicalize().unwrap_or_else(|_| p.clone());
+        !canonical.starts_with(&canonical_root)
+    };
+    let is_stdlib = |p: &std::path::PathBuf| -> bool {
+        let canonical = p.canonicalize().unwrap_or_else(|_| p.clone());
+        canonical == canonical_default_sources
+    };
+
     let mut paths: Vec<String> = Vec::new();
 
     let json_paths = crate::workspace_json::load_source_paths(root);
     for p in &json_paths {
-        let s = p.to_string_lossy().into_owned();
-        if !paths.contains(&s) {
-            paths.push(s);
-        }
-    }
-
-    if json_paths.is_empty() {
-        for p in crate::workspace_json::detect_build_layout_source_paths(root) {
+        if is_external(p) && !(no_stdlib && is_stdlib(p)) {
             let s = p.to_string_lossy().into_owned();
             if !paths.contains(&s) {
                 paths.push(s);
@@ -83,10 +191,25 @@ fn collect_cli_source_paths(root: &Path) -> Vec<String> {
         }
     }
 
+    // If workspace.json declares explicit sourcePaths, use those and skip the
+    // global default.  An absent key (None) falls through to the global default.
+    if let Some(configured) = crate::workspace_json::load_configured_source_paths(root) {
+        for p in configured {
+            if is_external(&p) && !(no_stdlib && is_stdlib(&p)) {
+                let s = p.to_string_lossy().into_owned();
+                if !paths.contains(&s) {
+                    paths.push(s);
+                }
+            }
+        }
+        return paths;
+    }
+
+    if no_stdlib {
+        return paths;
+    }
+
     // Auto-include the well-known `extract-sources` output dir if present.
-    #[allow(deprecated)]
-    let home = std::env::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    let default_sources = home.join(".kotlin-lsp").join("sources");
     if default_sources.is_dir() {
         let s = default_sources.to_string_lossy().into_owned();
         if !paths.contains(&s) {
@@ -153,16 +276,37 @@ fn fast_refs(name: &str, root: &Path) -> Vec<CliResult> {
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 pub(crate) async fn run(args: CliArgs) {
-    let root = resolve_root(args.root.as_deref());
     let json = args.fmt == OutputFmt::Json;
     let verbose = args.verbose;
 
     match args.subcommand {
-        Subcommand::Index => run_index(&root, verbose).await,
-        Subcommand::Find { name } => run_find(&root, args.mode, json, verbose, &name).await,
-        Subcommand::Refs { name } => run_refs(&root, args.mode, json, verbose, &name).await,
+        Subcommand::Index => {
+            let root = resolve_root(args.root.as_deref());
+            run_index(&root, verbose).await
+        }
+        Subcommand::Find { name } => {
+            let root = resolve_root(args.root.as_deref());
+            run_find(&root, args.mode, json, verbose, &name).await
+        }
+        Subcommand::Refs { name } => {
+            let root = resolve_root(args.root.as_deref());
+            run_refs(&root, args.mode, json, verbose, &name).await
+        }
         Subcommand::Hover { file, line, col } => {
+            let root = resolve_root_for_file(args.root.as_deref(), &file);
             run_hover(&root, args.mode, json, verbose, &file, line, col).await
+        }
+        Subcommand::Complete {
+            file,
+            line,
+            col,
+            dot,
+            eol,
+            no_stdlib,
+        } => {
+            let root = resolve_root_for_file(args.root.as_deref(), &file);
+            let resolved_col = resolve_col(&file, line, col, dot, eol);
+            run_complete(&root, json, verbose, &file, line, resolved_col, no_stdlib).await
         }
         Subcommand::Tokens {
             file,
@@ -171,19 +315,23 @@ pub(crate) async fn run(args: CliArgs) {
             phases,
             show_tree,
         } => {
+            let root = resolve_root_for_file(args.root.as_deref(), &file);
             let use_index = resolve && !cst_only;
             let index = if use_index {
                 if verbose {
                     eprintln!("Loading index for Phase 2 resolution...");
                 }
-                Some(build_index(&root).await)
+                Some(build_index(&root, false).await)
             } else {
                 None
             };
             run_tokens(json, &file, index.as_ref(), cst_only, phases, show_tree)
         }
         Subcommand::Tree { file } => run_tree(&file),
-        Subcommand::Sources => super::sources::run_sources(&root, json),
+        Subcommand::Sources => {
+            let root = resolve_root(args.root.as_deref());
+            super::sources::run_sources(&root, json)
+        }
         Subcommand::ExtractSources {
             gradle_home,
             output,
@@ -202,7 +350,7 @@ async fn run_index(root: &Path, verbose: bool) {
     if verbose {
         eprintln!("Indexing workspace: {}", root.display());
     }
-    let index = build_index(root).await;
+    let index = build_index(root, false).await;
     if verbose {
         eprintln!(
             "Done: {} files, {} symbols",
@@ -216,7 +364,7 @@ async fn run_find(root: &Path, mode: Mode, json: bool, verbose: bool, name: &str
     let results = match effective_mode(mode, root, "find", verbose) {
         Mode::Fast => fast_find(name, root),
         _ => {
-            let index = build_index(root).await;
+            let index = build_index(root, false).await;
             smart_find(&index, name, root)
         }
     };
@@ -232,7 +380,7 @@ async fn run_refs(root: &Path, mode: Mode, json: bool, verbose: bool, name: &str
     let results = match effective_mode(mode, root, "refs", verbose) {
         Mode::Fast => fast_refs(name, root),
         _ => {
-            let index = build_index(root).await;
+            let index = build_index(root, false).await;
             smart_refs(&index, name, root)
         }
     };
@@ -253,7 +401,7 @@ async fn run_hover(
         eprintln!("hover requires index; run `kotlin-lsp index` first or remove --fast");
         std::process::exit(1);
     }
-    let index = build_index(root).await;
+    let index = build_index(root, false).await;
     let Some(text) = hover_at(&index, file, line, col) else {
         eprintln!("No symbol found at {}:{}:{}", file.display(), line, col);
         std::process::exit(1);
@@ -266,6 +414,58 @@ async fn run_hover(
         );
     } else {
         println!("{text}");
+    }
+}
+
+async fn run_complete(root: &Path, json: bool, verbose: bool, file: &Path, line: u32, col: u32, no_stdlib: bool) {
+    if verbose {
+        if no_stdlib {
+            eprintln!("Loading workspace index (--no-stdlib, skipping ~/.kotlin-lsp/sources)...");
+        } else {
+            eprintln!("Loading index for completion...");
+        }
+    }
+    let index = build_index(root, no_stdlib).await;
+    let rows = completions_at(&index, file, line, col);
+    if rows.is_empty() {
+        eprintln!("No completions at {}:{}:{}", file.display(), line, col);
+        std::process::exit(1);
+    }
+    if json {
+        let arr: Vec<_> = rows
+            .iter()
+            .map(|r| {
+                let mut obj = serde_json::json!({
+                    "label": r.label,
+                    "kind": r.kind,
+                });
+                if !r.detail.is_empty() {
+                    obj["detail"] = serde_json::Value::String(r.detail.clone());
+                }
+                if let Some(ref import) = r.import {
+                    obj["import"] = serde_json::Value::String(import.clone());
+                }
+                obj
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&arr).unwrap_or_default()
+        );
+    } else {
+        for row in &rows {
+            let import_hint = row
+                .import
+                .as_deref()
+                .map(|i| format!("  [{i}]"))
+                .unwrap_or_default();
+            if row.detail.is_empty() {
+                println!("{:<40} {}{}", row.label, row.kind, import_hint);
+            } else {
+                println!("{:<40} {}  {}{}", row.label, row.kind, row.detail, import_hint);
+            }
+        }
+        eprintln!("({} items)", rows.len());
     }
 }
 

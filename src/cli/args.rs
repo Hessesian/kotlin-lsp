@@ -15,6 +15,20 @@ pub(crate) enum Subcommand {
         line: u32,
         col: u32,
     },
+    /// Show completion candidates at a file position (debug).
+    Complete {
+        file: PathBuf,
+        line: u32,
+        /// 1-based UTF-16 column. `None` when resolved from `--dot` or `--eol`.
+        col: Option<u32>,
+        /// Resolve column to just after the last `.` on the line.
+        dot: bool,
+        /// Resolve column to end of trimmed content on the line (bare-word prefix).
+        eol: bool,
+        /// Skip loading `~/.kotlin-lsp/sources` (extracted stdlib/libraries).
+        /// Returns only workspace symbols. Much faster (~2s vs ~10s).
+        no_stdlib: bool,
+    },
     Index,
     /// Dump semantic tokens for a file (debug).
     Tokens {
@@ -106,6 +120,9 @@ struct ParsedCliFlags {
     gradle_home: Option<PathBuf>,
     output_dir: Option<PathBuf>,
     dry_run: bool,
+    dot: bool,
+    eol: bool,
+    no_stdlib: bool,
 }
 
 fn parse_first_argument(args: &mut lexopt::Parser) -> Result<Option<std::ffi::OsString>, String> {
@@ -150,6 +167,9 @@ fn parse_cli_flags(args: &mut lexopt::Parser) -> Result<ParsedCliFlags, String> 
         gradle_home: None,
         output_dir: None,
         dry_run: false,
+        dot: false,
+        eol: false,
+        no_stdlib: false,
     };
 
     loop {
@@ -176,6 +196,9 @@ fn parse_cli_flags(args: &mut lexopt::Parser) -> Result<ParsedCliFlags, String> 
                 parsed.output_dir = Some(PathBuf::from(value.to_string_lossy().as_ref()));
             }
             Some(lexopt::Arg::Long("dry-run")) => parsed.dry_run = true,
+            Some(lexopt::Arg::Short('d') | lexopt::Arg::Long("dot")) => parsed.dot = true,
+            Some(lexopt::Arg::Short('e') | lexopt::Arg::Long("eol")) => parsed.eol = true,
+            Some(lexopt::Arg::Long("no-stdlib")) => parsed.no_stdlib = true,
             Some(lexopt::Arg::Short('h') | lexopt::Arg::Long("help")) => {
                 print_help();
                 std::process::exit(0);
@@ -203,6 +226,9 @@ fn build_subcommand(subcommand: &str, parsed: ParsedCliFlags) -> Result<Subcomma
         gradle_home,
         output_dir,
         dry_run,
+        dot,
+        eol,
+        no_stdlib,
         ..
     } = parsed;
     match subcommand {
@@ -213,6 +239,7 @@ fn build_subcommand(subcommand: &str, parsed: ParsedCliFlags) -> Result<Subcomma
             name: first_positional(positionals, "refs requires a NAME argument")?,
         }),
         "hover" => build_hover_subcommand(positionals),
+        "complete" => build_complete_subcommand(positionals, dot, eol, no_stdlib),
         "index" => Ok(Subcommand::Index),
         "tokens" => Ok(Subcommand::Tokens {
             file: PathBuf::from(first_positional(
@@ -242,34 +269,69 @@ fn build_subcommand(subcommand: &str, parsed: ParsedCliFlags) -> Result<Subcomma
 }
 
 fn build_hover_subcommand(positionals: Vec<String>) -> Result<Subcommand, String> {
-    let mut positionals = positionals.into_iter();
-    let file = PathBuf::from(
-        positionals
-            .next()
-            .ok_or("hover requires FILE LINE COL arguments")?,
-    );
-    let line = parse_position_arg(
-        positionals.next(),
-        "hover requires LINE argument",
-        "LINE must be a positive integer",
-    )?;
-    let col = parse_position_arg(
-        positionals.next(),
-        "hover requires COL argument",
-        "COL must be a positive integer",
-    )?;
+    let (file, line, col) = parse_file_line_col(positionals, "hover")?;
     Ok(Subcommand::Hover { file, line, col })
 }
 
-fn parse_position_arg(
-    value: Option<String>,
-    missing_message: &'static str,
-    invalid_message: &'static str,
-) -> Result<u32, String> {
-    value
-        .ok_or(missing_message)?
-        .parse()
-        .map_err(|_| invalid_message.to_string())
+fn build_complete_subcommand(
+    positionals: Vec<String>,
+    dot: bool,
+    eol: bool,
+    no_stdlib: bool,
+) -> Result<Subcommand, String> {
+    let mut iter = positionals.into_iter();
+    let file = PathBuf::from(
+        iter.next()
+            .ok_or("complete requires a FILE argument")?,
+    );
+    let line = iter
+        .next()
+        .ok_or("complete requires a LINE argument")?
+        .parse::<u32>()
+        .map_err(|_| "LINE must be a positive integer".to_string())?;
+    // col is optional when --dot or --eol is given
+    let col = match iter.next() {
+        Some(s) => Some(
+            s.parse::<u32>()
+                .map_err(|_| "COL must be a positive integer".to_string())?,
+        ),
+        None => {
+            if !dot && !eol {
+                return Err("complete requires a COL argument (or use --dot / --eol)".to_string());
+            }
+            None
+        }
+    };
+    Ok(Subcommand::Complete {
+        file,
+        line,
+        col,
+        dot,
+        eol,
+        no_stdlib,
+    })
+}
+
+fn parse_file_line_col(
+    positionals: Vec<String>,
+    name: &'static str,
+) -> Result<(PathBuf, u32, u32), String> {
+    let mut iter = positionals.into_iter();
+    let file = PathBuf::from(
+        iter.next()
+            .ok_or_else(|| format!("{name} requires FILE LINE COL arguments"))?,
+    );
+    let line = iter
+        .next()
+        .ok_or_else(|| format!("{name} requires LINE argument"))?
+        .parse::<u32>()
+        .map_err(|_| "LINE must be a positive integer".to_string())?;
+    let col = iter
+        .next()
+        .ok_or_else(|| format!("{name} requires COL argument"))?
+        .parse::<u32>()
+        .map_err(|_| "COL must be a positive integer".to_string())?;
+    Ok((file, line, col))
 }
 
 fn first_positional(
@@ -285,7 +347,15 @@ fn first_positional(
 fn is_subcommand(value: &str) -> bool {
     matches!(
         value,
-        "find" | "refs" | "hover" | "index" | "tokens" | "tree" | "sources" | "extract-sources"
+        "find"
+            | "refs"
+            | "hover"
+            | "complete"
+            | "index"
+            | "tokens"
+            | "tree"
+            | "sources"
+            | "extract-sources"
     )
 }
 
@@ -305,6 +375,7 @@ SUBCOMMANDS:
     find    <name>              Find declarations of a symbol
     refs    <name>              Find all references to a symbol
     hover   <file> <line> <col> Show type/doc info at a position
+    complete <file> <line> [col] Show completion candidates at a position
     index                       Build and cache the workspace index
     sources                     List auto-discovered source roots
     extract-sources [PATTERN…]  Extract Gradle *-sources.jar to sourcePaths dir
@@ -323,6 +394,9 @@ OPTIONS:
     --gradle-home <dir> (extract-sources) Gradle home (default: $GRADLE_USER_HOME or ~/.gradle)
     --output <dir>      (extract-sources) Output root (default: ~/.kotlin-lsp/sources)
     --dry-run           (extract-sources) Print what would be extracted; write nothing
+    -d, --dot           (complete) Resolve col to just after the last '.' on the line
+    -e, --eol           (complete) Resolve col to end of trimmed content on the line
+    --no-stdlib         (complete) Skip ~/.kotlin-lsp/sources; workspace symbols only (~2s)
     -v, --verbose       Show progress messages (indexing, cache status)
     -h, --help          Print this help
     -V, --version       Print version
@@ -331,6 +405,11 @@ EXAMPLES:
     kotlin-lsp find MyViewModel
     kotlin-lsp refs --fast MyViewModel --root ./android
     kotlin-lsp hover src/Foo.kt 42 10 --json
+    kotlin-lsp complete src/Foo.kt 42 10
+    kotlin-lsp complete src/Foo.kt 42 10 --json
+    kotlin-lsp complete src/Foo.kt 42 --dot --json
+    kotlin-lsp complete src/Foo.kt 42 --eol --json
+    kotlin-lsp complete src/Foo.kt 42 --dot --no-stdlib --json
     kotlin-lsp index --root ./android
     kotlin-lsp sources --root ./android
     kotlin-lsp sources --json
