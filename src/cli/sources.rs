@@ -1,45 +1,71 @@
-//! CLI `sources` subcommand — list auto-discovered source roots.
+//! CLI `sources` subcommand — list resolved source roots.
 //!
-//! Shows what `workspace.json` and/or standard build layout detection
-//! would contribute as source roots, which paths actually exist, and
-//! where each path was found. Useful for verifying project setup without
-//! starting the LSP server.
+//! Shows what the canonical workspace source resolver would contribute as
+//! source roots, which paths actually exist, and where each path was
+//! found. Useful for verifying project setup without starting the LSP
+//! server.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use serde::Serialize;
 
+use crate::workspace::Config;
+
 #[derive(Debug, Serialize)]
 pub(crate) struct SourceRoot {
-    pub path: String,         // lossy-UTF8; always serializable
-    pub origin: &'static str, // "workspace.json" | "build-layout"
+    pub path: String, // lossy-UTF8; always serializable
+    pub origin: &'static str,
     pub exists: bool,
 }
 
-/// Collect all auto-discovered source roots for the given workspace root.
+/// Collect all resolved source roots for the given workspace root.
 pub(crate) fn discover(workspace_root: &Path) -> Vec<SourceRoot> {
-    let mut roots: Vec<SourceRoot> = Vec::new();
+    let config = Config {
+        root: workspace_root.to_path_buf(),
+        explicit_source_paths: Vec::new(),
+        ignore_patterns: Vec::new(),
+        pin_workspace: false,
+    };
+    let workspace_json_paths: HashSet<String> =
+        crate::workspace_json::load_source_paths(workspace_root)
+            .into_iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect();
+    let extract_sources_path = crate::util::home_dir().map(|home| {
+        home.join(".kotlin-lsp")
+            .join("sources")
+            .to_string_lossy()
+            .into_owned()
+    });
 
-    let json_paths = crate::workspace_json::load_source_paths(workspace_root);
-    for path in &json_paths {
-        roots.push(SourceRoot {
-            exists: path.is_dir(),
-            path: path.to_string_lossy().into_owned(),
-            origin: "workspace.json",
-        });
+    config
+        .resolve_sources()
+        .into_iter()
+        .map(|path| SourceRoot {
+            exists: Path::new(&path).is_dir(),
+            origin: source_origin(
+                &path,
+                &workspace_json_paths,
+                extract_sources_path.as_deref(),
+            ),
+            path,
+        })
+        .collect()
+}
+
+fn source_origin(
+    path: &str,
+    workspace_json_paths: &HashSet<String>,
+    extract_sources_path: Option<&str>,
+) -> &'static str {
+    if workspace_json_paths.contains(path) {
+        return "workspace.json";
     }
-
-    if json_paths.is_empty() {
-        for path in crate::workspace_json::detect_build_layout_source_paths(workspace_root) {
-            roots.push(SourceRoot {
-                exists: path.is_dir(),
-                path: path.to_string_lossy().into_owned(),
-                origin: "build-layout",
-            });
-        }
+    if extract_sources_path == Some(path) {
+        return "extract-sources";
     }
-
-    roots
+    "build-layout"
 }
 
 pub(crate) fn run_sources(workspace_root: &Path, json: bool) {

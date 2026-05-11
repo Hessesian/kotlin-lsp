@@ -32,7 +32,7 @@ pub(crate) enum Subcommand {
     Tree {
         file: PathBuf,
     },
-    /// List auto-discovered source roots for the workspace.
+    /// List resolved source roots for the workspace.
     Sources,
     /// Extract Gradle *-sources.jar files to a sourcePaths-ready directory.
     ExtractSources {
@@ -306,7 +306,7 @@ SUBCOMMANDS:
     refs    <name>              Find all references to a symbol
     hover   <file> <line> <col> Show type/doc info at a position
     index                       Build and cache the workspace index
-    sources                     List auto-discovered source roots
+    sources                     List resolved source roots
     extract-sources [PATTERN…]  Extract Gradle *-sources.jar to sourcePaths dir
     tokens  <file>              Dump semantic tokens (debug)
     tree    <file>              Dump tree-sitter parse tree (debug)
