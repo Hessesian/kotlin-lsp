@@ -39,8 +39,8 @@ fn index_root(root: &Path) {
 }
 
 /// Run `kotlin-lsp complete <file> <line> <col> --json --root <root>` and
-/// return the parsed JSON array.  Returns `None` if the binary exits with a
-/// non-zero status (no completions).
+/// return the parsed JSON array.  Returns `None` if stdout is empty
+/// (the binary may exit 0 with no completions or non-zero on error).
 fn complete_json(root: &Path, file: &Path, line: u32, col: u32) -> Option<Vec<Value>> {
     let out = Command::new(BIN)
         .args(["complete"])

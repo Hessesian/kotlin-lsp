@@ -58,7 +58,7 @@ Show completion candidates at a file position — the primary tool for discoveri
 - Takes an absolute file path, 1-based line and col (cursor position **after** the last typed character)
 - Returns JSON: `[{label, kind, detail?, import?}]` where `import` is the auto-import text edit
 - Works for bare-word completion (class names, functions, annotations), dot-completion, and annotation context
-- Requires the index to be built first (`kotlin_lsp_status` phase=done, or run `kotlin-lsp index`)
+- Builds/loads the index on first use (no separate `kotlin-lsp index` step needed)
 - Use to answer: "what classes match prefix X?", "does `@Composable` exist in scope?", "what's available after this dot?"
 - Library symbols from `~/.kotlin-lsp/sources` (populated by `kotlin-lsp extract-sources`) appear here with import edits
 

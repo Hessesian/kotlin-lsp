@@ -115,7 +115,13 @@ pub(crate) fn load_configured_source_paths(workspace_root: &Path) -> Option<Vec<
     }
 
     let content = std::fs::read_to_string(&json_path).ok()?;
-    let data: WorkspaceData = serde_json::from_str(&content).ok()?;
+    let data: WorkspaceData = match serde_json::from_str(&content) {
+        Ok(d) => d,
+        Err(e) => {
+            log::warn!("Failed to parse workspace.json at {}: {e}", json_path.display());
+            return None;
+        }
+    };
 
     // `None` means key was absent → caller applies global default.
     // `Some([])` means key present but empty → explicit "no library sources".

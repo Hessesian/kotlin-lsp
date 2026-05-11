@@ -362,7 +362,7 @@ impl Indexer {
                 total
             );
 
-            let ws_root_str = workspace_root.to_str().unwrap_or("").to_string();
+
             let mut local_files: HashMap<String, Arc<FileData>> =
                 HashMap::with_capacity(total);
             let mut local_hashes: HashMap<String, u64> = HashMap::with_capacity(total);
@@ -398,7 +398,7 @@ impl Indexer {
                     &mut local_packages,
                     &mut local_subtypes,
                 );
-                if !path_str.starts_with(&ws_root_str) {
+                if !std::path::Path::new(path_str.as_str()).starts_with(&workspace_root) {
                     new_library_uris.push(uri_str);
                 }
             }

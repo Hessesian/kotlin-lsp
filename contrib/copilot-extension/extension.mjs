@@ -74,6 +74,15 @@ function runShell(cmd, timeout = 8000) {
   });
 }
 
+/** Run a command with an explicit argument array — no shell interpolation. */
+function runCommand(cmd, args, timeout = 8000) {
+  return new Promise((resolve) => {
+    execFile(cmd, args, { maxBuffer: 1024 * 256, timeout }, (err, stdout, stderr) => {
+      resolve({ code: err?.code ?? 0, stdout: stdout || "", stderr: stderr || "" });
+    });
+  });
+}
+
 const WORKSPACE_CONFIG = path.join(os.homedir(), ".config", "kotlin-lsp", "workspace");
 const STATUS_PATH = path.join(os.homedir(), ".cache", "kotlin-lsp", "status.json");
 
@@ -263,21 +272,20 @@ const session = await joinSession({
 
         if (!Number.isInteger(line) || line < 1) return "Error: line must be a positive integer";
 
-        let colArg = "";
-        if (dot) {
-          colArg = "--dot";
-        } else if (eol) {
-          colArg = "--eol";
-        } else {
-          const col = Number(args.col);
+        let col = null;
+        if (!dot && !eol) {
+          col = Number(args.col);
           if (!Number.isInteger(col) || col < 1) return "Error: col must be a positive integer (or use dot/eol)";
-          colArg = String(col);
         }
 
-        const rootFlag = args.root ? `--root ${JSON.stringify(path.resolve(args.root))}` : "";
-        const noStdlibFlag = noStdlib ? "--no-stdlib" : "";
-        const cmd = `kotlin-lsp complete ${JSON.stringify(file)} ${line} ${colArg} --json ${noStdlibFlag} ${rootFlag}`.trim();
-        const { code, stdout, stderr } = await runShell(cmd, 30000);
+        const cmdArgs = ["complete", file, String(line)];
+        if (dot) cmdArgs.push("--dot");
+        else if (eol) cmdArgs.push("--eol");
+        else cmdArgs.push(String(col));
+        cmdArgs.push("--json");
+        if (noStdlib) cmdArgs.push("--no-stdlib");
+        if (args.root) { cmdArgs.push("--root"); cmdArgs.push(path.resolve(args.root)); }
+        const { code, stdout, stderr } = await runCommand("kotlin-lsp", cmdArgs, 30000);
 
         if (code !== 0 && !stdout.trim()) {
           return `No completions at ${file}:${line}${stderr ? `\n${stderr}` : ""}`;
