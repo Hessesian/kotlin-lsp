@@ -541,7 +541,12 @@ impl LanguageServer for Backend {
         for change in params.changes {
             if change.typ == FileChangeType::DELETED {
                 // Remove from index; definition map cleanup is handled lazily.
-                self.indexer.remove_indexed_file(&change.uri);
+                let _ = self
+                    .event_tx
+                    .send(Event::FileDeleted {
+                        uri: change.uri.clone(),
+                    })
+                    .await;
                 continue;
             }
             let uri = change.uri;
