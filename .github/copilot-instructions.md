@@ -391,6 +391,26 @@ pub(crate) fn with_ready(&self) -> Option<&WorkspaceData> { … }
 Remove the allow when the consuming code lands. If the consuming code never lands, the item
 should be deleted.
 
+### 15. Event dispatch functions are flat coordinators
+
+The function that matches on an event enum (`run()`, `handle_event()`) must contain **zero logic**. It dispatches to named handlers — one line per variant. All logic lives in the handlers.
+
+**Good example — `Actor::run()` and `handle_event()` (`src/workspace/actor.rs`):**
+```rust
+async fn handle_event(&mut self, event: Event) {
+    match event {
+        Event::Initialize { config }        => self.scan_handler.handle_initialize(config).await,
+        Event::FileChanged { uri, changes } => self.file_change_handler.handle_file_changed(uri, changes).await,
+        Event::FileOpened { uri, lang, text }=> self.document_handler.handle_file_opened(uri, lang, text).await,
+        // … every arm is one line
+    }
+}
+```
+
+If a match arm body grows beyond one line, it belongs in a named method on the appropriate handler struct.
+
+**Contrast — old `actor.rs`** had `handle_file_changed` (60 lines, 4-level nesting) directly in the Actor, with comments separating phases (`// batch drain`, `// spawn live-tree update`, `// reschedule debounce`). The comments were implicit function names; the refactor made them real.
+
 ## SOLID principles (Rust mapping)
 
 These are mapped to Rust idioms. Good examples are added here as they emerge from refactoring — when you write code that cleanly illustrates a principle, add it below.
@@ -401,7 +421,24 @@ One struct/module = one reason to change.
 
 **Signal that SRP is violated:** a handler function does I/O, mutation, *and* decision logic in the same body. Extract the decision into a pure helper, the mutation into a named method.
 
-*Add examples here as they emerge from Wave 5b interactor split.*
+**Good example — `FileChangeHandler` (`src/workspace/file_change_handler.rs`):**
+The old `Actor::handle_file_changed` was ~60 lines doing 5 things inline (extract text, update live lines, spawn tree parse, cancel debounce, schedule reindex). After Wave 5b it became:
+
+```rust
+// Each name replaces a section comment in the old code
+async fn drain_and_apply_file_changes(&mut self, uri: Url, changes: Vec<…>) {
+    let Some(text) = self.drain_file_changed_batch(changes) else { return };
+    self.indexer.set_live_lines(&uri, &text);
+    self.spawn_live_tree_update(uri.clone(), text.clone());
+    self.reschedule_debounced_reindex(uri, text);
+}
+```
+
+`FileChangeHandler` has one reason to change: the file-edit debounce strategy.
+`ScanHandler` has one reason to change: when/how workspace scans are enqueued.
+`DocumentHandler` has one reason to change: how opened/saved/closed files affect index state.
+
+**Contrast — `src/backend/mod.rs`** is still 765 lines mixing LSP protocol dispatch, workspace config resolution, and direct indexer writes. This is the next refactor target.
 
 ### O — Open/Closed
 
@@ -409,25 +446,40 @@ Open for extension (new trait implementors), closed for modification (existing m
 
 **Rust form:** define a trait, implement it for new types. Avoid exhaustive `match` on concrete enums in library code — prefer trait dispatch.
 
-*Add examples here as they emerge.*
+**Good example — `ProgressReporter` trait (`src/indexer/mod.rs`):**
+New reporter implementations (LSP client, CLI no-op, test stub) can be added without touching scan logic. `ScanHandler<R: ProgressReporter>` compiles for any `R` — adding a new reporter variant does not require modifying `ScanHandler`.
+
+*Add further examples as they emerge.*
 
 ### L — Liskov Substitution
 
 Any `impl Trait` must honour the documented contract of the trait, not just satisfy the type checker. If `fn process<R: ProgressReporter>(r: &R)` says it calls `r.begin()`/`r.end()` in pairs, every impl must tolerate that sequence.
 
-*Add examples here as they emerge.*
+*Add examples as they emerge.*
 
 ### I — Interface Segregation
 
 Keep traits small. See rule 13 (YAGNI). A caller should not be forced to implement methods it does not use.
 
-*Add examples here as they emerge.*
+**Good example — Wave 6 `WorkspaceRead` target:** only add methods that backend handlers actually call. Don't pre-populate with 9 methods "in case" (lesson from rule 13 — `WorkspaceRead` was trimmed from 9 to 1 method after review).
+
+*Add further examples as they emerge.*
 
 ### D — Dependency Inversion
 
-Depend on trait bounds (`impl Trait`, `<T: Trait>`), not concrete types. The actor receives `Arc<dyn ProgressReporter>`, not `Arc<Client>` directly — so it can be tested with a stub.
+Depend on trait bounds (`impl Trait`, `<T: Trait>`), not concrete types.
 
-*Add examples here as they emerge from Wave 5b `ScanHandler<R>` wiring.*
+**Good example — `ScanHandler<R: ProgressReporter>` (`src/workspace/scan_handler.rs`):**
+```rust
+pub(crate) struct ScanHandler<R: ProgressReporter + 'static> {
+    indexer: Arc<Indexer>,
+    reporter: Arc<R>,   // ← trait bound, not Arc<Client>
+    state: Arc<RwLock<State>>,
+}
+```
+In tests, `R = NoopReporter`. In LSP mode, `R = LspProgressReporter`. `ScanHandler` never imports `tower_lsp::Client` — it cannot accidentally depend on LSP transport details.
+
+**Contrast — old `Actor`** held `client: Option<Client>` directly and passed it into every handler. Adding a new notification type required touching `Actor` even when the change was only relevant to one handler.
 
 ---
 
