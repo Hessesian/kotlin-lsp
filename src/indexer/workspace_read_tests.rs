@@ -37,7 +37,8 @@ fn find_definition_qualified_default_resolves_via_index() {
     let target = location("/workspace/src/Foo.kt", 3);
     let workspace = TestWorkspace::default().with_definition("Foo", target.clone());
 
-    let result = workspace.find_definition_qualified("Foo", None, &file_url("/workspace/src/Bar.kt"));
+    let result =
+        workspace.find_definition_qualified("Foo", None, &file_url("/workspace/src/Bar.kt"));
 
     assert_eq!(result, vec![target]);
 }

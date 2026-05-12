@@ -15,6 +15,7 @@ mod stdlib_tail;
 mod str_ext;
 mod task_runner;
 mod types;
+mod util;
 mod workspace;
 mod workspace_json;
 

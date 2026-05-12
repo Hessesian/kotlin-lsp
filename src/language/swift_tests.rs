@@ -1,7 +1,7 @@
 use tower_lsp::lsp_types::SymbolKind;
 
-use crate::language::LanguageParser;
 use crate::language::swift::SwiftParser;
+use crate::language::LanguageParser;
 
 #[test]
 fn language_id_is_swift() {

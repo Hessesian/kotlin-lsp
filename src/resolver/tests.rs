@@ -1652,6 +1652,49 @@ fn long_prefix_tier2_not_crowded_out() {
 }
 
 #[test]
+fn library_file_appears_in_cross_package_completion() {
+    // Regression: library (sourcePaths) symbols must appear in bare-word completion
+    // even when they live in a different package from the current file.
+    let idx = Indexer::new();
+    let cur_uri = uri("/project/src/Screen.kt");
+    let lib_uri: Url = "file:///home/user/.kotlin-lsp/sources/compose/Composable.kt"
+        .parse()
+        .unwrap();
+    let col_uri: Url = "file:///home/user/.kotlin-lsp/sources/compose/Column.kt"
+        .parse()
+        .unwrap();
+
+    idx.index_content(
+        &lib_uri,
+        "package androidx.compose.runtime\nannotation class Composable",
+    );
+    idx.index_content(
+        &col_uri,
+        "package androidx.compose.foundation.layout\nfun Column() {}",
+    );
+    idx.index_content(&cur_uri, "package com.example\n");
+
+    let (items, _) = complete_bare(&idx, "Comp", &cur_uri, false, false);
+    assert!(
+        items.iter().any(|i| i.label == "Composable"),
+        "Composable from library file must appear for prefix 'Comp'"
+    );
+
+    // Import edit must be included so the editor can auto-import the symbol.
+    let composable = items.iter().find(|i| i.label == "Composable").unwrap();
+    assert!(
+        composable.additional_text_edits.is_some(),
+        "Composable completion must include an auto-import text edit"
+    );
+
+    let (items2, _) = complete_bare(&idx, "Col", &cur_uri, false, false);
+    assert!(
+        items2.iter().any(|i| i.label == "Column"),
+        "Column (fun) from library file must appear for prefix 'Col'"
+    );
+}
+
+#[test]
 fn cross_file_type_subst_multi_class_same_file() {
     // Regression test: when multiple classes in one file extend the same generic base
     // with different type args, completion must pick the correct substitution based on
@@ -1747,7 +1790,9 @@ fn is_annotation_context_detection() {
     assert!(is_annotation_context("@Composable", "Composable"));
     assert!(is_annotation_context("  @Comp", "Comp"));
     assert!(!is_annotation_context("Composable", "Composable")); // no @
-                                                                 // "x@Comp" — technically matches, real code won't have identifiers directly before @
+                                                                 // "@" alone — cursor right after the trigger character, empty prefix
+    assert!(is_annotation_context("@", ""));
+    assert!(is_annotation_context("  @", ""));
 }
 
 // ── ReceiverType::from_raw ────────────────────────────────────────────────

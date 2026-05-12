@@ -109,30 +109,68 @@ require('cmp').setup {
 
 ## Zed
 
-Add to your Zed settings (`~/.config/zed/settings.json` or `.zed/settings.json` per-project):
+### Recommended: install the extension
+
+The `contrib/zed-extension` bundled in this repo registers `kotlin-lsp` as a
+first-class Zed language server, resolving the binary from `$PATH`. This is
+the preferred setup — no manual `binary.path` wiring required.
+
+**Install the binary first:**
+```bash
+cargo install kotlin-lsp
+```
+
+**Install the extension:**
+```bash
+# From the repo root
+zed --install-dev-extension contrib/zed-extension
+```
+
+Or copy the directory manually and restart Zed:
+```bash
+cp -r contrib/zed-extension ~/.config/zed/extensions/kotlin-lsp
+```
+
+**Suppress the default JVM-based server** (add to `~/.config/zed/settings.json`):
 
 ```json
 {
   "languages": {
     "Kotlin": {
-      "language_servers": ["kotlin-lsp"]
+      "language_servers": ["kotlin-lsp", "!kotlin-language-server"],
+      "format_on_save": "off"
     },
     "Java": {
-      "language_servers": ["kotlin-lsp"]
+      "language_servers": ["kotlin-lsp"],
+      "format_on_save": "off"
     },
     "Swift": {
-      "language_servers": ["kotlin-lsp"]
-    }
-  },
-  "lsp": {
-    "kotlin-lsp": {
-      "binary": {
-        "path": "kotlin-lsp",
-        "arguments": ["--stdio"]
-      }
+      "language_servers": ["kotlin-lsp"],
+      "format_on_save": "off"
     }
   }
 }
 ```
 
-> **Note:** Zed requires a restart (not just workspace reload) after changing LSP config. If Zed doesn't recognise Kotlin files, you may need the [Kotlin extension](https://zed.dev/extensions?query=kotlin) installed.
+### Without the extension (manual wiring)
+
+If you prefer not to install the extension, add the full LSP config to
+`~/.config/zed/settings.json`:
+
+```json
+{
+  "languages": {
+    "Kotlin": { "language_servers": ["kotlin-lsp"] },
+    "Java":   { "language_servers": ["kotlin-lsp"] },
+    "Swift":  { "language_servers": ["kotlin-lsp"] }
+  },
+  "lsp": {
+    "kotlin-lsp": {
+      "binary": { "path": "kotlin-lsp", "arguments": ["--stdio"] }
+    }
+  }
+}
+```
+
+> **Note:** Zed requires a full restart (not just workspace reload) after changing
+> LSP settings. Check **Zed → Help → Open Log** if the server doesn't start.

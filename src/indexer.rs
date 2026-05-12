@@ -12,7 +12,6 @@ use crate::StrExt;
 // Re-export rg-module items that existing callers reach via `crate::indexer::`.
 pub(crate) use self::scan::{NoopReporter, ProgressReporter};
 pub(crate) use crate::rg::IgnoreMatcher;
-pub(crate) use crate::rg::SOURCE_EXTENSIONS;
 
 mod doc;
 
@@ -62,6 +61,9 @@ mod discover;
 
 mod scan;
 pub(crate) const MAX_FILES_UNLIMITED: usize = usize::MAX;
+
+mod workspace_root;
+pub(crate) use self::workspace_root::WorkspaceRoot;
 
 mod apply;
 #[allow(unused_imports)]
@@ -129,8 +131,11 @@ pub(crate) struct Indexer {
     pub(crate) qualified: DashMap<String, Location>,
     /// Package name → vec of URI strings (for same-package resolution).
     pub(crate) packages: DashMap<String, Vec<String>>,
-    /// Absolute path to the workspace root, set once on first `index_workspace`.
-    pub(crate) workspace_root: RwLock<Option<PathBuf>>,
+    /// Workspace root path + monotonic staleness generation.
+    /// The only write path is [`WorkspaceRoot::set`], which always bumps the
+    /// generation — coupling enforced by the type, not by convention.
+    /// Written only by [`crate::workspace::Actor`]; read-paths elsewhere observe it.
+    pub(crate) workspace_root: WorkspaceRoot,
     /// URI string → xxHash of last indexed content (skip identical re-parses).
     content_hashes: DashMap<String, u64>,
     /// Semaphore capping concurrent parse workers.
@@ -156,10 +161,6 @@ pub(crate) struct Indexer {
     /// When the key matches, the cached items are returned without recomputation —
     /// covers the common "typing more characters in the same word/after same dot" case.
     pub(crate) last_completion: std::sync::Mutex<Option<(String, String, Vec<CompletionItem>)>>,
-    /// Monotonically increasing generation counter.  Incremented on every root
-    /// switch so that background tasks spawned for an older root can detect
-    /// staleness and bail out early.
-    pub(crate) root_generation: AtomicU64,
     /// Guard to prevent concurrent background indexing runs on same Indexer.
     pub(crate) indexing_in_progress: std::sync::atomic::AtomicBool,
     /// Set when a reindex request arrives while a scan is already running.
@@ -181,6 +182,7 @@ pub(crate) struct Indexer {
     scheduled_paths: DashMap<String, u64>,
     /// Set when workspace was explicitly configured (env var, config file, or changeRoot command).
     /// When true, `did_open` auto-detection will NOT override the workspace.
+    /// Written only by [`crate::workspace::Actor`].
     pub(crate) workspace_pinned: std::sync::atomic::AtomicBool,
     /// Set to true after a non-truncated workspace scan; false after a truncated one.
     /// Drives `complete_scan` on the on-disk cache so warm-manifest mode is only
@@ -188,9 +190,12 @@ pub(crate) struct Indexer {
     pub(crate) last_scan_complete: std::sync::atomic::AtomicBool,
     /// User-configured ignore patterns from LSP `initializationOptions`.
     /// Applied during file discovery to exclude matching paths.
+    /// Written only by [`crate::workspace::Actor`]; tests configure it through actor events too.
     pub(crate) ignore_matcher: RwLock<Option<Arc<IgnoreMatcher>>>,
-    /// Raw source paths from `initializationOptions.indexingOptions.sourcePaths`.
-    /// Stored unresolved; resolved against workspace root at indexing time.
+    /// Resolved source paths written by the workspace actor for `index_source_paths`.
+    /// Populated from `Config::resolve_sources()`, which merges `initializationOptions.indexingOptions.sourcePaths`,
+    /// auto-discovered `workspace.json` / build-layout paths, and the default extract-sources dir.
+    /// Written only by [`crate::workspace::Actor`]; visibility stays `pub(crate)` for read-path consumers.
     pub(crate) source_paths_raw: RwLock<Vec<String>>,
     /// URIs of files indexed from `sourcePaths` that lie outside the workspace root.
     /// These are treated as library sources: available for hover/definition/autocomplete
@@ -236,7 +241,7 @@ impl Indexer {
             definitions: DashMap::new(),
             qualified: DashMap::new(),
             packages: DashMap::new(),
-            workspace_root: RwLock::new(None),
+            workspace_root: WorkspaceRoot::new(),
             content_hashes: DashMap::new(),
             // Allow configurable concurrent parse workers. Default to number of CPU cores.
             // Use env KOTLIN_LSP_PARSE_WORKERS to override.
@@ -258,7 +263,6 @@ impl Indexer {
             subtypes: DashMap::new(),
             bare_name_cache: std::sync::RwLock::new(Vec::new()),
             last_completion: std::sync::Mutex::new(None),
-            root_generation: AtomicU64::new(0),
             indexing_in_progress: std::sync::atomic::AtomicBool::new(false),
             pending_reindex: std::sync::atomic::AtomicBool::new(false),
             pending_reindex_root: RwLock::new(None),

@@ -23,6 +23,11 @@ const WORKSPACE_PLACEHOLDER: &str = "<WORKSPACE>";
 struct WorkspaceData {
     #[serde(default)]
     modules: Vec<ModuleData>,
+    /// Optional list of external library source directories.
+    /// When present (even as `[]`), these override the global `~/.kotlin-lsp/sources` default.
+    /// Supports the `<WORKSPACE>` placeholder (substituted with the workspace root path).
+    #[serde(default, rename = "sourcePaths")]
+    source_paths: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -97,7 +102,51 @@ pub(crate) fn load_source_paths(workspace_root: &Path) -> Vec<PathBuf> {
     paths
 }
 
-/// Detects standard Maven/Gradle source layouts without requiring `workspace.json`.
+/// Reads the `sourcePaths` key from `<workspace_root>/workspace.json`.
+///
+/// Returns `Some(paths)` when the key is present (even if the list is empty —
+/// an empty list is an explicit "use no library sources").  Returns `None` when
+/// the file is absent or the key is not present, so callers can fall back to
+/// the global `~/.kotlin-lsp/sources` default.
+pub(crate) fn load_configured_source_paths(workspace_root: &Path) -> Option<Vec<PathBuf>> {
+    let json_path = workspace_root.join("workspace.json");
+    if !json_path.exists() {
+        return None;
+    }
+
+    let content = match std::fs::read_to_string(&json_path) {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!(
+                "Failed to read workspace.json at {}: {e}",
+                json_path.display()
+            );
+            return None;
+        }
+    };
+    let data: WorkspaceData = match serde_json::from_str(&content) {
+        Ok(d) => d,
+        Err(e) => {
+            log::warn!(
+                "Failed to parse workspace.json at {}: {e}",
+                json_path.display()
+            );
+            return None;
+        }
+    };
+
+    // `None` means key was absent → caller applies global default.
+    // `Some([])` means key present but empty → explicit "no library sources".
+    let source_paths = data.source_paths?;
+
+    let workspace_str = workspace_root.to_string_lossy();
+    let paths = source_paths
+        .iter()
+        .map(|p| PathBuf::from(p.replace(WORKSPACE_PLACEHOLDER, &workspace_str)))
+        .collect();
+
+    Some(paths)
+}
 ///
 /// Activates when a build file (`build.gradle.kts`, `build.gradle`, `pom.xml`, …) exists
 /// at the workspace root. Probes well-known source directories; returns only those that
@@ -210,6 +259,73 @@ fn parse_include_calls(content: &str) -> Vec<String> {
         }
     }
     result
+}
+
+/// Auto-detect Android SDK source directories.
+///
+/// Checks, in order:
+/// 1. `sdk.dir` property in `<workspace_root>/local.properties`
+/// 2. `$ANDROID_HOME` environment variable
+/// 3. `$ANDROID_SDK_ROOT` environment variable
+///
+/// When an SDK directory is found, returns the highest API-level
+/// `sources/android-XX` subdirectory that exists on disk, which
+/// contains the Android platform Java sources.  Returns an empty `Vec`
+/// when no SDK is found or the SDK has no `sources/` directory.
+pub(crate) fn detect_android_sdk_source_paths(workspace_root: &Path) -> Vec<PathBuf> {
+    let sdk_dir = sdk_dir_from_local_properties(workspace_root)
+        .or_else(|| std::env::var("ANDROID_HOME").ok().map(PathBuf::from))
+        .or_else(|| std::env::var("ANDROID_SDK_ROOT").ok().map(PathBuf::from))
+        .filter(|p| p.is_dir());
+
+    let Some(sdk) = sdk_dir else {
+        return Vec::new();
+    };
+
+    let sources_root = sdk.join("sources");
+    if !sources_root.is_dir() {
+        return Vec::new();
+    }
+
+    // Find highest android-XX API level present under sdk/sources/.
+    let best = std::fs::read_dir(&sources_root)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().ok().map(|t| t.is_dir()).unwrap_or(false))
+        .filter_map(|e| {
+            let name = e.file_name();
+            let api: u32 = name
+                .to_string_lossy()
+                .strip_prefix("android-")?
+                .parse()
+                .ok()?;
+            Some((api, e.path()))
+        })
+        .max_by_key(|(api, _)| *api)
+        .map(|(_, path)| path);
+
+    match best {
+        Some(path) => {
+            log::info!("android-sdk: auto-detected sources at {}", path.display());
+            vec![path]
+        }
+        None => Vec::new(),
+    }
+}
+
+/// Read `sdk.dir` from `<workspace_root>/local.properties`.
+fn sdk_dir_from_local_properties(workspace_root: &Path) -> Option<PathBuf> {
+    let content = std::fs::read_to_string(workspace_root.join("local.properties")).ok()?;
+    content.lines().find_map(|line| {
+        let (key, val) = line.split_once('=')?;
+        if key.trim() == "sdk.dir" {
+            Some(PathBuf::from(val.trim()))
+        } else {
+            None
+        }
+    })
 }
 
 #[cfg(test)]

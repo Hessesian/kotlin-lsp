@@ -1,0 +1,15 @@
+id = "kotlin-lsp"
+name = "Kotlin LSP"
+version = "0.1.0"
+schema_version = 1
+description = "Kotlin, Java and Swift language support via kotlin-lsp (tree-sitter, no JVM)."
+repository = "https://github.com/Hessesian/kotlin-lsp"
+authors = ["kotlin-lsp contributors"]
+
+[lib]
+kind = "Rust"
+version = "0.5.0"
+
+[language_servers.kotlin-lsp]
+name = "Kotlin LSP"
+languages = ["Kotlin", "Java", "Swift"]

@@ -55,4 +55,7 @@ pub(crate) enum Event {
 
     /// Drop live document state for a closed file.
     FileClosed { uri: Url },
+
+    /// Remove a file from the in-memory index after a workspace-watched deletion.
+    FileDeleted { uri: Url },
 }

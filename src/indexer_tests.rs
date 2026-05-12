@@ -1884,14 +1884,24 @@ async fn e2e_ignore_patterns_excludes_symbols() {
     .unwrap();
 
     let indexer = Arc::new(Indexer::new());
-    *indexer.ignore_matcher.write().unwrap() = Some(Arc::new(IgnoreMatcher::new(
-        vec!["bazel-bin/**".to_owned()],
-        root,
-    )));
-
-    Arc::clone(&indexer)
-        .index_workspace_full(root, Arc::new(NoopReporter))
-        .await;
+    let (event_tx, event_rx) = tokio::sync::mpsc::channel(16);
+    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+    let actor =
+        crate::workspace::Actor::new(Arc::clone(&indexer), Arc::new(NoopReporter), event_rx, None);
+    tokio::spawn(actor.run());
+    event_tx
+        .send(crate::workspace::Event::Initialize {
+            config: crate::workspace::Config {
+                root: root.to_path_buf(),
+                explicit_source_paths: Vec::new(),
+                ignore_patterns: vec!["bazel-bin/**".to_owned()],
+                pin_workspace: false,
+            },
+            completion_tx: Some(completion_tx),
+        })
+        .await
+        .unwrap();
+    completion_rx.await.unwrap();
 
     assert!(
         indexer.definitions.contains_key("MainClass"),
@@ -1925,14 +1935,24 @@ async fn e2e_ignore_patterns_bare_pattern_any_depth() {
     .unwrap();
 
     let indexer = Arc::new(Indexer::new());
-    *indexer.ignore_matcher.write().unwrap() = Some(Arc::new(IgnoreMatcher::new(
-        vec!["third-party".to_owned()],
-        root,
-    )));
-
-    Arc::clone(&indexer)
-        .index_workspace_full(root, Arc::new(NoopReporter))
-        .await;
+    let (event_tx, event_rx) = tokio::sync::mpsc::channel(16);
+    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+    let actor =
+        crate::workspace::Actor::new(Arc::clone(&indexer), Arc::new(NoopReporter), event_rx, None);
+    tokio::spawn(actor.run());
+    event_tx
+        .send(crate::workspace::Event::Initialize {
+            config: crate::workspace::Config {
+                root: root.to_path_buf(),
+                explicit_source_paths: Vec::new(),
+                ignore_patterns: vec!["third-party".to_owned()],
+                pin_workspace: false,
+            },
+            completion_tx: Some(completion_tx),
+        })
+        .await
+        .unwrap();
+    completion_rx.await.unwrap();
 
     assert!(
         indexer.definitions.contains_key("KeepMe"),

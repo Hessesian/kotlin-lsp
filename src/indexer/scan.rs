@@ -270,20 +270,15 @@ fn queue_reindex_request(indexer: &Indexer, root: &Path, max: usize) {
     indexer
         .pending_reindex
         .store(true, std::sync::atomic::Ordering::Release);
-    indexer
-        .root_generation
-        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    indexer.workspace_root.bump_generation();
 }
 
 fn prepare_scan(indexer: &Arc<Indexer>, root: &Path, max: usize) -> ScanSetup {
     let guard = IndexingGuard {
         indexer: Arc::clone(indexer),
     };
-    *indexer.workspace_root.write().unwrap() = Some(root.to_path_buf());
 
-    let start_gen = indexer
-        .root_generation
-        .load(std::sync::atomic::Ordering::SeqCst);
+    let start_gen = indexer.workspace_root.generation();
     let cache = try_load_cache(root);
     let matcher: Option<Arc<IgnoreMatcher>> = indexer.ignore_matcher.read().unwrap().clone();
     let discovered = discover_workspace_paths(root, max, &cache, matcher.as_deref());
@@ -595,11 +590,7 @@ async fn parse_work_item(
 ) -> Option<FileIndexResult> {
     log::debug!("Parsing: {}", item.path.display());
 
-    if idx
-        .root_generation
-        .load(std::sync::atomic::Ordering::SeqCst)
-        != item.start_gen
-    {
+    if idx.workspace_root.generation() != item.start_gen {
         counters
             .gen_skipped
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -707,8 +698,6 @@ impl Indexer {
         root: &Path,
         reporter: Arc<R>,
     ) {
-        // workspace_root is updated inside index_workspace_impl after the
-        // concurrency guard is acquired, so we never set a stale root here.
         let max = resolve_max_files(DEFAULT_MAX_INDEX_FILES);
         let (result, guard_opt) = Arc::clone(&self)
             .index_workspace_impl(root, max, Arc::clone(&reporter))
@@ -732,8 +721,11 @@ impl Indexer {
         initial_paths: Vec<PathBuf>,
         reporter: Arc<R>,
     ) {
-        // workspace_root is updated inside index_workspace_impl; don't set it
-        // here to avoid leaving a stale root if the impl aborts early.
+        // `workspace_root` is expected to be up-to-date before calling this
+        // function. In the actor-driven path the workspace actor calls
+        // `set_root` before scheduling the scan; in the CLI (`--index-only`)
+        // and `kotlin-lsp/reindex` paths the caller is responsible for
+        // keeping `workspace_root` in sync.
 
         // Guard priority parsing: if a scan is already running, skip it to
         // avoid mutating the shared index concurrently.
@@ -851,7 +843,7 @@ impl Indexer {
             let root_opt = self.pending_reindex_root.write().unwrap().take();
             let root = match root_opt {
                 Some(r) => r,
-                None => match self.workspace_root.read().unwrap().clone() {
+                None => match self.workspace_root.get() {
                     Some(r) => r,
                     None => return,
                 },
@@ -900,9 +892,17 @@ impl Indexer {
         self.last_scan_complete
             .store(result.complete_scan, std::sync::atomic::Ordering::Release);
         let root = result.workspace_root.clone();
+        let files_parsed = result.stats.files_parsed;
         self.apply_workspace_result(&result);
         Arc::clone(&self).index_source_paths(root).await;
-        self.save_cache_to_disk();
+        // Always save when a complete scan ran — this trims deleted-file entries from
+        // the on-disk cache even when files_parsed == 0 (all cache hits).  Skip only
+        // for partial / truncated scans where nothing new was parsed.
+        if files_parsed > 0 || result.complete_scan {
+            self.save_cache_to_disk();
+        } else {
+            log::info!("Partial scan, nothing new parsed — skipping workspace cache save");
+        }
         // _guard dropped here → indexing_in_progress cleared
     }
 
@@ -939,7 +939,7 @@ impl Indexer {
         } = prepare_scan(&self, root, max);
         let session = ScanSession {
             start_gen,
-            root_generation: &self.root_generation,
+            root_generation: self.workspace_root.generation_atomic(),
             scheduled_paths: &self.scheduled_paths,
         };
         let PartitionResult {
@@ -1010,16 +1010,14 @@ impl Indexer {
     /// Serialize the current index to `~/.cache/kotlin-lsp/<root-hash>/index.bin`.
     /// Safe to call from a background thread. Logs warnings on error; never panics.
     pub(crate) fn save_cache_to_disk(&self) {
-        let root_guard = self.workspace_root.read().unwrap();
-        let root = match root_guard.as_ref() {
-            Some(r) => r,
-            None => return,
+        let Some(root) = self.workspace_root.get() else {
+            return;
         };
         let complete_scan = self
             .last_scan_complete
             .load(std::sync::atomic::Ordering::Acquire);
         save_cache(
-            root,
+            &root,
             &self.files,
             &self.content_hashes,
             &self.library_uris,

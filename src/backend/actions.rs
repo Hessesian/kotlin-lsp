@@ -1,7 +1,7 @@
 use super::rename::whole_word_replace_file;
 use super::Backend;
+use crate::indexer::resolution::WorkspaceRead;
 use crate::StrExt;
-use std::sync::atomic::Ordering;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 
@@ -137,10 +137,13 @@ impl Backend {
         let pp = params.text_document_position;
         let uri = &pp.text_document.uri;
         let position = pp.position;
-        let snippets = self.snippet_support.load(Ordering::Relaxed);
+        let snippets = self
+            .snippet_support
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let workspace = self.indexer.as_ref();
 
-        let (mut items, hit_cap) = self.indexer.completions(uri, position, snippets);
-        let still_indexing = self.indexer.indexing_in_progress.load(Ordering::Acquire);
+        let (mut items, hit_cap) = WorkspaceRead::completions(workspace, uri, position, snippets);
+        let still_indexing = workspace.is_indexing_in_progress();
         if items.is_empty() && !still_indexing {
             return Ok(None);
         }

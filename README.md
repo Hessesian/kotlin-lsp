@@ -32,6 +32,26 @@ code --install-extension kotlin-lsp-darwin-arm64-vX.Y.Z.vsix # macOS Apple Silic
 
 The extension bundles syntax highlighting and launches `kotlin-lsp` automatically.
 
+**Zed** — install the bundled extension (registers `kotlin-lsp` from `$PATH`, no manual wiring):
+
+```bash
+zed --install-dev-extension contrib/zed-extension
+```
+
+Then suppress the default JVM server in `~/.config/zed/settings.json`:
+
+```json
+{
+  "languages": {
+    "Kotlin": { "language_servers": ["kotlin-lsp", "!kotlin-language-server"] },
+    "Java":   { "language_servers": ["kotlin-lsp"] },
+    "Swift":  { "language_servers": ["kotlin-lsp"] }
+  }
+}
+```
+
+[Full Zed setup + manual wiring option →](docs/editors.md#zed)
+
 **Helix** — add to `~/.config/helix/languages.toml`:
 
 ```toml
@@ -52,13 +72,15 @@ command = "kotlin-lsp"
 **Once your editor is wired up:**
 
 1. Open a Kotlin/Java file — hover, go-to-definition, and completions work immediately via `rg` fallback while the index builds in the background.
-2. _(Optional)_ Index library sources for hover and completions on third-party code:
+2. Library sources are discovered automatically — no configuration needed in most cases:
+   - **Android SDK** (`Activity`, `Context`, `View`, …) — detected from `local.properties` → `$ANDROID_HOME` → `$ANDROID_SDK_ROOT`
+   - **Gradle library sources** (Compose, coroutines, AndroidX, …) — run once to unpack `*-sources.jar` from the Gradle cache:
 
 ```bash
-kotlin-lsp extract-sources   # unpacks *-sources.jar from ~/.gradle; restart editor after
+kotlin-lsp extract-sources   # one-time; restart editor after
 ```
 
-`~/.kotlin-lsp/sources` is picked up automatically — no config needed.
+   - **IntelliJ/Android Studio projects** — `workspace.json` source roots are picked up automatically, including any `sourcePaths` you've configured there.
 
 ---
 
@@ -78,7 +100,7 @@ kotlin-lsp extract-sources   # unpacks *-sources.jar from ~/.gradle; restart edi
 | **Go-to-implementation** | Transitive subtype lookup (BFS) |
 | **Signature help** | Active parameter highlighting |
 | **Folding** | Brace regions + consecutive comment blocks |
-| **CLI mode** | `find`, `refs`, `hover`, `index`, `tokens`, `tree`, `sources`, `extract-sources` — scriptable, no daemon |
+| **CLI mode** | `find`, `refs`, `hover`, `index`, `complete`, `tokens`, `tree`, `sources`, `extract-sources` — scriptable, no daemon |
 
 All features work immediately — `rg` fallback handles symbols before indexing finishes.
 
@@ -102,6 +124,7 @@ All features work immediately — `rg` fallback handles symbols before indexing 
 kotlin-lsp find MyViewModel              # search declarations
 kotlin-lsp refs MyViewModel              # find all references
 kotlin-lsp hover src/Foo.kt 42 10        # hover info at line 42, col 10
+kotlin-lsp complete src/Foo.kt 42 --dot  # completions after last '.' on line 42
 kotlin-lsp index --root ./android        # pre-build cache
 kotlin-lsp sources --root ./android      # list detected source roots
 kotlin-lsp extract-sources               # unpack library sources from Gradle cache
@@ -114,6 +137,8 @@ kotlin-lsp extract-sources               # unpack library sources from Gradle ca
 | `--smart` | Require index; build it if missing |
 | `--json` | Machine-readable output |
 | `--root <dir>` | Workspace root (default: nearest `.git` dir) |
+
+`complete` returns JSON `[{label, kind, detail?, import?}]`. Use `--dot` / `--eol` to auto-place the cursor; `--no-stdlib` skips `~/.kotlin-lsp/sources` for ~5× faster project-only results.
 
 [Full CLI reference →](docs/features.md#cli-subcommands)
 
@@ -141,14 +166,37 @@ Patterns follow gitignore glob rules and apply to both `fd` and `walkdir` fallba
 
 ### Source paths
 
-`~/.kotlin-lsp/sources` (the default `extract-sources` output) is **automatically included** by both the LSP server and CLI — no config needed after running `kotlin-lsp extract-sources`.
+Library sources are resolved automatically — no manual config needed in most cases:
 
-To add other directories (generated stubs, custom source roots) for hover and completions — excluded from `findReferences` and `rename`:
+| Source | How it's discovered |
+|---|---|
+| Android SDK (`Activity`, `Context`, …) | `sdk.dir` in `local.properties` → `$ANDROID_HOME` → `$ANDROID_SDK_ROOT` |
+| Gradle library sources (Compose, coroutines, …) | `~/.kotlin-lsp/sources` after running `kotlin-lsp extract-sources` |
+| IntelliJ/Android Studio project roots | `workspace.json` at project root (exported by IDE) |
+| Standard Gradle/Maven layouts | `src/main/kotlin`, `src/test/kotlin`, per-module subprojects |
+
+**`workspace.json`** — JetBrains IDEs export this file to the project root. It describes every module's source roots and lets you override library source directories:
+
+```json
+{
+  "sourcePaths": [
+    "<WORKSPACE>/custom-stubs",
+    "/absolute/path/to/generated-sources"
+  ]
+}
+```
+
+When `sourcePaths` is present (even as `[]`), it overrides the `~/.kotlin-lsp/sources` default. Use `[]` to disable all library sources for a specific project.
+
+**Manual override** via LSP config (for custom stubs or generated code):
 
 ```toml
+# ~/.config/helix/languages.toml
 [language-server.kotlin-lsp.config.indexingOptions]
 sourcePaths = ["buildSrc/src", "/path/to/generated-stubs"]
 ```
+
+Source path files are indexed for hover and completions but excluded from `findReferences` and `rename`.
 
 [Full configuration reference →](docs/features.md)
 
@@ -161,7 +209,7 @@ sourcePaths = ["buildSrc/src", "/path/to/generated-stubs"]
 - **Swift support is structural** — all symbols indexed; no module boundaries or closure type inference
 - **Java completion** is less refined than Kotlin
 - **`findReferences` on common names** returns noise — name-based search via `rg`, no import filtering yet
-- **Binary `.aar`/`.jar`** cannot be indexed — requires a `*-sources.jar` (use `kotlin-lsp extract-sources`)
+- **Binary `.aar`/`.jar`** — only the public API surface is available; full source navigation requires a `*-sources.jar` (use `kotlin-lsp extract-sources`). Direct class-file indexing is [planned](https://github.com/Hessesian/kotlin-lsp/issues/79).
 
 ---
 

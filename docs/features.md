@@ -65,6 +65,24 @@ Lists every source root that would be auto-discovered for a project (from `works
 If source roots are missing, the command suggests `extract-sources` as a next step.
 
 ```
+kotlin-lsp complete <file> <line> [--dot] [--eol] [--no-stdlib] [--json] [--root <dir>]
+```
+Returns completion candidates for the cursor position without starting the LSP daemon — useful for shell integrations, editor plugins, and testing.
+
+| Flag | Description |
+|---|---|
+| `--dot` | Auto-place cursor immediately after the last `.` on the line |
+| `--eol` | Auto-place cursor at the end of the line |
+| `--no-stdlib` | Skip `~/.kotlin-lsp/sources` for project-only results (~5× faster) |
+| `--json` | Output as JSON `[{label, kind, detail?, import?}]` |
+
+Output (plain text):
+```
+Column     (function)  fun Column(modifier: Modifier, content: @Composable () -> Unit)
+Row        (function)  fun Row(modifier: Modifier, content: @Composable () -> Unit)
+```
+
+```
 kotlin-lsp extract-sources [PATTERN…] [OPTIONS]
 ```
 Unpacks `*-sources.jar` files from the Gradle module cache so the LSP server can serve hover docs and go-to-definition for library code.
@@ -85,10 +103,8 @@ kotlin-lsp sources --root ./android
 # 2. Extract library sources (first time, or after a Gradle sync)
 kotlin-lsp extract-sources androidx.compose org.jetbrains.kotlin
 
-# 3. Add the output dir to your LSP config (one-time)
-#    sourcePaths = ["~/.kotlin-lsp/sources"]
-
-# 4. Re-index (or restart the server) to pick up new sources
+# Android SDK, workspace.json, and ~/.kotlin-lsp/sources are picked up automatically.
+# 3. Re-index (or restart the server) to pick up new sources
 kotlin-lsp index --root ./android
 ```
 

@@ -115,27 +115,23 @@ impl Backend {
     }
 
     pub(crate) async fn rg_context(&self) -> (Option<PathBuf>, Option<Arc<IgnoreMatcher>>) {
-        let root = self.indexer.workspace_root.read().unwrap().clone();
+        let root = self.indexer.workspace_root.get();
         let ignore = self.indexer.ignore_matcher.read().unwrap().clone();
         (root, ignore)
     }
 
     /// Try `find_definition_qualified` with `rt.qualified`, falling back to `rt.leaf`
     /// when the first lookup is empty and the two names differ.
-    pub(super) fn resolve_with_receiver_fallback(
+    pub(super) fn resolve_with_receiver_fallback<W: WorkspaceRead>(
         &self,
+        workspace: &W,
         word: &str,
         rt: &crate::resolver::ReceiverType,
         uri: &Url,
     ) -> Vec<Location> {
-        let locs = WorkspaceRead::find_definition_qualified(
-            &self.indexer,
-            word,
-            Some(&rt.qualified),
-            uri,
-        );
+        let locs = workspace.find_definition_qualified(word, Some(&rt.qualified), uri);
         if locs.is_empty() && rt.leaf != rt.qualified {
-            WorkspaceRead::find_definition_qualified(&self.indexer, word, Some(&rt.leaf), uri)
+            workspace.find_definition_qualified(word, Some(&rt.leaf), uri)
         } else {
             locs
         }
@@ -205,10 +201,9 @@ impl Backend {
     }
 
     fn workspace_root_from_config() -> Option<PathBuf> {
-        let home_directory = std::env::var("HOME")
-            .ok()
-            .unwrap_or_else(|| "/tmp".to_string());
-        let config_file = Path::new(&home_directory).join(".config/kotlin-lsp/workspace");
+        let config_file = crate::util::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+            .join(".config/kotlin-lsp/workspace");
         std::fs::read_to_string(config_file)
             .ok()
             .map(|workspace_root| PathBuf::from(workspace_root.trim()))
@@ -221,9 +216,6 @@ impl Backend {
         workspace_root: &Path,
         workspace_pinned: bool,
     ) {
-        if workspace_pinned {
-            self.indexer.workspace_pinned.store(true, Ordering::Relaxed);
-        }
         let (explicit_source_paths, ignore_patterns) =
             self.apply_initialization_options(params.initialization_options.as_ref());
         if self
@@ -233,6 +225,7 @@ impl Backend {
                     root: workspace_root.to_path_buf(),
                     explicit_source_paths,
                     ignore_patterns,
+                    pin_workspace: workspace_pinned,
                 },
                 completion_tx: None,
             })
@@ -296,7 +289,7 @@ fn server_capabilities() -> ServerCapabilities {
             },
         )),
         completion_provider: Some(CompletionOptions {
-            trigger_characters: Some(vec![".".into(), ":".into()]),
+            trigger_characters: Some(vec![".".into(), ":".into(), "@".into()]),
             resolve_provider: Some(true),
             ..Default::default()
         }),
@@ -370,28 +363,15 @@ impl LanguageServer for Backend {
         self.client
             .log_message(MessageType::INFO, "kotlin-lsp ready")
             .await;
-
-        // Register a file-system watcher so we get notified when source
-        // files change on disk (e.g. after a workspace/rename edit is applied to
-        // closed files that never send didChange).
-        let watchers: Vec<FileSystemWatcher> = crate::indexer::SOURCE_EXTENSIONS
-            .iter()
-            .map(|ext| FileSystemWatcher {
-                glob_pattern: GlobPattern::String(format!("**/*.{ext}")),
-                kind: None,
-            })
-            .collect();
-        let _ = self
-            .client
-            .register_capability(vec![Registration {
-                id: "watched-source-files".into(),
-                method: "workspace/didChangeWatchedFiles".into(),
-                register_options: Some(
-                    serde_json::to_value(DidChangeWatchedFilesRegistrationOptions { watchers })
-                        .unwrap_or_default(),
-                ),
-            }])
-            .await;
+        // NOTE: dynamic capability registration via client.register_capability() is intentionally
+        // omitted here. tower-lsp 0.20 panics when the oneshot receiver created by pending.wait()
+        // is dropped before the client's response arrives — a race that occurs because tower-lsp
+        // fires `initialized` as a fire-and-forget notification (no coroutine keepalive). When
+        // the client (e.g. Zed) responds quickly, pending.rs:35 finds a dropped receiver and
+        // calls tx.send(r).expect("receiver already dropped"), killing the server process.
+        //
+        // Clients that natively watch files (Zed, Helix) send workspace/didChangeWatchedFiles
+        // without dynamic registration; our did_change_watched_files handler processes those.
     }
 
     async fn shutdown(&self) -> Result<()> {
@@ -408,7 +388,7 @@ impl LanguageServer for Backend {
         params: ExecuteCommandParams,
     ) -> Result<Option<serde_json::Value>> {
         if params.command == "kotlin-lsp/reindex" {
-            let root = self.indexer.workspace_root.read().unwrap().clone();
+            let root = self.indexer.workspace_root.get();
             let Some(root) = root else {
                 self.client
                     .show_message(MessageType::WARNING, "kotlin-lsp: no workspace root set")
@@ -446,7 +426,7 @@ impl LanguageServer for Backend {
                 pb
             } else {
                 // Acquire current root upfront and drop the lock before any await.
-                let current_root_opt = { self.indexer.workspace_root.read().unwrap().clone() };
+                let current_root_opt = { self.indexer.workspace_root.get() };
                 match current_root_opt {
                     Some(r) => r,
                     None => {
@@ -544,7 +524,16 @@ impl LanguageServer for Backend {
         for change in params.changes {
             if change.typ == FileChangeType::DELETED {
                 // Remove from index; definition map cleanup is handled lazily.
-                self.indexer.remove_indexed_file(&change.uri);
+                if self
+                    .event_tx
+                    .send(Event::FileDeleted {
+                        uri: change.uri.clone(),
+                    })
+                    .await
+                    .is_err()
+                {
+                    log::warn!("FileDeleted event dropped: workspace actor channel closed");
+                }
                 continue;
             }
             let uri = change.uri;

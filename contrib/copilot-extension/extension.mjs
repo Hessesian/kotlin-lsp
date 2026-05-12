@@ -21,7 +21,7 @@ const GREP_BASH_RE = /\b(rg|grep|fd|find)\b.*(-e\s+(?:kt|kts|java)|\.(kt|kts|jav
 const GLOB_KT_RE = /\.(kt|java|kts)\b/;
 
 // Tools that count as proper LSP usage (reset the streak)
-const LSP_TOOLS = new Set(["lsp"]);
+const LSP_TOOLS = new Set(["lsp", "kotlin_lsp_complete"]);
 
 const STREAK_THRESHOLD = 3;  // consecutive grep calls before reinforcing
 
@@ -69,6 +69,15 @@ function denyMessage() {
 function runShell(cmd, timeout = 8000) {
   return new Promise((resolve) => {
     execFile("/bin/sh", ["-c", cmd], { maxBuffer: 1024 * 256, timeout }, (err, stdout, stderr) => {
+      resolve({ code: err?.code ?? 0, stdout: stdout || "", stderr: stderr || "" });
+    });
+  });
+}
+
+/** Run a command with an explicit argument array — no shell interpolation. */
+function runCommand(cmd, args, timeout = 8000) {
+  return new Promise((resolve) => {
+    execFile(cmd, args, { maxBuffer: 1024 * 256, timeout }, (err, stdout, stderr) => {
       resolve({ code: err?.code ?? 0, stdout: stdout || "", stderr: stderr || "" });
     });
   });
@@ -200,6 +209,87 @@ const session = await joinSession({
           pattern, cwd,
         ];
         return await runRg(rgArgs, cwd);
+      },
+    },
+    {
+      name: "kotlin_lsp_complete",
+      description: [
+        "List completion candidates at a file position.",
+        "Useful for discovering what functions, classes, or properties are available in scope",
+        "without knowing the exact name upfront — e.g. after typing a partial identifier or",
+        "after a dot. Returns label, kind (class/fun/method/var/…), detail qualifier, and",
+        "the auto-import text that the editor would insert.",
+        "FILE must be an absolute path. LINE is 1-based.",
+        "Use dot=true to auto-place cursor after the last '.' on the line (no col needed).",
+        "Use eol=true to auto-place cursor at end of trimmed line content (no col needed).",
+        "Use no_stdlib=true to skip ~/.kotlin-lsp/sources and return only workspace symbols.",
+        "This makes completion ~5x faster (~1s vs ~10s) and is sufficient for project types,",
+        "sealed classes, and enum members. Omit no_stdlib when stdlib/library completions matter.",
+        "Builds/loads the index automatically on first call; for best performance pre-warm with `kotlin-lsp index`.",
+        "Returns JSON: [{label, kind, detail?, import?}, …].",
+      ].join(" "),
+      parameters: {
+        type: "object",
+        properties: {
+          file: {
+            type: "string",
+            description: "Absolute path to the Kotlin/Java file",
+          },
+          line: {
+            type: "integer",
+            description: "1-based line number",
+          },
+          col: {
+            type: "integer",
+            description: "1-based column number. Optional when dot or eol is true.",
+          },
+          dot: {
+            type: "boolean",
+            description: "Auto-place cursor just after the last '.' on the line. Overrides col.",
+          },
+          eol: {
+            type: "boolean",
+            description: "Auto-place cursor at end of trimmed line content. Overrides col.",
+          },
+          no_stdlib: {
+            type: "boolean",
+            description: "Skip ~/.kotlin-lsp/sources (extracted stdlib/libraries). Returns only workspace symbols. Much faster (~1s vs ~10s). Recommended for project-type completion.",
+          },
+          root: {
+            type: "string",
+            description: "Optional workspace root (default: nearest .git parent of file)",
+          },
+        },
+        required: ["file", "line"],
+      },
+      handler: async (args) => {
+        const file = path.resolve(args.file);
+        const line = Number(args.line);
+        const dot = args.dot === true;
+        const eol = args.eol === true;
+        const noStdlib = args.no_stdlib === true;
+
+        if (!Number.isInteger(line) || line < 1) return "Error: line must be a positive integer";
+        if (dot && eol) return "Error: --dot and --eol are mutually exclusive";
+        let col = null;
+        if (!dot && !eol) {
+          col = Number(args.col);
+          if (!Number.isInteger(col) || col < 1) return "Error: col must be a positive integer (or use dot/eol)";
+        }
+
+        const cmdArgs = ["complete", file, String(line)];
+        if (dot) cmdArgs.push("--dot");
+        else if (eol) cmdArgs.push("--eol");
+        else cmdArgs.push(String(col));
+        cmdArgs.push("--json");
+        if (noStdlib) cmdArgs.push("--no-stdlib");
+        if (args.root) { cmdArgs.push("--root"); cmdArgs.push(path.resolve(args.root)); }
+        const { code, stdout, stderr } = await runCommand("kotlin-lsp", cmdArgs, 30000);
+
+        if (code !== 0 && !stdout.trim()) {
+          return `No completions at ${file}:${line}${stderr ? `\n${stderr}` : ""}`;
+        }
+        return stdout.trim() || `No completions at ${file}:${line}`;
       },
     },
     {

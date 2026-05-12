@@ -239,58 +239,17 @@ If not, and if ≥2 distinct implementations could exist (production + test stub
 - Reserve `Box<dyn Trait>` only for heterogeneous runtime collections or plugin registries.
 - Apply the Rule of Three: wait for the second concrete implementation before abstracting.
 
-### 4. Max 2 levels of `{}` nesting
+### 4. No deep nesting
 
-A function body is level 1. Every `{` block inside it adds a level. Two is the limit.
+Functions should have at most 3 levels of indentation in their body.
 
-**Flatten guards with `let-else`** instead of `if let { … } else { … }` or `match { Ok(x) => { … } Err => warn }`:
-
-```rust
-// ✗ — three levels: fn body → if → body
-fn set_root(&self, root: PathBuf) {
-    if let Ok(mut guard) = self.indexer.workspace_root.write() {
-        *guard = Some(root);
-    } else {
-        log::warn!("failed to write workspace root");
-    }
-}
-
-// ✓ — one level: fn body only (see src/workspace/actor.rs Actor::set_root)
-fn set_root(&self, root: PathBuf) {
-    let Ok(mut guard) = self.indexer.workspace_root.write() else {
-        log::warn!("Actor: failed to write workspace root");
-        return;
-    };
-    *guard = Some(root);
-}
-```
-
-When a function needs multiple `Option`/`Result` values, use **separate `let-else`** lines instead of a nested `match (a, b)`:
-
-```rust
-// ✓ — flat (see Actor::is_outside_pinned_workspace_root in src/workspace/actor.rs)
-let Some(opened) = opened_file_path else { return false; };
-let Some(root) = self.current_root()  else { return false; };
-```
-
-**Replace `while`/`loop` + `match`** with `let-else` guards inside the loop:
-
-```rust
-// ✓ — flat loop, no match (see Actor::drain_file_changed_batch in src/workspace/actor.rs)
-loop {
-    let Ok(event) = self.rx.try_recv() else { break };
-    let Event::FileChanged { uri, changes } = event else {
-        self.pushback = Some(event);
-        break;
-    };
-    batch.insert(uri.to_string(), (uri, changes));
-}
-```
-
-Other tools:
+Flatten with:
 - Early `return` / `return None` guards at the top
 - The `?` operator for error propagation
+- `let … else` for mandatory destructuring
 - Extracted helper functions for inner loops or match arms
+
+A `match` nested inside another `match` inside an `if` is a signal to extract.
 
 ### 5. Section comments inside a function body signal a split
 
@@ -301,6 +260,25 @@ separate logical phases inside a function, that's a signal the function should b
 - The top-level function becomes a readable sequence of helper calls.
 - Exception: a single clarifying comment on a non-obvious line is fine; what's banned is
   using comments as section dividers to compensate for a function doing too many things.
+
+**`and` in a function name is the same signal at the naming level.** If a function is
+named `drain_and_apply`, `fetch_and_store`, or `parse_and_index`, it is doing two things.
+Split into two functions called from a coordinator:
+
+```rust
+// Bad: one function doing two things, name says so
+fn drain_and_apply_changes(&mut self) { … }
+
+// Good: coordinator calls two focused functions
+fn handle_file_changed(&mut self) {
+    let changes = self.drain_pending_changes();
+    self.apply_changes(changes);
+}
+```
+
+The only time `and` in a name is acceptable is when the two parts are inseparable
+(e.g., `read_and_advance` on a cursor where reading without advancing would corrupt
+state) — document *why* they cannot be separated.
 
 ### 6. Long names signal missing structs or traits; avoid abbreviations
 
@@ -392,6 +370,22 @@ Examples of duplication caught too late in this project:
 config, or deduplicates a collection — grep for the concept first. If a function already
 exists, call it or extend it; don't write a parallel one.
 
+### 12a. Refactoring tasks move code — they don't rewrite it
+
+When a task says "extract X into its own module/struct", the implementation is:
+1. **Read** the source file in full before touching anything
+2. **Copy** the exact function body verbatim into the new location
+3. **Adjust** only `self.` references to match the new struct's fields
+4. **Delete** from the original location
+5. **Verify** with `cargo test` that behaviour is identical
+
+Do not rewrite logic, do not guess function signatures, do not invent helper names.
+If a function name used in a task description does not appear in `rg -n "fn <name>" src/`,
+stop and search for what actually exists — the name is wrong, not the codebase.
+
+This applies especially to MVI actor refactoring: `src/workspace/actor.rs` already contains
+all handler functions. Wave 5b extracts them into handler structs — it does not create new logic.
+
 ### 13. Start traits minimal (YAGNI)
 
 Do not add methods to a trait "in case" they are needed later. Start with the smallest
@@ -416,35 +410,147 @@ pub(crate) fn with_ready(&self) -> Option<&WorkspaceData> { … }
 Remove the allow when the consuming code lands. If the consuming code never lands, the item
 should be deleted.
 
-### 15. Flat event dispatch — one line per variant
+### 15. Event dispatch functions are flat coordinators
 
-The `match` in an event loop is a **dispatch table**, not an implementation. Each arm must be a single method call. All logic lives in named handler functions.
+The function that matches on an event enum (`run()`, `handle_event()`) must contain **zero logic**. It dispatches to named handlers — one line per variant. All logic lives in the handlers.
 
+**Good example — `Actor::run()` and `handle_event()` (`src/workspace/actor.rs`):**
 ```rust
-// ✓ — flat dispatch, handlers carry the meaning (see Actor::handle_event in src/workspace/actor.rs)
 async fn handle_event(&mut self, event: Event) {
     match event {
-        Event::Initialize { config, completion_tx } => self.handle_initialize(config, completion_tx).await,
-        Event::Reindex                              => self.handle_reindex().await,
-        Event::FileChanged { uri, changes }         => self.drain_and_apply_file_changes(uri, changes).await,
-        Event::FileSaved { uri }                    => self.handle_file_saved(uri).await,
-        // …
+        Event::Initialize { config }        => self.scan_handler.handle_initialize(config).await,
+        Event::FileChanged { uri, changes } => self.file_change_handler.handle_file_changed(uri, changes).await,
+        Event::FileOpened { uri, lang, text }=> self.document_handler.handle_file_opened(uri, lang, text).await,
+        // … every arm is one line
     }
 }
 ```
 
-The calling loop stays readable regardless of how complex individual handlers grow:
+If a match arm body grows beyond one line, it belongs in a named method on the appropriate handler struct.
+
+**Contrast — old `actor.rs`** had `handle_file_changed` (60 lines, 4-level nesting) directly in the Actor, with comments separating phases (`// batch drain`, `// spawn live-tree update`, `// reschedule debounce`). The comments were implicit function names; the refactor made them real.
+
+### 16. Side effects belong at the write site, not scattered at call sites
+
+When a mutation always has a companion side effect (e.g., writing X always invalidates Y), put the side effect *inside the write helper*, not at each call site. Call sites forget; the write helper cannot.
+
+**Good example — `ScanHandler::set_root()` (`src/workspace/scan_handler.rs`):**
+```rust
+fn set_root(&self, root: PathBuf) {
+    if let Ok(mut guard) = self.indexer.workspace_root.write() {
+        *guard = Some(root);
+    } else {
+        log::warn!("Actor: failed to write workspace root");
+        return;   // ← don't bump if write failed
+    }
+    // Every root change invalidates in-flight scans — this cannot be forgotten.
+    self.indexer.root_generation.fetch_add(1, Ordering::SeqCst);
+}
+```
+
+Three callers (`handle_initialize`, `handle_change_root`, `switch_workspace_root_for_opened_document`) previously each bumped `root_generation` manually. One caller had missed it entirely (the bug). Moving the bump into `set_root` makes forgetting impossible.
+
+**Contrast — before:** `root_generation.fetch_add(…)` repeated at three call sites; one was missing, causing a race window.
+
+### 17. When multiple functions must each "do" the same thing — that's an architectural gap
+
+If you find yourself adding the same side effect (bump a counter, notify a channel, update a flag) to two or more call sites because "every caller must remember to do X", that repetition is a symptom: **X is not owned by the right abstraction**.
+
+The fix is not discipline — it's architecture:
+- Extract a write helper that performs X automatically (Rule 16).
+- Or wrap the shared state in a newtype whose only mutation method performs X (e.g. `WorkspaceRoot::set()` always bumps the generation — callers cannot forget because there is no lower-level path).
+- Or route all mutations through a single owner (e.g. the actor) so there is physically only one call site.
+
+**Signal:** "every function that does A must also do B" → `A` and `B` are not separate concerns; they are one atomic operation that belongs in one place.
+
+**Anti-pattern:**
+```rust
+// Three callers each bump root_generation manually after changing workspace_root.
+// One missed it → race window.
+self.indexer.workspace_root.write()...;        // caller 1
+self.indexer.root_generation.fetch_add(1, ...); // caller 1 (and 2, and 3...)
+```
+
+**Fix — collapse into one write path:**
+```rust
+// WorkspaceRoot::set() is the only mutation path.
+// The generation bump is inside set() — impossible to call one without the other.
+self.indexer.workspace_root.set(new_root);
+```
+
+When you see "must also", ask: who should own both halves so the contract is enforced by construction?
+
+## SOLID principles (Rust mapping)
+
+These are mapped to Rust idioms. Good examples are added here as they emerge from refactoring — when you write code that cleanly illustrates a principle, add it below.
+
+### S — Single Responsibility
+
+One struct/module = one reason to change.
+
+**Signal that SRP is violated:** a handler function does I/O, mutation, *and* decision logic in the same body. Extract the decision into a pure helper, the mutation into a named method.
+
+**Good example — `FileChangeHandler` (`src/workspace/file_change_handler.rs`):**
+The old `Actor::handle_file_changed` was ~60 lines doing 5 things inline (extract text, update live lines, spawn tree parse, cancel debounce, schedule reindex). After Wave 5b it became:
 
 ```rust
-// ✓ — the loop itself has zero logic (see Actor::run in src/workspace/actor.rs)
-pub(crate) async fn run(mut self) {
-    while let Some(event) = self.receive_event().await {
-        self.handle_event(event).await;
-    }
+// Each name replaces a section comment in the old code
+async fn drain_and_apply_file_changes(&mut self, uri: Url, changes: Vec<…>) {
+    let Some(text) = self.drain_file_changed_batch(changes) else { return };
+    self.indexer.set_live_lines(&uri, &text);
+    self.spawn_live_tree_update(uri.clone(), text.clone());
+    self.reschedule_debounced_reindex(uri, text);
 }
 ```
 
-If an arm needs more than one expression, extract a named method. The arm name must then read as a verb phrase that summarises what happens: `on_scan_completed`, `drain_and_apply_file_changes`.
+`FileChangeHandler` has one reason to change: the file-edit debounce strategy.
+`ScanHandler` has one reason to change: when/how workspace scans are enqueued.
+`DocumentHandler` has one reason to change: how opened/saved/closed files affect index state.
+
+**Contrast — `src/backend/mod.rs`** is still 765 lines mixing LSP protocol dispatch, workspace config resolution, and direct indexer writes. This is the next refactor target.
+
+### O — Open/Closed
+
+Open for extension (new trait implementors), closed for modification (existing match arms untouched).
+
+**Rust form:** define a trait, implement it for new types. Avoid exhaustive `match` on concrete enums in library code — prefer trait dispatch.
+
+**Good example — `ProgressReporter` trait (`src/indexer/mod.rs`):**
+New reporter implementations (LSP client, CLI no-op, test stub) can be added without touching scan logic. `ScanHandler<R: ProgressReporter>` compiles for any `R` — adding a new reporter variant does not require modifying `ScanHandler`.
+
+*Add further examples as they emerge.*
+
+### L — Liskov Substitution
+
+Any `impl Trait` must honour the documented contract of the trait, not just satisfy the type checker. If `fn process<R: ProgressReporter>(r: &R)` says it calls `r.begin()`/`r.end()` in pairs, every impl must tolerate that sequence.
+
+*Add examples as they emerge.*
+
+### I — Interface Segregation
+
+Keep traits small. See rule 13 (YAGNI). A caller should not be forced to implement methods it does not use.
+
+**Good example — Wave 6 `WorkspaceRead` target:** only add methods that backend handlers actually call. Don't pre-populate with 9 methods "in case" (lesson from rule 13 — `WorkspaceRead` was trimmed from 9 to 1 method after review).
+
+*Add further examples as they emerge.*
+
+### D — Dependency Inversion
+
+Depend on trait bounds (`impl Trait`, `<T: Trait>`), not concrete types.
+
+**Good example — `ScanHandler<R: ProgressReporter>` (`src/workspace/scan_handler.rs`):**
+```rust
+pub(crate) struct ScanHandler<R: ProgressReporter + 'static> {
+    indexer: Arc<Indexer>,
+    reporter: Arc<R>,   // ← trait bound, not Arc<Client>
+    state: Arc<RwLock<State>>,
+}
+```
+In tests, `R = NoopReporter`. In LSP mode, `R = LspProgressReporter`. `ScanHandler` never imports `tower_lsp::Client` — it cannot accidentally depend on LSP transport details.
+
+**Contrast — old `Actor`** held `client: Option<Client>` directly and passed it into every handler. Adding a new notification type required touching `Actor` even when the change was only relevant to one handler.
+
+---
 
 ## Architecture patterns (from rust-analyzer)
 

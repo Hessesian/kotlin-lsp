@@ -10,9 +10,7 @@ use crate::workspace::{Actor, Config, Event};
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
-fn make_actor(
-    indexer: Arc<Indexer>,
-) -> (Actor<NoopReporter>, mpsc::Sender<Event>) {
+fn make_actor(indexer: Arc<Indexer>) -> (Actor<NoopReporter>, mpsc::Sender<Event>) {
     let (tx, rx) = mpsc::channel(16);
     let actor = Actor::new(indexer, Arc::new(NoopReporter), rx, None);
     (actor, tx)
@@ -52,6 +50,7 @@ async fn initialize_sets_workspace_root() {
             root: root.clone(),
             explicit_source_paths: Vec::new(),
             ignore_patterns: Vec::new(),
+            pin_workspace: false,
         },
         completion_tx: None,
     })
@@ -65,9 +64,7 @@ async fn initialize_sets_workspace_root() {
     poll_until(
         move || {
             idx.workspace_root
-                .read()
-                .ok()
-                .and_then(|g| g.clone())
+                .get()
                 .map(|r| r == expected)
                 .unwrap_or(false)
         },
@@ -75,7 +72,7 @@ async fn initialize_sets_workspace_root() {
     )
     .await;
 
-    let actual_root = indexer.workspace_root.read().unwrap().clone();
+    let actual_root = indexer.workspace_root.get();
     assert_eq!(
         actual_root.as_deref(),
         Some(root.as_path()),
@@ -98,6 +95,7 @@ async fn initialize_writes_explicit_source_paths() {
             root: root.clone(),
             explicit_source_paths: vec!["/some/lib".to_string()],
             ignore_patterns: Vec::new(),
+            pin_workspace: false,
         },
         completion_tx: Some(completion_tx),
     })
@@ -147,9 +145,7 @@ async fn change_root_updates_workspace_root() {
     poll_until(
         move || {
             idx.workspace_root
-                .read()
-                .ok()
-                .and_then(|g| g.clone())
+                .get()
                 .map(|r| r == expected)
                 .unwrap_or(false)
         },
@@ -157,7 +153,7 @@ async fn change_root_updates_workspace_root() {
     )
     .await;
 
-    let actual = indexer.workspace_root.read().unwrap().clone();
+    let actual = indexer.workspace_root.get();
     assert_eq!(
         actual.as_deref(),
         Some(root.as_path()),
@@ -203,6 +199,7 @@ async fn multiple_initialize_last_one_runs() {
             root: tmp1.path().to_path_buf(),
             explicit_source_paths: Vec::new(),
             ignore_patterns: Vec::new(),
+            pin_workspace: false,
         },
         completion_tx: None,
     })
@@ -212,6 +209,7 @@ async fn multiple_initialize_last_one_runs() {
             root: tmp2.path().to_path_buf(),
             explicit_source_paths: Vec::new(),
             ignore_patterns: Vec::new(),
+            pin_workspace: false,
         },
         completion_tx: None,
     })
@@ -221,6 +219,7 @@ async fn multiple_initialize_last_one_runs() {
             root: tmp3.path().to_path_buf(),
             explicit_source_paths: Vec::new(),
             ignore_patterns: Vec::new(),
+            pin_workspace: false,
         },
         completion_tx: Some(done_tx),
     })
@@ -232,7 +231,7 @@ async fn multiple_initialize_last_one_runs() {
         .expect("last initialize should complete within 5s")
         .unwrap();
 
-    let root = indexer.workspace_root.read().unwrap().clone();
+    let root = indexer.workspace_root.get();
     assert_eq!(
         root.as_deref(),
         Some(tmp3.path()),

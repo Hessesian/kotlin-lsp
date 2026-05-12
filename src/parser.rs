@@ -634,20 +634,21 @@ fn extract_fun_interfaces(root: Node, bytes: &[u8], data: &mut FileData) {
 /// Returns true if `node` or any of its (error-containing) descendants is a
 /// `fun interface` misparse — either the ERROR shape or the function_declaration shape.
 /// Prunes clean subtrees (`!has_error()`) for efficiency.
-fn has_fun_interface_descendant(node: &Node, bytes: &[u8]) -> bool {
-    if fun_interface_name_from_fn_decl(node, bytes).is_some() || is_fun_interface_error(node, bytes)
-    {
-        return true;
+fn has_fun_interface_descendant(root: &Node, bytes: &[u8]) -> bool {
+    let mut stack = vec![*root];
+    while let Some(node) = stack.pop() {
+        if fun_interface_name_from_fn_decl(&node, bytes).is_some()
+            || is_fun_interface_error(&node, bytes)
+        {
+            return true;
+        }
+        if !node.has_error() {
+            continue;
+        }
+        let mut cursor = node.walk();
+        stack.extend(node.children(&mut cursor));
     }
-    if !node.has_error() {
-        return false;
-    }
-    let mut cursor = node.walk();
-    let children: Vec<_> = node.children(&mut cursor).collect();
-    drop(cursor);
-    children
-        .iter()
-        .any(|c| has_fun_interface_descendant(c, bytes))
+    false
 }
 
 fn collect_syntax_errors(root: Node, bytes: &[u8]) -> Vec<SyntaxError> {

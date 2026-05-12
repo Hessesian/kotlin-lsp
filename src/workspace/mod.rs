@@ -24,15 +24,18 @@
 
 pub(crate) mod actor;
 pub(crate) mod contract;
+pub(crate) mod document_handler;
 pub(crate) mod event;
+pub(crate) mod file_change_handler;
 pub(crate) mod phase;
+pub(crate) mod scan_handler;
 pub(crate) mod scan_queue;
 
 // Re-exports are unused until Wave 2 wires this module in (ws-backend, ws-cli, ws-main).
 #[allow(unused_imports)]
 pub(crate) use actor::Actor;
 #[allow(unused_imports)]
-pub(crate) use contract::{ReadyState, Effect, State};
+pub(crate) use contract::{Effect, ReadyState, State};
 #[allow(unused_imports)]
 pub(crate) use event::Event;
 
@@ -48,31 +51,21 @@ use std::path::PathBuf;
 pub(crate) struct Config {
     /// Absolute path to the workspace root (nearest `.git` ancestor of the opened file,
     /// or an explicit `--root` flag in CLI mode, or the LSP `rootUri`).
-    pub root: PathBuf,
+    pub(crate) root: PathBuf,
 
     /// Source paths explicitly configured by the caller (e.g. LSP
     /// `initializationOptions.indexingOptions.sourcePaths`).
     /// These are merged with auto-discovered paths by [`resolve_sources`].
-    pub explicit_source_paths: Vec<String>,
+    pub(crate) explicit_source_paths: Vec<String>,
 
     /// Glob-style ignore patterns from LSP `initializationOptions.indexingOptions.ignorePatterns`.
-    pub ignore_patterns: Vec<String>,
+    pub(crate) ignore_patterns: Vec<String>,
+
+    /// Whether the workspace root should be pinned against didOpen auto-detection.
+    pub(crate) pin_workspace: bool,
 }
 
 impl Config {
-    /// Convenience constructor for a clean root-switch config with no
-    /// editor-provided overrides.  Used by `handle_change_root` and the
-    /// auto-detect workspace root path — explicitly *not* used by
-    /// `handle_initialize`, which may carry session-level `explicit_source_paths`
-    /// and `ignore_patterns`.
-    pub(crate) fn for_root(root: PathBuf) -> Self {
-        Self {
-            root,
-            explicit_source_paths: Vec::new(),
-            ignore_patterns: Vec::new(),
-        }
-    }
-
     /// Return the deduplicated, ordered list of source paths to index.
     ///
     /// Discovery priority (first win for deduplication):
@@ -82,8 +75,10 @@ impl Config {
     ///    only attempted when `workspace.json` is absent
     /// 4. `~/.kotlin-lsp/sources` (default `extract-sources` output dir)
     ///
-    /// Called only from `Actor` event handlers (`handle_initialize`,
-    /// `handle_change_root`).  No other code should call this method.
+    /// Called from `Actor` event handlers (`handle_initialize`,
+    /// `handle_change_root`) and from the CLI `sources` subcommand (read-only,
+    /// no index state mutations).  Other callers should not mutate index state
+    /// based on the result.
     pub(crate) fn resolve_sources(&self) -> Vec<String> {
         use std::collections::HashSet;
 
@@ -111,18 +106,29 @@ impl Config {
             }
         }
 
-        // Auto-include the well-known `extract-sources` output directory if present.
-        // Skip entirely when HOME is unknown to avoid accidentally indexing the
-        // current working directory (matches existing backend behaviour).
-        // Skipped in test builds so actor tests don't accidentally index the
-        // developer's local library sources and time out.
-        #[cfg(not(test))]
-        #[allow(deprecated)]
-        if let Some(home) = std::env::home_dir() {
-            let default_sources = home.join(".kotlin-lsp").join("sources");
-            if default_sources.is_dir() {
-                push(default_sources.to_string_lossy().into_owned());
+        // `workspace.json` `sourcePaths` key — explicit library overrides.
+        // When present (even as `[]`), it takes precedence over the default
+        // `~/.kotlin-lsp/sources` directory so a project can opt out entirely.
+        let configured = crate::workspace_json::load_configured_source_paths(&self.root);
+        if let Some(ref configured_paths) = configured {
+            for p in configured_paths {
+                push(p.to_string_lossy().into_owned());
             }
+        } else {
+            // No explicit `sourcePaths` key — fall back to the well-known
+            // `extract-sources` output directory if it exists.
+            if let Some(home) = crate::util::home_dir() {
+                let default_sources = home.join(".kotlin-lsp").join("sources");
+                if default_sources.is_dir() {
+                    push(default_sources.to_string_lossy().into_owned());
+                }
+            }
+        }
+
+        // Android SDK sources — always added when detectable, independent of
+        // the `sourcePaths` override (SDK sources are not library sources).
+        for p in crate::workspace_json::detect_android_sdk_source_paths(&self.root) {
+            push(p.to_string_lossy().into_owned());
         }
 
         paths

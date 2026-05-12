@@ -168,15 +168,14 @@ fn extract_jar(jar: &Path, dest: &Path, dry_run: bool) -> Result<usize, String> 
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-#[allow(deprecated)] // home_dir is deprecated for Windows edge cases; fine on Unix/macOS
-fn home_dir() -> PathBuf {
-    std::env::home_dir().unwrap_or_else(|| PathBuf::from("."))
-}
-
 fn default_gradle_home() -> PathBuf {
     std::env::var("GRADLE_USER_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| home_dir().join(".gradle"))
+        .unwrap_or_else(|_| {
+            crate::util::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".gradle")
+        })
 }
 
 // ── entry point ───────────────────────────────────────────────────────────────
@@ -195,9 +194,12 @@ pub(crate) fn run_extract_sources(opts: ExtractOptions) {
         std::process::exit(1);
     }
 
-    let output_root = opts
-        .output
-        .unwrap_or_else(|| home_dir().join(".kotlin-lsp").join("sources"));
+    let output_root = opts.output.unwrap_or_else(|| {
+        crate::util::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".kotlin-lsp")
+            .join("sources")
+    });
 
     println!("Searching: {}", search_root.display());
     println!("Output:    {}", output_root.display());

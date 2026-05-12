@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.13.0
+
+- **Zed extension** — `contrib/zed-extension` registers `kotlin-lsp` as a first-class Zed language server for Kotlin, Java, and Swift. Resolves the binary from `$PATH`; no symlinks or `binary.path` overrides required. Install locally with `zed --install-dev-extension contrib/zed-extension` or copy to `~/.config/zed/extensions/kotlin-lsp/`.
+- **`complete` CLI subcommand** — `kotlin-lsp complete <file> <line> [col]` returns completion candidates as JSON (`[{label, kind, detail?, import?}]`). Flags: `--dot` (auto-place cursor after last `.` on the line), `--eol` (end of trimmed line), `--no-stdlib` (skip `~/.kotlin-lsp/sources` for ~5× faster project-only completions). Useful for agent/script integration without a running LSP daemon.
+- **Library cache** — `sourcePaths`-indexed files are saved to a deterministic on-disk cache (`~/.cache/kotlin-lsp/library-<hash>.bin`). Subsequent restarts skip re-parsing unchanged library sources, making warm startup significantly faster on large projects with many source JARs.
+- **Library visibility filtering** — symbols marked `private` or `internal` in library source files are stripped from the index. Only `public` and `protected` symbols are indexed for external libraries (inaccessible members add noise to completions and workspace symbol search).
+- **Android SDK auto-detection** — the Android platform sources (`$ANDROID_HOME/sources/android-XX/`) are now indexed automatically. Detection order: `sdk.dir` in `local.properties` → `$ANDROID_HOME` → `$ANDROID_SDK_ROOT`. The highest installed API level is picked. No `sourcePaths` config or `extract-sources` needed for Android SDK classes (`Activity`, `Context`, `View`, etc.).
+- **`@` completion trigger** — `@` is now a trigger character so annotation completions (`@Composable`, `@Inject`, `@Override`, …) appear immediately after typing `@`.
+- **LSP smoke test suite** — `tests/lsp_smoke.rs` exercises the full server over stdio: initialization, workspace symbol, go-to-definition, hover, and inlay hints. Runs against a temp fixture without a real Android project.
+- **Stack overflow fix** — `has_fun_interface_descendant` converted from recursive to iterative to prevent stack overflow on deeply nested class hierarchies.
+
 ## 0.12.1
 
 - **Auto-include `~/.kotlin-lsp/sources` in LSP server** — after running `kotlin-lsp extract-sources`, extracted library sources are indexed automatically without any manual `sourcePaths` configuration in the LSP client.

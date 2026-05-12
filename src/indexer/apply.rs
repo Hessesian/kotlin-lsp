@@ -24,10 +24,11 @@ use dashmap::DashMap;
 use tower_lsp::lsp_types::*;
 
 use super::{FileContributions, Indexer, StaleKeys};
+use crate::indexer::cache::FileCacheEntry;
 use crate::indexer::discover::find_source_files_unconstrained;
 use crate::parser::parse_by_extension;
 use crate::resolver::symbols_from_uri_as_completions_pub;
-use crate::types::{FileData, FileIndexResult, WorkspaceIndexResult};
+use crate::types::{FileData, FileIndexResult, Visibility, WorkspaceIndexResult};
 use crate::StrExt;
 
 // ─── hash helper ─────────────────────────────────────────────────────────────
@@ -43,6 +44,22 @@ pub(super) fn hash_str(s: &str) -> u64 {
 }
 
 // ─── Pure functions ───────────────────────────────────────────────────────────
+
+/// Strip private symbols from `results` whose URI appears in `library_uris`.
+/// Private members of external dependencies are inaccessible from workspace code.
+fn strip_library_private_symbols(
+    results: &mut [FileIndexResult],
+    library_uris: &std::collections::HashSet<&str>,
+) {
+    for result in results.iter_mut() {
+        if library_uris.contains(result.uri.as_str()) {
+            result
+                .data
+                .symbols
+                .retain(|s| !matches!(s.visibility, Visibility::Private | Visibility::Internal));
+        }
+    }
+}
 
 /// Pure: compute what a parsed file contributes to each index map.
 /// No side effects. Call [`Indexer::apply_contributions`] to commit.
@@ -137,6 +154,148 @@ pub(crate) fn build_bare_names(definitions: &DashMap<String, Vec<Location>>) -> 
     names.sort_unstable();
     names.dedup();
     names
+}
+
+/// Accumulator for the library index fast path.
+///
+/// Bundles all six HashMap contributions and the library-URI list so that
+/// adding a new index field causes a compile error at `flush_into` rather
+/// than a silent miss at an arbitrary call site.
+struct LibraryBatch {
+    files: HashMap<String, Arc<FileData>>,
+    hashes: HashMap<String, u64>,
+    definitions: HashMap<String, Vec<Location>>,
+    qualified: HashMap<String, Location>,
+    packages: HashMap<String, Vec<String>>,
+    subtypes: HashMap<String, Vec<Location>>,
+    library_uris: Vec<String>,
+}
+
+impl LibraryBatch {
+    fn with_capacity(n: usize) -> Self {
+        Self {
+            files: HashMap::with_capacity(n),
+            hashes: HashMap::with_capacity(n),
+            definitions: HashMap::new(),
+            qualified: HashMap::new(),
+            packages: HashMap::new(),
+            subtypes: HashMap::new(),
+            library_uris: Vec::with_capacity(n),
+        }
+    }
+
+    /// Populate one cache entry into the batch.
+    ///
+    /// `path` is the filesystem path used to determine whether the file is
+    /// outside `workspace_root` (library) or inside it (workspace source).
+    fn collect_entry(
+        &mut self,
+        uri: &Url,
+        uri_str: &str,
+        path: &std::path::Path,
+        entry: &FileCacheEntry,
+        class_kinds: &[SymbolKind],
+        workspace_root: &std::path::Path,
+    ) {
+        let is_library = !path.starts_with(workspace_root);
+
+        // Library files: strip private symbols — private members of external
+        // dependencies are never accessible from workspace code and only add
+        // noise to completions and workspace symbol search.
+        let file_data: Arc<FileData> = if is_library {
+            let mut d = entry.file_data.clone();
+            d.symbols
+                .retain(|s| !matches!(s.visibility, Visibility::Private | Visibility::Internal));
+            Arc::new(d)
+        } else {
+            Arc::new(entry.file_data.clone())
+        };
+
+        let file_stem: Option<String> = uri
+            .to_file_path()
+            .ok()
+            .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()));
+
+        for sym in &file_data.symbols {
+            let loc = Location {
+                uri: uri.clone(),
+                range: sym.selection_range,
+            };
+            self.definitions
+                .entry(sym.name.clone())
+                .or_default()
+                .push(loc.clone());
+            if let Some(ref pkg) = file_data.package {
+                self.qualified
+                    .insert(format!("{pkg}.{}", sym.name), loc.clone());
+                if let Some(ref stem) = file_stem {
+                    if *stem != sym.name {
+                        self.qualified
+                            .insert(format!("{pkg}.{stem}.{}", sym.name), loc);
+                    }
+                }
+            }
+        }
+
+        if let Some(ref pkg) = file_data.package {
+            self.packages
+                .entry(pkg.clone())
+                .or_default()
+                .push(uri_str.to_string());
+        }
+
+        for sym in &file_data.symbols {
+            if !class_kinds.contains(&sym.kind) {
+                continue;
+            }
+            let start_line = sym.selection_start();
+            let class_loc = Location {
+                uri: uri.clone(),
+                range: sym.selection_range,
+            };
+            for (_, super_name, _) in file_data.supers.iter().filter(|(l, _, _)| *l == start_line) {
+                self.subtypes
+                    .entry(super_name.clone())
+                    .or_default()
+                    .push(class_loc.clone());
+            }
+        }
+
+        self.files.insert(uri_str.to_string(), file_data);
+        self.hashes.insert(uri_str.to_string(), entry.content_hash);
+
+        if is_library {
+            self.library_uris.push(uri_str.to_string());
+        }
+    }
+
+    /// Bulk-extend the Indexer's DashMaps — one lock acquisition per unique key.
+    ///
+    /// All fields are consumed here. Adding a new index map to `LibraryBatch`
+    /// will cause a compile error if `flush_into` is not updated.
+    fn flush_into(self, indexer: &Indexer) {
+        for (k, v) in self.hashes {
+            indexer.content_hashes.insert(k, v);
+        }
+        for (k, v) in self.files {
+            indexer.files.insert(k, v);
+        }
+        for (name, locs) in self.definitions {
+            indexer.definitions.entry(name).or_default().extend(locs);
+        }
+        for (key, loc) in self.qualified {
+            indexer.qualified.insert(key, loc);
+        }
+        for (pkg, uris) in self.packages {
+            indexer.packages.entry(pkg).or_default().extend(uris);
+        }
+        for (super_name, locs) in self.subtypes {
+            indexer.subtypes.entry(super_name).or_default().extend(locs);
+        }
+        for uri_str in self.library_uris {
+            indexer.library_uris.insert(uri_str);
+        }
+    }
 }
 
 // ─── impl Indexer ─────────────────────────────────────────────────────────────
@@ -261,7 +420,7 @@ impl Indexer {
             return;
         }
 
-        let gen = self.root_generation.load(Ordering::SeqCst);
+        let gen = self.workspace_root.generation();
 
         // Resolve raw paths against workspace root at call time.
         let source_paths: Vec<PathBuf> = raw_paths
@@ -276,9 +435,70 @@ impl Indexer {
             })
             .collect();
 
+        let cache_path = crate::indexer::cache::library_cache_path(&raw_paths);
+        let lib_cache = crate::indexer::cache::try_load_library_cache(&raw_paths);
+        let cache_is_fresh = match &lib_cache {
+            Some(entries) => {
+                crate::indexer::cache::library_cache_is_fresh(&source_paths, &cache_path, entries)
+            }
+            None => false,
+        };
+
+        // Fast path: library cache is fresh (source dirs haven't changed).
+        // Batch all contributions into local HashMaps first (no DashMap overhead),
+        // then bulk-extend into DashMap in one pass. This avoids ~390K individual
+        // lock acquisitions + dedup scans that plague the per-file approach.
+        if cache_is_fresh {
+            let lib_cache = lib_cache.unwrap();
+            let total = lib_cache.len();
+            log::debug!(
+                "Library cache fresh: restoring {} entries without re-scanning",
+                total
+            );
+
+            let mut batch = LibraryBatch::with_capacity(total);
+
+            // Class kinds constant — hoisted out of the per-file loop.
+            let class_kinds = [
+                SymbolKind::CLASS,
+                SymbolKind::INTERFACE,
+                SymbolKind::STRUCT,
+                SymbolKind::ENUM,
+                SymbolKind::OBJECT,
+            ];
+
+            for (path_str, entry) in &lib_cache {
+                let Ok(uri) = Url::from_file_path(path_str) else {
+                    continue;
+                };
+                let uri_str = uri.to_string();
+                batch.collect_entry(
+                    &uri,
+                    &uri_str,
+                    std::path::Path::new(path_str.as_str()),
+                    entry,
+                    &class_kinds,
+                    &workspace_root,
+                );
+            }
+
+            batch.flush_into(&self);
+
+            self.rebuild_bare_name_cache();
+
+            log::debug!(
+                "Source paths restored from cache: {} library files, {} total indexed files",
+                self.library_uris.len(),
+                self.files.len()
+            );
+            return;
+        }
+
+        // Slow path: scan directories, validate per-file, parse changed files.
         let sem = Arc::clone(&self.parse_sem);
         let mut new_library_uris: Vec<String> = Vec::new();
         let mut all_results: Vec<FileIndexResult> = Vec::new();
+        let mut cache_hits: usize = 0;
 
         for source_path in &source_paths {
             if !source_path.exists() {
@@ -307,6 +527,30 @@ impl Indexer {
                 if !path.starts_with(&workspace_root) {
                     new_library_uris.push(uri_str.clone());
                 }
+
+                // Check library cache: if mtime+size match, skip re-parse.
+                let path_str = path.to_string_lossy().to_string();
+                if let Some(cache) = &lib_cache {
+                    if let Some(entry) = cache.get(&path_str) {
+                        let meta = std::fs::metadata(&path);
+                        let mtime = meta
+                            .as_ref()
+                            .ok()
+                            .and_then(|m| m.modified().ok())
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        let on_disk_size = meta.map(|m| m.len()).unwrap_or(u64::MAX);
+                        if entry.mtime_secs == mtime && entry.file_size == on_disk_size {
+                            all_results.push(crate::indexer::cache::cache_entry_to_file_result(
+                                &uri, entry,
+                            ));
+                            cache_hits += 1;
+                            continue;
+                        }
+                    }
+                }
+
                 let sem2 = Arc::clone(&sem);
                 let task: tokio::task::JoinHandle<Option<FileIndexResult>> =
                     tokio::spawn(async move {
@@ -325,12 +569,19 @@ impl Indexer {
         }
 
         // Bail if workspace switched during async I/O.
-        if self.root_generation.load(Ordering::SeqCst) != gen {
+        if self.workspace_root.generation() != gen {
             log::info!(
                 "index_source_paths: generation changed during async I/O, discarding results"
             );
             return;
         }
+
+        let newly_parsed = all_results.len().saturating_sub(cache_hits);
+
+        // Strip private symbols from library files before applying.
+        let library_uri_set: std::collections::HashSet<&str> =
+            new_library_uris.iter().map(String::as_str).collect();
+        strip_library_private_symbols(&mut all_results, &library_uri_set);
 
         // Apply results additively (no reset_index_state).
         for result in all_results {
@@ -344,10 +595,24 @@ impl Indexer {
 
         self.rebuild_bare_name_cache();
         log::info!(
-            "Source paths indexed: {} library files, {} total indexed files",
+            "Source paths indexed: {} library files ({} cache hits), {} total indexed files",
             self.library_uris.len(),
+            cache_hits,
             self.files.len()
         );
+
+        // Persist library index so subsequent calls skip re-parsing.
+        // Skip if everything came from cache — nothing new to write.
+        if lib_cache.is_none() || newly_parsed > 0 {
+            crate::indexer::cache::save_library_cache(
+                &raw_paths,
+                &self.files,
+                &self.content_hashes,
+                &self.library_uris,
+            );
+        } else {
+            log::info!("Library cache unchanged ({cache_hits} hits), skipping save");
+        }
     }
 
     /// Primitive: drain a [`FileContributions`] into the DashMaps.
@@ -403,6 +668,12 @@ impl Indexer {
             *cache = build_bare_names(&self.definitions);
         }
         self.rebuild_importable_fqns();
+        // Invalidate the single-entry last_completion cache so that the next
+        // request re-runs against the updated symbol set (e.g. after library
+        // source paths finish indexing).
+        if let Ok(mut last) = self.last_completion.lock() {
+            *last = None;
+        }
     }
 
     /// Build importable_fqns: `simple_name → [FQN, …]` from real top-level symbols.

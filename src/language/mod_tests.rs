@@ -15,10 +15,22 @@ fn language_ids_are_distinct() {
 #[test]
 fn language_parser_via_enum_dispatches_correctly() {
     use crate::Language;
-    assert_eq!(Language::from_path("Foo.kt").parser().language_id(), "kotlin");
-    assert_eq!(Language::from_path("Foo.kts").parser().language_id(), "kotlin");
-    assert_eq!(Language::from_path("Bar.java").parser().language_id(), "java");
-    assert_eq!(Language::from_path("Baz.swift").parser().language_id(), "swift");
+    assert_eq!(
+        Language::from_path("Foo.kt").parser().language_id(),
+        "kotlin"
+    );
+    assert_eq!(
+        Language::from_path("Foo.kts").parser().language_id(),
+        "kotlin"
+    );
+    assert_eq!(
+        Language::from_path("Bar.java").parser().language_id(),
+        "java"
+    );
+    assert_eq!(
+        Language::from_path("Baz.swift").parser().language_id(),
+        "swift"
+    );
 }
 
 #[test]

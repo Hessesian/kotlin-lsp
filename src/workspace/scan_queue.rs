@@ -1,4 +1,6 @@
 //! [`ScanQueue`] — coalescing queue for full-workspace scans.
+//! Wired into [`ScanHandler`] as part of the w7 quiescent-state work.
+#![allow(dead_code)]
 //!
 //! Prevents concurrent duplicate scans from the thundering-herd problem:
 //! if `Initialize`, `Reindex`, or `ChangeRoot` events arrive while a scan

@@ -53,6 +53,19 @@ This correctly handles mono-repos (e.g. `android/settings.gradle.kts` beats mono
 
 ### Extension-provided tools
 
+#### `kotlin_lsp_complete`
+Show completion candidates at a file position — the primary tool for discovering what APIs are available in scope.
+- Takes an absolute file path, 1-based line and col (cursor position **after** the last typed character)
+- Returns JSON: `[{label, kind, detail?, import?}]` where `import` is the auto-import text edit
+- Works for bare-word completion (class names, functions, annotations), dot-completion, and annotation context
+- Builds/loads the index on first use (no separate `kotlin-lsp index` step needed)
+- Use to answer: "what classes match prefix X?", "does `@Composable` exist in scope?", "what's available after this dot?"
+- Library symbols from `~/.kotlin-lsp/sources` (populated by `kotlin-lsp extract-sources`) appear here with import edits
+
+```
+kotlin_lsp_complete file="/path/Screen.kt" line=10 col=14 root="/path/android"
+```
+
 #### `kotlin_find_subtypes`
 **Last-resort fallback** — `lsp goToImplementation` handles this natively with transitive subtypes.
 Only use if goToImplementation returns empty (LSP not indexed yet, or edge case).
@@ -74,8 +87,9 @@ Restricted ripgrep for Kotlin/Java/Swift files — **fallback only** when LSP ca
 5. **`lsp goToDefinition file.kt line col`** — jump to source
 6. **`lsp findReferences file.kt line col`** — all usages cross-project
 7. **`lsp goToImplementation file.kt line col`** — interface subtypes (transitive)
-8. **`view` with line range** — read code at known location
-9. **`kotlin_rg`** — only for free-text, extension fns, generated code (provide reason)
+8. **`kotlin_lsp_complete file line col`** — discover available APIs / check what's in scope
+9. **`view` with line range** — read code at known location
+10. **`kotlin_rg`** — only for free-text, extension fns, generated code (provide reason)
 
 #### Swift (iOS)
 1. **`lsp documentSymbol file.swift`** — always works immediately; get symbols + line numbers

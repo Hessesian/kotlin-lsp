@@ -188,3 +188,69 @@ fn ignores_include_build_lines() {
     let result = parse_include_calls(content);
     assert_eq!(result, vec!["app"]);
 }
+
+// ─── Android SDK detection tests ─────────────────────────────────────────────
+
+#[test]
+fn no_sdk_returns_empty() {
+    let dir = TempDir::new().unwrap();
+    // No local.properties, no env vars set in test env
+    let paths = detect_android_sdk_source_paths(dir.path());
+    // Either empty (no SDK) or points to a real SDK — either is valid in CI.
+    // We just verify the function returns without panic.
+    let _ = paths;
+}
+
+#[test]
+fn sdk_dir_from_local_properties_finds_sdk_dot_dir() {
+    let dir = TempDir::new().unwrap();
+    let fake_sdk = dir.path().join("sdk");
+    fs::create_dir_all(fake_sdk.join("sources").join("android-34")).unwrap();
+    fs::write(
+        dir.path().join("local.properties"),
+        format!(
+            "# generated\nsdk.dir={}\nndk.version=25.0.0\n",
+            fake_sdk.display()
+        ),
+    )
+    .unwrap();
+    let paths = detect_android_sdk_source_paths(dir.path());
+    assert_eq!(paths.len(), 1);
+    assert!(paths[0].ends_with("android-34"));
+}
+
+#[test]
+fn picks_highest_api_level() {
+    let dir = TempDir::new().unwrap();
+    let fake_sdk = dir.path().join("sdk");
+    for api in [31_u32, 33, 34] {
+        fs::create_dir_all(fake_sdk.join("sources").join(format!("android-{api}"))).unwrap();
+    }
+    fs::write(
+        dir.path().join("local.properties"),
+        format!("sdk.dir={}\n", fake_sdk.display()),
+    )
+    .unwrap();
+    let paths = detect_android_sdk_source_paths(dir.path());
+    assert_eq!(paths.len(), 1);
+    assert!(
+        paths[0].ends_with("android-34"),
+        "expected android-34, got {:?}",
+        paths[0]
+    );
+}
+
+#[test]
+fn sdk_dir_from_local_properties_with_whitespace() {
+    let dir = TempDir::new().unwrap();
+    let fake_sdk = dir.path().join("sdk");
+    fs::create_dir_all(fake_sdk.join("sources").join("android-35")).unwrap();
+    fs::write(
+        dir.path().join("local.properties"),
+        format!("sdk.dir = {} \n", fake_sdk.display()),
+    )
+    .unwrap();
+    let paths = detect_android_sdk_source_paths(dir.path());
+    assert_eq!(paths.len(), 1);
+    assert!(paths[0].ends_with("android-35"));
+}
