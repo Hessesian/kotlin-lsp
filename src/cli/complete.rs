@@ -37,7 +37,7 @@ pub(crate) fn completions_at(
                 .additional_text_edits
                 .as_ref()
                 .and_then(|edits| edits.first())
-                .map(|e| e.new_text.trim().to_string());
+                .map(|e| e.new_text.clone());
             CompletionRow {
                 label: item.label,
                 kind,

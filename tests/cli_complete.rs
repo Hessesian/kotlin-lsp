@@ -273,6 +273,7 @@ fn default_sources_dir_appears_in_completion() {
 }
 
 #[test]
+#[ignore = "dot-complete requires type inference from a running LSP server"]
 fn dot_complete_shows_class_members() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();

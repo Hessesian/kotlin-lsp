@@ -316,7 +316,10 @@ pub(super) fn library_cache_is_fresh(
         Ok(t) => t,
         Err(_) => return false,
     };
-    // Tier 1: directory mtime (catches add/delete).
+    // Tier 1: directory mtime.  Detects files added or removed directly inside each source
+    // path on most filesystems (the immediate parent directory mtime changes on add/remove).
+    // Note: on Linux, modifying a file's contents does NOT update its parent directory mtime,
+    // so this tier cannot detect modifications — Tier 2 handles that case.
     let dirs_fresh = source_paths.iter().all(|p| {
         std::fs::metadata(p)
             .and_then(|m| m.modified())
@@ -326,12 +329,16 @@ pub(super) fn library_cache_is_fresh(
     if !dirs_fresh {
         return false;
     }
-    // Tier 2: sample up to 32 cached entries and compare mtime+size on disk.
-    let sample_size = 32_usize.min(cached_entries.len());
+    // Tier 2: validate a spread sample of cached entries against on-disk mtime+size.
+    // This catches file modifications that Tier 1 misses.  We use up to 256 samples with
+    // a uniform stride so we cover the full entry set at roughly 1-in-(N/256) granularity.
+    // Library files (Gradle caches, extracted sources) are stable in practice, so this
+    // probabilistic check is sufficient; a full O(N) scan would be prohibitively slow for
+    // caches with tens of thousands of entries.
+    let sample_size = 256_usize.min(cached_entries.len());
     if sample_size == 0 {
         return true;
     }
-    // Use a simple stride to pick spread-out entries without random overhead.
     let stride = (cached_entries.len() / sample_size).max(1);
     cached_entries
         .iter()

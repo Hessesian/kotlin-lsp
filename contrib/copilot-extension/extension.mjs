@@ -270,7 +270,7 @@ const session = await joinSession({
         const noStdlib = args.no_stdlib === true;
 
         if (!Number.isInteger(line) || line < 1) return "Error: line must be a positive integer";
-
+        if (dot && eol) return "Error: --dot and --eol are mutually exclusive";
         let col = null;
         if (!dot && !eol) {
           col = Number(args.col);
