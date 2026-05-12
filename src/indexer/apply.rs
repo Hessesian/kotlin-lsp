@@ -199,17 +199,10 @@ impl LibraryBatch {
     ) {
         let is_library = !path.starts_with(workspace_root);
 
-        // Library files: strip private symbols — private members of external
-        // dependencies are never accessible from workspace code and only add
-        // noise to completions and workspace symbol search.
-        let file_data: Arc<FileData> = if is_library {
-            let mut d = entry.file_data.clone();
-            d.symbols
-                .retain(|s| !matches!(s.visibility, Visibility::Private | Visibility::Internal));
-            Arc::new(d)
-        } else {
-            Arc::new(entry.file_data.clone())
-        };
+        // Library entries loaded from cache have private/internal symbols already
+        // stripped at save time; workspace entries need no filtering.  Either way,
+        // a plain Arc::clone is sufficient — no deep copy or retain() needed here.
+        let file_data = Arc::clone(&entry.file_data);
 
         let file_stem: Option<String> = uri
             .to_file_path()

@@ -113,7 +113,7 @@ fn warm_discover_files_returns_cached_existing_files() {
             mtime_secs: 0,
             file_size: 0,
             content_hash: 0,
-            file_data: FileData::default(),
+            file_data: std::sync::Arc::new(FileData::default()),
         },
     );
     let cache = IndexCache {
@@ -160,7 +160,7 @@ fn warm_discover_files_skips_deleted_files() {
             mtime_secs: 0,
             file_size: 0,
             content_hash: 0,
-            file_data: FileData::default(),
+            file_data: std::sync::Arc::new(FileData::default()),
         },
     );
     let cache = IndexCache {

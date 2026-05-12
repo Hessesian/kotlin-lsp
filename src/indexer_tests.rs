@@ -1427,7 +1427,7 @@ fn subtypes_survive_cache_roundtrip() {
         mtime_secs: 0,
         file_size: 0,
         content_hash: 42,
-        file_data: (*data).clone(),
+        file_data: std::sync::Arc::clone(&data),
     };
     // Use the pure pipeline: cache_entry_to_file_result → apply_file_result.
     let result = cache_entry_to_file_result(&u, &entry);

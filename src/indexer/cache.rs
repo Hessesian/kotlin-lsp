@@ -16,7 +16,7 @@ use dashmap::{DashMap, DashSet};
 use serde::{Deserialize, Serialize};
 use tower_lsp::lsp_types::Url;
 
-use crate::types::{FileData, FileIndexResult};
+use crate::types::{FileData, FileIndexResult, Visibility};
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -35,7 +35,12 @@ pub(crate) struct FileCacheEntry {
     /// FNV-1a content hash — tertiary guard for mtime collisions / FAT FS.
     pub(crate) content_hash: u64,
     /// Parsed symbol data for this file.
-    pub(crate) file_data: FileData,
+    ///
+    /// Wrapped in `Arc` so that `collect_entry` can hand out cheap clones into
+    /// the live index without deep-copying every `FileData` on each `complete`
+    /// invocation.  `serde/rc` serialises `Arc<T>` identically to `T`, so
+    /// no cache-version bump is needed.
+    pub(crate) file_data: Arc<FileData>,
 }
 
 /// Complete serialized index, written to `~/.cache/kotlin-lsp/<root-hash>/index.bin`.
@@ -162,7 +167,7 @@ pub(crate) fn cache_entry_to_file_result(uri: &Url, entry: &FileCacheEntry) -> F
     }
     FileIndexResult {
         uri: uri.clone(),
-        data: data.clone(),
+        data: (**data).clone(),
         supertypes,
         content_hash: entry.content_hash,
         error: None,
@@ -221,7 +226,7 @@ pub(super) fn save_cache(
                         mtime_secs: mtime,
                         file_size,
                         content_hash: hash,
-                        file_data: (**data).clone(),
+                        file_data: Arc::clone(data),
                     },
                 );
             }
@@ -415,13 +420,21 @@ pub(super) fn save_library_cache(
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
                 let file_size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+                // Strip private/internal symbols before writing to disk: library
+                // members with restricted visibility are never accessible from
+                // workspace code, so there is no point caching them.  Filtering
+                // here means fast-path loads can use a plain Arc::clone.
+                let mut filtered = (**data).clone();
+                filtered.symbols.retain(|s| {
+                    !matches!(s.visibility, Visibility::Private | Visibility::Internal)
+                });
                 entries.insert(
                     path_buf.to_string_lossy().to_string(),
                     FileCacheEntry {
                         mtime_secs: mtime,
                         file_size,
                         content_hash: hash,
-                        file_data: (**data).clone(),
+                        file_data: Arc::new(filtered),
                     },
                 );
             }
