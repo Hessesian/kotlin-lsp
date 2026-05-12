@@ -175,3 +175,107 @@ async fn actor_stops_when_sender_dropped() {
         .expect("actor did not stop within 2s after sender drop")
         .unwrap();
 }
+
+// ─── OpQueue coalescing tests ─────────────────────────────────────────────────
+
+#[tokio::test]
+async fn multiple_initialize_last_one_runs() {
+    // Three Initialize events are queued before the actor can process any.
+    // The actor starts scan1 immediately (from event 1), then coalesces events
+    // 2 and 3 into a single pending scan.  After scan1 finishes, only scan3
+    // (last-write-wins) runs.  The final workspace root must be from event 3.
+    let indexer = Arc::new(Indexer::new());
+    let tmp1 = temp_dir();
+    let tmp2 = temp_dir();
+    let tmp3 = temp_dir();
+
+    let (actor, tx) = make_actor(Arc::clone(&indexer));
+    tokio::spawn(actor.run());
+
+    let (done_tx, done_rx) = oneshot::channel();
+    // try_send: all three land in the channel before the actor runs.
+    tx.try_send(Event::Initialize {
+        config: Config {
+            root: tmp1.path().to_path_buf(),
+            explicit_source_paths: Vec::new(),
+            ignore_patterns: Vec::new(),
+        },
+        completion_tx: None,
+    })
+    .unwrap();
+    tx.try_send(Event::Initialize {
+        config: Config {
+            root: tmp2.path().to_path_buf(),
+            explicit_source_paths: Vec::new(),
+            ignore_patterns: Vec::new(),
+        },
+        completion_tx: None,
+    })
+    .unwrap();
+    tx.try_send(Event::Initialize {
+        config: Config {
+            root: tmp3.path().to_path_buf(),
+            explicit_source_paths: Vec::new(),
+            ignore_patterns: Vec::new(),
+        },
+        completion_tx: Some(done_tx),
+    })
+    .unwrap();
+
+    // The last initialize's completion_tx fires when all pending scans finish.
+    tokio::time::timeout(Duration::from_secs(5), done_rx)
+        .await
+        .expect("last initialize should complete within 5s")
+        .unwrap();
+
+    let root = indexer.workspace_root.read().unwrap().clone();
+    assert_eq!(
+        root.as_deref(),
+        Some(tmp3.path()),
+        "final workspace root should be from the last Initialize"
+    );
+}
+
+#[tokio::test]
+async fn file_changed_coalesced_per_uri() {
+    // Three FileChanged events for the same URI arrive in rapid succession.
+    // The coalescing logic keeps only the last change per URI.
+    // live_lines should reflect the final content ("v3").
+    let indexer = Arc::new(Indexer::new());
+    let (actor, tx) = make_actor(Arc::clone(&indexer));
+    tokio::spawn(actor.run());
+
+    let uri = tower_lsp::lsp_types::Url::parse("file:///tmp/test.kt").unwrap();
+
+    // Queue all three before the actor drains them.
+    for text in ["v1", "v2", "v3"] {
+        tx.try_send(Event::FileChanged {
+            uri: uri.clone(),
+            changes: vec![tower_lsp::lsp_types::TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: text.to_string(),
+            }],
+        })
+        .unwrap();
+    }
+
+    // Wait until live_lines is populated (actor processed the batch).
+    let uri_clone = uri.clone();
+    let idx = Arc::clone(&indexer);
+    poll_until(
+        move || idx.live_lines.contains_key(uri_clone.as_str()),
+        Duration::from_secs(2),
+    )
+    .await;
+
+    let lines = indexer
+        .live_lines
+        .get(uri.as_str())
+        .map(|r| r.value().as_ref().join("\n"));
+    assert_eq!(
+        lines.as_deref(),
+        Some("v3"),
+        "last FileChanged per URI should win after coalescing"
+    );
+}

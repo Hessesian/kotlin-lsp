@@ -29,6 +29,7 @@ pub(crate) mod event;
 pub(crate) mod file_change_handler;
 pub(crate) mod phase;
 pub(crate) mod scan_handler;
+pub(crate) mod scan_queue;
 
 // Re-exports are unused until Wave 2 wires this module in (ws-backend, ws-cli, ws-main).
 #[allow(unused_imports)]
