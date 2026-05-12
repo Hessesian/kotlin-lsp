@@ -18,8 +18,8 @@ use super::Config;
 /// Immutable snapshot of workspace state captured at initialisation time.
 ///
 /// Produced from a [`Config`] the first time the actor processes a
-/// [`Event::Initialize`] event, and updated on every
-/// [`Event::ChangeRoot`].
+/// [`super::Event::Initialize`] event, and updated on every
+/// [`super::Event::ChangeRoot`].
 ///
 /// Carries the resolved (not raw) source-path list so that no caller ever has
 /// to re-run source discovery.

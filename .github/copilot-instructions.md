@@ -239,17 +239,58 @@ If not, and if ≥2 distinct implementations could exist (production + test stub
 - Reserve `Box<dyn Trait>` only for heterogeneous runtime collections or plugin registries.
 - Apply the Rule of Three: wait for the second concrete implementation before abstracting.
 
-### 4. No deep nesting
+### 4. Max 2 levels of `{}` nesting
 
-Functions should have at most 3 levels of indentation in their body.
+A function body is level 1. Every `{` block inside it adds a level. Two is the limit.
 
-Flatten with:
+**Flatten guards with `let-else`** instead of `if let { … } else { … }` or `match { Ok(x) => { … } Err => warn }`:
+
+```rust
+// ✗ — three levels: fn body → if → body
+fn set_root(&self, root: PathBuf) {
+    if let Ok(mut guard) = self.indexer.workspace_root.write() {
+        *guard = Some(root);
+    } else {
+        log::warn!("failed to write workspace root");
+    }
+}
+
+// ✓ — one level: fn body only (see src/workspace/actor.rs Actor::set_root)
+fn set_root(&self, root: PathBuf) {
+    let Ok(mut guard) = self.indexer.workspace_root.write() else {
+        log::warn!("Actor: failed to write workspace root");
+        return;
+    };
+    *guard = Some(root);
+}
+```
+
+When a function needs multiple `Option`/`Result` values, use **separate `let-else`** lines instead of a nested `match (a, b)`:
+
+```rust
+// ✓ — flat (see Actor::is_outside_pinned_workspace_root in src/workspace/actor.rs)
+let Some(opened) = opened_file_path else { return false; };
+let Some(root) = self.current_root()  else { return false; };
+```
+
+**Replace `while`/`loop` + `match`** with `let-else` guards inside the loop:
+
+```rust
+// ✓ — flat loop, no match (see Actor::drain_file_changed_batch in src/workspace/actor.rs)
+loop {
+    let Ok(event) = self.rx.try_recv() else { break };
+    let Event::FileChanged { uri, changes } = event else {
+        self.pushback = Some(event);
+        break;
+    };
+    batch.insert(uri.to_string(), (uri, changes));
+}
+```
+
+Other tools:
 - Early `return` / `return None` guards at the top
 - The `?` operator for error propagation
-- `let … else` for mandatory destructuring
 - Extracted helper functions for inner loops or match arms
-
-A `match` nested inside another `match` inside an `if` is a signal to extract.
 
 ### 5. Section comments inside a function body signal a split
 
@@ -374,6 +415,36 @@ pub(crate) fn with_ready(&self) -> Option<&WorkspaceData> { … }
 
 Remove the allow when the consuming code lands. If the consuming code never lands, the item
 should be deleted.
+
+### 15. Flat event dispatch — one line per variant
+
+The `match` in an event loop is a **dispatch table**, not an implementation. Each arm must be a single method call. All logic lives in named handler functions.
+
+```rust
+// ✓ — flat dispatch, handlers carry the meaning (see Actor::handle_event in src/workspace/actor.rs)
+async fn handle_event(&mut self, event: Event) {
+    match event {
+        Event::Initialize { config, completion_tx } => self.handle_initialize(config, completion_tx).await,
+        Event::Reindex                              => self.handle_reindex().await,
+        Event::FileChanged { uri, changes }         => self.drain_and_apply_file_changes(uri, changes).await,
+        Event::FileSaved { uri }                    => self.handle_file_saved(uri).await,
+        // …
+    }
+}
+```
+
+The calling loop stays readable regardless of how complex individual handlers grow:
+
+```rust
+// ✓ — the loop itself has zero logic (see Actor::run in src/workspace/actor.rs)
+pub(crate) async fn run(mut self) {
+    while let Some(event) = self.receive_event().await {
+        self.handle_event(event).await;
+    }
+}
+```
+
+If an arm needs more than one expression, extract a named method. The arm name must then read as a verb phrase that summarises what happens: `on_scan_completed`, `drain_and_apply_file_changes`.
 
 ## Architecture patterns (from rust-analyzer)
 

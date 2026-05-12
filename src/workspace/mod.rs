@@ -26,6 +26,7 @@ pub(crate) mod actor;
 pub(crate) mod contract;
 pub(crate) mod event;
 pub(crate) mod phase;
+pub(crate) mod scan_queue;
 
 // Re-exports are unused until Wave 2 wires this module in (ws-backend, ws-cli, ws-main).
 #[allow(unused_imports)]
@@ -59,6 +60,19 @@ pub(crate) struct Config {
 }
 
 impl Config {
+    /// Convenience constructor for a clean root-switch config with no
+    /// editor-provided overrides.  Used by `handle_change_root` and the
+    /// auto-detect workspace root path — explicitly *not* used by
+    /// `handle_initialize`, which may carry session-level `explicit_source_paths`
+    /// and `ignore_patterns`.
+    pub(crate) fn for_root(root: PathBuf) -> Self {
+        Self {
+            root,
+            explicit_source_paths: Vec::new(),
+            ignore_patterns: Vec::new(),
+        }
+    }
+
     /// Return the deduplicated, ordered list of source paths to index.
     ///
     /// Discovery priority (first win for deduplication):
@@ -100,6 +114,9 @@ impl Config {
         // Auto-include the well-known `extract-sources` output directory if present.
         // Skip entirely when HOME is unknown to avoid accidentally indexing the
         // current working directory (matches existing backend behaviour).
+        // Skipped in test builds so actor tests don't accidentally index the
+        // developer's local library sources and time out.
+        #[cfg(not(test))]
         #[allow(deprecated)]
         if let Some(home) = std::env::home_dir() {
             let default_sources = home.join(".kotlin-lsp").join("sources");
