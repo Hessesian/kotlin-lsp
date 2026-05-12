@@ -204,11 +204,6 @@ impl LibraryBatch {
         // a plain Arc::clone is sufficient — no deep copy or retain() needed here.
         let file_data = Arc::clone(&entry.file_data);
 
-        let file_stem: Option<String> = uri
-            .to_file_path()
-            .ok()
-            .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()));
-
         for sym in &file_data.symbols {
             let loc = Location {
                 uri: uri.clone(),
@@ -218,13 +213,38 @@ impl LibraryBatch {
                 .entry(sym.name.clone())
                 .or_default()
                 .push(loc.clone());
+        }
+
+        // Fast path: use pre-computed qualified keys stored at save time.
+        // Fall back to format!() for old cache entries that lack the field.
+        if !entry.qualified_keys.is_empty() {
+            for (key, range) in &entry.qualified_keys {
+                self.qualified.insert(
+                    key.clone(),
+                    Location {
+                        uri: uri.clone(),
+                        range: *range,
+                    },
+                );
+            }
+        } else {
+            let file_stem: Option<String> = uri
+                .to_file_path()
+                .ok()
+                .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()));
             if let Some(ref pkg) = file_data.package {
-                self.qualified
-                    .insert(format!("{pkg}.{}", sym.name), loc.clone());
-                if let Some(ref stem) = file_stem {
-                    if *stem != sym.name {
-                        self.qualified
-                            .insert(format!("{pkg}.{stem}.{}", sym.name), loc);
+                for sym in &file_data.symbols {
+                    let loc = Location {
+                        uri: uri.clone(),
+                        range: sym.selection_range,
+                    };
+                    self.qualified
+                        .insert(format!("{pkg}.{}", sym.name), loc.clone());
+                    if let Some(ref stem) = file_stem {
+                        if *stem != sym.name {
+                            self.qualified
+                                .insert(format!("{pkg}.{stem}.{}", sym.name), loc);
+                        }
                     }
                 }
             }

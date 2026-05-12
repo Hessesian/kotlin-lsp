@@ -42,6 +42,7 @@ fn cache_entry_to_file_result_supertypes_extracted() {
         file_size: 0,
         content_hash: 42,
         file_data: std::sync::Arc::new(data),
+        qualified_keys: vec![],
     };
 
     let result = cache_entry_to_file_result(&u, &entry);
@@ -76,6 +77,7 @@ fn cache_entry_to_file_result_preserves_hash() {
         file_size: 0,
         content_hash: 0xdeadbeef,
         file_data: std::sync::Arc::new(data),
+        qualified_keys: vec![],
     };
 
     let result = cache_entry_to_file_result(&u, &entry);

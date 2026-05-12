@@ -41,6 +41,14 @@ pub(crate) struct FileCacheEntry {
     /// invocation.  `serde/rc` serialises `Arc<T>` identically to `T`, so
     /// no cache-version bump is needed.
     pub(crate) file_data: Arc<FileData>,
+    /// Pre-computed qualified map keys for this file's symbols.
+    ///
+    /// Each entry is `(qualified_key, selection_range)` pre-built at save time
+    /// so that fast-path loading skips all `format!("{pkg}.{name}")` calls.
+    /// Old entries without this field deserialise as an empty `Vec`, falling
+    /// back to the `format!()` path on first warm load.
+    #[serde(default)]
+    pub(crate) qualified_keys: Vec<(String, tower_lsp::lsp_types::Range)>,
 }
 
 /// Complete serialized index, written to `~/.cache/kotlin-lsp/<root-hash>/index.bin`.
@@ -174,6 +182,32 @@ pub(crate) fn cache_entry_to_file_result(uri: &Url, entry: &FileCacheEntry) -> F
     }
 }
 
+/// Compute qualified map keys for a single file.
+///
+/// Returns one or two `(key, selection_range)` pairs per symbol:
+/// - `"pkg.SymName"`
+/// - `"pkg.FileStem.SymName"` (only when file stem differs from the symbol name)
+///
+/// Used at save time so fast-path loading can skip `format!()` entirely.
+pub(crate) fn build_qualified_keys(
+    file_data: &FileData,
+    file_stem: Option<&str>,
+) -> Vec<(String, tower_lsp::lsp_types::Range)> {
+    let Some(ref pkg) = file_data.package else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(file_data.symbols.len() * 2);
+    for sym in &file_data.symbols {
+        out.push((format!("{pkg}.{}", sym.name), sym.selection_range));
+        if let Some(stem) = file_stem {
+            if stem != sym.name {
+                out.push((format!("{pkg}.{stem}.{}", sym.name), sym.selection_range));
+            }
+        }
+    }
+    out
+}
+
 // ─── Save ─────────────────────────────────────────────────────────────────────
 
 /// Build and write the workspace index cache to disk.
@@ -211,6 +245,7 @@ pub(super) fn save_cache(
         let hash = content_hashes.get(uri_str).map(|h| *h).unwrap_or(0);
         if let Ok(url) = uri_str.parse::<Url>() {
             if let Ok(path) = url.to_file_path() {
+                let file_stem = path.file_stem().map(|s| s.to_string_lossy().into_owned());
                 let meta = std::fs::metadata(&path);
                 let mtime = meta
                     .as_ref()
@@ -220,6 +255,7 @@ pub(super) fn save_cache(
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
                 let file_size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+                let qualified_keys = build_qualified_keys(data, file_stem.as_deref());
                 entries.insert(
                     path.to_string_lossy().to_string(),
                     FileCacheEntry {
@@ -227,6 +263,7 @@ pub(super) fn save_cache(
                         file_size,
                         content_hash: hash,
                         file_data: Arc::clone(data),
+                        qualified_keys,
                     },
                 );
             }
@@ -411,6 +448,9 @@ pub(super) fn save_library_cache(
         let hash = content_hashes.get(uri_str).map(|h| *h).unwrap_or(0);
         if let Ok(url) = uri_str.parse::<Url>() {
             if let Ok(path_buf) = url.to_file_path() {
+                let file_stem = path_buf
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned());
                 let meta = std::fs::metadata(&path_buf);
                 let mtime = meta
                     .as_ref()
@@ -428,13 +468,16 @@ pub(super) fn save_library_cache(
                 filtered.symbols.retain(|s| {
                     !matches!(s.visibility, Visibility::Private | Visibility::Internal)
                 });
+                let filtered = Arc::new(filtered);
+                let qualified_keys = build_qualified_keys(&filtered, file_stem.as_deref());
                 entries.insert(
                     path_buf.to_string_lossy().to_string(),
                     FileCacheEntry {
                         mtime_secs: mtime,
                         file_size,
                         content_hash: hash,
-                        file_data: Arc::new(filtered),
+                        file_data: filtered,
+                        qualified_keys,
                     },
                 );
             }

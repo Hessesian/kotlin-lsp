@@ -179,6 +179,7 @@ fn apply_workspace_result_includes_cached_files_issue_apply() {
         file_size: 0,
         content_hash: 0,
         file_data: std::sync::Arc::new(parsed.data.clone()),
+        qualified_keys: vec![],
     };
     let cached_result = cache_entry_to_file_result(&u, &entry);
 
@@ -258,6 +259,7 @@ fn apply_workspace_result_mixed_cache_and_parsed_issue_apply() {
         file_size: 0,
         content_hash: 0,
         file_data: std::sync::Arc::new(cached_parse.data.clone()),
+        qualified_keys: vec![],
     };
     let cached_result = cache_entry_to_file_result(&u_cached, &entry);
     let parsed_result = Indexer::parse_file(&u_parsed, "class ParsedClass");
