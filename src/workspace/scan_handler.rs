@@ -261,7 +261,9 @@ impl<R: ProgressReporter + 'static> ScanHandler<R> {
                 }
             }
 
-            // _done drops here → scan_done_tx fires.
+            // Signal scan complete first so the queue accepts new requests
+            // before the caller's completion channel fires.
+            drop(_done);
             if indexer.workspace_root.generation() == expected_generation {
                 if let Some(tx) = completion_tx {
                     let _ = tx.send(());

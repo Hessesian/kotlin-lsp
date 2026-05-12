@@ -164,7 +164,7 @@ async fn build_index_inner(root: &Path, source_paths: Vec<String>) -> Arc<Indexe
 
 /// Collect source paths for CLI indexing: workspace.json + default extract dir.
 ///
-/// When `workspace.json` provides no explicit `sourcePaths`, Gradle/Maven
+/// When `workspace.json` declares no JetBrains module source roots, Gradle/Maven
 /// build-layout paths under `root` are included so CLI completions behave like
 /// the full LSP path. External library paths (outside the workspace root) are
 /// always included via the configured `sourcePaths` key or the default
