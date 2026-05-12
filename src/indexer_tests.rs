@@ -1867,6 +1867,9 @@ async fn e2e_ignore_patterns_excludes_symbols() {
     let dir = tempfile::TempDir::new().expect("create tempdir");
     let root = dir.path();
 
+    // Opt out of real external sources to avoid scanning ~/.kotlin-lsp/sources.
+    std::fs::write(root.join("workspace.json"), r#"{"sourcePaths":[]}"#).unwrap();
+
     // Normal source file.
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::write(
@@ -1918,6 +1921,9 @@ async fn e2e_ignore_patterns_excludes_symbols() {
 async fn e2e_ignore_patterns_bare_pattern_any_depth() {
     let dir = tempfile::TempDir::new().expect("create tempdir");
     let root = dir.path();
+
+    // Opt out of real external sources to avoid scanning ~/.kotlin-lsp/sources.
+    std::fs::write(root.join("workspace.json"), r#"{"sourcePaths":[]}"#).unwrap();
 
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::write(
