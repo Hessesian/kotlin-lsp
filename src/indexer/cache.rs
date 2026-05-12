@@ -301,7 +301,7 @@ pub(super) fn library_cache_path(source_paths: &[String]) -> PathBuf {
 ///
 /// Two-tier check:
 /// 1. Directory mtime — catches file additions/deletions (fast, 1 stat per dir).
-/// 2. A random sample of up to 32 cached entries — catches in-place edits, which
+/// 2. A random sample of up to 256 cached entries — catches in-place edits, which
 ///    on most filesystems do NOT update the parent directory mtime.
 ///
 /// Limitation: edited files not in the random sample are still missed.
