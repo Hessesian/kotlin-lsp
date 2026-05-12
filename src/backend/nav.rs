@@ -129,12 +129,7 @@ impl Backend {
         };
 
         // Direct subtypes from the index.
-        let mut locs: Vec<Location> = self
-            .indexer
-            .subtypes
-            .get(&word)
-            .map(|v| v.clone())
-            .unwrap_or_default();
+        let mut locs: Vec<Location> = self.indexer.subtypes_of(&word);
 
         // If index is empty for this symbol (cold start), try rg-based heuristic
         // to find implementors quickly to avoid client timeouts in large projects.
@@ -181,7 +176,6 @@ impl Backend {
                     .iter()
                     .any(|l| l.uri == loc.uri && l.range == loc.range)
                 {
-                    locs.push(loc.clone());
                     if let Some(data) = self.indexer.file_data_for(loc.uri.as_str()) {
                         if let Some(sym) =
                             data.symbols.iter().find(|s| s.selection_range == loc.range)
@@ -189,6 +183,7 @@ impl Backend {
                             queue.push(sym.name.clone());
                         }
                     }
+                    locs.push(loc);
                 }
             }
         }
