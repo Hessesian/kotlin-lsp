@@ -96,8 +96,7 @@ impl<R: ProgressReporter + 'static> Actor<R> {
                     self.handle_event(event).await;
                 }
                 Some(()) = self.scan_done_rx.recv() => {
-                    // scan_done_rx fires when a background scan finishes;
-                    // is_scanning was already cleared by the scan task before sending.
+                    self.scan_handler.on_scan_completed();
                 }
             }
             let is_ready = self.is_ready().await;

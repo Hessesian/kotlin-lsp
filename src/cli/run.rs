@@ -204,13 +204,12 @@ fn collect_cli_source_paths(root: &Path, no_stdlib: bool) -> Vec<String> {
 
     // When workspace files declare no source roots, try Gradle/Maven build
     // layout detection so `complete` behaves like the LSP path.
+    // These paths are under the workspace root so `is_external` does not apply.
     if json_paths.is_empty() {
         for p in crate::workspace_json::detect_build_layout_source_paths(root) {
-            if is_external(&p) {
-                let s = p.to_string_lossy().into_owned();
-                if !paths.contains(&s) {
-                    paths.push(s);
-                }
+            let s = p.to_string_lossy().into_owned();
+            if !paths.contains(&s) {
+                paths.push(s);
             }
         }
     }
