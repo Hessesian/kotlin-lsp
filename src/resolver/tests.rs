@@ -1664,7 +1664,10 @@ fn library_file_appears_in_cross_package_completion() {
         .parse()
         .unwrap();
 
-    idx.index_content(&lib_uri, "package androidx.compose.runtime\nannotation class Composable");
+    idx.index_content(
+        &lib_uri,
+        "package androidx.compose.runtime\nannotation class Composable",
+    );
     idx.index_content(
         &col_uri,
         "package androidx.compose.foundation.layout\nfun Column() {}",
@@ -1787,7 +1790,7 @@ fn is_annotation_context_detection() {
     assert!(is_annotation_context("@Composable", "Composable"));
     assert!(is_annotation_context("  @Comp", "Comp"));
     assert!(!is_annotation_context("Composable", "Composable")); // no @
-    // "@" alone — cursor right after the trigger character, empty prefix
+                                                                 // "@" alone — cursor right after the trigger character, empty prefix
     assert!(is_annotation_context("@", ""));
     assert!(is_annotation_context("  @", ""));
 }

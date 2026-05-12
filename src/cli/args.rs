@@ -280,10 +280,7 @@ fn build_complete_subcommand(
     no_stdlib: bool,
 ) -> Result<Subcommand, String> {
     let mut iter = positionals.into_iter();
-    let file = PathBuf::from(
-        iter.next()
-            .ok_or("complete requires a FILE argument")?,
-    );
+    let file = PathBuf::from(iter.next().ok_or("complete requires a FILE argument")?);
     let line = iter
         .next()
         .ok_or("complete requires a LINE argument")?

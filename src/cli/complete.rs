@@ -31,11 +31,7 @@ pub(crate) fn completions_at(
     items
         .into_iter()
         .map(|item| {
-            let kind = item
-                .kind
-                .map(kind_name)
-                .unwrap_or_default()
-                .to_string();
+            let kind = item.kind.map(kind_name).unwrap_or_default().to_string();
             let detail = item.detail.unwrap_or_default();
             let import = item
                 .additional_text_edits

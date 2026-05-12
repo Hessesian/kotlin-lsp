@@ -118,7 +118,10 @@ pub(crate) fn load_configured_source_paths(workspace_root: &Path) -> Option<Vec<
     let data: WorkspaceData = match serde_json::from_str(&content) {
         Ok(d) => d,
         Err(e) => {
-            log::warn!("Failed to parse workspace.json at {}: {e}", json_path.display());
+            log::warn!(
+                "Failed to parse workspace.json at {}: {e}",
+                json_path.display()
+            );
             return None;
         }
     };

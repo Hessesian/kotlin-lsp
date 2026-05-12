@@ -62,10 +62,7 @@ fn complete_json(root: &Path, file: &Path, line: u32, col: u32) -> Option<Vec<Va
 }
 
 fn labels(items: &[Value]) -> Vec<&str> {
-    items
-        .iter()
-        .filter_map(|v| v["label"].as_str())
-        .collect()
+    items.iter().filter_map(|v| v["label"].as_str()).collect()
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -225,7 +222,10 @@ fn source_paths_outside_workspace_appear_in_completion() {
         "LibraryTestClass from external sourcePaths dir must appear; got: {lbls:?}"
     );
 
-    let item = items.iter().find(|v| v["label"] == "LibraryTestClass").unwrap();
+    let item = items
+        .iter()
+        .find(|v| v["label"] == "LibraryTestClass")
+        .unwrap();
     assert!(
         item.get("import").is_some(),
         "LibraryTestClass must include an auto-import edit; item: {item}"

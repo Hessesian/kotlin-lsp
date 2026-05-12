@@ -312,9 +312,7 @@ pub(super) fn library_cache_is_fresh(
     cache_path: &Path,
     cached_entries: &HashMap<String, FileCacheEntry>,
 ) -> bool {
-    let cache_mtime = match std::fs::metadata(cache_path)
-        .and_then(|m| m.modified())
-    {
+    let cache_mtime = match std::fs::metadata(cache_path).and_then(|m| m.modified()) {
         Ok(t) => t,
         Err(_) => return false,
     };

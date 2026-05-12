@@ -198,10 +198,12 @@ impl LibraryBatch {
                 .or_default()
                 .push(loc.clone());
             if let Some(ref pkg) = data.package {
-                self.qualified.insert(format!("{pkg}.{}", sym.name), loc.clone());
+                self.qualified
+                    .insert(format!("{pkg}.{}", sym.name), loc.clone());
                 if let Some(ref stem) = file_stem {
                     if *stem != sym.name {
-                        self.qualified.insert(format!("{pkg}.{stem}.{}", sym.name), loc);
+                        self.qualified
+                            .insert(format!("{pkg}.{stem}.{}", sym.name), loc);
                     }
                 }
             }
@@ -231,7 +233,8 @@ impl LibraryBatch {
             }
         }
 
-        self.files.insert(uri_str.to_string(), Arc::new(data.clone()));
+        self.files
+            .insert(uri_str.to_string(), Arc::new(data.clone()));
         self.hashes.insert(uri_str.to_string(), entry.content_hash);
 
         if !path.starts_with(workspace_root) {
@@ -426,7 +429,6 @@ impl Indexer {
                 total
             );
 
-
             let mut batch = LibraryBatch::with_capacity(total);
 
             // Class kinds constant — hoisted out of the per-file loop.
@@ -513,9 +515,9 @@ impl Indexer {
                             .unwrap_or(0);
                         let on_disk_size = meta.map(|m| m.len()).unwrap_or(u64::MAX);
                         if entry.mtime_secs == mtime && entry.file_size == on_disk_size {
-                            all_results.push(
-                                crate::indexer::cache::cache_entry_to_file_result(&uri, entry),
-                            );
+                            all_results.push(crate::indexer::cache::cache_entry_to_file_result(
+                                &uri, entry,
+                            ));
                             cache_hits += 1;
                             continue;
                         }

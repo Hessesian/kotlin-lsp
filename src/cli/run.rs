@@ -42,9 +42,7 @@ fn resolve_root_for_file(explicit: Option<&Path>, file: &Path) -> PathBuf {
     if let Some(r) = explicit {
         return r.to_path_buf();
     }
-    let file_dir = file
-        .canonicalize()
-        .unwrap_or_else(|_| file.to_path_buf());
+    let file_dir = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
     let file_dir = file_dir.parent().unwrap_or(&file_dir);
     if let Some(root) = find_git_root(file_dir) {
         return root;
@@ -64,14 +62,19 @@ fn resolve_root_for_file(explicit: Option<&Path>, file: &Path) -> PathBuf {
 ///   Returns `Err` if the line is blank/whitespace-only.
 /// - explicit col: used as-is.
 /// - fallback (no flags, no col): col 1 (beginning of line).
-fn resolve_col(file: &Path, line: u32, col: Option<u32>, dot: bool, eol: bool) -> Result<u32, String> {
+fn resolve_col(
+    file: &Path,
+    line: u32,
+    col: Option<u32>,
+    dot: bool,
+    eol: bool,
+) -> Result<u32, String> {
     if !dot && !eol {
         return Ok(col.unwrap_or(1));
     }
     let line_text = read_line(file, line).unwrap_or_default();
     if dot {
-        col_after_last_dot(&line_text)
-            .ok_or_else(|| format!("no '.' found on line {line}"))
+        col_after_last_dot(&line_text).ok_or_else(|| format!("no '.' found on line {line}"))
     } else {
         col_after_last_nonws(&line_text)
             .ok_or_else(|| format!("line {line} is blank — cannot use --eol"))
@@ -86,10 +89,7 @@ fn read_line(file: &Path, line: u32) -> Option<String> {
     let f = std::fs::File::open(file).ok()?;
     let reader = std::io::BufReader::new(f);
     let target = (line as usize).saturating_sub(1);
-    reader
-        .lines()
-        .nth(target)
-        .and_then(|r| r.ok())
+    reader.lines().nth(target).and_then(|r| r.ok())
 }
 
 /// Return 1-based UTF-16 column just after the last `.` in `text`, or `None`
@@ -429,7 +429,15 @@ async fn run_hover(
     }
 }
 
-async fn run_complete(root: &Path, json: bool, verbose: bool, file: &Path, line: u32, col: u32, no_stdlib: bool) {
+async fn run_complete(
+    root: &Path,
+    json: bool,
+    verbose: bool,
+    file: &Path,
+    line: u32,
+    col: u32,
+    no_stdlib: bool,
+) {
     if verbose {
         if no_stdlib {
             eprintln!("Loading workspace index (--no-stdlib, skipping ~/.kotlin-lsp/sources)...");
@@ -460,10 +468,7 @@ async fn run_complete(root: &Path, json: bool, verbose: bool, file: &Path, line:
                 obj
             })
             .collect();
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&arr).unwrap_or_default()
-        );
+        println!("{}", serde_json::to_string_pretty(&arr).unwrap_or_default());
     } else {
         for row in &rows {
             let import_hint = row
@@ -474,7 +479,10 @@ async fn run_complete(root: &Path, json: bool, verbose: bool, file: &Path, line:
             if row.detail.is_empty() {
                 println!("{:<40} {}{}", row.label, row.kind, import_hint);
             } else {
-                println!("{:<40} {}  {}{}", row.label, row.kind, row.detail, import_hint);
+                println!(
+                    "{:<40} {}  {}{}",
+                    row.label, row.kind, row.detail, import_hint
+                );
             }
         }
         eprintln!("({} items)", rows.len());
