@@ -919,8 +919,7 @@ fn lambda_receiver_type_named_arg_ml(
             let locs = idx.resolve_symbol_no_rg(outer, uri);
             locs.first().map(|l| l.uri.to_string()).or_else(|| {
                 // On-demand: use rg to find and index the outer class.
-                let root = idx.workspace_root.get();
-                let matcher = idx.ignore_matcher.read().unwrap().clone();
+                let (root, matcher) = idx.rg_context();
                 let rg_locs =
                     crate::rg::rg_find_definition(outer, root.as_deref(), matcher.as_deref());
                 for loc in &rg_locs {
