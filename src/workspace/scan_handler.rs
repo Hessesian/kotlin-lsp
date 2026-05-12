@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use tokio::sync::{oneshot, RwLock};
+use tokio::sync::{mpsc, oneshot, RwLock};
 
 use crate::indexer::{Indexer, ProgressReporter};
 use crate::rg::IgnoreMatcher;
@@ -13,15 +14,29 @@ pub(crate) struct ScanHandler<R: ProgressReporter + 'static> {
     indexer: Arc<Indexer>,
     reporter: Arc<R>,
     state: Arc<RwLock<State>>,
+    is_scanning: Arc<AtomicBool>,
+    scan_done_tx: mpsc::UnboundedSender<()>,
 }
 
 impl<R: ProgressReporter + 'static> ScanHandler<R> {
-    pub(crate) fn new(indexer: Arc<Indexer>, reporter: Arc<R>, state: Arc<RwLock<State>>) -> Self {
+    pub(crate) fn new(
+        indexer: Arc<Indexer>,
+        reporter: Arc<R>,
+        state: Arc<RwLock<State>>,
+        scan_done_tx: mpsc::UnboundedSender<()>,
+    ) -> Self {
         Self {
             indexer,
             reporter,
             state,
+            is_scanning: Arc::new(AtomicBool::new(false)),
+            scan_done_tx,
         }
+    }
+
+    /// Returns `true` while a background index scan is in flight.
+    pub(crate) fn is_scanning(&self) -> bool {
+        self.is_scanning.load(Ordering::Acquire)
     }
 
     pub(crate) fn state_stream(&self) -> Arc<RwLock<State>> {
@@ -143,10 +158,15 @@ impl<R: ProgressReporter + 'static> ScanHandler<R> {
     ) {
         let indexer = Arc::clone(&self.indexer);
         let reporter = Arc::clone(&self.reporter);
+        let is_scanning = Arc::clone(&self.is_scanning);
+        let scan_done_tx = self.scan_done_tx.clone();
+        is_scanning.store(true, Ordering::Release);
         tokio::spawn(async move {
             indexer
                 .index_workspace_prioritized(&root, initial_paths, reporter)
                 .await;
+            is_scanning.store(false, Ordering::Release);
+            let _ = scan_done_tx.send(());
             if let Some(completion_tx) = completion_tx {
                 let _ = completion_tx.send(());
             }
@@ -156,8 +176,13 @@ impl<R: ProgressReporter + 'static> ScanHandler<R> {
     async fn spawn_full_scan(&self, root: PathBuf) {
         let indexer = Arc::clone(&self.indexer);
         let reporter = Arc::clone(&self.reporter);
+        let is_scanning = Arc::clone(&self.is_scanning);
+        let scan_done_tx = self.scan_done_tx.clone();
+        is_scanning.store(true, Ordering::Release);
         tokio::spawn(async move {
             indexer.index_workspace_full(&root, reporter).await;
+            is_scanning.store(false, Ordering::Release);
+            let _ = scan_done_tx.send(());
         });
     }
 }

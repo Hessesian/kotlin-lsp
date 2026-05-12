@@ -16,8 +16,13 @@ fn make_actor(indexer: Arc<Indexer>) -> (Actor<NoopReporter>, mpsc::Sender<Event
     (actor, tx)
 }
 
+/// Create a temp dir with a `workspace.json` that opts out of all external
+/// sources (`sourcePaths:[]`), preventing actor tests from accidentally
+/// indexing `~/.kotlin-lsp/sources` or any real Android SDK on the host.
 fn temp_dir() -> tempfile::TempDir {
-    tempfile::tempdir().unwrap()
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("workspace.json"), r#"{"sourcePaths":[]}"#).unwrap();
+    dir
 }
 
 /// Poll `condition` every yield until it returns `true` or `timeout` elapses.
@@ -280,5 +285,66 @@ async fn file_changed_coalesced_per_uri() {
         lines.as_deref(),
         Some("v3"),
         "last FileChanged per URI should win after coalescing"
+    );
+}
+
+// ─── Quiescent state tests ────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn actor_remains_responsive_after_scan_completes() {
+    // After a scan completes (completion_tx fires), the actor must still accept
+    // and process subsequent events — i.e. the scan_done_rx handling in the
+    // select loop must not block or consume the event rx.
+    let indexer = Arc::new(Indexer::new());
+    let tmp = temp_dir();
+    let root = tmp.path().to_path_buf();
+
+    let (actor, tx) = make_actor(Arc::clone(&indexer));
+    tokio::spawn(actor.run());
+
+    let (done_tx, done_rx) = oneshot::channel();
+    tx.send(Event::Initialize {
+        config: Config {
+            root: root.clone(),
+            explicit_source_paths: Vec::new(),
+            ignore_patterns: Vec::new(),
+            pin_workspace: false,
+        },
+        completion_tx: Some(done_tx),
+    })
+    .await
+    .unwrap();
+
+    // Wait for the first scan to complete (quiescent → BecameReady fires).
+    tokio::time::timeout(Duration::from_secs(5), done_rx)
+        .await
+        .expect("Initialize should complete within 5s")
+        .unwrap();
+
+    // Actor must still accept a subsequent event without deadlocking.
+    let tmp2 = temp_dir();
+    let root2 = tmp2.path().to_path_buf();
+    let (done_tx2, done_rx2) = oneshot::channel();
+    tx.send(Event::Initialize {
+        config: Config {
+            root: root2.clone(),
+            explicit_source_paths: Vec::new(),
+            ignore_patterns: Vec::new(),
+            pin_workspace: false,
+        },
+        completion_tx: Some(done_tx2),
+    })
+    .await
+    .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(5), done_rx2)
+        .await
+        .expect("second Initialize should complete within 5s")
+        .unwrap();
+
+    assert_eq!(
+        indexer.workspace_root.get().as_deref(),
+        Some(root2.as_path()),
+        "workspace_root should reflect the second Initialize root"
     );
 }

@@ -38,6 +38,7 @@ use super::{Config, Event};
 /// Construct with [`Actor::new`] and drive with [`Actor::run`].
 pub(crate) struct Actor<R: ProgressReporter + 'static> {
     rx: mpsc::Receiver<Event>,
+    scan_done_rx: mpsc::UnboundedReceiver<()>,
     scan_handler: ScanHandler<R>,
     file_change_handler: FileChangeHandler,
     document_handler: DocumentHandler,
@@ -56,9 +57,16 @@ impl<R: ProgressReporter + 'static> Actor<R> {
         client: Option<Client>,
     ) -> Self {
         let state = Arc::new(RwLock::new(State::Uninitialized));
+        let (scan_done_tx, scan_done_rx) = mpsc::unbounded_channel();
         Self {
             rx,
-            scan_handler: ScanHandler::new(Arc::clone(&indexer), reporter, Arc::clone(&state)),
+            scan_done_rx,
+            scan_handler: ScanHandler::new(
+                Arc::clone(&indexer),
+                reporter,
+                Arc::clone(&state),
+                scan_done_tx,
+            ),
             file_change_handler: FileChangeHandler::new(Arc::clone(&indexer), client.clone()),
             document_handler: DocumentHandler::new(indexer, client),
         }
@@ -73,29 +81,76 @@ impl<R: ProgressReporter + 'static> Actor<R> {
     /// Run the event loop until the sender side is dropped.
     ///
     /// The exhaustive `match` is the architectural guarantee: every new
-    /// [`Event`] variant must be handled here or the code will not
-    /// compile.
+    /// [`Event`] variant must be handled here or the code will not compile.
+    ///
+    /// After each event or scan completion, checks whether the workspace has
+    /// transitioned into the quiescent "ready" state and fires [`on_became_ready`]
+    /// exactly once per such transition.
     pub(crate) async fn run(mut self) {
-        while let Some(event) = self.rx.recv().await {
-            match event {
-                Event::Initialize {
-                    config,
-                    completion_tx,
-                } => self.handle_initialize(config, completion_tx).await,
-                Event::Reindex => self.handle_reindex().await,
-                Event::ChangeRoot { root } => self.handle_change_root(root).await,
-                Event::FileOpened {
-                    uri,
-                    language_id,
-                    content,
-                } => self.handle_file_opened(uri, language_id, content).await,
-                Event::FileChanged { uri, changes } => {
-                    self.handle_file_changed(uri, changes).await;
+        let mut was_ready = false;
+        loop {
+            tokio::select! {
+                biased;
+                maybe_event = self.rx.recv() => {
+                    let Some(event) = maybe_event else { break };
+                    self.handle_event(event).await;
                 }
-                Event::FileSaved { uri } => self.handle_file_saved(uri).await,
-                Event::FileClosed { uri } => self.handle_file_closed(uri).await,
-                Event::FileDeleted { uri } => self.handle_file_deleted(uri).await,
+                Some(()) = self.scan_done_rx.recv() => {
+                    // scan_done_rx fires when a background scan finishes;
+                    // is_scanning was already cleared by the scan task before sending.
+                }
             }
+            let is_ready = self.is_ready().await;
+            if !was_ready && is_ready {
+                self.on_became_ready().await;
+            }
+            was_ready = is_ready;
+        }
+    }
+
+    /// Returns `true` when the workspace has been initialised **and** no
+    /// background scan is currently in flight.
+    async fn is_ready(&self) -> bool {
+        self.scan_handler
+            .state_stream()
+            .read()
+            .await
+            .ready()
+            .is_some()
+            && !self.scan_handler.is_scanning()
+    }
+
+    /// Called exactly once each time the workspace transitions from a
+    /// non-quiescent state into the quiescent ready state.
+    async fn on_became_ready(&self) {
+        if let Some(state) = self.scan_handler.state_stream().read().await.ready() {
+            log::info!(
+                "Workspace ready: {} ({} source path(s))",
+                state.root.display(),
+                state.source_paths.len(),
+            );
+        }
+    }
+
+    async fn handle_event(&mut self, event: Event) {
+        match event {
+            Event::Initialize {
+                config,
+                completion_tx,
+            } => self.handle_initialize(config, completion_tx).await,
+            Event::Reindex => self.handle_reindex().await,
+            Event::ChangeRoot { root } => self.handle_change_root(root).await,
+            Event::FileOpened {
+                uri,
+                language_id,
+                content,
+            } => self.handle_file_opened(uri, language_id, content).await,
+            Event::FileChanged { uri, changes } => {
+                self.handle_file_changed(uri, changes).await;
+            }
+            Event::FileSaved { uri } => self.handle_file_saved(uri).await,
+            Event::FileClosed { uri } => self.handle_file_closed(uri).await,
+            Event::FileDeleted { uri } => self.handle_file_deleted(uri).await,
         }
     }
 
