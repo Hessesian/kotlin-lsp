@@ -12,7 +12,6 @@ use crate::StrExt;
 // Re-export rg-module items that existing callers reach via `crate::indexer::`.
 pub(crate) use self::scan::{NoopReporter, ProgressReporter};
 pub(crate) use crate::rg::IgnoreMatcher;
-pub(crate) use crate::rg::SOURCE_EXTENSIONS;
 
 mod doc;
 
