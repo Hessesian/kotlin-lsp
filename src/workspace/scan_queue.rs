@@ -34,6 +34,10 @@ pub(crate) struct ScanArgs {
     /// Generation stamped by [`ScanHandler::enqueue_scan`] after any in-progress bump.
     /// The scan task compares this against the live generation to detect superseded scans.
     pub(crate) expected_generation: u64,
+    /// When `true`, the scan task calls `Indexer::reset_index_state` immediately before
+    /// running the indexer. Deferred until the task starts so the reset never races
+    /// with a concurrently running scan that was enqueued before this one.
+    pub(crate) reset_before_scan: bool,
 }
 
 // ─── ScanQueue ───────────────────────────────────────────────────────────────

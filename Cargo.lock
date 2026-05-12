@@ -832,6 +832,7 @@ dependencies = [
  "ignore",
  "lexopt",
  "log",
+ "parking_lot",
  "serde",
  "serde_json",
  "sha2",

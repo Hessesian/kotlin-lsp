@@ -52,6 +52,7 @@ sha2 = "0.10"
 zip = "2"
 futures = "0.3.32"
 lexopt = "0.3"
+parking_lot = "0.12.5"
 
 [profile.release]
 opt-level = 3

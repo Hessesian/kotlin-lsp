@@ -164,9 +164,11 @@ async fn build_index_inner(root: &Path, source_paths: Vec<String>) -> Arc<Indexe
 
 /// Collect source paths for CLI indexing: workspace.json + default extract dir.
 ///
-/// Build-layout paths auto-detected under `root` are intentionally excluded —
-/// those files are already covered by `index_workspace_full`'s workspace scan.
-/// Only paths that live *outside* the workspace root need a separate indexing pass.
+/// When `workspace.json` provides no explicit `sourcePaths`, Gradle/Maven
+/// build-layout paths under `root` are included so CLI completions behave like
+/// the full LSP path. External library paths (outside the workspace root) are
+/// always included via the configured `sourcePaths` key or the default
+/// `~/.kotlin-lsp/sources` directory.
 ///
 /// When `no_stdlib` is true, `~/.kotlin-lsp/sources` is excluded regardless of
 /// whether it appears in `workspace.json` or is auto-detected. Use this for fast

@@ -91,12 +91,12 @@ impl<R: ProgressReporter + 'static> Actor<R> {
         loop {
             tokio::select! {
                 biased;
+                Some(()) = self.scan_done_rx.recv() => {
+                    self.scan_handler.on_scan_completed();
+                }
                 maybe_event = self.rx.recv() => {
                     let Some(event) = maybe_event else { break };
                     self.handle_event(event).await;
-                }
-                Some(()) = self.scan_done_rx.recv() => {
-                    self.scan_handler.on_scan_completed();
                 }
             }
             let is_ready = self.is_ready().await;
