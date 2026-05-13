@@ -177,14 +177,16 @@ impl Backend {
     }
 
     async fn rg_reference_locations(&self, search: &ReferenceSearch) -> Vec<Location> {
-        let (workspace_root, source_paths, ignore_matcher) = self.rg_context().await;
+        let file_path = search.uri.to_file_path().ok();
+        let (root, source_paths, ignore_matcher) =
+            self.rg_scope_for_file(file_path.as_deref()).await;
         let request = search.clone();
         tokio::task::spawn_blocking(move || {
             let rg_request = crate::rg::RgSearchRequest::new(
                 &request.name,
                 request.parent_class.as_deref(),
                 request.declared_pkg.as_deref(),
-                workspace_root.as_deref(),
+                root.as_deref(),
                 request.include_decl,
                 &request.uri,
                 &request.decl_files,

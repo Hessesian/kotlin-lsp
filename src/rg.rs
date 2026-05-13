@@ -217,6 +217,10 @@ pub(crate) fn effective_rg_root(
 /// Passing workspace root here is essential; without it rg would search
 /// from CWD which may not be the project when spawned by the editor.
 ///
+/// When `source_paths` is non-empty, rg searches only those directories instead
+/// of `root`. `root` is still used as the base for resolving relative entries in
+/// `source_paths` and as a fallback if every configured path is missing on disk.
+///
 /// Results in directories matched by `matcher` are filtered out.
 pub(crate) fn rg_find_definition(
     name: &str,
@@ -569,6 +573,23 @@ fn merge_decl_files(candidate_files: &mut Vec<String>, decl_files: &[String]) {
     }
 }
 
+/// When `source_paths` is non-empty, filter `decl_files` to only those within the
+/// configured source roots so declaration files outside the scope don't bypass scoping.
+fn scope_decl_files<'a>(
+    decl_files: &'a [String],
+    source_paths: &'a [String],
+) -> std::borrow::Cow<'a, [String]> {
+    if source_paths.is_empty() {
+        return std::borrow::Cow::Borrowed(decl_files);
+    }
+    let filtered: Vec<String> = decl_files
+        .iter()
+        .filter(|f| source_paths.iter().any(|sp| f.starts_with(sp.as_str())))
+        .cloned()
+        .collect();
+    std::borrow::Cow::Owned(filtered)
+}
+
 fn append_unique_reference_hits(
     locations: &mut Vec<Location>,
     hits: Vec<(Location, String)>,
@@ -615,7 +636,10 @@ fn parent_scoped_reference_locations(
         ),
         matcher,
     );
-    merge_decl_files(&mut candidate_files, request.decl_files);
+    merge_decl_files(
+        &mut candidate_files,
+        &scope_decl_files(request.decl_files, request.source_paths),
+    );
     if !candidate_files.is_empty() {
         let bare_hits = rg_word_in_files(&patterns[2], &candidate_files);
         append_unique_reference_hits(&mut locations, bare_hits, request);

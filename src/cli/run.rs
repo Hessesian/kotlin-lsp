@@ -239,6 +239,17 @@ fn locs_to_results(locs: Vec<Location>, name: &str, kind: &str) -> Vec<CliResult
         .collect()
 }
 
+// ── Workspace source roots for CLI ───────────────────────────────────────────
+
+/// Load workspace.json module sourceRoots to scope rg searches in the CLI.
+/// Mirrors the subset of `Backend::collect_workspace_source_roots` relevant for CLI.
+fn cli_workspace_source_roots(root: &Path) -> Vec<String> {
+    crate::workspace_json::load_source_paths(root)
+        .into_iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect()
+}
+
 // ── Smart-mode find ───────────────────────────────────────────────────────────
 
 fn smart_find(indexer: &Arc<Indexer>, name: &str, root: &Path) -> Vec<CliResult> {
@@ -247,11 +258,8 @@ fn smart_find(indexer: &Arc<Indexer>, name: &str, root: &Path) -> Vec<CliResult>
     if !locs.is_empty() {
         return locs_to_results(locs, name, "");
     }
-    // Fallback to rg so smart mode still covers edge cases (generics, type aliases).
-    // Pass &[] so rg searches the full workspace root — CLI source_paths_raw contains
-    // only external library paths (outside the workspace root) used for indexing, not
-    // workspace source roots suitable for scoping definition searches.
-    let locs = rg_find_definition(name, Some(root), &[], None);
+    let source_roots = cli_workspace_source_roots(root);
+    let locs = rg_find_definition(name, Some(root), &source_roots, None);
     locs_to_results(locs, name, "")
 }
 
@@ -268,7 +276,9 @@ fn smart_refs(indexer: &Arc<Indexer>, name: &str, root: &Path) -> Vec<CliResult>
     let dummy_uri: tower_lsp::lsp_types::Url = tower_lsp::lsp_types::Url::from_file_path(root)
         .unwrap_or_else(|_| "file:///".parse().unwrap());
 
-    let request = RgSearchRequest::new(name, None, None, Some(root), true, &dummy_uri, &decl_files);
+    let source_roots = cli_workspace_source_roots(root);
+    let request = RgSearchRequest::new(name, None, None, Some(root), true, &dummy_uri, &decl_files)
+        .with_source_paths(&source_roots);
     let locs = crate::rg::rg_find_references(&request, None);
     locs_to_results(locs, name, "")
 }
@@ -276,7 +286,8 @@ fn smart_refs(indexer: &Arc<Indexer>, name: &str, root: &Path) -> Vec<CliResult>
 // ── Fast-mode find ────────────────────────────────────────────────────────────
 
 fn fast_find(name: &str, root: &Path) -> Vec<CliResult> {
-    let locs = rg_find_definition(name, Some(root), &[], None);
+    let source_roots = cli_workspace_source_roots(root);
+    let locs = rg_find_definition(name, Some(root), &source_roots, None);
     locs_to_results(locs, name, "")
 }
 

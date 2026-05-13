@@ -141,6 +141,28 @@ impl Backend {
         (root, source_roots, ignore)
     }
 
+    /// Return `(effective_root, scoped_source_paths, matcher)` for an rg search
+    /// originating from `file_path`.
+    ///
+    /// `effective_root` is computed via `effective_rg_root` (follows the file into its
+    /// own project root when it lives outside the configured workspace root).
+    /// `scoped_source_paths` is non-empty only when the effective root matches the
+    /// workspace root — when we've switched to a different project, source roots from
+    /// the workspace context don't apply and we fall back to a full-root search.
+    pub(crate) async fn rg_scope_for_file(
+        &self,
+        file_path: Option<&Path>,
+    ) -> (Option<PathBuf>, Vec<String>, Option<Arc<IgnoreMatcher>>) {
+        let (workspace_root, source_roots, matcher) = self.rg_context().await;
+        let effective_root = crate::rg::effective_rg_root(workspace_root.as_deref(), file_path);
+        let scoped_paths = if effective_root == workspace_root {
+            source_roots
+        } else {
+            Vec::new()
+        };
+        (effective_root, scoped_paths, matcher)
+    }
+
     /// Try `find_definition_qualified` with `rt.qualified`, falling back to `rt.leaf`
     /// when the first lookup is empty and the two names differ.
     pub(super) fn resolve_with_receiver_fallback(
@@ -272,8 +294,7 @@ impl Backend {
 
         let all_source_paths =
             Self::collect_all_source_paths(initialization_options, workspace_root);
-        let rg_source_roots =
-            Self::collect_workspace_source_roots(initialization_options, workspace_root);
+        let rg_source_roots = Self::collect_workspace_source_roots(workspace_root);
 
         if !all_source_paths.is_empty() {
             log::info!("sourcePaths (combined): {:?}", all_source_paths);
@@ -363,46 +384,29 @@ impl Backend {
         paths
     }
 
-    /// Collect workspace source roots for rg scoping: only paths that the user explicitly
-    /// configured and that lie under the workspace root.
+    /// Collect workspace source roots for rg scoping.
     ///
-    /// - Includes workspace.json JetBrains module sourceRoots (`load_source_paths`).
-    /// - Includes LSP init `sourcePaths` entries that resolve under `workspace_root`.
-    /// - Excludes auto-detected build-layout paths, Android SDK, and library directories.
-    fn collect_workspace_source_roots(
-        initialization_options: Option<&serde_json::Value>,
-        workspace_root: &Path,
-    ) -> Vec<String> {
-        let mut roots: Vec<String> = Vec::new();
+    /// Only workspace.json JetBrains module sourceRoots are included — these are paths
+    /// the user explicitly configured for the project layout. `initializationOptions.sourcePaths`
+    /// is intentionally excluded: it is an additive indexing override for stubs/generated code,
+    /// not a scope restriction, and including it would make references/rename skip the rest of
+    /// the workspace for any project that adds a single `buildSrc/src` to sourcePaths.
+    fn collect_workspace_source_roots(workspace_root: &Path) -> Vec<String> {
+        crate::workspace_json::load_source_paths(workspace_root)
+            .into_iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect()
+    }
 
-        for path in crate::workspace_json::load_source_paths(workspace_root) {
-            let s = path.to_string_lossy().into_owned();
-            if !roots.contains(&s) {
-                roots.push(s);
-            }
+    /// Reload workspace source roots from `workspace_root`'s workspace.json and store them.
+    /// Call whenever the active workspace root changes so stale source roots from the previous
+    /// project are not used for rg scoping in the new project.
+    fn reload_workspace_source_roots(&self, workspace_root: &Path) {
+        let roots = Self::collect_workspace_source_roots(workspace_root);
+        match self.indexer.workspace_source_roots.write() {
+            Ok(mut guard) => *guard = roots,
+            Err(e) => log::warn!("Failed to update workspace_source_roots: {e}"),
         }
-
-        if let Some(init_paths) =
-            Self::collect_indexing_option_strings(initialization_options, "sourcePaths")
-        {
-            for p_str in init_paths {
-                let path = std::path::Path::new(&p_str);
-                let abs = if path.is_absolute() {
-                    path.to_path_buf()
-                } else {
-                    workspace_root.join(path)
-                };
-                // Normalize before `starts_with` to resolve `..` components.
-                // A path like `"../escape"` lexically looks like a prefix match but
-                // canonicalizes outside the workspace root.
-                let normalized = Self::normalize_path(&abs);
-                if normalized.starts_with(workspace_root) && !roots.contains(&p_str) {
-                    roots.push(p_str);
-                }
-            }
-        }
-
-        roots
     }
 
     fn collect_indexing_option_strings(
@@ -534,27 +538,6 @@ impl Backend {
         std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
     }
 
-    /// Normalize `path` by resolving `..` and `.` components without requiring the path
-    /// to exist on disk. Uses `canonicalize` when the path exists (also resolves symlinks),
-    /// otherwise falls back to a lexical walk so that `../escape` traversals are caught
-    /// even for paths that have not been created yet.
-    fn normalize_path(path: &Path) -> PathBuf {
-        if let Ok(canonical) = std::fs::canonicalize(path) {
-            return canonical;
-        }
-        use std::path::Component;
-        path.components().fold(PathBuf::new(), |mut acc, comp| {
-            match comp {
-                Component::ParentDir => {
-                    acc.pop();
-                }
-                Component::CurDir => {}
-                c => acc.push(c),
-            }
-            acc
-        })
-    }
-
     fn switch_workspace_root_for_opened_document(
         &self,
         workspace_root: PathBuf,
@@ -564,6 +547,9 @@ impl Backend {
         self.indexer.workspace_pinned.store(true, Ordering::Relaxed);
         self.indexer.root_generation.fetch_add(1, Ordering::SeqCst);
         self.indexer.reset_index_state();
+        // Reload source roots for the new workspace so rg scoping doesn't use
+        // stale paths from the previous project.
+        self.reload_workspace_source_roots(&workspace_root);
         log::info!(
             "Auto-detected workspace root (now pinned): {}",
             workspace_root.display()
