@@ -191,6 +191,12 @@ pub(crate) struct Indexer {
     /// Raw source paths from `initializationOptions.indexingOptions.sourcePaths`.
     /// Stored unresolved; resolved against workspace root at indexing time.
     pub(crate) source_paths_raw: RwLock<Vec<String>>,
+    /// Workspace source roots explicitly configured by the user (workspace.json
+    /// JetBrains module sourceRoots or LSP init `sourcePaths` under the workspace root).
+    /// Used to scope rg searches to project source directories only.
+    /// Unlike `source_paths_raw`, this excludes external library sources (Android SDK,
+    /// ~/.kotlin-lsp/sources) and auto-detected build-layout paths.
+    pub(crate) workspace_source_roots: RwLock<Vec<String>>,
     /// URIs of files indexed from `sourcePaths` that lie outside the workspace root.
     /// These are treated as library sources: available for hover/definition/autocomplete
     /// but excluded from findReferences and rename.
@@ -269,6 +275,7 @@ impl Indexer {
             last_scan_complete: std::sync::atomic::AtomicBool::new(false),
             ignore_matcher: RwLock::new(None),
             source_paths_raw: RwLock::new(Vec::new()),
+            workspace_source_roots: RwLock::new(Vec::new()),
             library_uris: DashSet::new(),
             importable_fqns: std::sync::RwLock::new(std::collections::HashMap::new()),
             live_trees: DashMap::new(),

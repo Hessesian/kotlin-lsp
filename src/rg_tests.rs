@@ -478,6 +478,10 @@ fn rg_find_definition_scoped_to_source_paths() {
         .collect();
 
     assert!(
+        !files.is_empty(),
+        "must find Foo inside the configured source_path; got nothing"
+    );
+    assert!(
         files.iter().all(|f| f.contains("app/src/main/kotlin")),
         "must only return results from source_paths; got: {files:?}"
     );
@@ -502,5 +506,74 @@ fn rg_find_definition_empty_source_paths_falls_back_to_root() {
     assert!(
         !locs.is_empty(),
         "must find Bar when source_paths is empty (fallback to root)"
+    );
+}
+
+/// `rg_find_references` with `with_source_paths` must limit candidate-file
+/// discovery and reference search to the configured source root.
+#[test]
+fn rg_find_references_scoped_to_source_paths() {
+    let dir = tempfile::TempDir::new().expect("create tempdir");
+    let root = dir.path();
+
+    // Source root: contains the declaration and a legitimate reference.
+    std::fs::create_dir_all(root.join("app/src/main/kotlin/com/example")).unwrap();
+    std::fs::write(
+        root.join("app/src/main/kotlin/com/example/Contract.kt"),
+        "package com.example\nclass Contract {\n  class Event\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("app/src/main/kotlin/com/example/User.kt"),
+        "package com.example\nfun use(e: Contract.Event) {}\n",
+    )
+    .unwrap();
+
+    // Outside source root: should NOT appear in results.
+    std::fs::create_dir_all(root.join("generated/com/example")).unwrap();
+    std::fs::write(
+        root.join("generated/com/example/Contract.kt"),
+        "package com.example\nclass Contract {\n  class Event\n}\n",
+    )
+    .unwrap();
+
+    let source_path = root
+        .join("app/src/main/kotlin")
+        .to_string_lossy()
+        .into_owned();
+    let source_paths = vec![source_path];
+
+    let decl_uri =
+        Url::from_file_path(root.join("app/src/main/kotlin/com/example/Contract.kt")).unwrap();
+    let decl_file = root
+        .join("app/src/main/kotlin/com/example/Contract.kt")
+        .to_string_lossy()
+        .into_owned();
+    let decl_files = [decl_file];
+
+    let request = RgSearchRequest::new(
+        "Event",
+        Some("Contract"),
+        Some("com.example"),
+        Some(root),
+        true,
+        &decl_uri,
+        &decl_files,
+    )
+    .with_source_paths(&source_paths);
+
+    let locs = rg_find_references(&request, None);
+    let files: Vec<String> = locs
+        .iter()
+        .map(|l| l.uri.to_file_path().unwrap().to_string_lossy().into_owned())
+        .collect();
+
+    assert!(
+        !files.is_empty(),
+        "must find references inside configured source_paths; got nothing"
+    );
+    assert!(
+        !files.iter().any(|f| f.contains("generated")),
+        "must not include files outside source_paths; got: {files:?}"
     );
 }

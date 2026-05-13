@@ -106,12 +106,20 @@ impl Backend {
         let (workspace_root, source_paths, matcher) = self.rg_context().await;
         let root_opt =
             crate::rg::effective_rg_root(workspace_root.as_deref(), file_path.as_deref());
+        // Only apply source_paths scoping when rg searches the workspace root itself.
+        // If effective_rg_root diverged (e.g. open file is in a different project),
+        // fall back to full-root search so nothing is missed.
+        let scoped_paths = if root_opt == workspace_root {
+            source_paths
+        } else {
+            Vec::new()
+        };
         let name_clone = ctx.word.clone();
         let rg_locs = tokio::task::spawn_blocking(move || {
             crate::rg::rg_find_definition(
                 &name_clone,
                 root_opt.as_deref(),
-                &source_paths,
+                &scoped_paths,
                 matcher.as_deref(),
             )
         })
@@ -147,12 +155,17 @@ impl Backend {
             let (workspace_root, source_paths, matcher) = self.rg_context().await;
             let root_opt =
                 crate::rg::effective_rg_root(workspace_root.as_deref(), file_path.as_deref());
+            let scoped_paths = if root_opt == workspace_root {
+                source_paths
+            } else {
+                Vec::new()
+            };
             let word_clone = word.clone();
             let rg_impls = tokio::task::spawn_blocking(move || {
                 crate::rg::rg_find_implementors(
                     &word_clone,
                     root_opt.as_deref(),
-                    &source_paths,
+                    &scoped_paths,
                     matcher.as_deref(),
                 )
             })
@@ -249,11 +262,16 @@ impl Backend {
         let (workspace_root, source_paths, matcher) = self.rg_context().await;
         let root_opt =
             crate::rg::effective_rg_root(workspace_root.as_deref(), file_path.as_deref());
+        let scoped_paths = if root_opt == workspace_root {
+            source_paths
+        } else {
+            Vec::new()
+        };
         tokio::task::spawn_blocking(move || {
             crate::rg::rg_find_definition(
                 &name_clone,
                 root_opt.as_deref(),
-                &source_paths,
+                &scoped_paths,
                 matcher.as_deref(),
             )
         })

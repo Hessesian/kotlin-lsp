@@ -361,13 +361,23 @@ impl<'a> RgSearch<'a> {
                 command.arg(root);
             }
             RgTarget::SourcePaths(paths) => {
+                let mut any_added = false;
                 for p in paths.iter() {
                     let path = Path::new(p);
-                    if path.is_absolute() {
-                        command.arg(p.as_str());
+                    let abs = if path.is_absolute() {
+                        path.to_path_buf()
                     } else {
-                        command.arg(self.parse_root.join(path));
+                        self.parse_root.join(path)
+                    };
+                    if abs.is_dir() {
+                        command.arg(&abs);
+                        any_added = true;
                     }
+                }
+                // If all configured source paths are missing, fall back to workspace root
+                // so rg doesn't silently return zero results.
+                if !any_added {
+                    command.arg(self.parse_root);
                 }
             }
             RgTarget::Files(files) => {

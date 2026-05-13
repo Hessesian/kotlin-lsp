@@ -407,9 +407,9 @@ pub(crate) fn resolve_symbol_inner(
 
     // 5 ── project-wide rg ───────────────────────────────────────────────────
     let root = idx.workspace_root.read().unwrap().clone();
-    let source_paths = idx.source_paths_raw.read().unwrap().clone();
+    let source_roots = idx.workspace_source_roots.read().unwrap().clone();
     let matcher = idx.ignore_matcher.read().unwrap().clone();
-    rg_find_definition(name, root.as_deref(), &source_paths, matcher.as_deref())
+    rg_find_definition(name, root.as_deref(), &source_roots, matcher.as_deref())
 }
 
 /// Returns the first Location found by scanning star-import packages.
