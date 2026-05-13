@@ -392,7 +392,11 @@ impl Backend {
                 } else {
                     workspace_root.join(path)
                 };
-                if abs.starts_with(workspace_root) && !roots.contains(&p_str) {
+                // Normalize before `starts_with` to resolve `..` components.
+                // A path like `"../escape"` lexically looks like a prefix match but
+                // canonicalizes outside the workspace root.
+                let normalized = Self::normalize_path(&abs);
+                if normalized.starts_with(workspace_root) && !roots.contains(&p_str) {
                     roots.push(p_str);
                 }
             }
@@ -528,6 +532,27 @@ impl Backend {
 
     fn canonicalize_or_clone(path: &Path) -> PathBuf {
         std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    }
+
+    /// Normalize `path` by resolving `..` and `.` components without requiring the path
+    /// to exist on disk. Uses `canonicalize` when the path exists (also resolves symlinks),
+    /// otherwise falls back to a lexical walk so that `../escape` traversals are caught
+    /// even for paths that have not been created yet.
+    fn normalize_path(path: &Path) -> PathBuf {
+        if let Ok(canonical) = std::fs::canonicalize(path) {
+            return canonical;
+        }
+        use std::path::Component;
+        path.components().fold(PathBuf::new(), |mut acc, comp| {
+            match comp {
+                Component::ParentDir => {
+                    acc.pop();
+                }
+                Component::CurDir => {}
+                c => acc.push(c),
+            }
+            acc
+        })
     }
 
     fn switch_workspace_root_for_opened_document(
