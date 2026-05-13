@@ -5,10 +5,7 @@ use crate::LinesExt;
 use crate::StrExt;
 
 use super::ensure_file_data;
-use super::infer_lines::{
-    extract_return_type_from_detail, extract_type_with_generics, find_rhs_str,
-    has_dot_after_first_call,
-};
+use super::infer_lines::{extract_return_type_from_detail, find_rhs_str, has_dot_after_first_call};
 
 // ─── InferenceChain trait ─────────────────────────────────────────────────────
 
@@ -95,16 +92,25 @@ pub(crate) enum ReceiverKind<'a> {
 /// - `outer`     — first dot-segment: `"Outer"`  (used for file lookup)
 /// - `leaf`      — last dot-segment: `"Inner"`   (used for fallback member lookup)
 pub(crate) struct ReceiverType {
+    /// Full raw type string as inferred, e.g. `"StateFlow<UiState>?"`.
     pub raw: String,
+    /// Type name with no generics and no `?`, e.g. `"StateFlow"` or `"Outer.Inner"`.
     pub qualified: String,
+    /// Outermost segment of `qualified`, e.g. `"Outer"`.
     pub outer: String,
+    /// Innermost segment of `qualified`, e.g. `"Inner"`.
     pub leaf: String,
+    /// Whether the type was annotated as nullable (`?`), e.g. `val x: User?`.
+    /// Available for hover/completion display; lookup sites use `qualified`.
+    #[allow(dead_code)]
+    pub nullable: bool,
 }
 
 impl ReceiverType {
     pub(crate) fn from_raw(raw: String) -> Self {
-        // Strip generics: take chars until first `<`.
-        let qualified: String = raw.chars().take_while(|&c| c != '<').collect();
+        // Strip generics and outer `?` — stop at first `<` or `?`.
+        let qualified: String = raw.chars().take_while(|&c| c != '<' && c != '?').collect();
+        let nullable = raw.contains('?');
         let outer = qualified
             .split('.')
             .next()
@@ -120,6 +126,7 @@ impl ReceiverType {
             qualified,
             outer,
             leaf,
+            nullable,
         }
     }
 }
@@ -243,11 +250,10 @@ fn infer_variable_type_raw_impl(
             }
             (*ll).clone()
         } else if let Some(data) = idx.files.get(uri.as_str()) {
-            // CST explicit type annotation — preserves generics but strips outer `?`
-            // to match `infer_type_in_lines_raw` / `extract_type_with_generics` behaviour.
-            // Keeps inner nullable generics: `List<String?>?` → `List<String?>`.
+            // CST explicit type annotation — return verbatim (includes `?` for nullable).
+            // `ReceiverType::from_raw` strips `?` from qualified/outer/leaf for lookups.
             if let Some(ann) = data.type_annotations.iter().find(|(_, n, _)| n == var_name) {
-                return Some(extract_type_with_generics(&ann.2));
+                return Some(ann.2.clone());
             }
             // Line scan — fallback for constructor parameters and edge cases not
             // captured by the property_declaration CST walk (e.g. `class Foo(val x: T)`).
@@ -324,7 +330,7 @@ pub(crate) fn infer_field_type_raw(
             .iter()
             .find(|(_, n, _)| n == field_name)
         {
-            return Some(extract_type_with_generics(&ann.2));
+            return Some(ann.2.clone());
         }
         return data.lines.infer_type_raw(field_name);
     }

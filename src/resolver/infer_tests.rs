@@ -95,7 +95,7 @@ fn infer_annotated_property_from_cst() {
         "nullable annotated property: non-raw strips nullability"
     );
 
-    // Raw: preserves inner generics, strips outer nullable marker (matches line-scan behaviour).
+    // Raw: preserves generics and outer `?` (nullable flows through to ReceiverType).
     assert_eq!(
         infer_variable_type_raw(&idx, "items", &file_uri),
         Some("List<Product>".into()),
@@ -103,11 +103,11 @@ fn infer_annotated_property_from_cst() {
     );
     assert_eq!(
         infer_variable_type_raw(&idx, "state", &file_uri),
-        Some("StateFlow<UiState>".into()),
-        "nullable annotated property: raw strips outer ? to match line-scan"
+        Some("StateFlow<UiState>?".into()),
+        "nullable annotated property: raw preserves ? (stripped in ReceiverType::from_raw)"
     );
 
-    // Non-generic nullable: raw strips ? too.
+    // Non-generic nullable: raw preserves ? too.
     let idx2 = Indexer::new();
     idx2.index_content(
         &file_uri,
@@ -115,7 +115,7 @@ fn infer_annotated_property_from_cst() {
     );
     assert_eq!(
         infer_variable_type_raw(&idx2, "user", &file_uri),
-        Some("User".into()),
-        "non-generic nullable: raw strips outer ?"
+        Some("User?".into()),
+        "non-generic nullable: raw preserves ?"
     );
 }
