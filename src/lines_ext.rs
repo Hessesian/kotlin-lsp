@@ -98,15 +98,15 @@ impl LinesExt for [String] {
     }
 
     fn infer_type(&self, var_name: &str) -> Option<String> {
-        crate::resolver::infer::infer_type_in_lines(self, var_name)
+        crate::resolver::infer_lines::infer_type_in_lines(self, var_name)
     }
 
     fn infer_type_raw(&self, var_name: &str) -> Option<String> {
-        crate::resolver::infer::infer_type_in_lines_raw(self, var_name)
+        crate::resolver::infer_lines::infer_type_in_lines_raw(self, var_name)
     }
 
     fn find_declaration_range(&self, name: &str) -> Option<Range> {
-        crate::resolver::infer::find_declaration_range_in_lines(self, name)
+        crate::resolver::infer_lines::find_declaration_range_in_lines(self, name)
     }
 
     fn find_declaration_range_after(&self, name: &str, start_line: u32) -> Option<Range> {

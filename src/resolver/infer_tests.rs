@@ -1,4 +1,4 @@
-use super::extract_return_type_from_detail;
+use super::super::infer_lines::{extract_return_type_from_detail, has_dot_after_first_call};
 
 #[test]
 fn return_type_simple() {
@@ -42,15 +42,12 @@ fn return_type_nullable_stripped() {
 #[test]
 fn has_dot_after_first_call_chained() {
     // paren_pos=7: "getList" is 7 chars, then "("
-    assert!(super::has_dot_after_first_call(
-        "getList(isRefresh).joinAll()",
-        7
-    ));
+    assert!(has_dot_after_first_call("getList(isRefresh).joinAll()", 7));
 }
 
 #[test]
 fn has_dot_after_first_call_standalone() {
-    assert!(!super::has_dot_after_first_call(
+    assert!(!has_dot_after_first_call(
         "getConnectedAccounts(isRefresh)",
         20
     ));
@@ -59,5 +56,5 @@ fn has_dot_after_first_call_standalone() {
 #[test]
 fn has_dot_after_first_call_nested_parens() {
     // Nested parens inside arg list must not fool the scanner.
-    assert!(super::has_dot_after_first_call("getList(foo(x)).map()", 7));
+    assert!(has_dot_after_first_call("getList(foo(x)).map()", 7));
 }
