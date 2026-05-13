@@ -105,9 +105,8 @@ pub(crate) fn find_fun_signature_full(fn_name: &str, idx: &Indexer, uri: &Url) -
         return Some(sig);
     }
     // Slow path: rg to locate the definition, index on-demand.
-    let root = idx.workspace_root.read().unwrap().clone();
-    let source_roots = idx.workspace_source_roots.read().unwrap().clone();
-    let matcher = idx.ignore_matcher.read().unwrap().clone();
+    let open_file = uri.to_file_path().ok();
+    let (root, source_roots, matcher) = idx.rg_scope_for_path(open_file.as_deref());
     let locs =
         crate::rg::rg_find_definition(fn_name, root.as_deref(), &source_roots, matcher.as_deref());
     for loc in &locs {

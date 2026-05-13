@@ -425,9 +425,20 @@ impl<'a> RgSearch<'a> {
             RgTarget::Root(root) => *root,
             RgTarget::Files(_) => return vec![],
             RgTarget::SourcePaths(_) => {
+                // Apply the same relative-path normalization as the Root branch so that
+                // a source root passed as relative (or rg run from a different cwd) doesn't
+                // produce relative filenames that later fail URI construction.
+                let parse_root = self.parse_root;
                 return String::from_utf8_lossy(&output.stdout)
                     .lines()
-                    .map(|line| line.to_owned())
+                    .map(|line| {
+                        let path = Path::new(line);
+                        if path.is_absolute() {
+                            line.to_owned()
+                        } else {
+                            parse_root.join(line).to_string_lossy().into_owned()
+                        }
+                    })
                     .collect();
             }
         };
@@ -582,9 +593,15 @@ fn scope_decl_files<'a>(
     if source_paths.is_empty() {
         return std::borrow::Cow::Borrowed(decl_files);
     }
+    // Use Path::starts_with (component-based) rather than str::starts_with to avoid
+    // sibling-path false positives: "/src/main/kotlin2" must not match "/src/main/kotlin".
+    let source_paths_buf: Vec<&Path> = source_paths.iter().map(|s| Path::new(s.as_str())).collect();
     let filtered: Vec<String> = decl_files
         .iter()
-        .filter(|f| source_paths.iter().any(|sp| f.starts_with(sp.as_str())))
+        .filter(|f| {
+            let fp = Path::new(f.as_str());
+            source_paths_buf.iter().any(|sp| fp.starts_with(sp))
+        })
         .cloned()
         .collect();
     std::borrow::Cow::Owned(filtered)
@@ -826,8 +843,11 @@ fn rg_word_in_files(safe_name: &str, files: &[String]) -> Vec<(Location, String)
 /// Used by the CLI `refs --fast` subcommand.  Less precise than
 /// `rg_find_references` (no package/class context) but zero-cost to run —
 /// no index required.
-pub(crate) fn rg_word_search(name: &str, root: &Path) -> Vec<Location> {
-    RgSearch::rooted(root)
+///
+/// When `source_paths` is non-empty, the search is scoped to those directories
+/// instead of `root`, mirroring the scoping behaviour of other rg search functions.
+pub(crate) fn rg_word_search(name: &str, root: &Path, source_paths: &[String]) -> Vec<Location> {
+    RgSearch::scoped(source_paths, root)
         .word_regexp()
         .with_pattern(regex_escape(name))
         .locations()

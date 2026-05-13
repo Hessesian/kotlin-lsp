@@ -156,6 +156,15 @@ async fn build_index_inner(root: &Path, source_paths: Vec<String>) -> Arc<Indexe
     if !source_paths.is_empty() {
         *idx.source_paths_raw.write().unwrap() = source_paths;
     }
+    // Populate workspace source roots from workspace.json so resolver/infer rg fallbacks
+    // are scoped when the CLI is run in a project with configured module sourceRoots.
+    let workspace_roots: Vec<String> = crate::workspace_json::load_source_paths(root)
+        .into_iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    if !workspace_roots.is_empty() {
+        *idx.workspace_source_roots.write().unwrap() = workspace_roots;
+    }
     Arc::clone(&idx)
         .index_workspace_full(root, Arc::new(NoopReporter))
         .await;
@@ -294,7 +303,8 @@ fn fast_find(name: &str, root: &Path) -> Vec<CliResult> {
 // ── Fast-mode refs ────────────────────────────────────────────────────────────
 
 fn fast_refs(name: &str, root: &Path) -> Vec<CliResult> {
-    let locs = rg_word_search(name, root);
+    let source_roots = cli_workspace_source_roots(root);
+    let locs = rg_word_search(name, root, &source_roots);
     locs_to_results(locs, name, "")
 }
 

@@ -135,10 +135,7 @@ impl Backend {
     pub(crate) async fn rg_context(
         &self,
     ) -> (Option<PathBuf>, Vec<String>, Option<Arc<IgnoreMatcher>>) {
-        let root = self.indexer.workspace_root.read().unwrap().clone();
-        let source_roots = self.indexer.workspace_source_roots.read().unwrap().clone();
-        let ignore = self.indexer.ignore_matcher.read().unwrap().clone();
-        (root, source_roots, ignore)
+        self.indexer.rg_scope_for_path(None)
     }
 
     /// Return `(effective_root, scoped_source_paths, matcher)` for an rg search
@@ -153,14 +150,7 @@ impl Backend {
         &self,
         file_path: Option<&Path>,
     ) -> (Option<PathBuf>, Vec<String>, Option<Arc<IgnoreMatcher>>) {
-        let (workspace_root, source_roots, matcher) = self.rg_context().await;
-        let effective_root = crate::rg::effective_rg_root(workspace_root.as_deref(), file_path);
-        let scoped_paths = if effective_root == workspace_root {
-            source_roots
-        } else {
-            Vec::new()
-        };
-        (effective_root, scoped_paths, matcher)
+        self.indexer.rg_scope_for_path(file_path)
     }
 
     /// Try `find_definition_qualified` with `rt.qualified`, falling back to `rt.leaf`

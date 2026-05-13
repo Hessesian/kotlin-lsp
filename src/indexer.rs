@@ -191,11 +191,12 @@ pub(crate) struct Indexer {
     /// Raw source paths from `initializationOptions.indexingOptions.sourcePaths`.
     /// Stored unresolved; resolved against workspace root at indexing time.
     pub(crate) source_paths_raw: RwLock<Vec<String>>,
-    /// Workspace source roots explicitly configured by the user (workspace.json
-    /// JetBrains module sourceRoots or LSP init `sourcePaths` under the workspace root).
-    /// Used to scope rg searches to project source directories only.
-    /// Unlike `source_paths_raw`, this excludes external library sources (Android SDK,
-    /// ~/.kotlin-lsp/sources) and auto-detected build-layout paths.
+    /// Workspace source roots for scoping rg searches to project source directories only.
+    /// Populated exclusively from workspace.json JetBrains module sourceRoots
+    /// (`workspace_json::load_source_paths`). LSP init `sourcePaths` is intentionally
+    /// excluded — it is an additive indexing override for stubs/generated code, not a
+    /// search-scope restriction. Auto-detected build-layout paths, Android SDK sources,
+    /// and ~/.kotlin-lsp/sources are also excluded.
     pub(crate) workspace_source_roots: RwLock<Vec<String>>,
     /// URIs of files indexed from `sourcePaths` that lie outside the workspace root.
     /// These are treated as library sources: available for hover/definition/autocomplete
@@ -334,6 +335,38 @@ impl Indexer {
 
     pub(crate) fn is_library_uri(&self, uri: &Url) -> bool {
         self.library_uris.contains(uri.as_str())
+    }
+
+    /// Return `(effective_root, scoped_source_paths, matcher)` for an rg search
+    /// whose context file is `open_file`.
+    ///
+    /// `effective_root` is derived via `effective_rg_root`: when `open_file` lives
+    /// outside the configured workspace root, it walks up to the nearest `.git` root
+    /// so rg searches the *actual* project of that file.
+    ///
+    /// `scoped_source_paths` is non-empty only when `effective_root` matches the
+    /// configured workspace root — when the file belongs to a different project,
+    /// workspace source roots don't apply and we fall back to a full-root search.
+    ///
+    /// Pass `None` for `open_file` to get workspace-level scope (no file context).
+    pub(crate) fn rg_scope_for_path(
+        &self,
+        open_file: Option<&std::path::Path>,
+    ) -> (
+        Option<std::path::PathBuf>,
+        Vec<String>,
+        Option<Arc<crate::rg::IgnoreMatcher>>,
+    ) {
+        let workspace_root = self.workspace_root.read().unwrap().clone();
+        let source_roots = self.workspace_source_roots.read().unwrap().clone();
+        let matcher = self.ignore_matcher.read().unwrap().clone();
+        let effective_root = crate::rg::effective_rg_root(workspace_root.as_deref(), open_file);
+        let scoped_paths = if effective_root == workspace_root {
+            source_roots
+        } else {
+            Vec::new()
+        };
+        (effective_root, scoped_paths, matcher)
     }
 
     pub(crate) fn remove_live_lines(&self, uri: &Url) {

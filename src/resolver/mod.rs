@@ -406,9 +406,8 @@ pub(crate) fn resolve_symbol_inner(
     }
 
     // 5 ── project-wide rg ───────────────────────────────────────────────────
-    let root = idx.workspace_root.read().unwrap().clone();
-    let source_roots = idx.workspace_source_roots.read().unwrap().clone();
-    let matcher = idx.ignore_matcher.read().unwrap().clone();
+    let open_file = from_uri.to_file_path().ok();
+    let (root, source_roots, matcher) = idx.rg_scope_for_path(open_file.as_deref());
     rg_find_definition(name, root.as_deref(), &source_roots, matcher.as_deref())
 }
 
