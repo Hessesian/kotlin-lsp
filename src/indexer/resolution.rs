@@ -8,6 +8,7 @@ use tower_lsp::lsp_types::{CompletionItem, Position, SymbolKind, Url};
 
 use crate::indexer::doc::extract_doc_comment;
 use crate::indexer::Location;
+use crate::resolver::InferenceChain;
 use crate::types::{CallerContext, FileData, SymbolEntry};
 use crate::LinesExt;
 

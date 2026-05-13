@@ -354,6 +354,7 @@ pub(crate) const KIND_LAMBDA_LIT: &str = "lambda_literal";
 pub(crate) const KIND_LAMBDA_PARAMS: &str = "lambda_parameters";
 pub(crate) const KIND_VALUE_ARG: &str = "value_argument";
 pub(crate) const KIND_VALUE_ARGS: &str = "value_arguments";
+pub(crate) const KIND_NULLABLE_TYPE: &str = "nullable_type";
 pub(crate) const KIND_USER_TYPE: &str = "user_type";
 pub(crate) const KIND_FUN_DECL: &str = "function_declaration";
 pub(crate) const KIND_FUN: &str = "fun";

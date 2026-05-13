@@ -181,6 +181,13 @@ pub(crate) struct FileData {
     /// Used by method-return-type inference for indexed files.
     #[serde(default)]
     pub method_call_rhs: Vec<(u32, String, String, String)>,
+    /// Explicit type annotations for properties, extracted from the CST at parse time.
+    /// Each entry is `(declaration_line, var_name, declared_type)` where `declared_type`
+    /// preserves generics and nullability: `val x: List<Foo>?` → `"List<Foo>?"`.
+    /// Covers both `user_type` and `nullable_type` annotation nodes.
+    /// Takes priority over line-scan inference for indexed files.
+    #[serde(default)]
+    pub type_annotations: Vec<(u32, String, String)>,
     /// Structural syntax errors from tree-sitter (ERROR / MISSING nodes).
     /// Transient — not serialized to disk cache.
     #[serde(skip)]

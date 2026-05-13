@@ -7,6 +7,69 @@ use crate::StrExt;
 use super::ensure_file_data;
 use super::infer_lines::{extract_return_type_from_detail, find_rhs_str, has_dot_after_first_call};
 
+// ─── InferenceChain trait ─────────────────────────────────────────────────────
+
+/// Capability trait for type-inference queries over an indexed workspace.
+///
+/// Implemented by [`Indexer`] in production.  Mirrors the shape of
+/// [`ResolutionChain`](super::resolve::ResolutionChain) — all methods
+/// delegate to the free functions in this module so the trait is a zero-cost
+/// façade.
+///
+/// `#[allow(dead_code)]` is retained until this trait is wired through the
+/// resolution pipeline in a future pass (G4).
+// TODO(G4): wire trait bound through resolution pipeline to enable test stubs
+#[allow(dead_code)]
+pub(crate) trait InferenceChain {
+    fn infer_variable_type(&self, var_name: &str, uri: &Url) -> Option<String>;
+    fn infer_variable_type_raw(&self, var_name: &str, uri: &Url) -> Option<String>;
+    fn infer_field_type(&self, file_uri: &str, field_name: &str) -> Option<String>;
+    fn find_field_type_in_class(&self, class_name: &str, field_name: &str) -> Option<String>;
+    fn find_fun_return_type_by_name(&self, fn_name: &str) -> Option<String>;
+    fn find_method_return_type(&self, type_name: &str, method_name: &str) -> Option<String>;
+    fn infer_receiver_type(&self, kind: ReceiverKind<'_>, uri: &Url) -> Option<ReceiverType>;
+}
+
+impl InferenceChain for Indexer {
+    fn infer_variable_type(&self, var_name: &str, uri: &Url) -> Option<String> {
+        infer_variable_type(self, var_name, uri)
+    }
+    fn infer_variable_type_raw(&self, var_name: &str, uri: &Url) -> Option<String> {
+        infer_variable_type_raw(self, var_name, uri)
+    }
+    fn infer_field_type(&self, file_uri: &str, field_name: &str) -> Option<String> {
+        infer_field_type(self, file_uri, field_name)
+    }
+    fn find_field_type_in_class(&self, class_name: &str, field_name: &str) -> Option<String> {
+        find_field_type_in_class(self, class_name, field_name)
+    }
+    fn find_fun_return_type_by_name(&self, fn_name: &str) -> Option<String> {
+        find_fun_return_type_by_name(self, fn_name)
+    }
+    fn find_method_return_type(&self, type_name: &str, method_name: &str) -> Option<String> {
+        find_method_return_type(self, type_name, method_name)
+    }
+    fn infer_receiver_type(&self, kind: ReceiverKind<'_>, uri: &Url) -> Option<ReceiverType> {
+        infer_receiver_type(self, kind, uri)
+    }
+}
+
+// ─── Type-string helpers ──────────────────────────────────────────────────────
+
+/// Strip generic parameters and nullability markers from a type string.
+///
+/// `"List<Product>"` → `"List"`, `"String?"` → `"String"`, `"Outer.Inner<T>"` → `"Outer.Inner"`
+///
+/// Mirrors the stripping done by [`infer_type_in_lines`](super::infer_lines::infer_type_in_lines)
+/// so that `type_annotations` lookups return the same shape as line-scan results.
+fn strip_generics(ty: &str) -> String {
+    let stripped: String = ty
+        .chars()
+        .take_while(|&c| c.is_alphanumeric() || c == '_' || c == '.')
+        .collect();
+    stripped.trim_end_matches('.').to_owned()
+}
+
 // ─── Receiver type resolution ─────────────────────────────────────────────────
 
 /// How the receiver expression should be resolved.
@@ -29,16 +92,25 @@ pub(crate) enum ReceiverKind<'a> {
 /// - `outer`     — first dot-segment: `"Outer"`  (used for file lookup)
 /// - `leaf`      — last dot-segment: `"Inner"`   (used for fallback member lookup)
 pub(crate) struct ReceiverType {
+    /// Full raw type string as inferred, e.g. `"StateFlow<UiState>?"`.
     pub raw: String,
+    /// Type name with no generics and no `?`, e.g. `"StateFlow"` or `"Outer.Inner"`.
     pub qualified: String,
+    /// Outermost segment of `qualified`, e.g. `"Outer"`.
     pub outer: String,
+    /// Innermost segment of `qualified`, e.g. `"Inner"`.
     pub leaf: String,
+    /// Whether the type was annotated as nullable (`?`), e.g. `val x: User?`.
+    /// Available for hover/completion display; lookup sites use `qualified`.
+    #[allow(dead_code)]
+    pub nullable: bool,
 }
 
 impl ReceiverType {
     pub(crate) fn from_raw(raw: String) -> Self {
-        // Strip generics: take chars until first `<`.
-        let qualified: String = raw.chars().take_while(|&c| c != '<').collect();
+        // Strip generics and outer `?` — stop at first `<` or `?`.
+        let qualified: String = raw.chars().take_while(|&c| c != '<' && c != '?').collect();
+        let nullable = raw.contains('?');
         let outer = qualified
             .split('.')
             .next()
@@ -54,6 +126,7 @@ impl ReceiverType {
             qualified,
             outer,
             leaf,
+            nullable,
         }
     }
 }
@@ -113,10 +186,17 @@ fn infer_variable_type_impl(idx: &Indexer, var_name: &str, uri: &Url, depth: u8)
             }
             (*ll).clone()
         } else if let Some(data) = idx.files.get(uri.as_str()) {
+            // CST explicit type annotation — highest priority for indexed files.
+            // Covers `val x: Type` and `val x: Type?` without line scanning.
+            if let Some(ann) = data.type_annotations.iter().find(|(_, n, _)| n == var_name) {
+                return Some(strip_generics(&ann.2));
+            }
+            // Line scan — fallback for constructor parameters and edge cases not
+            // captured by the property_declaration CST walk (e.g. `class Foo(val x: T)`).
             if let result @ Some(_) = data.lines.infer_type(var_name) {
                 return result;
             }
-            // CST-indexed RHS types — primary path for indexed files.
+            // CST-indexed RHS types (unannotated properties) and method-call RHS.
             let rhs_match = data
                 .rhs_types
                 .iter()
@@ -140,7 +220,7 @@ fn infer_variable_type_impl(idx: &Indexer, var_name: &str, uri: &Url, depth: u8)
                     }
                 }
             }
-            // Lines guard was dropped above; fall through to string-based fallback.
+            // Fallback: line scan for function parameters and unindexed edge cases.
             return infer_method_return_type(idx, var_name, &lines, uri, depth - 1);
         } else {
             // File not indexed yet — read from disk; skip method inference.
@@ -170,6 +250,13 @@ fn infer_variable_type_raw_impl(
             }
             (*ll).clone()
         } else if let Some(data) = idx.files.get(uri.as_str()) {
+            // CST explicit type annotation — return verbatim (includes `?` for nullable).
+            // `ReceiverType::from_raw` strips `?` from qualified/outer/leaf for lookups.
+            if let Some(ann) = data.type_annotations.iter().find(|(_, n, _)| n == var_name) {
+                return Some(ann.2.clone());
+            }
+            // Line scan — fallback for constructor parameters and edge cases not
+            // captured by the property_declaration CST walk (e.g. `class Foo(val x: T)`).
             if let result @ Some(_) = data.lines.infer_type_raw(var_name) {
                 return result;
             }
@@ -208,11 +295,18 @@ fn infer_variable_type_raw_impl(
 
 /// Scan a specific (possibly un-indexed) file for the declared type of `field_name`.
 ///
-/// Checks the in-memory index first (lines are cached); falls back to reading
-/// the file from disk when it isn't indexed yet.
+/// Checks CST type annotations first (indexed files), then falls back to line
+/// scanning, then reads from disk for un-indexed files.
 pub(crate) fn infer_field_type(idx: &Indexer, file_uri: &str, field_name: &str) -> Option<String> {
     let uri = tower_lsp::lsp_types::Url::parse(file_uri).ok()?;
     let file_data = ensure_file_data(idx, &uri)?;
+    if let Some(ann) = file_data
+        .type_annotations
+        .iter()
+        .find(|(_, n, _)| n == field_name)
+    {
+        return Some(strip_generics(&ann.2));
+    }
     file_data.lines.infer_type(field_name)
 }
 
@@ -220,8 +314,8 @@ pub(crate) fn infer_field_type(idx: &Indexer, file_uri: &str, field_name: &str) 
 ///
 /// Returns `"MutableList<MbAccount>"` rather than `"MutableList"`, which is
 /// needed for collection element type extraction via `extract_collection_element_type`.
-/// Checks live editor lines first (most up-to-date), then falls back to indexed
-/// lines and finally to a disk read for un-indexed files.
+/// Checks live editor lines first (most up-to-date), then CST type annotations,
+/// then falls back to indexed lines and finally to a disk read for un-indexed files.
 pub(crate) fn infer_field_type_raw(
     idx: &Indexer,
     file_uri: &str,
@@ -231,6 +325,13 @@ pub(crate) fn infer_field_type_raw(
         return live.infer_type_raw(field_name);
     }
     if let Some(data) = idx.files.get(file_uri) {
+        if let Some(ann) = data
+            .type_annotations
+            .iter()
+            .find(|(_, n, _)| n == field_name)
+        {
+            return Some(ann.2.clone());
+        }
         return data.lines.infer_type_raw(field_name);
     }
     let path = tower_lsp::lsp_types::Url::parse(file_uri)
@@ -259,21 +360,6 @@ pub(crate) fn find_field_type_in_class(
         }
     }
     None
-}
-
-// ─── impl Indexer wrappers ────────────────────────────────────────────────────
-
-#[allow(dead_code)]
-impl crate::indexer::Indexer {
-    pub(crate) fn infer_variable_type(&self, var_name: &str, uri: &Url) -> Option<String> {
-        infer_variable_type(self, var_name, uri)
-    }
-    pub(crate) fn infer_variable_type_raw(&self, var_name: &str, uri: &Url) -> Option<String> {
-        infer_variable_type_raw(self, var_name, uri)
-    }
-    pub(crate) fn infer_field_type(&self, file_uri: &str, field_name: &str) -> Option<String> {
-        infer_field_type(self, file_uri, field_name)
-    }
 }
 
 // ─── Method return-type inference ─────────────────────────────────────────────

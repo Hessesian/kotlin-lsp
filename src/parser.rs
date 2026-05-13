@@ -13,11 +13,11 @@ use crate::queries::{
     KIND_IMPORT_ALIAS, KIND_IMPORT_DECL, KIND_IMPORT_HEADER, KIND_IMPORT_LIST,
     KIND_INHERITANCE_SPEC, KIND_INHERITANCE_SPECS, KIND_INTERFACE_DECL, KIND_LAMBDA_LIT,
     KIND_METHOD_DECL, KIND_MODIFIERS, KIND_MOD_FINAL, KIND_MOD_STATIC, KIND_NAV_EXPR,
-    KIND_OBJECT_DECL, KIND_PACKAGE_DECL, KIND_PACKAGE_HEADER, KIND_PROP_DECL, KIND_PROP_DELEGATE,
-    KIND_PROTOCOL_DECL, KIND_RECORD_DECL, KIND_SCOPED_IDENT, KIND_SIMPLE_IDENT, KIND_STATEMENTS,
-    KIND_SUPERCLASS, KIND_SUPER_INTERFACES, KIND_TYPE_IDENT, KIND_USER_TYPE, KIND_VALUE_ARG,
-    KIND_VALUE_ARGS, KIND_VAR_DECL, KIND_VAR_DECLARATOR, KIND_WILDCARD_IMPORT, KOTLIN_DEFINITIONS,
-    SWIFT_DEFINITIONS,
+    KIND_NULLABLE_TYPE, KIND_OBJECT_DECL, KIND_PACKAGE_DECL, KIND_PACKAGE_HEADER, KIND_PROP_DECL,
+    KIND_PROP_DELEGATE, KIND_PROTOCOL_DECL, KIND_RECORD_DECL, KIND_SCOPED_IDENT, KIND_SIMPLE_IDENT,
+    KIND_STATEMENTS, KIND_SUPERCLASS, KIND_SUPER_INTERFACES, KIND_TYPE_IDENT, KIND_USER_TYPE,
+    KIND_VALUE_ARG, KIND_VALUE_ARGS, KIND_VAR_DECL, KIND_VAR_DECLARATOR, KIND_WILDCARD_IMPORT,
+    KOTLIN_DEFINITIONS, SWIFT_DEFINITIONS,
 };
 use crate::StrExt;
 
@@ -1408,24 +1408,26 @@ impl crate::types::FileData {
         }
     }
 
-    /// Walk all Kotlin `property_declaration` nodes and populate `rhs_types` and
-    /// `method_call_rhs` for unannotated properties (those without an explicit `: Type`).
+    /// Walk all Kotlin `property_declaration` nodes and populate `rhs_types`,
+    /// `method_call_rhs`, and `type_annotations` for property declarations.
     ///
-    /// Extracts three patterns at index time so hover/completion never need fragile
-    /// string scanning:
+    /// For **unannotated** properties (no explicit `: Type`), extracts:
     /// 1. DI generic call: `inject<T>()`, `viewModel<T>()` etc. → type arg `T`
     /// 2. Constructor call: `SomeType(args)` → `SomeType`
     /// 3. `by lazy { SomeType() }` (single-statement lambda) → `SomeType`
     /// 4. Method call: `receiver.method(args)` → stored in `method_call_rhs` for
     ///    two-step inference (resolve receiver type, then look up method return type)
+    ///
+    /// For **annotated** properties (`val x: Type`), extracts the full declared type
+    /// (including generics and nullability) into `type_annotations`, which takes
+    /// priority over line-scan inference for indexed files.
     fn extract_rhs_types_kotlin(&mut self, root: Node, bytes: &[u8]) {
         let mut stack = vec![root];
         while let Some(node) = stack.pop() {
             if node.kind() == KIND_PROP_DECL {
                 if let Some(var_decl) = node.first_child_of_kind(KIND_VAR_DECL) {
-                    // Only infer for unannotated properties: variable_declaration has
-                    // just the identifier (named_child_count == 1 means no `: Type` child).
                     if var_decl.named_child_count() == 1 {
+                        // Unannotated property: infer type from RHS expression.
                         if let Some(name) = var_decl
                             .first_child_of_kind(KIND_SIMPLE_IDENT)
                             .and_then(|n| n.utf8_text_owned(bytes))
@@ -1451,6 +1453,23 @@ impl crate::types::FileData {
                                         }
                                     } else if let Some(ty) = call_expr_direct_type(rhs, bytes) {
                                         self.rhs_types.push((line, name, ty));
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // Annotated property: `val x: Type` or `val x: Type? = ...`
+                        // The second named child is the type node (user_type or nullable_type).
+                        if let Some(name) = var_decl
+                            .first_child_of_kind(KIND_SIMPLE_IDENT)
+                            .and_then(|n| n.utf8_text_owned(bytes))
+                        {
+                            if let Some(type_node) = var_decl.named_child(1) {
+                                let kind = type_node.kind();
+                                if kind == KIND_USER_TYPE || kind == KIND_NULLABLE_TYPE {
+                                    if let Some(ty) = type_node.utf8_text_owned(bytes) {
+                                        let line = var_decl.start_position().row as u32;
+                                        self.type_annotations.push((line, name, ty));
                                     }
                                 }
                             }

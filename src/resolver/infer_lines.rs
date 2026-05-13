@@ -370,7 +370,7 @@ pub(super) fn extract_return_type_from_detail(detail: &str) -> Option<String> {
 /// `"List<Product> = emptyList()"` → `"List<Product>"`
 /// `"StateFlow<UiState>"` → `"StateFlow<UiState>"`
 /// `"User?"` → `"User"`  (nullable stripped at the outer `?`)
-pub(super) fn extract_type_with_generics(s: &str) -> String {
+pub(crate) fn extract_type_with_generics(s: &str) -> String {
     let mut result = String::new();
     let mut depth = 0i32;
     for c in s.chars() {

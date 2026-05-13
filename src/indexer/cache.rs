@@ -21,7 +21,7 @@ use crate::types::{FileData, FileIndexResult, Visibility};
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 /// Bump when the serialized format changes; invalidates any older cache files.
-pub(crate) const CACHE_VERSION: u32 = 11;
+pub(crate) const CACHE_VERSION: u32 = 12;
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
