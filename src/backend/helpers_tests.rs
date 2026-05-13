@@ -1,5 +1,5 @@
 use super::super::rename::{enclosing_scope, rename_in_scope};
-use super::resolve_references_scope;
+use crate::features::references::resolve_scope;
 use tower_lsp::lsp_types::TextEdit;
 
 fn lines(src: &str) -> Vec<String> {
@@ -187,7 +187,7 @@ fn scope_lowercase_name_always_none() {
     let uri = tower_lsp::lsp_types::Url::parse("file:///t.kt").unwrap();
     let src = "package demo\nclass Foo { val descriptiveNumber: String = \"\" }";
     let idx = make_indexer_with(src, &uri);
-    let (parent, pkg) = resolve_references_scope(&idx, &uri, 1, "descriptiveNumber");
+    let (parent, pkg) = resolve_scope(&idx, &uri, 1, "descriptiveNumber");
     assert_eq!(parent, None, "lowercase member must not get a parent_class");
     assert_eq!(pkg, None, "lowercase member must not get a declared_pkg");
 }
@@ -199,7 +199,7 @@ fn scope_uppercase_on_declaration_uses_enclosing_class() {
     let src = "package demo\nclass Outer {\n    class Inner\n}";
     let idx = make_indexer_with(src, &uri);
     // `Inner` is declared on line 2 inside `Outer`
-    let (parent, pkg) = resolve_references_scope(&idx, &uri, 2, "Inner");
+    let (parent, pkg) = resolve_scope(&idx, &uri, 2, "Inner");
     assert_eq!(
         parent.as_deref(),
         Some("Outer"),

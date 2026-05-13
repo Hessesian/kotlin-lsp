@@ -1,4 +1,4 @@
-use super::word_byte_offsets;
+use crate::features::text_utils::word_byte_offsets;
 
 #[test]
 fn finds_single_word() {

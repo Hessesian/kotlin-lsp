@@ -7,7 +7,6 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{async_trait, Client, LanguageServer};
 
-use crate::indexer::resolution::WorkspaceRead;
 use crate::indexer::{workspace_cache_path, IgnoreMatcher, Indexer, ProgressReporter};
 use crate::semantic_tokens;
 use crate::workspace::{Config, Event};
@@ -116,23 +115,6 @@ impl Backend {
 
     pub(crate) async fn rg_context(&self) -> (Option<PathBuf>, Option<Arc<IgnoreMatcher>>) {
         self.indexer.rg_context()
-    }
-
-    /// Try `find_definition_qualified` with `rt.qualified`, falling back to `rt.leaf`
-    /// when the first lookup is empty and the two names differ.
-    pub(super) fn resolve_with_receiver_fallback<W: WorkspaceRead>(
-        &self,
-        workspace: &W,
-        word: &str,
-        rt: &crate::resolver::ReceiverType,
-        uri: &Url,
-    ) -> Vec<Location> {
-        let locs = workspace.find_definition_qualified(word, Some(&rt.qualified), uri);
-        if locs.is_empty() && rt.leaf != rt.qualified {
-            workspace.find_definition_qualified(word, Some(&rt.leaf), uri)
-        } else {
-            locs
-        }
     }
 
     fn detect_snippet_support(params: &InitializeParams) -> bool {

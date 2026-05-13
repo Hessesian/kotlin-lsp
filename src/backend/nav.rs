@@ -1,30 +1,9 @@
 use super::cursor::CursorContext;
 use super::Backend;
-use crate::indexer::resolution::WorkspaceRead;
-use crate::parser::parse_by_extension;
+use crate::features::definition as def;
+use crate::features::implementation as imp;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
-
-fn locs_to_response(locs: Vec<Location>) -> GotoDefinitionResponse {
-    match locs.len() {
-        1 => {
-            GotoDefinitionResponse::Scalar(locs.into_iter().next().expect("len == 1 by match arm"))
-        }
-        _ => GotoDefinitionResponse::Array(locs),
-    }
-}
-
-/// Converts a possibly-empty location list into an optional LSP response.
-fn locs_to_opt_response(locs: Vec<Location>) -> Option<GotoDefinitionResponse> {
-    match locs.len() {
-        0 => None,
-        1 => Some(GotoDefinitionResponse::Scalar(
-            locs.into_iter().next().expect("len == 1 by match arm"),
-        )),
-        _ => Some(GotoDefinitionResponse::Array(locs)),
-    }
-}
-
 impl Backend {
     pub(super) async fn goto_definition_impl(
         &self,
@@ -33,87 +12,12 @@ impl Backend {
         let pp = params.text_document_position_params;
         let uri = &pp.text_document.uri;
         let position = pp.position;
-        let workspace = self.indexer.as_ref();
 
         let Some(ctx) = CursorContext::build(&self.indexer, uri, position) else {
             return Ok(None);
         };
 
-        // Special case: `this` keyword — navigate to the enclosing class definition.
-        if ctx.qualifier.is_none() && ctx.word == "this" {
-            if let Some(class_name) = workspace.enclosing_class_at(uri, position.line) {
-                let locs = workspace.find_definition_qualified(&class_name, None, uri);
-                if !locs.is_empty() {
-                    return Ok(Some(locs_to_response(locs)));
-                }
-            }
-            return Ok(None);
-        }
-
-        // Special case: `super` keyword — navigate to the enclosing class's first supertype.
-        if ctx.qualifier.is_none() && ctx.word == "super" {
-            if let Some(result) = self.goto_super_class(workspace, uri, position.line).await {
-                return Ok(Some(result));
-            }
-            return Ok(None);
-        }
-
-        // Special case: `super.method(...)` — resolve `method` in the parent class.
-        if ctx.qualifier.as_deref() == Some("super") {
-            if let Some(result) = self
-                .goto_super_method(workspace, uri, position.line, &ctx.word)
-                .await
-            {
-                return Ok(Some(result));
-            }
-            return Ok(None);
-        }
-
-        // `it` / named lambda parameter — resolve to the element/receiver type class.
-        if ctx.qualifier.is_none() {
-            if let Some(ref rt) = ctx.contextual {
-                let lookup = rt.leaf.as_str();
-                let locs = workspace.find_definition_qualified(lookup, None, uri);
-                if !locs.is_empty() {
-                    return Ok(Some(locs_to_response(locs)));
-                }
-            }
-            // Lambda parameter with failed type inference — jump to `{ name -> }`.
-            if let Some(loc) = ctx.lambda_decl.as_ref() {
-                return Ok(Some(GotoDefinitionResponse::Scalar(loc.clone())));
-            }
-        }
-
-        // `this.field` / `it.field` — use the already-resolved contextual receiver
-        // so lookup finds the member in the correct class.
-        if ctx.qualifier.is_some() {
-            if let Some(ref rt) = ctx.contextual {
-                let locs = self.resolve_with_receiver_fallback(workspace, &ctx.word, rt, uri);
-                if !locs.is_empty() {
-                    return Ok(Some(locs_to_response(locs)));
-                }
-            }
-        }
-
-        let locs = workspace.find_definition_qualified(&ctx.word, ctx.qualifier.as_deref(), uri);
-        if !locs.is_empty() {
-            return Ok(locs_to_opt_response(locs));
-        }
-
-        // Index miss (symbol not indexed or indexing in progress) → rg fallback.
-        // Use effective_rg_root so searches use the open file's project root
-        // when workspace_root points to a different project (e.g. android vs ios).
-        let file_path = uri.to_file_path().ok();
-        let (workspace_root, matcher) = self.rg_context().await;
-        let root_opt =
-            crate::rg::effective_rg_root(workspace_root.as_deref(), file_path.as_deref());
-        let name_clone = ctx.word.clone();
-        let rg_locs = tokio::task::spawn_blocking(move || {
-            crate::rg::rg_find_definition(&name_clone, root_opt.as_deref(), matcher.as_deref())
-        })
-        .await
-        .unwrap_or_default();
-        Ok(locs_to_opt_response(rg_locs))
+        Ok(def::find_definition(&ctx, &*self.indexer, uri, position).await)
     }
 
     pub(super) async fn goto_implementation_impl(
@@ -128,153 +32,6 @@ impl Backend {
             return Ok(None);
         };
 
-        // Direct subtypes from the index.
-        let mut locs: Vec<Location> = self.indexer.subtypes_of(&word);
-
-        // If index is empty for this symbol (cold start), try rg-based heuristic
-        // to find implementors quickly to avoid client timeouts in large projects.
-        if locs.is_empty() {
-            let file_path = uri.to_file_path().ok();
-            let (workspace_root, matcher) = self.rg_context().await;
-            let root_opt =
-                crate::rg::effective_rg_root(workspace_root.as_deref(), file_path.as_deref());
-            let word_clone = word.clone();
-            let rg_impls = tokio::task::spawn_blocking(move || {
-                crate::rg::rg_find_implementors(
-                    &word_clone,
-                    root_opt.as_deref(),
-                    matcher.as_deref(),
-                )
-            })
-            .await
-            .unwrap_or_default();
-            if !rg_impls.is_empty() {
-                // Return early with rg results.
-                return Ok(locs_to_opt_response(rg_impls));
-            }
-        }
-
-        // Also collect transitive subtypes (BFS, depth-limited).
-        let mut queue: Vec<String> = locs
-            .iter()
-            .filter_map(|loc| {
-                let data = self.indexer.file_data_for(loc.uri.as_str())?;
-                data.symbols
-                    .iter()
-                    .find(|s| s.selection_range == loc.range)
-                    .map(|s| s.name.clone())
-            })
-            .collect();
-        let mut visited = vec![word.clone()];
-        while let Some(name) = queue.pop() {
-            if visited.contains(&name) {
-                continue;
-            }
-            visited.push(name.clone());
-            for loc in self.indexer.subtypes_of(&name) {
-                if !locs
-                    .iter()
-                    .any(|l| l.uri == loc.uri && l.range == loc.range)
-                {
-                    if let Some(data) = self.indexer.file_data_for(loc.uri.as_str()) {
-                        if let Some(sym) =
-                            data.symbols.iter().find(|s| s.selection_range == loc.range)
-                        {
-                            queue.push(sym.name.clone());
-                        }
-                    }
-                    locs.push(loc);
-                }
-            }
-        }
-
-        Ok(locs_to_opt_response(locs))
-    }
-
-    /// Collect the parent class names for the class enclosing `row` in `uri`.
-    pub(super) fn super_names_at<W: WorkspaceRead>(
-        &self,
-        workspace: &W,
-        uri: &Url,
-        row: u32,
-    ) -> Vec<String> {
-        let Some(class_name) = workspace.enclosing_class_at(uri, row) else {
-            return vec![];
-        };
-        for loc in workspace.get_definitions(&class_name).unwrap_or_default() {
-            let Some(file) = workspace.get_file_data(loc.uri.as_str()) else {
-                continue;
-            };
-            let names: Vec<String> = file
-                .supers
-                .iter()
-                .filter(|(line, _, _)| *line == loc.range.start.line)
-                .map(|(_, name, _)| name.clone())
-                .collect();
-            if !names.is_empty() {
-                return names;
-            }
-        }
-        if let Some(lines) = workspace.mem_lines_for(uri.as_str()) {
-            let content = lines.join("\n");
-            let names: Vec<String> = parse_by_extension(uri.path(), &content)
-                .supers
-                .into_iter()
-                .map(|(_, name, _)| name)
-                .collect();
-            if !names.is_empty() {
-                return names;
-            }
-        }
-        vec![]
-    }
-
-    pub(super) async fn rg_resolve(&self, uri: &Url, name: &str) -> Vec<Location> {
-        let name_clone = name.to_string();
-        let file_path = uri.to_file_path().ok();
-        let (workspace_root, matcher) = self.rg_context().await;
-        let root_opt =
-            crate::rg::effective_rg_root(workspace_root.as_deref(), file_path.as_deref());
-        tokio::task::spawn_blocking(move || {
-            crate::rg::rg_find_definition(&name_clone, root_opt.as_deref(), matcher.as_deref())
-        })
-        .await
-        .unwrap_or_default()
-    }
-
-    pub(super) async fn goto_super_class<W: WorkspaceRead>(
-        &self,
-        workspace: &W,
-        uri: &Url,
-        row: u32,
-    ) -> Option<GotoDefinitionResponse> {
-        for super_name in &self.super_names_at(workspace, uri, row) {
-            let locs = workspace.find_definition_qualified(super_name, None, uri);
-            if !locs.is_empty() {
-                return Some(locs_to_response(locs));
-            }
-            let rg_locs = self.rg_resolve(uri, super_name).await;
-            if !rg_locs.is_empty() {
-                return Some(locs_to_response(rg_locs));
-            }
-        }
-        None
-    }
-
-    pub(super) async fn goto_super_method<W: WorkspaceRead>(
-        &self,
-        workspace: &W,
-        uri: &Url,
-        row: u32,
-        method: &str,
-    ) -> Option<GotoDefinitionResponse> {
-        // resolve_qualified already handles root=="super" via resolve_from_class_hierarchy.
-        let locs = workspace.find_definition_qualified(method, Some("super"), uri);
-        if !locs.is_empty() {
-            return Some(locs_to_response(locs));
-        }
-        // Method not found in indexed hierarchy (e.g. Android SDK parent).
-        // Fall back to navigating to the parent class itself.
-        self.goto_super_class(workspace, uri, row).await
+        Ok(imp::find_implementation(&word, &*self.indexer, uri).await)
     }
 }

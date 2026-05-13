@@ -465,3 +465,7 @@ pub(crate) const KIND_KW_ENUM: &str = "enum";
 pub(crate) const KIND_KW_VAL: &str = "val";
 pub(crate) const KIND_BINDING_PATTERN_KIND: &str = "binding_pattern_kind";
 pub(crate) const KIND_PREFIX_EXPR: &str = "prefix_expression";
+
+// ─── Comment kinds ────────────────────────────────────────────────────────────
+pub(crate) const KIND_LINE_COMMENT: &str = "line_comment";
+pub(crate) const KIND_MULTILINE_COMMENT: &str = "multiline_comment";

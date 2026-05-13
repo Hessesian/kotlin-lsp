@@ -1,6 +1,5 @@
 use super::rename::whole_word_replace_file;
 use super::Backend;
-use crate::indexer::resolution::WorkspaceRead;
 use crate::StrExt;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
@@ -140,27 +139,13 @@ impl Backend {
         let snippets = self
             .snippet_support
             .load(std::sync::atomic::Ordering::Relaxed);
-        let workspace = self.indexer.as_ref();
 
-        let (mut items, hit_cap) = WorkspaceRead::completions(workspace, uri, position, snippets);
-        let still_indexing = workspace.is_indexing_in_progress();
-        if items.is_empty() && !still_indexing {
-            return Ok(None);
-        }
-        // Pre-select the best match so the editor highlights it without requiring
-        // an extra keystroke (mirrors RA's preselect behaviour).
-        if let Some(first) = items.first_mut() {
-            first.preselect = Some(true);
-        }
-        // When hit_cap is true the list was truncated — tell the client to
-        // re-request completions on every keystroke so the list stays tight
-        // as the user types more characters.
-        // Also mark incomplete while the workspace is still being indexed so
-        // the client keeps re-querying instead of caching a partial result.
-        Ok(Some(CompletionResponse::List(CompletionList {
-            is_incomplete: hit_cap || still_indexing,
-            items,
-        })))
+        Ok(crate::features::completion::compute_completions(
+            uri,
+            position,
+            snippets,
+            self.indexer.as_ref(),
+        ))
     }
 
     pub(super) async fn code_action_impl(

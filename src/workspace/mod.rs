@@ -27,6 +27,8 @@ pub(crate) mod contract;
 pub(crate) mod document_handler;
 pub(crate) mod event;
 pub(crate) mod file_change_handler;
+#[allow(dead_code)]
+pub(crate) mod handle;
 pub(crate) mod phase;
 pub(crate) mod scan_handler;
 pub(crate) mod scan_queue;

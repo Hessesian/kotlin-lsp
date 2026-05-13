@@ -1,6 +1,7 @@
 #![warn(unreachable_pub)]
 mod backend;
 mod cli;
+mod features;
 mod indexer;
 mod inlay_hints;
 mod language;

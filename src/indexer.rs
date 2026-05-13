@@ -15,6 +15,9 @@ pub(crate) use crate::rg::IgnoreMatcher;
 
 mod doc;
 
+mod cst_folding;
+pub(crate) use self::cst_folding::cst_folding_ranges;
+
 mod infer;
 pub(crate) mod resolution;
 // Re-export pure helpers from submodules so existing callers within this file

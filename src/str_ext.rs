@@ -22,10 +22,6 @@ pub(crate) trait StrExt {
     /// `"com.example.Foo"` → `"Foo"`, `"Foo"` → `"Foo"`.
     fn last_segment(&self) -> &str;
 
-    /// Returns the trailing identifier at the end of `self` — all trailing chars satisfying `is_id_char`.
-    /// `"foo.barBaz"` → `"barBaz"`;  `"foo.bar("` → `""`.
-    fn last_ident_in(&self) -> &str;
-
     /// Returns the declaration-keyword prefix of `self` — strips leading whitespace and annotations.
     fn decl_prefix(&self) -> &str;
 
@@ -65,17 +61,6 @@ impl StrExt for str {
     #[inline]
     fn last_segment(&self) -> &str {
         self.rsplit('.').next().unwrap_or(self)
-    }
-
-    #[inline]
-    fn last_ident_in(&self) -> &str {
-        let ident_bytes: usize = self
-            .chars()
-            .rev()
-            .take_while(|&c| is_id_char(c))
-            .map(|c| c.len_utf8())
-            .sum();
-        &self[self.len() - ident_bytes..]
     }
 
     #[inline]

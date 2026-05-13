@@ -1,6 +1,6 @@
 use super::actions::is_non_call_keyword;
-use super::helpers::resolve_references_scope;
 use super::Backend;
+use crate::features::references::resolve_scope;
 use crate::indexer::cst_cursor_is_local_var;
 #[cfg(test)]
 use crate::indexer::live_tree::utf16_col_to_byte;
@@ -286,7 +286,7 @@ impl Backend {
         let (parent_class, declared_package, scope_limited_to_current_file) =
             if name.starts_with_uppercase() {
                 let (parent_class, declared_package) =
-                    resolve_references_scope(&self.indexer, uri, pos.line, &name);
+                    resolve_scope(self.indexer.as_ref(), uri, pos.line, &name);
                 (parent_class, declared_package, false)
             } else {
                 (None, None, true)

@@ -144,14 +144,17 @@ pub(crate) trait WorkspaceRead: IndexRead {
         self.resolve_locations(name, qualifier, from_uri, true)
     }
 
+    #[allow(dead_code)]
     fn enclosing_class_at(&self, uri: &Url, row: u32) -> Option<String> {
         self.as_indexer()?.enclosing_class_at(uri, row)
     }
 
+    #[allow(dead_code)]
     fn mem_lines_for(&self, uri: &str) -> Option<Arc<Vec<String>>> {
         self.as_indexer()?.mem_lines_for(uri)
     }
 
+    #[allow(dead_code)]
     fn completions(
         &self,
         uri: &Url,
@@ -164,6 +167,7 @@ pub(crate) trait WorkspaceRead: IndexRead {
         indexer.completions(uri, position, snippets)
     }
 
+    #[allow(dead_code)]
     fn is_indexing_in_progress(&self) -> bool {
         self.as_indexer()
             .is_some_and(|indexer| indexer.indexing_in_progress.load(Ordering::Acquire))

@@ -19,7 +19,7 @@ use tower_lsp::lsp_types::SymbolKind;
 /// fun foo(x: Int): String
 /// ```
 /// ```
-pub(super) fn format_symbol_hover(info: &ResolvedSymbol, uri_path: &str) -> String {
+pub(crate) fn format_symbol_hover(info: &ResolvedSymbol, uri_path: &str) -> String {
     let lang = lang_str(uri_path);
     let sig = info.signature.as_str();
 
@@ -55,7 +55,7 @@ pub(super) fn format_symbol_hover(info: &ResolvedSymbol, uri_path: &str) -> Stri
 ///
 /// `type_sig_md` — the synthesized declaration line, e.g. `"val it: AccountType"`.
 /// `type_detail` — optional hover markdown for the resolved type symbol itself.
-pub(super) fn format_contextual_hover(
+pub(crate) fn format_contextual_hover(
     type_sig_md: &str,
     uri_path: &str,
     type_detail: Option<&str>,
