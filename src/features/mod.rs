@@ -18,4 +18,5 @@ pub(crate) mod definition;
 pub(crate) mod implementation;
 pub(crate) mod references;
 pub(crate) mod traits;
+#[allow(dead_code)]
 mod traits_impl;

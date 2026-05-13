@@ -32,10 +32,7 @@ impl SymbolIndex for Indexer {
     }
 
     fn subtypes_of(&self, name: &str) -> Vec<Location> {
-        self.subtypes
-            .get(name)
-            .map(|v| v.clone())
-            .unwrap_or_default()
+        self.subtypes_of(name)
     }
 
     fn file_data_for(&self, uri: &str) -> Option<Arc<FileData>> {

@@ -144,6 +144,7 @@ pub(crate) trait WorkspaceRead: IndexRead {
         self.resolve_locations(name, qualifier, from_uri, true)
     }
 
+    #[allow(dead_code)]
     fn enclosing_class_at(&self, uri: &Url, row: u32) -> Option<String> {
         self.as_indexer()?.enclosing_class_at(uri, row)
     }
