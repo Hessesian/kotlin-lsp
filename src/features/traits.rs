@@ -45,7 +45,6 @@ pub(crate) trait SymbolIndex {
 
     /// Iterate all indexed files, calling `f(uri_str, file_data)`.
     /// Return `false` from `f` to stop iteration early.
-    #[allow(dead_code)]
     fn for_each_indexed_file(&self, f: &mut dyn FnMut(&str, &Arc<FileData>) -> bool);
 
     /// Name of the innermost class/object enclosing `row` in `uri`, if any.
