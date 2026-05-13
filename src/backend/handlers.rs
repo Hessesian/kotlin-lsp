@@ -1,7 +1,6 @@
 use super::actions::is_non_call_keyword;
 use super::cursor::CursorContext;
 use super::format::{format_contextual_hover, format_symbol_hover};
-use super::helpers::resolve_references_scope;
 use super::Backend;
 use crate::indexer::resolution::{
     enrich_at_location, resolve_symbol_info, ResolveOptions, SubstitutionContext, WorkspaceRead,
@@ -143,90 +142,22 @@ impl Backend {
         &self,
         params: ReferenceParams,
     ) -> Result<Option<Vec<Location>>> {
-        let Some(search) = self.reference_search(&params) else {
+        let uri = &params.text_document_position.text_document.uri;
+        let position = params.text_document_position.position;
+        let Some((name, _)) = self.indexer.word_and_qualifier_at(uri, position) else {
             return Ok(None);
         };
 
-        let mut locations = self.rg_reference_locations(&search).await;
-        self.filter_library_reference_locations(&mut locations);
-        self.add_current_file_reference_locations(&search.uri, &search.name, &mut locations);
+        let locations = crate::features::references::find_references(
+            &name,
+            uri,
+            position.line,
+            params.context.include_declaration,
+            &*self.indexer,
+        )
+        .await;
 
         Ok((!locations.is_empty()).then_some(locations))
-    }
-
-    fn reference_search(&self, params: &ReferenceParams) -> Option<ReferenceSearch> {
-        let uri = &params.text_document_position.text_document.uri;
-        let position = params.text_document_position.position;
-        let include_decl = params.context.include_declaration;
-        let (name, _) = self.indexer.word_and_qualifier_at(uri, position)?;
-        let (parent_class, declared_pkg) =
-            resolve_references_scope(&self.indexer, uri, position.line, &name);
-        let decl_files = self.declaration_files_for_reference(&name, parent_class.as_deref());
-        Some(ReferenceSearch {
-            uri: uri.clone(),
-            name,
-            include_decl,
-            parent_class,
-            declared_pkg,
-            decl_files,
-        })
-    }
-
-    fn declaration_files_for_reference(
-        &self,
-        name: &str,
-        parent_class: Option<&str>,
-    ) -> Vec<String> {
-        self.indexer
-            .definition_locations(name)
-            .into_iter()
-            .filter(|location| {
-                reference_matches_parent_class(&self.indexer, location, parent_class)
-            })
-            .filter_map(|location| location.uri.to_file_path().ok())
-            .filter_map(|path| path.to_str().map(|path| path.to_owned()))
-            .collect()
-    }
-
-    async fn rg_reference_locations(&self, search: &ReferenceSearch) -> Vec<Location> {
-        let (workspace_root, ignore_matcher) = self.rg_context().await;
-        let request = search.clone();
-        tokio::task::spawn_blocking(move || {
-            let rg_request = crate::rg::RgSearchRequest::new(
-                &request.name,
-                request.parent_class.as_deref(),
-                request.declared_pkg.as_deref(),
-                workspace_root.as_deref(),
-                request.include_decl,
-                &request.uri,
-                &request.decl_files,
-            );
-            crate::rg::rg_find_references(&rg_request, ignore_matcher.as_deref())
-        })
-        .await
-        .unwrap_or_default()
-    }
-
-    fn filter_library_reference_locations(&self, locations: &mut Vec<Location>) {
-        locations.retain(|location| !self.indexer.is_library_uri(&location.uri));
-    }
-
-    fn add_current_file_reference_locations(
-        &self,
-        uri: &Url,
-        name: &str,
-        locations: &mut Vec<Location>,
-    ) {
-        let Some(lines) = self.indexer.mem_lines_for(uri.as_str()) else {
-            return;
-        };
-        for (line_idx, line) in lines.iter().enumerate() {
-            let line_number = line_idx as u32;
-            if has_reference_line(locations, uri, line_number) {
-                continue;
-            }
-            append_line_reference_locations(uri, name, line_number, line, locations);
-        }
     }
 
     pub(super) async fn document_symbol_impl(
@@ -799,85 +730,6 @@ fn rg_workspace_symbol(name: String, location: Location) -> SymbolInformation {
         location,
         container_name: Some("rg fallback".to_string()),
     }
-}
-
-#[derive(Clone)]
-struct ReferenceSearch {
-    uri: Url,
-    name: String,
-    include_decl: bool,
-    parent_class: Option<String>,
-    declared_pkg: Option<String>,
-    decl_files: Vec<String>,
-}
-
-fn reference_matches_parent_class(
-    indexer: &crate::indexer::Indexer,
-    location: &Location,
-    parent_class: Option<&str>,
-) -> bool {
-    let Some(parent_class) = parent_class else {
-        return true;
-    };
-    indexer
-        .enclosing_class_at(&location.uri, location.range.start.line)
-        .as_deref()
-        == Some(parent_class)
-}
-
-fn has_reference_line(locations: &[Location], uri: &Url, line_number: u32) -> bool {
-    locations
-        .iter()
-        .any(|location| location.uri == *uri && location.range.start.line == line_number)
-}
-
-fn append_line_reference_locations(
-    uri: &Url,
-    name: &str,
-    line_number: u32,
-    line: &str,
-    locations: &mut Vec<Location>,
-) {
-    for location in line_reference_locations(uri, name, line_number, line) {
-        if has_reference_start(locations, &location) {
-            continue;
-        }
-        locations.push(location);
-    }
-}
-
-fn line_reference_locations(uri: &Url, name: &str, line_number: u32, line: &str) -> Vec<Location> {
-    word_byte_offsets(line, name)
-        .map(|offset| reference_location(uri, name, line_number, line, offset))
-        .collect()
-}
-
-fn reference_location(
-    uri: &Url,
-    name: &str,
-    line_number: u32,
-    line: &str,
-    offset: usize,
-) -> Location {
-    let start = utf16_column(&line[..offset]);
-    let end = start + utf16_column(name);
-    Location {
-        uri: uri.clone(),
-        range: Range::new(
-            Position::new(line_number, start),
-            Position::new(line_number, end),
-        ),
-    }
-}
-
-fn utf16_column(text: &str) -> u32 {
-    text.chars().map(|ch| ch.len_utf16() as u32).sum()
-}
-
-fn has_reference_start(locations: &[Location], candidate: &Location) -> bool {
-    locations.iter().any(|location| {
-        location.uri == candidate.uri && location.range.start == candidate.range.start
-    })
 }
 
 fn hover_binding_keyword(uri: &Url) -> &'static str {

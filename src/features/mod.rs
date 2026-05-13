@@ -16,5 +16,6 @@
 pub(crate) mod cursor;
 pub(crate) mod definition;
 pub(crate) mod implementation;
+pub(crate) mod references;
 pub(crate) mod traits;
 mod traits_impl;
