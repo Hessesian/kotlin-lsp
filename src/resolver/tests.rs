@@ -1804,6 +1804,7 @@ fn receiver_type_simple() {
     assert_eq!(rt.qualified, "MyClass");
     assert_eq!(rt.outer, "MyClass");
     assert_eq!(rt.leaf, "MyClass");
+    assert!(!rt.nullable);
 }
 
 #[test]
@@ -1813,6 +1814,27 @@ fn receiver_type_with_generics() {
     assert_eq!(rt.qualified, "Flow");
     assert_eq!(rt.outer, "Flow");
     assert_eq!(rt.leaf, "Flow");
+    assert!(!rt.nullable);
+}
+
+#[test]
+fn receiver_type_nullable_simple() {
+    let rt = infer::ReceiverType::from_raw("User?".to_string());
+    assert_eq!(rt.raw, "User?");
+    assert_eq!(rt.qualified, "User");
+    assert_eq!(rt.outer, "User");
+    assert_eq!(rt.leaf, "User");
+    assert!(rt.nullable);
+}
+
+#[test]
+fn receiver_type_nullable_generic() {
+    let rt = infer::ReceiverType::from_raw("StateFlow<UiState>?".to_string());
+    assert_eq!(rt.raw, "StateFlow<UiState>?");
+    assert_eq!(rt.qualified, "StateFlow");
+    assert_eq!(rt.outer, "StateFlow");
+    assert_eq!(rt.leaf, "StateFlow");
+    assert!(rt.nullable);
 }
 
 #[test]
@@ -1822,6 +1844,7 @@ fn receiver_type_dotted_nested() {
     assert_eq!(rt.qualified, "Outer.Inner");
     assert_eq!(rt.outer, "Outer");
     assert_eq!(rt.leaf, "Inner");
+    assert!(!rt.nullable);
 }
 
 #[test]
@@ -1831,6 +1854,7 @@ fn receiver_type_dotted_with_generics() {
     assert_eq!(rt.qualified, "Outer.Inner");
     assert_eq!(rt.outer, "Outer");
     assert_eq!(rt.leaf, "Inner");
+    assert!(!rt.nullable);
 }
 
 #[test]
@@ -1839,6 +1863,7 @@ fn receiver_type_generic_with_params() {
     assert_eq!(rt.qualified, "OneYearOlderInteractor");
     assert_eq!(rt.outer, "OneYearOlderInteractor");
     assert_eq!(rt.leaf, "OneYearOlderInteractor");
+    assert!(!rt.nullable);
 }
 
 #[test]
