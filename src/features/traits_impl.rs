@@ -45,11 +45,7 @@ impl SymbolIndex for Indexer {
     }
 
     fn for_each_indexed_file(&self, f: &mut dyn FnMut(&str, &Arc<FileData>) -> bool) {
-        for entry in self.files.iter() {
-            if !f(entry.key(), entry.value()) {
-                break;
-            }
-        }
+        self.for_each_indexed_file(f);
     }
 
     fn enclosing_class_at(&self, uri: &Url, row: u32) -> Option<String> {

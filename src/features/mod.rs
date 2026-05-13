@@ -22,9 +22,8 @@ pub(crate) mod hover;
 pub(crate) mod implementation;
 pub(crate) mod references;
 pub(crate) mod signature_help;
-#[allow(dead_code)]
 pub(crate) mod symbols;
 pub(crate) mod text_utils;
 pub(crate) mod traits;
-#[allow(dead_code)]
 mod traits_impl;
+pub(crate) mod workspace_symbols;

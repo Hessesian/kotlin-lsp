@@ -21,7 +21,6 @@ use crate::types::{FileData, SymbolEntry};
 // ─── SymbolIndex ─────────────────────────────────────────────────────────────
 
 /// Symbol lookup — find, resolve, and navigate across the indexed codebase.
-#[allow(dead_code)]
 pub(crate) trait SymbolIndex {
     /// Find definition locations for `name`, using `qualifier` and `from_uri`
     /// to narrow the search to imported/accessible symbols.
@@ -42,6 +41,7 @@ pub(crate) trait SymbolIndex {
     fn file_data_for(&self, uri: &str) -> Option<Arc<FileData>>;
 
     /// All top-level symbols indexed for `uri`.
+    #[allow(dead_code)]
     fn file_symbols(&self, uri: &Url) -> Vec<SymbolEntry>;
 
     /// Iterate all indexed files, calling `f(uri_str, file_data)`.
@@ -55,29 +55,30 @@ pub(crate) trait SymbolIndex {
 // ─── DocumentAccess ──────────────────────────────────────────────────────────
 
 /// Document text and cursor-position access.
-#[allow(dead_code)]
 pub(crate) trait DocumentAccess {
     /// Lines from the in-memory caches only (no disk I/O).
     /// Prefers live (unsaved) buffer; falls back to indexed snapshot.
     fn mem_lines_for(&self, uri: &str) -> Option<Arc<Vec<String>>>;
 
     /// Lines for `uri`, including disk fallback if not live.
+    #[allow(dead_code)]
     fn lines_for(&self, uri: &Url) -> Option<Arc<Vec<String>>>;
 
     /// Extract the identifier and optional dot-qualifier at `pos`.
     fn word_and_qualifier_at(&self, uri: &Url, pos: Position) -> Option<(String, Option<String>)>;
 
     /// Extract just the identifier token at `pos`.
+    #[allow(dead_code)]
     fn word_at(&self, uri: &Url, pos: Position) -> Option<String>;
 
     /// Extract the identifier token and its source range at `pos`.
+    #[allow(dead_code)]
     fn word_and_range_at(&self, uri: &Url, pos: Position) -> Option<(String, Range)>;
 }
 
 // ─── ScopeQuery ──────────────────────────────────────────────────────────────
 
 /// Import and package scope resolution, plus library classification.
-#[allow(dead_code)]
 pub(crate) trait ScopeQuery {
     /// Returns `true` if `uri` is a library/stdlib file (not workspace source).
     fn is_library_uri(&self, uri: &Url) -> bool;
@@ -105,7 +106,6 @@ pub(crate) trait ScopeQuery {
 // ─── SearchAccess ────────────────────────────────────────────────────────────
 
 /// Ripgrep-based fallback search context.
-#[allow(dead_code)]
 pub(crate) trait SearchAccess {
     /// Returns the (workspace_root, ignore_matcher) tuple used to scope `rg` calls.
     fn rg_context(&self) -> (Option<PathBuf>, Option<Arc<IgnoreMatcher>>);
@@ -114,7 +114,6 @@ pub(crate) trait SearchAccess {
 // ─── CompletionIndex ─────────────────────────────────────────────────────────
 
 /// Completion pipeline — already fully orchestrated inside the Indexer.
-#[allow(dead_code)]
 pub(crate) trait CompletionIndex {
     /// Run the full completion pipeline for `uri` at `position`.
     fn completions(
@@ -131,7 +130,6 @@ pub(crate) trait CompletionIndex {
 // ─── SignatureIndex ───────────────────────────────────────────────────────────
 
 /// Function signature lookup with optional receiver type matching.
-#[allow(dead_code)]
 pub(crate) trait SignatureIndex {
     /// Signature text for `name`, optionally narrowed to `receiver`'s type.
     fn find_fun_signature_with_receiver(
@@ -149,7 +147,6 @@ pub(crate) trait SignatureIndex {
 /// Kept separate from the index-based traits because it requires live-tree state
 /// that those traits do not; mixing them would force test stubs to provide CST
 /// infrastructure unnecessarily.
-#[allow(dead_code)]
 pub(crate) trait LiveTreeAccess {
     /// Extract the call-site name, qualifier, and active parameter index
     /// at `pos` using the live parse tree for `uri`.

@@ -572,46 +572,11 @@ impl LanguageServer for Backend {
 
     // ── completionItem/resolve ────────────────────────────────────────────────
 
-    async fn completion_resolve(&self, mut item: CompletionItem) -> Result<CompletionItem> {
-        use crate::indexer::resolution::{enrich_at_line, ResolveOptions, SubstitutionContext};
-
-        if let Some(ref data) = item.data {
-            if let (Some(uri), Some(line)) = (
-                data.get("u").and_then(|v| v.as_str()),
-                data.get("l").and_then(|v| v.as_u64()),
-            ) {
-                let col = data.get("c").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                let calling_uri = data.get("cu").and_then(|v| v.as_str());
-
-                let subst_ctx = match calling_uri {
-                    Some(cu) if cu != uri => SubstitutionContext::CrossFile {
-                        calling_uri: cu,
-                        cursor_line: None,
-                    },
-                    _ => SubstitutionContext::None,
-                };
-
-                if let Some(info) = enrich_at_line(
-                    self.indexer.as_ref(),
-                    uri,
-                    line as u32,
-                    col,
-                    subst_ctx,
-                    &ResolveOptions::completion(),
-                ) {
-                    if !info.signature.is_empty() {
-                        item.detail = Some(info.signature);
-                    }
-                    if !info.doc.is_empty() {
-                        item.documentation = Some(Documentation::MarkupContent(MarkupContent {
-                            kind: MarkupKind::Markdown,
-                            value: info.doc,
-                        }));
-                    }
-                }
-            }
-        }
-        Ok(item)
+    async fn completion_resolve(&self, item: CompletionItem) -> Result<CompletionItem> {
+        Ok(crate::features::completion::resolve_completion_item(
+            item,
+            self.indexer.as_ref(),
+        ))
     }
 
     // ── textDocument/hover ───────────────────────────────────────────────────
