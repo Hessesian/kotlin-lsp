@@ -686,7 +686,7 @@ impl Indexer {
         if let Some(guard) = guard_opt {
             if !result.aborted {
                 Arc::clone(&self)
-                    .finalize_workspace_scan(result, guard)
+                    .finalize_workspace_scan(result, guard, Arc::clone(&reporter))
                     .await;
             }
         }
@@ -705,7 +705,7 @@ impl Indexer {
         if let Some(guard) = guard_opt {
             if !result.aborted {
                 Arc::clone(&self)
-                    .finalize_workspace_scan(result, guard)
+                    .finalize_workspace_scan(result, guard, Arc::clone(&reporter))
                     .await;
             }
         }
@@ -807,7 +807,7 @@ impl Indexer {
         if let Some(guard) = guard_opt {
             if !result.aborted {
                 Arc::clone(&self)
-                    .finalize_workspace_scan(result, guard)
+                    .finalize_workspace_scan(result, guard, Arc::clone(&reporter))
                     .await;
             }
         }
@@ -875,19 +875,22 @@ impl Indexer {
             }
             if let Some(guard) = guard_opt {
                 Arc::clone(&self)
-                    .finalize_workspace_scan(result, guard)
+                    .finalize_workspace_scan(result, guard, Arc::clone(&reporter))
                     .await;
             }
             // Loop: drain any request that arrived while this queued reindex was running.
         }
     }
 
-    /// Apply scan results, index source paths, and save the cache — while keeping
-    /// `indexing_in_progress` true for the full duration via `_guard`.
-    async fn finalize_workspace_scan(
+    /// Apply scan results, index source paths, and save the cache.
+    /// Clears `indexing_in_progress` BEFORE sending the progress-end notification
+    /// so that clients cannot observe `isIncomplete` in a completion response
+    /// that arrives after the `$/progress` end message.
+    async fn finalize_workspace_scan<R: ProgressReporter + 'static>(
         self: Arc<Self>,
         result: WorkspaceIndexResult,
-        _guard: IndexingGuard,
+        guard: IndexingGuard,
+        reporter: Arc<R>,
     ) {
         self.last_scan_complete
             .store(result.complete_scan, std::sync::atomic::Ordering::Release);
@@ -903,7 +906,12 @@ impl Indexer {
         } else {
             log::info!("Partial scan, nothing new parsed — skipping workspace cache save");
         }
-        // _guard dropped here → indexing_in_progress cleared
+        // Drop guard FIRST to clear indexing_in_progress, then notify the client.
+        // This ensures any request the client sends after the end notification
+        // (e.g. textDocument/completion) sees is_indexing_in_progress() == false.
+        drop(guard);
+        let token = NumberOrString::String("kotlin-lsp/indexing".into());
+        send_progress_end(&*reporter, &token, &result).await;
     }
 
     /// Core workspace indexing: file discovery → cache partition → concurrent parse.
@@ -995,7 +1003,6 @@ impl Indexer {
             parse_count,
             cache_hits,
         );
-        send_progress_end(&*reporter, &token, &result).await;
         write_indexing_done_status(
             root,
             result.stats.files_parsed,

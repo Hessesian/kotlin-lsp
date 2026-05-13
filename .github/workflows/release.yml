@@ -169,6 +169,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Publish to crates.io
-        run: cargo publish --no-verify
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          if curl -sf "https://crates.io/api/v1/crates/kotlin-lsp/${VERSION}" >/dev/null; then
+            echo "kotlin-lsp ${VERSION} already on crates.io — skipping publish"
+          else
+            cargo publish --no-verify
+          fi
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
