@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.14.0
+
+- **`sourceRoots` scoping for rg searches** — `rg`-based references, definitions, and symbol searches are now scoped to the configured `sourceRoots` entries from `workspace.json` (IntelliJ/Android Studio module source roots). Searches no longer scan generated code or build output directories when source roots are configured. All callers (Backend, CLI fast mode, resolver step-5, infer) use a single central `Indexer::rg_scope_for_path` path so scoping is consistent across the board. Fixes [#78](https://github.com/Hessesian/kotlin-lsp/issues/78).
+
 ## 0.13.0
 
 - **Zed extension** — `contrib/zed-extension` registers `kotlin-lsp` as a first-class Zed language server for Kotlin, Java, and Swift. Resolves the binary from `$PATH`; no symlinks or `binary.path` overrides required. Install locally with `zed --install-dev-extension contrib/zed-extension` or copy to `~/.config/zed/extensions/kotlin-lsp/`.
