@@ -47,18 +47,16 @@ impl Backend {
         params: DocumentSymbolParams,
     ) -> Result<Option<DocumentSymbolResponse>> {
         let uri = &params.text_document.uri;
-        // On-demand indexing: parse from disk when file not yet indexed.
-        if self.indexer.file_symbols(uri).is_empty() {
+        let mut symbols = self.indexer.file_symbols(uri);
+        if symbols.is_empty() {
             if let Ok(path) = uri.to_file_path() {
                 if let Ok(content) = std::fs::read_to_string(&path) {
                     self.indexer.index_content(uri, &content);
+                    symbols = self.indexer.file_symbols(uri);
                 }
             }
         }
-        Ok(crate::features::symbols::compute_document_symbols(
-            uri,
-            self.indexer.as_ref(),
-        ))
+        Ok(crate::features::symbols::compute_document_symbols(symbols))
     }
 
     pub(super) async fn inlay_hint_impl(

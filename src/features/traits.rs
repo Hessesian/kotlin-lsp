@@ -41,6 +41,7 @@ pub(crate) trait SymbolIndex {
     fn file_data_for(&self, uri: &str) -> Option<Arc<FileData>>;
 
     /// All top-level symbols indexed for `uri`.
+    #[allow(dead_code)]
     fn file_symbols(&self, uri: &Url) -> Vec<SymbolEntry>;
 
     /// Iterate all indexed files, calling `f(uri_str, file_data)`.

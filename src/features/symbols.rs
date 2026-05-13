@@ -1,21 +1,17 @@
 //! Document symbols feature — maps indexed `SymbolEntry` to LSP `DocumentSymbol`.
 
-use tower_lsp::lsp_types::{DocumentSymbol, DocumentSymbolResponse, Url};
+use tower_lsp::lsp_types::{DocumentSymbol, DocumentSymbolResponse};
 
 use crate::types::SymbolEntry;
 
-use super::traits::SymbolIndex;
-
-/// Build the LSP document symbols response for `uri`.
+/// Build the LSP document symbols response from a pre-fetched symbol list.
 ///
-/// Returns `None` when no symbols are indexed for the file.
-/// On-demand indexing (disk fallback) is handled by the backend adapter before
-/// this function is called.
+/// Returns `None` when `symbols` is empty.
+/// On-demand indexing (disk fallback) and symbol fetching are handled by the
+/// backend adapter before this function is called.
 pub(crate) fn compute_document_symbols(
-    uri: &Url,
-    index: &impl SymbolIndex,
+    symbols: Vec<SymbolEntry>,
 ) -> Option<DocumentSymbolResponse> {
-    let symbols = index.file_symbols(uri);
     if symbols.is_empty() {
         return None;
     }

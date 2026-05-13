@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, InsertTextFormat, SymbolKind, Url};
 
-use crate::features::completion::{DATA_CALLING_URI, DATA_COL, DATA_LINE, DATA_URI};
 use crate::indexer::Indexer;
 use crate::parser::parse_by_extension;
 use crate::stdlib::bare_completions;
@@ -14,6 +13,17 @@ use super::infer::{infer_receiver_type, ReceiverKind, ReceiverType};
 use super::{
     already_imported, ensure_file_data, fqns_for_name, resolve_symbol_no_rg, walk_hierarchy,
 };
+
+// ─── CompletionItem.data JSON keys ───────────────────────────────────────────
+
+/// Symbol definition URI.
+pub(crate) const DATA_URI: &str = "u";
+/// Symbol definition line (0-based).
+pub(crate) const DATA_LINE: &str = "l";
+/// Symbol definition UTF-16 column (0-based).
+pub(crate) const DATA_COL: &str = "c";
+/// Calling-site URI, present only for cross-file substitution context.
+pub(crate) const DATA_CALLING_URI: &str = "cu";
 
 // ─── match scoring ────────────────────────────────────────────────────────────
 

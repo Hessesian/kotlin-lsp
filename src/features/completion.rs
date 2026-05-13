@@ -4,7 +4,8 @@
 //!
 //! The completion pipeline writes a small JSON blob into `CompletionItem.data`
 //! so that `completionItem/resolve` can look up the full signature + doc comment.
-//! Use the `DATA_*` constants below on both the write and read side.
+//! The `DATA_*` constants are defined in `resolver::complete` (the write side)
+//! and re-exported here for use by `resolve_completion_item` (the read side).
 
 use tower_lsp::lsp_types::{
     CompletionItem, CompletionList, CompletionResponse, Documentation, MarkupContent, MarkupKind,
@@ -15,16 +16,8 @@ use crate::indexer::resolution::{enrich_at_line, IndexRead, ResolveOptions, Subs
 
 use super::traits::CompletionIndex;
 
-// ─── CompletionItem.data JSON keys ───────────────────────────────────────────
-
-/// Symbol definition URI.
-pub(crate) const DATA_URI: &str = "u";
-/// Symbol definition line (0-based).
-pub(crate) const DATA_LINE: &str = "l";
-/// Symbol definition UTF-16 column (0-based).
-pub(crate) const DATA_COL: &str = "c";
-/// Calling-site URI, present only for cross-file substitution context.
-pub(crate) const DATA_CALLING_URI: &str = "cu";
+// Re-export so callers only need to import from one place.
+pub(crate) use crate::resolver::complete::{DATA_CALLING_URI, DATA_COL, DATA_LINE, DATA_URI};
 
 /// Compute completions at `position` in `uri`.
 ///
