@@ -2198,3 +2198,71 @@ fn lambda_param_dotted_nested_class_chain() {
         "lambda param in dotted nested class chain should resolve to FamilyAccount, got: {result:?}"
     );
 }
+
+#[test]
+fn lambda_param_dotted_nested_class_chain_with_stdlib() {
+    // Same as above but with stdlib sources indexed (simulates post-indexing state)
+    let idx = Indexer::new();
+    let result_state_uri = uri("/ResultState.kt");
+    idx.index_content(
+        &result_state_uri,
+        concat!(
+            "package com.example\n",
+            "sealed class ResultState<out T> {\n",
+            "    data class Success<out T>(val value: T) : ResultState<T>()\n",
+            "}\n",
+        ),
+    );
+    let optional_uri = uri("/Optional.kt");
+    idx.index_content(
+        &optional_uri,
+        concat!(
+            "package com.example\n",
+            "class Optional<out T>(private val value: T?) {\n",
+            "    fun getOrNull(): T? = value\n",
+            "}\n",
+        ),
+    );
+    // Index stdlib scope functions — after full indexing these exist
+    let stdlib_uri = uri("/stdlib/Standard.kt");
+    idx.index_content(
+        &stdlib_uri,
+        concat!(
+            "package kotlin\n",
+            "public inline fun <T> T.also(block: (T) -> Unit): T { block(this); return this }\n",
+            "public inline fun <T> T.let(block: (T) -> T): T = block(this)\n",
+            "public inline fun <T, R> T.run(block: T.() -> R): R = block()\n",
+        ),
+    );
+    // Index kotlin.collections extensions — getOrNull might exist here too
+    let collections_uri = uri("/stdlib/Collections.kt");
+    idx.index_content(
+        &collections_uri,
+        concat!(
+            "package kotlin.collections\n",
+            "public fun <T> List<T>.getOrNull(index: Int): T? = if (index in indices) get(index) else null\n",
+        ),
+    );
+    let vm_uri = uri("/FamilyViewModel.kt");
+    idx.index_content(
+        &vm_uri,
+        concat!(
+            "package com.example\n",
+            "class FamilyAccount(val name: String)\n",
+            "class FamilyViewModel {\n",
+            "    private fun oneYearOlder(resultState: ResultState.Success<Optional<FamilyAccount>>) {\n",
+            "        resultState.value.getOrNull()?.also { familyAccount ->\n",
+            "            familyAccount.name\n",
+            "        }\n",
+            "    }\n",
+            "}\n",
+        ),
+    );
+    let col = "            ".len() as u32;
+    let result = idx.infer_lambda_param_type_at("familyAccount", &vm_uri, Position::new(5, col));
+    assert_eq!(
+        result.as_deref(),
+        Some("FamilyAccount"),
+        "with stdlib indexed, lambda param should still resolve to FamilyAccount, got: {result:?}"
+    );
+}

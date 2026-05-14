@@ -403,6 +403,13 @@ fn chain_with_type_subst(
     } else {
         first_concrete_type_arg_str(&intermediate_type_raw)?
     };
+    // We already resolved a concrete type through substitution — return it
+    // directly for the scope function's lambda param.  Calling
+    // `inferred_receiver_lambda_type` here would re-lookup the method signature
+    // and get a raw generic (T) from stdlib, shadowing our resolved type.
+    if concrete_type.starts_with_uppercase() && !is_generic_param(&concrete_type) {
+        return Some(concrete_type);
+    }
     inferred_receiver_lambda_type(&concrete_type, method, deps, uri)
 }
 
