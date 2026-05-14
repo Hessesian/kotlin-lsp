@@ -385,6 +385,14 @@ pub(crate) fn find_field_type_in_class(
             return Some(ty);
         }
     }
+    // Fallback: full variable inference including CST-indexed field_access_rhs
+    // and method_call_rhs data (handles unannotated `val x = recv.field`).
+    let locs = idx.definitions.get(class_name)?;
+    for loc in locs.iter() {
+        if let Some(ty) = infer_variable_type_raw(idx, field_name, &loc.uri) {
+            return Some(ty);
+        }
+    }
     None
 }
 
