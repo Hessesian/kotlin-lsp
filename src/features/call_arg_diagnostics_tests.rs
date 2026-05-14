@@ -290,3 +290,38 @@ fn diagnostic_on_correct_call_not_next_line() {
         diags[0].range.start.line
     );
 }
+
+#[test]
+fn test_file_functions_excluded_from_resolution() {
+    // A test file defines `loadData()` with 0 params.
+    // Production file defines `loadData(account: String, refresh: Boolean)`.
+    // The test-file overload should be excluded so the call site gets a
+    // clean single-signature match instead of being skipped as "overloaded".
+    let idx = Indexer::new();
+
+    let test_uri = uri("/src/test/kotlin/MyTest.kt");
+    idx.index_content(&test_uri, "fun loadData() { /* test helper */ }\n");
+    idx.store_live_tree(&test_uri, "fun loadData() { /* test helper */ }\n");
+
+    let main_uri = uri("/src/main/kotlin/Main.kt");
+    let main_src = concat!(
+        "fun loadData(account: String, refresh: Boolean) {}\n",
+        "fun caller() {\n",
+        "    loadData()\n",
+        "}\n",
+    );
+    idx.index_content(&main_uri, main_src);
+    idx.store_live_tree(&main_uri, main_src);
+
+    let diags = call_arg_diagnostics(&idx, &main_uri);
+    assert_eq!(
+        diags.len(),
+        1,
+        "test file overload should be excluded: {diags:?}"
+    );
+    assert!(
+        diags[0].message.contains("expected 2"),
+        "should see production signature: {}",
+        diags[0].message
+    );
+}

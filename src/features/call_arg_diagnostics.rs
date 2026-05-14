@@ -214,6 +214,9 @@ fn resolve_signatures(
     // Check definitions map for the function name
     if let Some(locs) = indexer.definitions.get(fn_name) {
         for loc in locs.iter() {
+            if is_test_file(loc.uri.as_str()) {
+                continue;
+            }
             let sigs = collect_all_fun_params_texts(fn_name, loc.uri.as_str(), indexer);
             all_sigs.extend(sigs);
         }
@@ -244,6 +247,15 @@ fn resolve_signatures(
     } else {
         Vec::new()
     }
+}
+
+/// Heuristic: a file path likely belongs to a test source set.
+fn is_test_file(uri_str: &str) -> bool {
+    // Common Android/Gradle test source sets
+    uri_str.contains("/src/test/")
+        || uri_str.contains("/src/androidTest/")
+        || uri_str.contains("/src/commonTest/")
+        || uri_str.contains("/src/iosTest/")
 }
 
 /// Parse a parameter list and return `(required_count, total_count)`.
