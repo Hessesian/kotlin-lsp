@@ -331,3 +331,176 @@ fun test() {
         _ => panic!("expected CodeAction"),
     }
 }
+
+// ─── Boolean tests ────────────────────────────────────────────────────────────
+
+#[test]
+fn boolean_fill_all_branches() {
+    let src = "\
+fun test(flag: Boolean) {
+    when(flag) {
+
+    }
+}
+";
+    let idx = setup(&[("/main.kt", src)]);
+    let u = uri("/main.kt");
+    let action = build_fill_when_action(&idx, &u, cursor_at(2, 0));
+    assert!(action.is_some(), "expected action for Boolean when");
+    match action.unwrap() {
+        CodeActionOrCommand::CodeAction(ca) => {
+            let edit = ca.edit.unwrap();
+            let changes = edit.changes.unwrap();
+            let edits = changes.get(&u).unwrap();
+            let text = &edits[0].new_text;
+            assert!(
+                text.contains("true -> TODO()"),
+                "should have true: {text:?}"
+            );
+            assert!(
+                text.contains("false -> TODO()"),
+                "should have false: {text:?}"
+            );
+            assert!(
+                !text.contains("Boolean."),
+                "should be bare true/false: {text:?}"
+            );
+        }
+        _ => panic!("expected CodeAction"),
+    }
+}
+
+#[test]
+fn boolean_partial_branch() {
+    let src = "\
+fun test(flag: Boolean) {
+    when(flag) {
+        true -> println(\"yes\")
+    }
+}
+";
+    let idx = setup(&[("/main.kt", src)]);
+    let u = uri("/main.kt");
+    let action = build_fill_when_action(&idx, &u, cursor_at(2, 0));
+    assert!(action.is_some(), "expected action");
+    match action.unwrap() {
+        CodeActionOrCommand::CodeAction(ca) => {
+            let edit = ca.edit.unwrap();
+            let changes = edit.changes.unwrap();
+            let edits = changes.get(&u).unwrap();
+            let text = &edits[0].new_text;
+            assert!(
+                text.contains("false -> TODO()"),
+                "should have false: {text:?}"
+            );
+            assert!(
+                !text.contains("true -> TODO()"),
+                "should not have true (already present): {text:?}"
+            );
+        }
+        _ => panic!("expected CodeAction"),
+    }
+}
+
+#[test]
+fn boolean_complete_no_action() {
+    let src = "\
+fun test(flag: Boolean) {
+    when(flag) {
+        true -> println(\"yes\")
+        false -> println(\"no\")
+    }
+}
+";
+    let idx = setup(&[("/main.kt", src)]);
+    let u = uri("/main.kt");
+    let action = build_fill_when_action(&idx, &u, cursor_at(2, 0));
+    assert!(
+        action.is_none(),
+        "should have no action when all Boolean branches present"
+    );
+}
+
+// ─── Diagnostics tests ───────────────────────────────────────────────────────
+
+use crate::features::fill_when::when_diagnostics;
+
+#[test]
+fn diagnostics_reports_missing_enum_branches() {
+    let src = "\
+fun test(c: Color) {
+    when (c) {
+        Color.RED -> println(\"red\")
+    }
+}
+";
+    let idx = setup(&[("/Color.kt", ENUM_SRC), ("/main.kt", src)]);
+    let u = uri("/main.kt");
+    let diags = when_diagnostics(&idx, &u);
+    assert_eq!(diags.len(), 1, "should have 1 diagnostic");
+    assert!(
+        diags[0].message.contains("GREEN"),
+        "message: {}",
+        diags[0].message
+    );
+    assert!(
+        diags[0].message.contains("BLUE"),
+        "message: {}",
+        diags[0].message
+    );
+    assert_eq!(diags[0].severity, Some(DiagnosticSeverity::WARNING));
+    assert_eq!(diags[0].source.as_deref(), Some("kotlin-lsp"));
+}
+
+#[test]
+fn diagnostics_no_report_when_complete() {
+    let src = "\
+fun test(c: Color) {
+    when (c) {
+        Color.RED -> println(\"red\")
+        Color.GREEN -> println(\"green\")
+        Color.BLUE -> println(\"blue\")
+    }
+}
+";
+    let idx = setup(&[("/Color.kt", ENUM_SRC), ("/main.kt", src)]);
+    let u = uri("/main.kt");
+    let diags = when_diagnostics(&idx, &u);
+    assert!(diags.is_empty(), "no diagnostic when all branches covered");
+}
+
+#[test]
+fn diagnostics_no_report_with_else() {
+    let src = "\
+fun test(c: Color) {
+    when (c) {
+        Color.RED -> println(\"red\")
+        else -> println(\"other\")
+    }
+}
+";
+    let idx = setup(&[("/Color.kt", ENUM_SRC), ("/main.kt", src)]);
+    let u = uri("/main.kt");
+    let diags = when_diagnostics(&idx, &u);
+    assert!(diags.is_empty(), "no diagnostic when else present");
+}
+
+#[test]
+fn diagnostics_boolean_missing() {
+    let src = "\
+fun test(flag: Boolean) {
+    when(flag) {
+        true -> println(\"yes\")
+    }
+}
+";
+    let idx = setup(&[("/main.kt", src)]);
+    let u = uri("/main.kt");
+    let diags = when_diagnostics(&idx, &u);
+    assert_eq!(diags.len(), 1);
+    assert!(
+        diags[0].message.contains("false"),
+        "message: {}",
+        diags[0].message
+    );
+}

@@ -6,6 +6,7 @@ use tower_lsp::lsp_types::Url;
 use tower_lsp::Client;
 
 use crate::backend::helpers::syntax_diagnostics;
+use crate::features::fill_when::when_diagnostics;
 use crate::indexer::{Indexer, ProgressReporter};
 
 use super::file_change_handler::FileChangeHandler;
@@ -137,7 +138,7 @@ impl DocumentHandler {
             })
             .await;
 
-            let diagnostics = match result {
+            let mut diagnostics = match result {
                 Ok(Some(indexed_file_data)) => syntax_diagnostics(&indexed_file_data.syntax_errors),
                 Ok(None) => cached_indexer
                     .files
@@ -146,6 +147,7 @@ impl DocumentHandler {
                     .unwrap_or_default(),
                 Err(_) => Vec::new(),
             };
+            diagnostics.extend(when_diagnostics(&cached_indexer, &diagnostics_uri));
             if let Some(client) = client {
                 client
                     .publish_diagnostics(diagnostics_uri, diagnostics, None)

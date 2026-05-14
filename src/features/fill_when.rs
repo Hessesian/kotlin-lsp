@@ -14,6 +14,56 @@ use crate::queries::{
     KIND_USER_TYPE, KIND_WHEN_CONDITION, KIND_WHEN_ENTRY, KIND_WHEN_EXPR, KIND_WHEN_SUBJECT,
 };
 
+/// Analysis result for incomplete when expressions — shared by code actions and diagnostics.
+struct WhenAnalysis<'a> {
+    when_node: tree_sitter::Node<'a>,
+    subject_type: String,
+    type_kind: TypeKind,
+    missing: Vec<WhenMember>,
+}
+
+/// Analyze a single when expression for missing branches.
+fn analyze_when<'a>(
+    indexer: &Indexer,
+    uri: &Url,
+    when_node: tree_sitter::Node<'a>,
+    source_bytes: &[u8],
+) -> Option<WhenAnalysis<'a>> {
+    let subject_node = when_node
+        .children(&mut when_node.walk())
+        .find(|c| c.kind() == KIND_WHEN_SUBJECT)?;
+
+    let subject_var = extract_subject_identifier(&subject_node, source_bytes)?;
+
+    let subject_type = resolve_subject_type_from_cst(&when_node, &subject_var, source_bytes)
+        .or_else(|| crate::resolver::infer::infer_variable_type(indexer, &subject_var, uri))?;
+    let subject_type = strip_nullable(&subject_type).to_string();
+
+    let (type_kind, members) = resolve_type_members(indexer, &subject_type)?;
+
+    let existing = collect_existing_branches(&when_node, source_bytes);
+
+    if existing.iter().any(|b| b == "else") {
+        return None;
+    }
+
+    let missing: Vec<WhenMember> = members
+        .into_iter()
+        .filter(|m| !existing.contains(&m.name))
+        .collect();
+
+    if missing.is_empty() {
+        return None;
+    }
+
+    Some(WhenAnalysis {
+        when_node,
+        subject_type,
+        type_kind,
+        missing,
+    })
+}
+
 /// Try to build a "fill missing when branches" code action for the cursor position.
 ///
 /// Returns `None` if the cursor is not inside a `when` expression, the subject type
@@ -30,40 +80,18 @@ pub(crate) fn build_fill_when_action(
     let cursor_byte = byte_offset_for_position(&lines, range.start)?;
     let when_node = find_enclosing_when(&live_doc.tree, source_bytes, cursor_byte)?;
 
-    // Must have a when_subject (bare `when { ... }` is not exhaustive-checkable)
-    let subject_node = when_node
-        .children(&mut when_node.walk())
-        .find(|c| c.kind() == KIND_WHEN_SUBJECT)?;
+    let analysis = analyze_when(indexer, uri, when_node, source_bytes)?;
 
-    let subject_var = extract_subject_identifier(&subject_node, source_bytes)?;
-
-    // Try CST-based local resolution first (handles spaces in `: Type`), then index fallback
-    let subject_type = resolve_subject_type_from_cst(&when_node, &subject_var, source_bytes)
-        .or_else(|| crate::resolver::infer::infer_variable_type(indexer, &subject_var, uri))?;
-    let subject_type = strip_nullable(&subject_type);
-
-    let (type_kind, members) = resolve_type_members(indexer, subject_type)?;
-
-    let existing = collect_existing_branches(&when_node, source_bytes);
-
-    // If `else` branch exists, all branches are covered — no action needed
-    if existing.iter().any(|b| b == "else") {
-        return None;
-    }
-
-    let missing: Vec<&WhenMember> = members
-        .iter()
-        .filter(|m| !existing.contains(&m.name))
-        .collect();
-
-    if missing.is_empty() {
-        return None;
-    }
-
-    let indent = detect_indent(&when_node, source_bytes);
-    let (replace_range, brace_indent) = find_insert_position(&when_node, source_bytes, &lines)?;
-    let mut insert_text = build_branch_text(&missing, subject_type, type_kind, &indent);
-    // Re-add closing brace with proper indent (we're replacing the whole line)
+    let indent = detect_indent(&analysis.when_node, source_bytes);
+    let (replace_range, brace_indent) =
+        find_insert_position(&analysis.when_node, source_bytes, &lines)?;
+    let missing_refs: Vec<&WhenMember> = analysis.missing.iter().collect();
+    let mut insert_text = build_branch_text(
+        &missing_refs,
+        &analysis.subject_type,
+        analysis.type_kind,
+        &indent,
+    );
     insert_text.push_str(&brace_indent);
     insert_text.push('}');
 
@@ -76,7 +104,7 @@ pub(crate) fn build_fill_when_action(
     changes.insert(uri.clone(), vec![edit]);
 
     let action = CodeAction {
-        title: format!("Fill missing '{}' branches", subject_type),
+        title: format!("Fill missing '{}' branches", analysis.subject_type),
         kind: Some(CodeActionKind::QUICKFIX),
         edit: Some(WorkspaceEdit {
             changes: Some(changes),
@@ -88,12 +116,69 @@ pub(crate) fn build_fill_when_action(
     Some(CodeActionOrCommand::CodeAction(action))
 }
 
+/// Produce diagnostics for all incomplete `when` expressions in a file.
+///
+/// Scans the CST for every `when_expression` node and emits a warning
+/// diagnostic on each one that has missing branches.
+pub(crate) fn when_diagnostics(indexer: &Indexer, uri: &Url) -> Vec<Diagnostic> {
+    if crate::Language::from_path(uri.path()) != crate::Language::Kotlin {
+        return Vec::new();
+    }
+    let live_doc = match indexer.live_doc(uri) {
+        Some(doc) => doc,
+        None => return Vec::new(),
+    };
+    let source_bytes = &live_doc.bytes;
+    let root = live_doc.tree.root_node();
+
+    let mut diagnostics = Vec::new();
+    collect_when_nodes(root, source_bytes, indexer, uri, &mut diagnostics);
+    diagnostics
+}
+
+fn collect_when_nodes(
+    node: tree_sitter::Node,
+    source: &[u8],
+    indexer: &Indexer,
+    uri: &Url,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if node.kind() == KIND_WHEN_EXPR {
+        if let Some(analysis) = analyze_when(indexer, uri, node, source) {
+            let missing_names: Vec<&str> =
+                analysis.missing.iter().map(|m| m.name.as_str()).collect();
+            let message = format!("'when' is missing branches: {}", missing_names.join(", "));
+            let start = node.start_position();
+            let keyword_end_col = start.column + 4; // "when" is 4 chars
+            diagnostics.push(Diagnostic {
+                range: Range::new(
+                    Position::new(start.row as u32, start.column as u32),
+                    Position::new(start.row as u32, keyword_end_col as u32),
+                ),
+                severity: Some(DiagnosticSeverity::WARNING),
+                source: Some("kotlin-lsp".into()),
+                message,
+                ..Default::default()
+            });
+        }
+        // Don't recurse into nested when — they'll be visited from parent traversal
+        return;
+    }
+
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i) {
+            collect_when_nodes(child, source, indexer, uri, diagnostics);
+        }
+    }
+}
+
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TypeKind {
     Enum,
     Sealed,
+    Boolean,
 }
 
 #[derive(Debug)]
@@ -300,8 +385,23 @@ fn strip_nullable(type_name: &str) -> &str {
     type_name.strip_suffix('?').unwrap_or(type_name)
 }
 
-/// Resolve whether the type is an enum or sealed class and return its members.
+/// Resolve whether the type is an enum, sealed class, or Boolean, and return its members.
 fn resolve_type_members(indexer: &Indexer, type_name: &str) -> Option<(TypeKind, Vec<WhenMember>)> {
+    // Boolean is a built-in — no index lookup needed
+    if type_name == "Boolean" {
+        let members = vec![
+            WhenMember {
+                name: "true".to_string(),
+                is_object: true,
+            },
+            WhenMember {
+                name: "false".to_string(),
+                is_object: true,
+            },
+        ];
+        return Some((TypeKind::Boolean, members));
+    }
+
     let locations = indexer.definition_locations(type_name);
     if locations.is_empty() {
         return None;
@@ -429,6 +529,10 @@ fn extract_branch_name(condition: &tree_sitter::Node, source: &[u8]) -> Option<S
                 // navigation_expression → simple_identifier "." simple_identifier
                 return extract_nav_last_ident(&child, source);
             }
+            // Boolean literals: `true` / `false`
+            "boolean_literal" => {
+                return child.utf8_text(source).ok().map(|s| s.to_string());
+            }
             _ => {}
         }
     }
@@ -481,6 +585,10 @@ fn build_branch_text(
     let mut text = String::new();
     for member in missing {
         match type_kind {
+            TypeKind::Boolean => {
+                // Bare value: `true -> TODO()`, `false -> TODO()`
+                text.push_str(&format!("{}{} -> TODO()\n", indent, member.name));
+            }
             TypeKind::Enum => {
                 text.push_str(&format!(
                     "{}{}.{} -> TODO()\n",
