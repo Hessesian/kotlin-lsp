@@ -176,6 +176,9 @@ pub(crate) fn parse_kotlin(content: &str) -> FileData {
         // ── rhs-type and method-call-rhs inference (unannotated properties) ────
         data.extract_rhs_types_kotlin(root, bytes);
 
+        // ── container assignment (parent class/object for each member) ──────────
+        assign_containers(&mut data.symbols);
+
         finalize_parse(data, root, bytes);
     })
 }
@@ -192,6 +195,7 @@ pub(crate) fn parse_java(content: &str) -> FileData {
                 queue.push(child);
             }
         }
+        assign_containers(&mut data.symbols);
         finalize_parse(data, root, bytes);
     })
 }
@@ -252,6 +256,9 @@ pub(crate) fn parse_swift(content: &str) -> FileData {
 
         // ── supertype relationships (inheritance specifiers) ──────────────────
         data.extract_supers_swift(root, bytes);
+
+        // ── container assignment (parent class/struct for each member) ───────
+        assign_containers(&mut data.symbols);
 
         finalize_parse(data, root, bytes);
     })
@@ -352,7 +359,57 @@ fn push_def_symbols(
                 detail,
                 type_params,
                 extension_receiver,
+                container: None,
             });
+        }
+    }
+}
+
+// ─── Container assignment (post-extraction pass) ─────────────────────────────
+
+/// Classify container-like symbol kinds (class, interface, object, enum).
+fn is_container_kind(kind: SymbolKind) -> bool {
+    matches!(
+        kind,
+        SymbolKind::CLASS
+            | SymbolKind::INTERFACE
+            | SymbolKind::STRUCT
+            | SymbolKind::ENUM
+            | SymbolKind::OBJECT
+    )
+}
+
+/// Assign `container` field to each symbol based on range nesting.
+///
+/// For each non-container symbol, finds the tightest enclosing container.
+/// For nested containers, assigns the parent container.
+/// Top-level symbols get `None`.
+fn assign_containers(symbols: &mut [SymbolEntry]) {
+    let containers: Vec<(usize, Range)> = symbols
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| is_container_kind(s.kind))
+        .map(|(i, s)| (i, s.range))
+        .collect();
+
+    for i in 0..symbols.len() {
+        let sym_range = symbols[i].range;
+        let sym_start = sym_range.start.line;
+
+        // Find tightest enclosing container (smallest range that fully encloses this symbol).
+        // Skip self (same range = same symbol, not a parent).
+        let parent = containers
+            .iter()
+            .filter(|(ci, cr)| {
+                *ci != i
+                    && cr.start.line <= sym_start
+                    && cr.end.line >= sym_range.end.line
+                    && (cr.start.line != sym_range.start.line || cr.end.line != sym_range.end.line)
+            })
+            .min_by_key(|(_, cr)| cr.end.line - cr.start.line);
+
+        if let Some(&(pi, _)) = parent {
+            symbols[i].container = Some(symbols[pi].name.clone());
         }
     }
 }
@@ -570,6 +627,7 @@ fn push_interface_symbol(
         detail,
         type_params,
         extension_receiver: String::new(),
+        container: None,
     });
 }
 
@@ -1554,6 +1612,7 @@ impl crate::types::FileData {
                 detail,
                 type_params,
                 extension_receiver: String::new(),
+                container: None,
             });
         }
     }
@@ -1588,6 +1647,7 @@ impl crate::types::FileData {
                     detail: detail.clone(),
                     type_params: Vec::new(),
                     extension_receiver: String::new(),
+                    container: None,
                 });
             }
         }

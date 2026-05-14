@@ -113,6 +113,11 @@ pub(crate) struct SymbolEntry {
     /// Empty string for non-extension symbols.
     #[serde(default)]
     pub extension_receiver: String,
+    /// Enclosing class/object/interface name (immediate parent only).
+    /// `None` for top-level declarations; `Some("ClassName")` for members.
+    /// Assigned by `assign_containers()` after extraction.
+    #[serde(default)]
+    pub container: Option<String>,
 }
 
 impl SymbolEntry {

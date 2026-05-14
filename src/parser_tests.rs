@@ -1356,3 +1356,63 @@ fn lambda_after_multiline_args_no_parse_error() {
         data.syntax_errors
     );
 }
+
+// ─── Container assignment tests ──────────────────────────────────────────────
+
+#[test]
+fn container_top_level_is_none() {
+    let data = parse_kotlin("fun topLevel() {}\nclass Foo {}");
+    let top_fn = sym(&data, "topLevel").unwrap();
+    assert_eq!(
+        top_fn.container, None,
+        "top-level fun should have no container"
+    );
+    let foo = sym(&data, "Foo").unwrap();
+    assert_eq!(
+        foo.container, None,
+        "top-level class should have no container"
+    );
+}
+
+#[test]
+fn container_member_assigned() {
+    let src = "class Outer {\n    fun member() {}\n    val prop = 1\n}";
+    let data = parse_kotlin(src);
+    let member = sym(&data, "member").unwrap();
+    assert_eq!(member.container.as_deref(), Some("Outer"));
+    let prop = sym(&data, "prop").unwrap();
+    assert_eq!(prop.container.as_deref(), Some("Outer"));
+}
+
+#[test]
+fn container_nested_class() {
+    let src = "class Outer {\n    class Inner {\n        fun deep() {}\n    }\n}";
+    let data = parse_kotlin(src);
+    let inner = sym(&data, "Inner").unwrap();
+    assert_eq!(inner.container.as_deref(), Some("Outer"));
+    let deep = sym(&data, "deep").unwrap();
+    assert_eq!(deep.container.as_deref(), Some("Inner"));
+}
+
+#[test]
+fn container_companion_object() {
+    let src = "class Host {\n    companion object {\n        fun factory() {}\n    }\n}";
+    let data = parse_kotlin(src);
+    // companion object is named "Companion" by Kotlin convention if unnamed
+    // But tree-sitter may give it a different name — check what we get
+    let factory = sym(&data, "factory").unwrap();
+    // factory's container should be either "Companion" or "Host" depending on
+    // whether the companion object is extracted as a separate symbol
+    assert!(
+        factory.container.is_some(),
+        "factory inside companion should have a container"
+    );
+}
+
+#[test]
+fn container_java_member() {
+    let src = "public class Outer {\n    public void method() {}\n    private int field;\n}";
+    let data = parse_java(src);
+    let method = sym(&data, "method").unwrap();
+    assert_eq!(method.container.as_deref(), Some("Outer"));
+}

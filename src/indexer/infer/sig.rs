@@ -383,21 +383,17 @@ pub(crate) fn find_method_params_in_class(
         let Some(file_data) = idx.files.get(loc.uri.as_str()) else {
             continue;
         };
-        let class_sym = file_data.symbols.iter().find(|s| {
+        // Verify the class exists (and if qualified, check its own container).
+        let has_class = file_data.symbols.iter().any(|s| {
             s.name == type_base
-                && container.is_none_or(|c| {
-                    file_data.symbols.iter().any(|outer| {
-                        outer.name == c
-                            && outer.range.start.line <= s.range.start.line
-                            && outer.range.end.line >= s.range.end.line
-                    })
-                })
+                && is_class_like(s.kind)
+                && container.is_none_or(|c| s.container.as_deref() == Some(c))
         });
-        let Some(class_entry) = class_sym else {
+        if !has_class {
             continue;
-        };
-        let class_range = class_entry.range;
+        }
 
+        // Find the method as a direct member of type_base.
         for sym in &file_data.symbols {
             if sym.name != method_name {
                 continue;
@@ -408,27 +404,7 @@ pub(crate) fn find_method_params_in_class(
             ) {
                 continue;
             }
-            if sym.range.start.line < class_range.start.line
-                || sym.range.end.line > class_range.end.line
-            {
-                continue;
-            }
-            let inside_nested = file_data.symbols.iter().any(|nested| {
-                nested.range != class_entry.range
-                    && matches!(
-                        nested.kind,
-                        SymbolKind::CLASS
-                            | SymbolKind::INTERFACE
-                            | SymbolKind::STRUCT
-                            | SymbolKind::ENUM
-                            | SymbolKind::OBJECT
-                    )
-                    && nested.range.start.line > class_entry.range.start.line
-                    && nested.range.end.line < class_entry.range.end.line
-                    && nested.range.start.line <= sym.range.start.line
-                    && nested.range.end.line >= sym.range.end.line
-            });
-            if inside_nested {
+            if sym.container.as_deref() != Some(type_base) {
                 continue;
             }
             let start_line = sym.range.start.line as usize;
@@ -438,6 +414,17 @@ pub(crate) fn find_method_params_in_class(
         }
     }
     None
+}
+
+fn is_class_like(kind: SymbolKind) -> bool {
+    matches!(
+        kind,
+        SymbolKind::CLASS
+            | SymbolKind::INTERFACE
+            | SymbolKind::STRUCT
+            | SymbolKind::ENUM
+            | SymbolKind::OBJECT
+    )
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
