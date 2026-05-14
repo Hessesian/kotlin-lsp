@@ -10,6 +10,8 @@ use std::collections::HashMap;
 use tower_lsp::lsp_types::*;
 
 use super::text_utils::whole_word_replace_file;
+use crate::indexer::live_tree::{lang_for_path, parse_live, utf16_col_to_byte};
+use crate::queries::{KIND_CALL_EXPR, KIND_LAMBDA_LIT, KIND_SOURCE_FILE};
 use crate::StrExt;
 
 // ─── entry point ──────────────────────────────────────────────────────────────
@@ -33,7 +35,7 @@ pub(crate) fn compute_code_actions(
     let mut actions: Vec<CodeActionOrCommand> = Vec::new();
 
     if has_selection && !is_import_ln {
-        if let Some(a) = build_introduce_variable(line_text, uri, range) {
+        if let Some(a) = build_introduce_variable(line_text, all_lines, uri, range) {
             actions.push(a);
         }
     }
@@ -85,9 +87,11 @@ pub(crate) fn is_non_call_keyword(name: &str) -> bool {
 
 fn build_introduce_variable(
     line_text: &str,
+    all_lines: &[String],
     uri: &Url,
     range: Range,
 ) -> Option<CodeActionOrCommand> {
+    let expanded = expand_selection_to_call(all_lines, range, uri.path());
     let chars: Vec<char> = line_text.chars().collect();
     let utf16_to_char = |utf16: usize| {
         let mut cu = 0usize;
@@ -99,9 +103,8 @@ fn build_introduce_variable(
         }
         chars.len()
     };
-    let raw_s = utf16_to_char(range.start.character as usize);
-    let raw_e = utf16_to_char(range.end.character as usize);
-    let (s, e) = expand_call_expr(&chars, raw_s, raw_e);
+    let s = utf16_to_char(expanded.start.character as usize);
+    let e = utf16_to_char(expanded.end.character as usize);
     let expr: String = chars[s..e].iter().collect();
     if expr.trim().is_empty() {
         return None;
@@ -291,55 +294,84 @@ fn build_rename_placeholder_action(
 
 // ─── text helpers ─────────────────────────────────────────────────────────────
 
-/// Expand a char-index range to cover the full call expression around it.
+/// Expand `range` (a single-line selection) to cover the enclosing
+/// `call_expression` node in the CST.
 ///
-/// * Expands LEFT:  eats `[a-zA-Z0-9_.]` (dotted receiver chain)
-/// * Expands RIGHT: eats remaining identifier chars, then a balanced `(…)` if present
-fn expand_call_expr(chars: &[char], s: usize, e: usize) -> (usize, usize) {
-    let mut new_s = s;
-    while new_s > 0 {
-        let c = chars[new_s - 1];
-        if c.is_alphanumeric() || c == '_' || c == '.' {
-            new_s -= 1;
-        } else {
-            break;
-        }
-    }
-    while new_s < e && chars[new_s] == '.' {
-        new_s += 1;
-    }
+/// Parses the file with tree-sitter, finds the leaf node at the start of the
+/// selection, walks ancestors until `call_expression` is found, then converts
+/// its byte range to a UTF-16 LSP `Range`.
+///
+/// Falls back to `range` unchanged when no live tree is available or when the
+/// cursor is not inside a call expression.
+fn expand_selection_to_call(all_lines: &[String], range: Range, uri_path: &str) -> Range {
+    expand_selection_to_call_inner(all_lines, range, uri_path).unwrap_or(range)
+}
 
-    let mut new_e = e;
-    while new_e < chars.len() {
-        let c = chars[new_e];
-        if c.is_alphanumeric() || c == '_' {
-            new_e += 1;
-        } else {
-            break;
+fn expand_selection_to_call_inner(
+    all_lines: &[String],
+    range: Range,
+    uri_path: &str,
+) -> Option<Range> {
+    let lang = lang_for_path(uri_path)?;
+    let content = all_lines.join("\n");
+    let doc = parse_live(&content, lang)?;
+
+    let cursor_line = range.start.line as usize;
+    let line_text = all_lines.get(cursor_line)?;
+    let start_byte_col = utf16_col_to_byte(line_text, range.start.character as usize);
+
+    let point = tree_sitter::Point {
+        row: cursor_line,
+        column: start_byte_col,
+    };
+    let leaf = doc
+        .tree
+        .root_node()
+        .descendant_for_point_range(point, point)?;
+
+    let call_node = call_expr_ancestor(leaf)?;
+
+    let start = call_node.start_position();
+    let end = call_node.end_position();
+    let start_line_text = all_lines.get(start.row)?;
+    let end_line_text = all_lines.get(end.row)?;
+
+    let start_utf16 = byte_col_to_utf16(start_line_text, start.column);
+    let end_utf16 = byte_col_to_utf16(end_line_text, end.column);
+
+    Some(Range {
+        start: Position {
+            line: start.row as u32,
+            character: start_utf16,
+        },
+        end: Position {
+            line: end.row as u32,
+            character: end_utf16,
+        },
+    })
+}
+
+/// Walk from `node` up the ancestor chain to find the nearest `call_expression`.
+/// Stops at lambda literals and source-file boundaries (never returns those).
+fn call_expr_ancestor(node: tree_sitter::Node<'_>) -> Option<tree_sitter::Node<'_>> {
+    let mut cur = node;
+    loop {
+        if cur.kind() == KIND_CALL_EXPR {
+            return Some(cur);
         }
-    }
-    if new_e < chars.len() && chars[new_e] == '(' {
-        let mut depth = 0usize;
-        while new_e < chars.len() {
-            match chars[new_e] {
-                '(' => {
-                    depth += 1;
-                    new_e += 1;
-                }
-                ')' => {
-                    new_e += 1;
-                    depth -= 1;
-                    if depth == 0 {
-                        break;
-                    }
-                }
-                _ => {
-                    new_e += 1;
-                }
-            }
+        if cur.kind() == KIND_LAMBDA_LIT || cur.kind() == KIND_SOURCE_FILE {
+            return None;
         }
+        cur = cur.parent()?;
     }
-    (new_s, new_e)
+}
+
+/// Convert a tree-sitter byte-offset column to a UTF-16 column index.
+fn byte_col_to_utf16(line_text: &str, byte_col: usize) -> u32 {
+    line_text[..byte_col.min(line_text.len())]
+        .chars()
+        .map(|c| c.len_utf16() as u32)
+        .sum()
 }
 
 /// Derive a short local variable name from an expression.
