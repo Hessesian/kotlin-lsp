@@ -421,6 +421,37 @@ fun test(flag: Boolean) {
     );
 }
 
+#[test]
+fn boolean_nullable_type_resolution() {
+    let src = "\
+fun test(flag: Boolean?) {
+    when(flag) {
+        true -> println(\"yes\")
+    }
+}
+";
+    let idx = setup(&[("/main.kt", src)]);
+    let u = uri("/main.kt");
+    let action = build_fill_when_action(&idx, &u, cursor_at(2, 0));
+    assert!(
+        action.is_some(),
+        "expected action for nullable Boolean when"
+    );
+    match action.unwrap() {
+        CodeActionOrCommand::CodeAction(ca) => {
+            let edit = ca.edit.unwrap();
+            let changes = edit.changes.unwrap();
+            let edits = changes.get(&u).unwrap();
+            let text = &edits[0].new_text;
+            assert!(
+                text.contains("false -> TODO()"),
+                "should have false: {text:?}"
+            );
+        }
+        _ => panic!("expected CodeAction"),
+    }
+}
+
 // ─── Diagnostics tests ───────────────────────────────────────────────────────
 
 use crate::features::fill_when::when_diagnostics;

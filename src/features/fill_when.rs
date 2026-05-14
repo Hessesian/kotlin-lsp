@@ -330,8 +330,13 @@ fn extract_var_type_from_declaration(
             if vc.kind() == KIND_SIMPLE_IDENT && vc.utf8_text(source).ok() == Some(var_name) {
                 found_name = true;
             }
-            if found_name && vc.kind() == KIND_USER_TYPE {
-                return extract_full_type_name(&vc, source);
+            if found_name {
+                if vc.kind() == KIND_USER_TYPE {
+                    return extract_full_type_name(&vc, source);
+                }
+                if vc.kind() == "nullable_type" {
+                    return extract_user_type_from_nullable(&vc, source);
+                }
             }
         }
     }
@@ -339,14 +344,29 @@ fn extract_var_type_from_declaration(
 }
 
 /// Extract type from a `parameter` or `class_parameter` node.
-/// CST: parameter → simple_identifier + ":" + user_type
+/// CST: parameter → simple_identifier + ":" + user_type | nullable_type
 fn extract_param_type(param: &tree_sitter::Node, var_name: &str, source: &[u8]) -> Option<String> {
     let mut found_name = false;
     for child in param.children(&mut param.walk()) {
         if child.kind() == KIND_SIMPLE_IDENT && child.utf8_text(source).ok() == Some(var_name) {
             found_name = true;
         }
-        if found_name && child.kind() == KIND_USER_TYPE {
+        if found_name {
+            if child.kind() == KIND_USER_TYPE {
+                return extract_full_type_name(&child, source);
+            }
+            if child.kind() == "nullable_type" {
+                return extract_user_type_from_nullable(&child, source);
+            }
+        }
+    }
+    None
+}
+
+/// Extract user_type from a nullable_type node (nullable_type → user_type + "?").
+fn extract_user_type_from_nullable(nullable: &tree_sitter::Node, source: &[u8]) -> Option<String> {
+    for child in nullable.children(&mut nullable.walk()) {
+        if child.kind() == KIND_USER_TYPE {
             return extract_full_type_name(&child, source);
         }
     }
