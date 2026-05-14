@@ -7,6 +7,7 @@
 //! 4. Untyped local `val`/`var` declarations — shows `: InferredType` after the name
 //!    (only when the type is determinable from the index without rg)
 //! 5. Expression-body functions without an explicit return type — shows `: ReturnType`
+//!    on the declared function line
 //!
 //! Uses the live CST (tree-sitter parse tree stored in `Indexer::live_trees`) when
 //! available, or re-parses on demand for files not currently open in the editor.

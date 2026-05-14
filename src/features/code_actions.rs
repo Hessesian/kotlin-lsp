@@ -34,7 +34,7 @@ pub(crate) fn compute_code_actions(
 
     let mut actions: Vec<CodeActionOrCommand> = Vec::new();
 
-    if has_selection && !is_import_ln {
+    if has_selection && !is_import_ln && is_kotlin {
         if let Some(a) = build_introduce_variable(line_text, all_lines, uri, range) {
             actions.push(a);
         }
@@ -53,34 +53,6 @@ pub(crate) fn compute_code_actions(
     }
 
     actions
-}
-
-// ─── keyword guard ────────────────────────────────────────────────────────────
-
-/// Returns `true` when `name` is a block-opening keyword that is NOT callable —
-/// i.e. signature help and rename should skip it.
-pub(crate) fn is_non_call_keyword(name: &str) -> bool {
-    matches!(
-        name,
-        "fun"
-            | "if"
-            | "while"
-            | "for"
-            | "when"
-            | "catch"
-            | "constructor"
-            | "override"
-            | "else"
-            | "return"
-            | "throw"
-            | "try"
-            | "finally"
-            | "object"
-            | "class"
-            | "interface"
-            | "enum"
-            | "init"
-    )
 }
 
 // ─── action builders ─────────────────────────────────────────────────────────

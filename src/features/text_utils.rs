@@ -29,6 +29,32 @@ pub(crate) fn utf16_column(text: &str) -> u32 {
     text.chars().map(|c| c.len_utf16() as u32).sum()
 }
 
+/// Returns `true` when `name` is a block-opening keyword that is NOT callable —
+/// i.e. signature help and rename should skip it.
+pub(crate) fn is_non_call_keyword(name: &str) -> bool {
+    matches!(
+        name,
+        "fun"
+            | "if"
+            | "while"
+            | "for"
+            | "when"
+            | "catch"
+            | "constructor"
+            | "override"
+            | "else"
+            | "return"
+            | "throw"
+            | "try"
+            | "finally"
+            | "object"
+            | "class"
+            | "interface"
+            | "enum"
+            | "init"
+    )
+}
+
 /// Replace all whole-word occurrences of `word` with `replacement` across
 /// `lines`, joining them back into a single string with `\n`.
 ///

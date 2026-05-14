@@ -23,9 +23,10 @@ pub(crate) struct CursorContext {
     /// The dot-qualifier to the left of the cursor (e.g. `"it"`, `"viewModel"`).
     /// `None` when cursor is on a bare name with no qualifying expression.
     pub qualifier: Option<String>,
-    /// Resolved contextual receiver — **only** set when `word` or `qualifier` is
-    /// `it`, `this`, or a named lambda parameter.  Plain variable or type
-    /// qualifiers are left for callers to resolve via `find_definition_qualified`.
+    /// Resolved contextual receiver — set for `it`, `this`, named lambda
+    /// parameters, and plain qualifiers narrowed by smart casts at the cursor.
+    /// Other variable or type qualifiers are left for callers to resolve via
+    /// `find_definition_qualified`.
     pub contextual: Option<ReceiverType>,
     /// When `contextual` is `None` and the word appears to be a named lambda
     /// parameter in scope, this holds the jump-target declaration location so

@@ -1,6 +1,6 @@
 use super::Backend;
-use crate::features::code_actions::is_non_call_keyword;
 use crate::features::references::resolve_scope;
+use crate::features::text_utils::is_non_call_keyword;
 use crate::indexer::cst_cursor_is_local_var;
 #[cfg(test)]
 use crate::indexer::live_tree::utf16_col_to_byte;

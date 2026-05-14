@@ -564,6 +564,10 @@ fn when_branch_smart_cast(lines: &[String], var_name: &str, line_idx: usize) -> 
                 branch_type = Some(ty);
                 continue;
             }
+            // Stop at `else ->` or other non-`is` branch boundaries.
+            if trimmed.contains(" ->") && !trimmed.starts_with("is ") {
+                break;
+            }
             // Stop if we hit a closing brace without finding a branch
             if depth > 0 {
                 break;
@@ -604,7 +608,11 @@ fn if_is_smart_cast(lines: &[String], var_name: &str, line_idx: usize) -> Option
 
         if brace_depth == 0 {
             if let Some(ty) = extract_if_is_type(trimmed, var_name) {
-                return Some(ty);
+                let opens = trimmed.chars().filter(|&c| c == '{').count();
+                let closes = trimmed.chars().filter(|&c| c == '}').count();
+                if opens == 0 || opens != closes {
+                    return Some(ty);
+                }
             }
             if (trimmed.ends_with('{') || trimmed == "{") && i > start {
                 if let Some(ty) = extract_if_is_type(lines[i - 1].trim(), var_name) {
@@ -635,9 +643,22 @@ fn if_is_smart_cast(lines: &[String], var_name: &str, line_idx: usize) -> Option
 fn extract_is_type_from_when_branch(trimmed: &str) -> Option<String> {
     // Pattern: `is TypeName ->` or `is TypeName<...> ->`
     let after_is = trimmed.strip_prefix("is ")?;
-    // Find the type name (stop at `->`, `,`, `{`, space followed by non-type chars)
     let type_end = after_is.find(" ->")?;
-    let type_str = after_is[..type_end].trim();
+    let type_str = &after_is[..type_end];
+
+    let mut end = 0usize;
+    let mut generic_depth = 0usize;
+    for (index, ch) in type_str.char_indices() {
+        match ch {
+            '<' => generic_depth += 1,
+            '>' => generic_depth = generic_depth.saturating_sub(1),
+            ',' if generic_depth == 0 => break,
+            _ => {}
+        }
+        end = index + ch.len_utf8();
+    }
+
+    let type_str = type_str[..end].trim();
     if type_str.is_empty() {
         return None;
     }
@@ -683,7 +704,7 @@ fn extract_if_is_type(trimmed: &str, var_name: &str) -> Option<String> {
             || !trimmed[..pos]
                 .chars()
                 .next_back()
-                .is_some_and(is_identifier_char)
+                .is_some_and(|c| is_identifier_char(c) || c == '.')
         {
             break pos;
         }
@@ -691,7 +712,7 @@ fn extract_if_is_type(trimmed: &str, var_name: &str) -> Option<String> {
     };
 
     let before = &trimmed[..pos];
-    if !before.contains("if") && !before.contains('(') {
+    if !before.contains("if") && !before.contains("else") {
         return None;
     }
 

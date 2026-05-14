@@ -24,11 +24,12 @@ use tower_lsp::lsp_types::Url;
 
 use crate::indexer::LiveDoc;
 
-/// Minimum dependency surface for pure lambda/type inference leaf functions.
+/// Minimum dependency surface for pure inference helpers and their lightweight
+/// orchestration layers.
 ///
 /// Two concrete implementations:
 /// - `Indexer` — production, full resolution with rg fallback
-/// - `TestDeps` — test stub, drives leaf-helper unit tests from plain `HashMap`s
+/// - `TestDeps` — test stub, drives inference unit tests from plain `HashMap`s
 pub(crate) trait InferDeps {
     /// Return the raw parameter text inside a function's outer `()`, e.g.
     /// `"key: K, flow: Flow<T>, map: (T) -> Model"` (no surrounding parens).

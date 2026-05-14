@@ -167,15 +167,18 @@ pub(crate) fn infer_receiver_type_at(
     uri: &Url,
     position: Position,
 ) -> Option<ReceiverType> {
-    // Try smart cast narrowing first
+    // Try smart cast narrowing first when lines are available.
     let lines = idx
         .live_lines
         .get(uri.as_str())
         .map(|ll| (*ll).clone())
-        .or_else(|| idx.files.get(uri.as_str()).map(|d| d.lines.clone()))?;
-    if let Some(narrowed) = super::infer_lines::smart_cast_type_at_line(&lines, name, position.line)
-    {
-        return Some(ReceiverType::from_raw(narrowed));
+        .or_else(|| idx.files.get(uri.as_str()).map(|d| d.lines.clone()));
+    if let Some(lines) = lines {
+        if let Some(narrowed) =
+            super::infer_lines::smart_cast_type_at_line(&lines, name, position.line)
+        {
+            return Some(ReceiverType::from_raw(narrowed));
+        }
     }
     // Fallback to normal inference
     infer_receiver_type(idx, ReceiverKind::Variable(name), uri)
@@ -250,8 +253,9 @@ fn infer_variable_type_impl(idx: &Indexer, var_name: &str, uri: &Url, depth: u8)
             }
             if let Some((recv, field)) = field_match {
                 if let Some(recv_type) = infer_variable_type_impl(idx, &recv, uri, depth - 1) {
-                    let recv_base = recv_type.ident_prefix();
-                    if let Some(field_type) = find_field_type_in_class(idx, &recv_base, &field) {
+                    let recv_stripped = recv_type.split('<').next().unwrap_or(&recv_type);
+                    let recv_base = recv_stripped.rsplit('.').next().unwrap_or(recv_stripped);
+                    if let Some(field_type) = find_field_type_in_class(idx, recv_base, &field) {
                         return Some(field_type);
                     }
                 }
@@ -325,8 +329,9 @@ fn infer_variable_type_raw_impl(
             }
             if let Some((recv, field)) = field_match {
                 if let Some(recv_type) = infer_variable_type_raw_impl(idx, &recv, uri, depth - 1) {
-                    let recv_base = recv_type.ident_prefix();
-                    if let Some(field_type) = find_field_type_in_class(idx, &recv_base, &field) {
+                    let recv_stripped = recv_type.split('<').next().unwrap_or(&recv_type);
+                    let recv_base = recv_stripped.rsplit('.').next().unwrap_or(recv_stripped);
+                    if let Some(field_type) = find_field_type_in_class(idx, recv_base, &field) {
                         return Some(field_type);
                     }
                 }

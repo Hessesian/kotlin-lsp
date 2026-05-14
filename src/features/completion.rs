@@ -24,6 +24,7 @@ use crate::resolver::complete::{
 use crate::types::CursorPos;
 use crate::StrExt;
 
+use super::text_utils::utf16_column;
 use super::traits::CompletionIndex;
 
 // Re-export so callers only need to import from one place.
@@ -207,7 +208,7 @@ fn complete_lambda_dot(
     prefix: &str,
 ) -> Vec<CompletionItem> {
     let cursor_line = position.line as usize;
-    let cursor_col = before.chars().count();
+    let cursor_col = utf16_column(before) as usize;
     let Some(elem_type) =
         resolve_lambda_recv_type(index, recv, before, cursor_line, cursor_col, uri)
     else {
