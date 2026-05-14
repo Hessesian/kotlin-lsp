@@ -28,3 +28,42 @@ pub(crate) fn word_byte_offsets<'a>(
 pub(crate) fn utf16_column(text: &str) -> u32 {
     text.chars().map(|c| c.len_utf16() as u32).sum()
 }
+
+/// Replace all whole-word occurrences of `word` with `replacement` across
+/// `lines`, joining them back into a single string with `\n`.
+///
+/// Skips `import` and `package` lines unchanged (preserves qualified names).
+/// Uses char-by-char scanning — no regex dependency.
+pub(crate) fn whole_word_replace_file(lines: &[String], word: &str, replacement: &str) -> String {
+    let wchars: Vec<char> = word.chars().collect();
+    let wlen = wchars.len();
+    let mut result = String::new();
+    for (i, line) in lines.iter().enumerate() {
+        if i > 0 {
+            result.push('\n');
+        }
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("import ") || trimmed.starts_with("package ") {
+            result.push_str(line);
+            continue;
+        }
+        let chars: Vec<char> = line.chars().collect();
+        let mut j = 0usize;
+        while j < chars.len() {
+            if chars[j..].starts_with(&wchars) {
+                let before_ok = j == 0 || !(chars[j - 1].is_alphanumeric() || chars[j - 1] == '_');
+                let end = j + wlen;
+                let after_ok =
+                    end >= chars.len() || !(chars[end].is_alphanumeric() || chars[end] == '_');
+                if before_ok && after_ok {
+                    result.push_str(replacement);
+                    j = end;
+                    continue;
+                }
+            }
+            result.push(chars[j]);
+            j += 1;
+        }
+    }
+    result
+}

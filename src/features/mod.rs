@@ -13,6 +13,7 @@
 //!
 //! Two jumps from any trait call to the concrete implementation.
 
+pub(crate) mod code_actions;
 pub(crate) mod completion;
 pub(crate) mod cursor;
 pub(crate) mod definition;

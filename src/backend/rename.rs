@@ -1,5 +1,5 @@
-use super::actions::is_non_call_keyword;
 use super::Backend;
+use crate::features::code_actions::is_non_call_keyword;
 use crate::features::references::resolve_scope;
 use crate::indexer::cst_cursor_is_local_var;
 #[cfg(test)]
@@ -115,44 +115,6 @@ fn cst_cursor_is_method(indexer: &crate::indexer::Indexer, uri: &Url, pos: Posit
             None => return false,
         }
     }
-}
-
-/// Replace all whole-word occurrences of `word` in `lines` with `replacement`.
-/// Returns the full new file content as a single string (lines joined with `\n`).
-pub(super) fn whole_word_replace_file(lines: &[String], word: &str, replacement: &str) -> String {
-    // Use simple char-by-char replacement to avoid regex dependency.
-    let wchars: Vec<char> = word.chars().collect();
-    let wlen = wchars.len();
-    let mut result = String::new();
-    for (i, line) in lines.iter().enumerate() {
-        if i > 0 {
-            result.push('\n');
-        }
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("import ") || trimmed.starts_with("package ") {
-            result.push_str(line);
-            continue;
-        }
-        let chars: Vec<char> = line.chars().collect();
-        let mut j = 0usize;
-        while j < chars.len() {
-            // Check whole-word match at position j.
-            if chars[j..].starts_with(&wchars) {
-                let before_ok = j == 0 || !(chars[j - 1].is_alphanumeric() || chars[j - 1] == '_');
-                let end = j + wlen;
-                let after_ok =
-                    end >= chars.len() || !(chars[end].is_alphanumeric() || chars[end] == '_');
-                if before_ok && after_ok {
-                    result.push_str(replacement);
-                    j = end;
-                    continue;
-                }
-            }
-            result.push(chars[j]);
-            j += 1;
-        }
-    }
-    result
 }
 
 /// Find the line range of the innermost function/lambda scope enclosing `cursor_line`.
