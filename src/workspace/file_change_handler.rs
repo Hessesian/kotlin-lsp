@@ -87,14 +87,22 @@ impl FileChangeHandler {
             })
             .await;
 
-            if let (Some(client), Ok(Some(data))) = (client, result) {
-                let mut diagnostics = syntax_diagnostics(&data.syntax_errors);
-                diagnostics.extend(when_diagnostics(&diagnostics_indexer, &diagnostics_uri));
-                diagnostics.extend(call_arg_diagnostics(&diagnostics_indexer, &diagnostics_uri));
-                client
-                    .publish_diagnostics(diagnostics_uri, diagnostics, None)
-                    .await;
-            }
+            let Some(client) = client else { return };
+
+            let mut diagnostics = match result {
+                Ok(Some(data)) => syntax_diagnostics(&data.syntax_errors),
+                Ok(None) => diagnostics_indexer
+                    .files
+                    .get(diagnostics_uri.as_str())
+                    .map(|file_data| syntax_diagnostics(&file_data.syntax_errors))
+                    .unwrap_or_default(),
+                Err(_) => Vec::new(),
+            };
+            diagnostics.extend(when_diagnostics(&diagnostics_indexer, &diagnostics_uri));
+            diagnostics.extend(call_arg_diagnostics(&diagnostics_indexer, &diagnostics_uri));
+            client
+                .publish_diagnostics(diagnostics_uri, diagnostics, None)
+                .await;
         });
         self.pending_reindex.insert(key, handle);
     }
