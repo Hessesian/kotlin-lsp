@@ -1183,8 +1183,10 @@ fn cst_lambda_param_type_via_call(
         Some(param_type) => {
             let extracted = lambda_type_nth_input(&param_type, param_pos)?;
             if is_generic_param(&extracted) {
-                // Generic param from indexed scope function — try receiver substitution
-                cst_scope_fn_receiver_type(lambda, &doc.bytes, deps, uri).or(Some(extracted))
+                // Generic param (T/R/E) — never return as-is. Try scope
+                // function receiver substitution; otherwise return None so
+                // the text-based fallback path can resolve from context.
+                cst_scope_fn_receiver_type(lambda, &doc.bytes, deps, uri)
             } else {
                 Some(extracted)
             }
