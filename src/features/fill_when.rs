@@ -61,11 +61,14 @@ pub(crate) fn build_fill_when_action(
     }
 
     let indent = detect_indent(&when_node, source_bytes);
-    let insert_text = build_branch_text(&missing, subject_type, type_kind, &indent);
-    let insert_pos = find_insert_position(&when_node, source_bytes, &lines)?;
+    let (replace_range, brace_indent) = find_insert_position(&when_node, source_bytes, &lines)?;
+    let mut insert_text = build_branch_text(&missing, subject_type, type_kind, &indent);
+    // Re-add closing brace with proper indent (we're replacing the whole line)
+    insert_text.push_str(&brace_indent);
+    insert_text.push('}');
 
     let edit = TextEdit {
-        range: Range::new(insert_pos, insert_pos),
+        range: replace_range,
         new_text: insert_text,
     };
 
@@ -515,13 +518,15 @@ fn detect_indent(when_node: &tree_sitter::Node, _source: &[u8]) -> String {
     " ".repeat(base + 4)
 }
 
-/// Find the position just before the closing `}` of the when expression.
+/// Find the insert range for new branches — replaces from start of closing brace line
+/// through the `}` character, so the generated text can include proper formatting.
+///
+/// Returns `(replace_range, closing_brace_indent)`.
 fn find_insert_position(
     when_node: &tree_sitter::Node,
     _source: &[u8],
     _lines: &[String],
-) -> Option<Position> {
-    // Find the closing `}` — it's the last child
+) -> Option<(Range, String)> {
     let child_count = when_node.child_count();
     if child_count == 0 {
         return None;
@@ -531,11 +536,13 @@ fn find_insert_position(
         return None;
     }
     let close_line = last.start_position().row as u32;
-    let close_col = last.start_position().column;
+    let close_col = last.start_position().column as u32;
 
-    // Insert at the beginning of the closing brace line
-    // but figure out the right UTF-16 column
-    Some(Position::new(close_line, close_col as u32))
+    // Replace from start of the closing brace line through the `}`
+    let start = Position::new(close_line, 0);
+    let end = Position::new(close_line, close_col + 1); // +1 to include `}`
+    let brace_indent = " ".repeat(close_col as usize);
+    Some((Range::new(start, end), brace_indent))
 }
 
 // ─── SymbolEntry helpers ──────────────────────────────────────────────────────

@@ -257,3 +257,42 @@ fun handle(c: Color) {
         "should resolve type from function parameter"
     );
 }
+
+#[test]
+fn empty_when_block_formatting() {
+    let src = "\
+fun test() {
+    val c: Color = Color.RED
+    when(c){
+      
+    }
+}
+";
+    let idx = setup(&[("/Color.kt", ENUM_SRC), ("/main.kt", src)]);
+    let u = uri("/main.kt");
+    let action = build_fill_when_action(&idx, &u, cursor_at(3, 0));
+    assert!(action.is_some(), "expected action for empty when block");
+    match action.unwrap() {
+        CodeActionOrCommand::CodeAction(ca) => {
+            let edit = ca.edit.unwrap();
+            let changes = edit.changes.unwrap();
+            let edits = changes.get(&u).unwrap();
+            let text = &edits[0].new_text;
+            // Verify proper formatting: branches indented, closing brace on own line
+            assert!(
+                text.ends_with('}'),
+                "should end with closing brace: {text:?}"
+            );
+            assert!(
+                text.contains("Color.RED -> TODO()\n"),
+                "branches should have newline: {text:?}"
+            );
+            // Closing brace should be at same indent as when keyword (4 spaces)
+            assert!(
+                text.ends_with("    }"),
+                "closing brace should be indented to match when: {text:?}"
+            );
+        }
+        _ => panic!("expected CodeAction"),
+    }
+}
