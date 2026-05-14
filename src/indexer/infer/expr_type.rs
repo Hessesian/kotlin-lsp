@@ -2,23 +2,36 @@
 //!
 //! Handles the cases that are knowable without a compiler:
 //!
-//! | Node kind           | Inferred type          |
-//! |---------------------|------------------------|
-//! | `integer_literal`   | `Int`                  |
-//! | `long_literal`      | `Long`                 |
-//! | `real_literal`      | `Float` or `Double`    |
-//! | `string_literal`    | `String`               |
-//! | `boolean_literal`   | `Boolean`              |
-//! | `null`              | `Nothing?`             |
-//! | `call_expression`   | return type from index |
+//! | Node kind                 | Inferred type          |
+//! |---------------------------|------------------------|
+//! | `integer_literal`         | `Int`                  |
+//! | `long_literal`            | `Long`                 |
+//! | `real_literal`            | `Float` or `Double`    |
+//! | `string_literal`          | `String`               |
+//! | `boolean_literal`         | `Boolean`              |
+//! | `null`                    | `Nothing?`             |
+//! | `character_literal`       | `Char`                 |
+//! | `call_expression`         | return type from index |
+//! | `check_expression`        | `Boolean`              |
+//! | `comparison_expression`   | `Boolean`              |
+//! | `disjunction_expression`  | `Boolean`              |
+//! | `conjunction_expression`  | `Boolean`              |
+//! | `prefix_expression` (`!`) | `Boolean`              |
+//! | `if_expression`           | type of then-branch    |
+//! | `range_expression` (int)  | `IntRange`             |
 //!
-//! Navigation expressions (e.g. `list.size`) and other compound forms are
-//! not resolved — callers receive `None` and can omit the type annotation.
+//! Navigation expressions (e.g. `list.size`), `when` expressions, and other
+//! compound forms are not resolved — callers receive `None` and can omit the
+//! type annotation.
 
 use tree_sitter::Node;
 
 use crate::indexer::NodeExt;
-use crate::queries::KIND_CALL_EXPR;
+use crate::queries::{
+    KIND_CALL_EXPR, KIND_CHECK_EXPR, KIND_COMPARISON_EXPR, KIND_CONJUNCTION_EXPR,
+    KIND_CONTROL_STRUCTURE_BODY, KIND_DISJUNCTION_EXPR, KIND_IF_EXPR, KIND_PREFIX_EXPR,
+    KIND_RANGE_EXPR,
+};
 
 use super::deps::InferDeps;
 
@@ -42,6 +55,16 @@ pub(crate) fn infer_expr_type(
         "null" => Some("Nothing?".to_owned()),
         "character_literal" => Some("Char".to_owned()),
         k if k == KIND_CALL_EXPR => infer_call_expr_type(node, bytes, deps),
+        k if k == KIND_CHECK_EXPR
+            || k == KIND_COMPARISON_EXPR
+            || k == KIND_DISJUNCTION_EXPR
+            || k == KIND_CONJUNCTION_EXPR =>
+        {
+            Some("Boolean".to_owned())
+        }
+        k if k == KIND_PREFIX_EXPR => infer_prefix_expr_type(node, bytes),
+        k if k == KIND_IF_EXPR => infer_if_expr_type(node, bytes, deps),
+        k if k == KIND_RANGE_EXPR => infer_range_expr_type(node, bytes, deps),
         _ => None,
     }
 }
@@ -70,3 +93,57 @@ fn infer_call_expr_type(node: Node<'_>, bytes: &[u8], deps: &impl InferDeps) -> 
     let raw = deps.find_fun_return_type(&fn_name)?;
     Some(raw.trim_start_matches(':').trim().to_owned())
 }
+
+/// `!expr` → `Boolean`; other prefix operators (`-`, `+`) are arithmetic and
+/// not inferable without knowing the operand type.
+fn infer_prefix_expr_type(node: Node<'_>, bytes: &[u8]) -> Option<String> {
+    let op = node.child(0)?;
+    let text = op.utf8_text(bytes).ok()?;
+    if text == "!" {
+        Some("Boolean".to_owned())
+    } else {
+        None
+    }
+}
+
+/// For `if (cond) <then> else <else>`: return the type of the then-branch as a
+/// best-effort hint. We don't verify that both branches agree (that would
+/// require full type-checking), so we only emit a hint when the then-branch
+/// type is unambiguous. No hint is emitted for bare `if` without `else`.
+fn infer_if_expr_type<D: InferDeps>(node: Node<'_>, bytes: &[u8], deps: &D) -> Option<String> {
+    // Must have an else branch to be a valid expression (not a statement).
+    let has_else =
+        (0..node.child_count()).any(|i| node.child(i).map(|c| c.kind() == "else").unwrap_or(false));
+    if !has_else {
+        return None;
+    }
+
+    // then-branch is the first control_structure_body child.
+    let then_body = (0..node.child_count())
+        .map(|i| node.child(i).unwrap())
+        .find(|c| c.kind() == KIND_CONTROL_STRUCTURE_BODY)?;
+
+    // control_structure_body wraps exactly one expression.
+    let expr = then_body.child(0)?;
+    infer_expr_type(expr, bytes, deps)
+}
+
+/// `a..b` or `a..<b`: infer `IntRange` only when both operands are integer
+/// literals. Any other operand type requires the compiler.
+fn infer_range_expr_type<D: InferDeps>(node: Node<'_>, bytes: &[u8], deps: &D) -> Option<String> {
+    let lhs = node.child(0)?;
+    let rhs_idx = node.child_count().checked_sub(1)?;
+    let rhs = node.child(rhs_idx)?;
+    let lhs_ty = infer_expr_type(lhs, bytes, deps)?;
+    let rhs_ty = infer_expr_type(rhs, bytes, deps)?;
+    match (lhs_ty.as_str(), rhs_ty.as_str()) {
+        ("Int", "Int") => Some("IntRange".to_owned()),
+        ("Long", "Long") | ("Int", "Long") | ("Long", "Int") => Some("LongRange".to_owned()),
+        ("Char", "Char") => Some("CharRange".to_owned()),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+#[path = "expr_type_tests.rs"]
+mod tests;

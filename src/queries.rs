@@ -466,6 +466,12 @@ pub(crate) const KIND_KW_ENUM: &str = "enum";
 pub(crate) const KIND_KW_VAL: &str = "val";
 pub(crate) const KIND_BINDING_PATTERN_KIND: &str = "binding_pattern_kind";
 pub(crate) const KIND_PREFIX_EXPR: &str = "prefix_expression";
+pub(crate) const KIND_IF_EXPR: &str = "if_expression";
+pub(crate) const KIND_CHECK_EXPR: &str = "check_expression";
+pub(crate) const KIND_COMPARISON_EXPR: &str = "comparison_expression";
+pub(crate) const KIND_DISJUNCTION_EXPR: &str = "disjunction_expression";
+pub(crate) const KIND_CONJUNCTION_EXPR: &str = "conjunction_expression";
+pub(crate) const KIND_RANGE_EXPR: &str = "range_expression";
 
 // ─── Comment kinds ────────────────────────────────────────────────────────────
 pub(crate) const KIND_LINE_COMMENT: &str = "line_comment";
