@@ -207,6 +207,11 @@ fn infer_variable_type_impl(idx: &Indexer, var_name: &str, uri: &Url, depth: u8)
                 .iter()
                 .find(|(_, n, _, _)| n == var_name)
                 .map(|(_, _, recv, method)| (recv.clone(), method.clone()));
+            let field_match = data
+                .field_access_rhs
+                .iter()
+                .find(|(_, n, _, _)| n == var_name)
+                .map(|(_, _, recv, field)| (recv.clone(), field.clone()));
             let lines = data.lines.clone();
             // Drop DashMap guard before any potential recursive call.
             drop(data);
@@ -217,6 +222,14 @@ fn infer_variable_type_impl(idx: &Indexer, var_name: &str, uri: &Url, depth: u8)
                 if let Some(recv_type) = infer_variable_type_impl(idx, &recv, uri, depth - 1) {
                     if let Some(ret) = find_method_return_type(idx, &recv_type, &method) {
                         return Some(ret);
+                    }
+                }
+            }
+            if let Some((recv, field)) = field_match {
+                if let Some(recv_type) = infer_variable_type_impl(idx, &recv, uri, depth - 1) {
+                    let recv_base = recv_type.ident_prefix();
+                    if let Some(field_type) = find_field_type_in_class(idx, &recv_base, &field) {
+                        return Some(strip_generics(&field_type));
                     }
                 }
             }
@@ -270,6 +283,11 @@ fn infer_variable_type_raw_impl(
                 .iter()
                 .find(|(_, n, _, _)| n == var_name)
                 .map(|(_, _, recv, method)| (recv.clone(), method.clone()));
+            let field_match = data
+                .field_access_rhs
+                .iter()
+                .find(|(_, n, _, _)| n == var_name)
+                .map(|(_, _, recv, field)| (recv.clone(), field.clone()));
             let lines = data.lines.clone();
             drop(data);
             if let Some(ty) = rhs_match {
@@ -279,6 +297,14 @@ fn infer_variable_type_raw_impl(
                 if let Some(recv_type) = infer_variable_type_raw_impl(idx, &recv, uri, depth - 1) {
                     if let Some(ret) = find_method_return_type(idx, &recv_type, &method) {
                         return Some(ret);
+                    }
+                }
+            }
+            if let Some((recv, field)) = field_match {
+                if let Some(recv_type) = infer_variable_type_raw_impl(idx, &recv, uri, depth - 1) {
+                    let recv_base = recv_type.ident_prefix();
+                    if let Some(field_type) = find_field_type_in_class(idx, &recv_base, &field) {
+                        return Some(field_type);
                     }
                 }
             }

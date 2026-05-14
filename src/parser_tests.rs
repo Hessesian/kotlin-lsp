@@ -1306,6 +1306,40 @@ fn method_call_rhs_regular_method() {
     assert_eq!(entry.unwrap().3, "getDetail");
 }
 
+#[test]
+fn field_access_rhs_plain_field() {
+    // `val triggers = dashboardTriggersHelper.triggersFlow`
+    // Plain field access (no call) → stored in field_access_rhs
+    let src = "val triggers = dashboardTriggersHelper.triggersFlow";
+    let data = super::parse_kotlin(src);
+    let entry = data
+        .field_access_rhs
+        .iter()
+        .find(|(_, n, _, _)| n == "triggers");
+    assert!(
+        entry.is_some(),
+        "expected field_access_rhs entry for `triggers`"
+    );
+    assert_eq!(entry.unwrap().2, "dashboardTriggersHelper");
+    assert_eq!(entry.unwrap().3, "triggersFlow");
+}
+
+#[test]
+fn field_access_rhs_not_stored_for_method_call() {
+    // `val state = helper.getState()` — method call must go to method_call_rhs, not field_access_rhs
+    let src = "val state = helper.getState()";
+    let data = super::parse_kotlin(src);
+    assert!(
+        data.field_access_rhs.is_empty(),
+        "method call should not appear in field_access_rhs"
+    );
+    let entry = data
+        .method_call_rhs
+        .iter()
+        .find(|(_, n, _, _)| n == "state");
+    assert!(entry.is_some(), "method call should be in method_call_rhs");
+}
+
 // ── lambda-after-closing-paren regression ────────────────────────────────────
 
 /// Regression: tree-sitter-kotlin must parse a trailing lambda after a

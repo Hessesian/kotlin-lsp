@@ -1186,8 +1186,29 @@ fn call_expr_receiver_method(call: Node, bytes: &[u8]) -> Option<(String, String
     Some((recv, method))
 }
 
-/// For a `call_expression` with a plain `simple_identifier` callee, return the
-/// inferred type:
+/// For a `navigation_expression` (plain field access, no call), return
+/// `(receiver_name, field_name)`.  Returns `None` for chained access
+/// (`a.b.c`), `this`/`super` receivers, and non-identifier fields.
+fn nav_expr_receiver_field(nav: Node, bytes: &[u8]) -> Option<(String, String)> {
+    let named_count = nav.named_child_count();
+    if named_count < 2 {
+        return None;
+    }
+    let receiver_node = nav.named_child(0)?;
+    let suffix_node = nav.named_child(named_count - 1)?;
+    // Reject multi-level chaining (e.g. `a.b.field`)
+    if receiver_node.kind() == KIND_NAV_EXPR {
+        return None;
+    }
+    let recv = receiver_node.utf8_text_owned(bytes)?;
+    let field = suffix_node
+        .first_child_of_kind(KIND_SIMPLE_IDENT)
+        .and_then(|n| n.utf8_text_owned(bytes))?;
+    if recv == "this" || recv == "super" {
+        return None;
+    }
+    Some((recv, field))
+}
 /// - DI generic call (`inject<T>()` etc.) → first type argument
 /// - Constructor call (`SomeType(args)`) → callee name
 fn call_expr_direct_type(call: Node, bytes: &[u8]) -> Option<String> {
@@ -1453,6 +1474,11 @@ impl crate::types::FileData {
                                         }
                                     } else if let Some(ty) = call_expr_direct_type(rhs, bytes) {
                                         self.rhs_types.push((line, name, ty));
+                                    }
+                                } else if rhs.kind() == KIND_NAV_EXPR {
+                                    if let Some((recv, field)) = nav_expr_receiver_field(rhs, bytes)
+                                    {
+                                        self.field_access_rhs.push((line, name, recv, field));
                                     }
                                 }
                             }

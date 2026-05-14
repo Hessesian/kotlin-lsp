@@ -181,6 +181,12 @@ pub(crate) struct FileData {
     /// Used by method-return-type inference for indexed files.
     #[serde(default)]
     pub method_call_rhs: Vec<(u32, String, String, String)>,
+    /// Field-access RHS patterns for unannotated properties: `val x = receiver.field`.
+    /// Each entry is `(declaration_line, var_name, receiver_name, field_name)`.
+    /// Used by field-type inference for indexed files (e.g. constructor params
+    /// that expose a field as a class property).
+    #[serde(default)]
+    pub field_access_rhs: Vec<(u32, String, String, String)>,
     /// Explicit type annotations for properties, extracted from the CST at parse time.
     /// Each entry is `(declaration_line, var_name, declared_type)` where `declared_type`
     /// preserves generics and nullability: `val x: List<Foo>?` → `"List<Foo>?"`.
