@@ -751,10 +751,20 @@ fn cst_it_or_this_type(
                         lambda_receiver_type_named_arg_ml(&before_brace, 0, lines, ln, idx, uri)
                     })
                     .or_else(|| cst_lambda_param_type_via_call(doc, &cur, idx, uri, 0));
-                // Generic params (T/R/E) are not useful — skip and let
-                // outer lambda or text fallback resolve a concrete type.
-                if result.as_deref().is_some_and(|t| !is_generic_param(t)) {
-                    return result;
+                match result.as_deref() {
+                    Some(t) if is_generic_param(t) => {
+                        // Generic T from indexed signature — try CST scope
+                        // function receiver substitution before walking up.
+                        if let Some(concrete) =
+                            cst_scope_fn_receiver_type(&cur, &doc.bytes, idx, uri)
+                        {
+                            return Some(concrete);
+                        }
+                        // Not a scope function or receiver unresolvable — skip
+                        // and walk up to outer lambda for concrete type.
+                    }
+                    Some(_) => return result,
+                    None => {}
                 }
             }
         }
