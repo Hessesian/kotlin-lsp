@@ -10,11 +10,11 @@ use tower_lsp::lsp_types::*;
 use crate::indexer::live_tree::utf16_col_to_byte;
 use crate::indexer::Indexer;
 use crate::queries::{
-    KIND_BOOLEAN_LITERAL, KIND_CLASS_DECL, KIND_CLASS_PARAM, KIND_FUN_DECL, KIND_FUN_VALUE_PARAMS,
-    KIND_NAV_EXPR, KIND_NAV_SUFFIX, KIND_NULLABLE_TYPE, KIND_PARAMETER, KIND_PRIMARY_CTOR,
-    KIND_PROP_DECL, KIND_SIMPLE_IDENT, KIND_STATEMENTS, KIND_TYPE_IDENT, KIND_TYPE_TEST,
-    KIND_USER_TYPE, KIND_VAR_DECL, KIND_WHEN_CONDITION, KIND_WHEN_ENTRY, KIND_WHEN_EXPR,
-    KIND_WHEN_SUBJECT,
+    KIND_BOOLEAN_LITERAL, KIND_CLASS_DECL, KIND_CLASS_PARAM, KIND_ELSE, KIND_FUN_DECL,
+    KIND_FUN_VALUE_PARAMS, KIND_LBRACE, KIND_NAV_EXPR, KIND_NAV_SUFFIX, KIND_NULLABLE_TYPE,
+    KIND_PARAMETER, KIND_PRIMARY_CTOR, KIND_PROP_DECL, KIND_SIMPLE_IDENT, KIND_STATEMENTS,
+    KIND_TYPE_IDENT, KIND_TYPE_TEST, KIND_USER_TYPE, KIND_VAR_DECL, KIND_WHEN_CONDITION,
+    KIND_WHEN_ENTRY, KIND_WHEN_EXPR, KIND_WHEN_SUBJECT,
 };
 
 /// Analysis result for incomplete when expressions — shared by code actions and diagnostics.
@@ -520,7 +520,7 @@ fn collect_existing_branches(when_node: &tree_sitter::Node, source: &[u8]) -> Ve
         }
         // Check for `else` branch
         for entry_child in child.children(&mut child.walk()) {
-            if entry_child.kind() == "else" {
+            if entry_child.kind() == KIND_ELSE {
                 branches.push("else".to_string());
                 continue;
             }
@@ -684,7 +684,7 @@ fn find_insert_position(
         // No entries — find `{` and start after it
         let open = when_node
             .children(&mut when_node.walk())
-            .find(|c| c.kind() == "{")?;
+            .find(|c| c.kind() == KIND_LBRACE)?;
         open.start_position().row as u32 + 1
     };
 
