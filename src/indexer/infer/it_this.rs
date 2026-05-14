@@ -37,7 +37,10 @@ use super::{
 };
 
 use crate::indexer::NodeExt;
-use crate::queries::{KIND_CALL_SUFFIX, KIND_LAMBDA_LIT, KIND_VALUE_ARG};
+use crate::queries::{
+    KIND_CALL_EXPR, KIND_CALL_SUFFIX, KIND_LAMBDA_LIT, KIND_NAV_EXPR, KIND_SIMPLE_IDENT,
+    KIND_TYPE_IDENT, KIND_VALUE_ARG,
+};
 use crate::resolver::{extract_collection_element_type, infer_lines::first_type_arg};
 use crate::StrExt;
 
@@ -1175,22 +1178,119 @@ fn cst_lambda_param_type_via_call(
     uri: &Url,
     param_pos: usize,
 ) -> Option<String> {
-    let param_type = cst_lambda_call_param_type(doc, lambda, deps, uri)?;
-    let resolved = lambda_type_nth_input(&param_type, param_pos)?;
-    // If the resolved type is a generic parameter (T, R, etc.), substitute
-    // with the receiver's concrete type from the call expression.
-    if is_generic_param(&resolved) {
-        let call_expr = lambda.enclosing_call_expression()?;
-        let (_fn_name, qualifier) = call_expr.call_fn_and_qualifier(&doc.bytes)?;
-        let recv_var = qualifier?;
-        let raw = deps.find_var_type(&recv_var, uri)?;
-        let receiver_type = raw.ident_prefix();
-        if !receiver_type.is_empty() && !is_generic_param(&receiver_type) {
-            return Some(receiver_type);
+    let result = cst_lambda_call_param_type(doc, lambda, deps, uri);
+    match result {
+        Some(param_type) => {
+            let extracted = lambda_type_nth_input(&param_type, param_pos)?;
+            if is_generic_param(&extracted) {
+                // Generic param from indexed scope function — try receiver substitution
+                cst_scope_fn_receiver_type(lambda, &doc.bytes, deps, uri).or(Some(extracted))
+            } else {
+                Some(extracted)
+            }
         }
+        None => {
+            // Function not indexed — if it's a known scope function,
+            // `it` is the receiver type directly
+            cst_scope_fn_receiver_type(lambda, &doc.bytes, deps, uri)
+        }
+    }
+}
+
+/// For a lambda that is a trailing argument of a scope function (let/also/etc),
+/// resolve the receiver's type from the enclosing call_expression's
+/// navigation_expression.
+fn cst_scope_fn_receiver_type(
+    lambda: &tree_sitter::Node<'_>,
+    bytes: &[u8],
+    deps: &impl InferDeps,
+    uri: &Url,
+) -> Option<String> {
+    let call_expr = lambda.enclosing_call_expression()?;
+    let (fn_name, qualifier) = call_expr.call_fn_and_qualifier(bytes)?;
+    if !SCOPE_FUNCTIONS.contains(&fn_name.as_str()) {
         return None;
     }
-    Some(resolved)
+    let recv_text = qualifier.as_deref()?;
+    // Try direct resolution first
+    if let Some(ty) = resolve_dotted_receiver_type(recv_text, deps, uri) {
+        return Some(ty);
+    }
+    // Receiver might be a complex expression (e.g. result of previous chain).
+    // Walk the CST to find the root variable of the navigation chain.
+    walk_chain_root_receiver(call_expr, bytes, deps, uri)
+}
+
+/// Walk a nested call_expression / navigation_expression chain to find the
+/// root receiver variable and resolve its type. Handles `a.b.let{}.let{}`
+/// chains by descending into the leftmost navigation_expression child.
+fn walk_chain_root_receiver(
+    call_expr: tree_sitter::Node<'_>,
+    bytes: &[u8],
+    deps: &impl InferDeps,
+    uri: &Url,
+) -> Option<String> {
+    let mut node = call_expr;
+    for _ in 0..10 {
+        let callee = node.child(0)?;
+        if callee.kind() == KIND_NAV_EXPR {
+            let receiver_node = callee.named_child(0)?;
+            match receiver_node.kind() {
+                k if k == KIND_CALL_EXPR => {
+                    node = receiver_node;
+                    continue;
+                }
+                k if k == KIND_NAV_EXPR => {
+                    // Dotted access like `settings.familyCreationDate`
+                    let text = receiver_node.utf8_text_owned(bytes)?;
+                    if let Some(ty) = resolve_dotted_receiver_type(&text, deps, uri) {
+                        return Some(ty);
+                    }
+                    node = receiver_node;
+                    continue;
+                }
+                k if k == KIND_SIMPLE_IDENT || k == KIND_TYPE_IDENT => {
+                    let name = receiver_node.utf8_text_owned(bytes)?;
+                    return resolve_dotted_receiver_type(&name, deps, uri);
+                }
+                _ => return None,
+            }
+        } else if callee.kind() == KIND_SIMPLE_IDENT || callee.kind() == KIND_TYPE_IDENT {
+            let name = callee.utf8_text_owned(bytes)?;
+            return resolve_dotted_receiver_type(&name, deps, uri);
+        } else {
+            return None;
+        }
+    }
+    None
+}
+
+/// Resolve the type of a possibly dotted receiver expression like
+/// `settings.familyCreationDate` by walking the chain:
+/// find type of first segment, then resolve each subsequent segment as a field.
+fn resolve_dotted_receiver_type(
+    recv_text: &str,
+    deps: &impl InferDeps,
+    uri: &Url,
+) -> Option<String> {
+    // Try the full text as a single variable first (handles simple `myVar?.let`)
+    if let Some(raw) = deps.find_var_type(recv_text, uri) {
+        return uppercase_ident_prefix(&raw);
+    }
+    // Dotted: resolve chain segment by segment
+    let parts: Vec<&str> = recv_text.split('.').collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    let mut current_type = deps.find_var_type(parts[0], uri)?;
+    for &field in &parts[1..] {
+        let type_name = current_type.dotted_ident_prefix();
+        if type_name.is_empty() {
+            return None;
+        }
+        current_type = deps.find_field_type(&type_name, field)?;
+    }
+    uppercase_ident_prefix(&current_type)
 }
 
 fn cst_lambda_call_param_type(

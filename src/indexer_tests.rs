@@ -2480,3 +2480,61 @@ fn synthetic_not_applied_to_non_enum() {
     // Should resolve from actual source, not synthetic
     assert_ne!(ty.as_deref(), Some("List<Foo>"));
 }
+fn nullable_let_chain_it_type_resolves() {
+    // Multi-line ?.let chain — `it` inside each lambda should get a type.
+    //
+    // Line 0: class IFamilySettings { var familyCreationDate: Long? = null }
+    // Line 1: fun currentTimeMillis(): Long = 0L
+    // Line 2: fun toMillis(days: Int): Long = 0L
+    // Line 3: fun test(settings: IFamilySettings) {
+    // Line 4:   val result = settings.familyCreationDate
+    // Line 5:     ?.let {
+    // Line 6:       if (it == 0L) currentTimeMillis().also {
+    // Line 7:         settings.familyCreationDate = it
+    // Line 8:       } else it
+    // Line 9:     }
+    // Line 10:    ?.let { currentTimeMillis() - it }
+    // Line 11:    ?.let { it > toMillis(2) } ?: false
+    // Line 12: }
+    let src = concat!(
+        "class IFamilySettings { var familyCreationDate: Long? = null }\n", // 0
+        "fun currentTimeMillis(): Long = 0L\n",                             // 1
+        "fun toMillis(days: Int): Long = 0L\n",                             // 2
+        "fun test(settings: IFamilySettings) {\n",                          // 3
+        "  val result = settings.familyCreationDate\n",                     // 4
+        "    ?.let {\n",                                                    // 5
+        "      if (it == 0L) currentTimeMillis().also {\n",                 // 6
+        "        settings.familyCreationDate = it\n",                       // 7
+        "      } else it\n",                                                // 8
+        "    }\n",                                                          // 9
+        "    ?.let { currentTimeMillis() - it }\n",                         // 10
+        "    ?.let { it > toMillis(2) } ?: false\n",                        // 11
+        "}\n",                                                              // 12
+    );
+    let (u, idx) = indexed("/chain.kt", src);
+    idx.store_live_tree(&u, src);
+
+    // Line 6: `it` inside first ?.let — should be Long (from familyCreationDate)
+    let r6 = idx.infer_lambda_param_type_at("it", &u, Position::new(6, 10));
+    assert_eq!(
+        r6.as_deref(),
+        Some("Long"),
+        "it in first ?.let lambda should be Long: {r6:?}"
+    );
+
+    // Line 10: `it` inside second ?.let — result of first ?.let is Long?
+    let r10 = idx.infer_lambda_param_type_at("it", &u, Position::new(10, 37));
+    assert_eq!(
+        r10.as_deref(),
+        Some("Long"),
+        "it in second ?.let lambda should be Long: {r10:?}"
+    );
+
+    // Line 11: `it` inside third ?.let — result of subtraction is Long
+    let r11 = idx.infer_lambda_param_type_at("it", &u, Position::new(11, 12));
+    assert_eq!(
+        r11.as_deref(),
+        Some("Long"),
+        "it in third ?.let lambda should be Long: {r11:?}"
+    );
+}
