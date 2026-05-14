@@ -15,13 +15,13 @@
 
 pub(crate) mod code_actions;
 pub(crate) mod completion;
-pub(crate) mod cursor;
 pub(crate) mod definition;
 pub(crate) mod folding;
 pub(crate) mod highlight;
 pub(crate) mod hover;
 pub(crate) mod implementation;
 pub(crate) mod references;
+pub(crate) mod rename;
 pub(crate) mod signature_help;
 pub(crate) mod symbols;
 pub(crate) mod text_utils;

@@ -7,7 +7,7 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{async_trait, Client, LanguageServer};
 
-use crate::indexer::{workspace_cache_path, IgnoreMatcher, Indexer, ProgressReporter};
+use crate::indexer::{workspace_cache_path, Indexer, ProgressReporter};
 use crate::semantic_tokens;
 use crate::workspace::{Config, Event};
 
@@ -111,21 +111,6 @@ impl Backend {
             event_tx,
             snippet_support: Arc::new(AtomicBool::new(false)),
         }
-    }
-
-    /// Return `(effective_root, scoped_source_paths, matcher)` for an rg search
-    /// originating from `file_path`.
-    ///
-    /// `effective_root` is computed via `effective_rg_root` (follows the file into its
-    /// own project root when it lives outside the configured workspace root).
-    /// `scoped_source_paths` is non-empty only when the effective root matches the
-    /// workspace root — when we've switched to a different project, source roots from
-    /// the workspace context don't apply and we fall back to a full-root search.
-    pub(crate) async fn rg_scope_for_file(
-        &self,
-        file_path: Option<&Path>,
-    ) -> (Option<PathBuf>, Vec<String>, Option<Arc<IgnoreMatcher>>) {
-        self.indexer.rg_scope_for_path(file_path)
     }
 
     fn detect_snippet_support(params: &InitializeParams) -> bool {

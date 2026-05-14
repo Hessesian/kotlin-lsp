@@ -6,7 +6,6 @@
 
 use crate::indexer::lookup::{lang_str, symbol_kw_for_lang};
 use crate::indexer::resolution::ResolvedSymbol;
-use tower_lsp::lsp_types::SymbolKind;
 
 /// Format a standard symbol hover: optional KDoc block + fenced code block.
 ///
@@ -66,10 +65,4 @@ pub(crate) fn format_contextual_hover(
         Some(td) if !td.is_empty() => format!("{sig_block}\n\n---\n\n{td}"),
         _ => sig_block,
     }
-}
-
-/// Return the language keyword for a symbol kind (Swift-aware).
-#[allow(dead_code)]
-pub(super) fn kw_for_kind(kind: SymbolKind, uri_path: &str) -> &'static str {
-    symbol_kw_for_lang(kind, lang_str(uri_path))
 }
