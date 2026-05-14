@@ -546,8 +546,28 @@ fn inferred_receiver_lambda_type(
     uri: &Url,
 ) -> Option<String> {
     extract_collection_element_type(raw_type)
+        .or_else(|| method_lambda_input_type_aware(raw_type, method, deps))
         .or_else(|| method_lambda_input_type(method, deps, uri))
         .or_else(|| uppercase_ident_prefix(raw_type))
+}
+
+/// Receiver-aware trailing lambda type: look up `method` on receiver's type,
+/// find its last param, extract lambda input type.
+fn method_lambda_input_type_aware(
+    raw_type: &str,
+    method: &str,
+    deps: &impl InferDeps,
+) -> Option<String> {
+    if method.is_empty() {
+        return None;
+    }
+    let dotted = raw_type.dotted_ident_prefix();
+    if dotted.is_empty() {
+        return None;
+    }
+    let sig = deps.find_method_params_text(&dotted, method)?;
+    let last_type = last_fun_param_type_str(&sig)?;
+    lambda_type_first_input(&last_type)
 }
 
 fn method_lambda_input_type(method: &str, deps: &impl InferDeps, uri: &Url) -> Option<String> {
@@ -1206,9 +1226,8 @@ fn receiver_aware_params(
     if let Some(recv_var) = &qualifier {
         if let Some(raw_type) = deps.find_var_type(recv_var, uri) {
             let dotted = raw_type.dotted_ident_prefix();
-            let type_base = dotted.last_segment();
-            if !type_base.is_empty() {
-                if let Some(params) = deps.find_method_params_text(type_base, &fn_name) {
+            if !dotted.is_empty() {
+                if let Some(params) = deps.find_method_params_text(&dotted, &fn_name) {
                     return Some(params);
                 }
             }
@@ -1234,11 +1253,10 @@ fn receiver_aware_params_from_text(
     }
     let raw_type = deps.find_var_type(recv_var, uri)?;
     let dotted = raw_type.dotted_ident_prefix();
-    let type_base = dotted.last_segment();
-    if type_base.is_empty() {
+    if dotted.is_empty() {
         return None;
     }
-    deps.find_method_params_text(type_base, fn_name)
+    deps.find_method_params_text(&dotted, fn_name)
 }
 
 /// For an INLINE lambda argument `fn(a, b, { param -> ... })`:

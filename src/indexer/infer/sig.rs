@@ -365,20 +365,38 @@ pub(crate) fn find_fun_signature_with_receiver(
 /// Receiver-aware params lookup: find `method_name`'s parameter text inside
 /// the class `class_name`.  Uses range containment to avoid picking a method
 /// from an unrelated class in the same file.
+///
+/// Supports dotted names like `"DepositAccountReducer.Factory"` — splits into
+/// container `"DepositAccountReducer"` and type_base `"Factory"`, then filters
+/// definitions to only those whose container matches.
 pub(crate) fn find_method_params_in_class(
     idx: &Indexer,
     class_name: &str,
     method_name: &str,
 ) -> Option<String> {
-    let type_base = class_name.split('.').next_back().unwrap_or(class_name);
+    let (container, type_base) = match class_name.rsplit_once('.') {
+        Some((c, b)) => (Some(c), b),
+        None => (None, class_name),
+    };
     let locations = idx.definitions.get(type_base)?;
     for loc in locations.iter() {
-        let file_data = idx.files.get(loc.uri.as_str())?;
-        let class_range = file_data
-            .symbols
-            .iter()
-            .find(|s| s.name == type_base)
-            .map(|s| s.range);
+        let Some(file_data) = idx.files.get(loc.uri.as_str()) else {
+            continue;
+        };
+        let class_sym = file_data.symbols.iter().find(|s| {
+            s.name == type_base
+                && container.is_none_or(|c| {
+                    file_data.symbols.iter().any(|outer| {
+                        outer.name == c
+                            && outer.range.start.line <= s.range.start.line
+                            && outer.range.end.line >= s.range.end.line
+                    })
+                })
+        });
+        let Some(class_entry) = class_sym else {
+            continue;
+        };
+        let class_range = class_entry.range;
 
         for sym in &file_data.symbols {
             if sym.name != method_name {
@@ -390,10 +408,10 @@ pub(crate) fn find_method_params_in_class(
             ) {
                 continue;
             }
-            if let Some(cr) = class_range {
-                if sym.range.start.line < cr.start.line || sym.range.end.line > cr.end.line {
-                    continue;
-                }
+            if sym.range.start.line < class_range.start.line
+                || sym.range.end.line > class_range.end.line
+            {
+                continue;
             }
             let start_line = sym.range.start.line as usize;
             if let Some(params) = collect_params_from_line(&file_data.lines, start_line) {
