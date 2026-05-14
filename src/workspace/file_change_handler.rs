@@ -88,6 +88,7 @@ impl FileChangeHandler {
             };
             let diagnostics_uri = uri.clone();
             let diagnostics_indexer = Arc::clone(&indexer);
+            let diagnostics_text = text.clone();
             let result = tokio::task::spawn_blocking(move || {
                 let data = indexer.index_content(&uri, &text);
                 drop(permit);
@@ -96,6 +97,16 @@ impl FileChangeHandler {
             .await;
 
             let Some(client) = client else { return };
+
+            // Ensure the live tree matches the exact text we just indexed,
+            // preventing races where a fire-and-forget store_live_tree from
+            // a prior edit overwrites a newer one.
+            let tree_indexer = Arc::clone(&cached_indexer);
+            let tree_uri = diagnostics_uri.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                tree_indexer.store_live_tree(&tree_uri, &diagnostics_text);
+            })
+            .await;
 
             let mut diagnostics = match result {
                 Ok(Some(data)) => syntax_diagnostics(&data.syntax_errors),
