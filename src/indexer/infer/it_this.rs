@@ -546,8 +546,7 @@ fn inferred_receiver_lambda_type(
     uri: &Url,
 ) -> Option<String> {
     extract_collection_element_type(raw_type)
-        .or_else(|| method_lambda_input_type_aware(raw_type, method, deps))
-        .or_else(|| method_lambda_input_type(method, deps, uri))
+        .or_else(|| method_lambda_input_type_aware(raw_type, method, deps, uri))
         .or_else(|| uppercase_ident_prefix(raw_type))
 }
 
@@ -557,24 +556,14 @@ fn method_lambda_input_type_aware(
     raw_type: &str,
     method: &str,
     deps: &impl InferDeps,
+    uri: &Url,
 ) -> Option<String> {
     if method.is_empty() {
         return None;
     }
-    let dotted = raw_type.dotted_ident_prefix();
-    if dotted.is_empty() {
-        return None;
-    }
-    let sig = deps.find_method_params_text(&dotted, method)?;
+    let sig = resolve_call_params(method, Some(raw_type), deps, uri)?;
     let last_type = last_fun_param_type_str(&sig)?;
     lambda_type_first_input(&last_type)
-}
-
-fn method_lambda_input_type(method: &str, deps: &impl InferDeps, uri: &Url) -> Option<String> {
-    if method.is_empty() {
-        return None;
-    }
-    fun_trailing_lambda_it_type(method, deps, uri)
 }
 
 fn uppercase_ident_prefix(raw: &str) -> Option<String> {
@@ -1230,6 +1219,24 @@ fn cst_lambda_call_param_type(
 /// Resolve function params with receiver awareness: if the call has a dot-receiver
 /// (e.g. `factory.create(...)`), resolve the receiver's type and look up the
 /// method on that type.  Falls back to global name-based lookup.
+/// Unified params lookup: try qualified on receiver type, fall back to global.
+fn resolve_call_params(
+    fn_name: &str,
+    receiver_type: Option<&str>,
+    deps: &impl InferDeps,
+    uri: &Url,
+) -> Option<String> {
+    if let Some(raw_type) = receiver_type {
+        let dotted = raw_type.dotted_ident_prefix();
+        if !dotted.is_empty() {
+            if let Some(params) = deps.find_method_params_text(&dotted, fn_name) {
+                return Some(params);
+            }
+        }
+    }
+    deps.find_fun_params_text(fn_name, uri)
+}
+
 fn receiver_aware_params(
     call_expr: tree_sitter::Node<'_>,
     bytes: &[u8],
@@ -1237,17 +1244,10 @@ fn receiver_aware_params(
     uri: &Url,
 ) -> Option<String> {
     let (fn_name, qualifier) = call_expr.call_fn_and_qualifier(bytes)?;
-    if let Some(recv_var) = &qualifier {
-        if let Some(raw_type) = deps.find_var_type(recv_var, uri) {
-            let dotted = raw_type.dotted_ident_prefix();
-            if !dotted.is_empty() {
-                if let Some(params) = deps.find_method_params_text(&dotted, &fn_name) {
-                    return Some(params);
-                }
-            }
-        }
-    }
-    deps.find_fun_params_text(&fn_name, uri)
+    let recv_type = qualifier
+        .as_deref()
+        .and_then(|v| deps.find_var_type(v, uri));
+    resolve_call_params(&fn_name, recv_type.as_deref(), deps, uri)
 }
 
 /// Text-based receiver-aware params lookup for `inline_lambda_param_type`.
@@ -1265,12 +1265,8 @@ fn receiver_aware_params_from_text(
     if recv_var.is_empty() {
         return None;
     }
-    let raw_type = deps.find_var_type(recv_var, uri)?;
-    let dotted = raw_type.dotted_ident_prefix();
-    if dotted.is_empty() {
-        return None;
-    }
-    deps.find_method_params_text(&dotted, fn_name)
+    let recv_type = deps.find_var_type(recv_var, uri);
+    resolve_call_params(fn_name, recv_type.as_deref(), deps, uri)
 }
 
 /// For an INLINE lambda argument `fn(a, b, { param -> ... })`:
