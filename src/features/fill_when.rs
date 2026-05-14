@@ -36,7 +36,10 @@ pub(crate) fn build_fill_when_action(
         .find(|c| c.kind() == KIND_WHEN_SUBJECT)?;
 
     let subject_var = extract_subject_identifier(&subject_node, source_bytes)?;
-    let subject_type = crate::resolver::infer::infer_variable_type(indexer, &subject_var, uri)?;
+
+    // Try CST-based local resolution first (handles spaces in `: Type`), then index fallback
+    let subject_type = resolve_subject_type_from_cst(&when_node, &subject_var, source_bytes)
+        .or_else(|| crate::resolver::infer::infer_variable_type(indexer, &subject_var, uri))?;
     let subject_type = strip_nullable(&subject_type);
 
     let (type_kind, members) = resolve_type_members(indexer, subject_type)?;
@@ -125,6 +128,159 @@ fn find_enclosing_when<'a>(
         current = n.parent();
     }
     None
+}
+
+/// Resolve the when subject's type from the CST by searching:
+/// 1. Sibling property_declarations in the same statements block (local vals)
+/// 2. Enclosing function's parameters
+/// 3. Enclosing class constructor parameters
+fn resolve_subject_type_from_cst(
+    when_node: &tree_sitter::Node,
+    var_name: &str,
+    source: &[u8],
+) -> Option<String> {
+    // Walk up to find statements block or function_declaration
+    let mut current = when_node.parent();
+    while let Some(node) = current {
+        match node.kind() {
+            "statements" => {
+                if let Some(ty) = find_type_in_sibling_declarations(&node, var_name, source) {
+                    return Some(ty);
+                }
+            }
+            "function_declaration" => {
+                if let Some(ty) = find_type_in_parameters(&node, var_name, source) {
+                    return Some(ty);
+                }
+            }
+            "class_declaration" => {
+                if let Some(ty) = find_type_in_constructor(&node, var_name, source) {
+                    return Some(ty);
+                }
+            }
+            _ => {}
+        }
+        current = node.parent();
+    }
+    None
+}
+
+/// Search sibling property_declarations for `val <var_name> : Type`
+fn find_type_in_sibling_declarations(
+    statements: &tree_sitter::Node,
+    var_name: &str,
+    source: &[u8],
+) -> Option<String> {
+    for child in statements.children(&mut statements.walk()) {
+        if child.kind() != "property_declaration" {
+            continue;
+        }
+        if let Some(ty) = extract_var_type_from_declaration(&child, var_name, source) {
+            return Some(ty);
+        }
+    }
+    None
+}
+
+/// Search function parameters for `<var_name>: Type`
+fn find_type_in_parameters(
+    func_node: &tree_sitter::Node,
+    var_name: &str,
+    source: &[u8],
+) -> Option<String> {
+    for child in func_node.children(&mut func_node.walk()) {
+        if child.kind() != "function_value_parameters" {
+            continue;
+        }
+        for param in child.children(&mut child.walk()) {
+            if param.kind() != "parameter" {
+                continue;
+            }
+            if let Some(ty) = extract_param_type(&param, var_name, source) {
+                return Some(ty);
+            }
+        }
+    }
+    None
+}
+
+/// Search class constructor parameters
+fn find_type_in_constructor(
+    class_node: &tree_sitter::Node,
+    var_name: &str,
+    source: &[u8],
+) -> Option<String> {
+    for child in class_node.children(&mut class_node.walk()) {
+        if child.kind() != "primary_constructor" {
+            continue;
+        }
+        for param in child.children(&mut child.walk()) {
+            if param.kind() != "class_parameter" {
+                continue;
+            }
+            if let Some(ty) = extract_param_type(&param, var_name, source) {
+                return Some(ty);
+            }
+        }
+    }
+    None
+}
+
+/// Extract type from `variable_declaration` inside a property_declaration.
+/// CST: property_declaration → variable_declaration → simple_identifier + ":" + user_type
+fn extract_var_type_from_declaration(
+    prop: &tree_sitter::Node,
+    var_name: &str,
+    source: &[u8],
+) -> Option<String> {
+    for child in prop.children(&mut prop.walk()) {
+        if child.kind() != "variable_declaration" {
+            continue;
+        }
+        let mut found_name = false;
+        for vc in child.children(&mut child.walk()) {
+            if vc.kind() == KIND_SIMPLE_IDENT && vc.utf8_text(source).ok() == Some(var_name) {
+                found_name = true;
+            }
+            if found_name && vc.kind() == KIND_USER_TYPE {
+                return extract_full_type_name(&vc, source);
+            }
+        }
+    }
+    None
+}
+
+/// Extract type from a `parameter` or `class_parameter` node.
+/// CST: parameter → simple_identifier + ":" + user_type
+fn extract_param_type(param: &tree_sitter::Node, var_name: &str, source: &[u8]) -> Option<String> {
+    let mut found_name = false;
+    for child in param.children(&mut param.walk()) {
+        if child.kind() == KIND_SIMPLE_IDENT && child.utf8_text(source).ok() == Some(var_name) {
+            found_name = true;
+        }
+        if found_name && child.kind() == KIND_USER_TYPE {
+            return extract_full_type_name(&child, source);
+        }
+    }
+    None
+}
+
+/// Extract the full type name from a user_type node (e.g. "TipsResult", "Effect").
+/// For dotted types like `Outer.Inner`, concatenates with dots.
+fn extract_full_type_name(user_type: &tree_sitter::Node, source: &[u8]) -> Option<String> {
+    let mut parts = Vec::new();
+    for child in user_type.children(&mut user_type.walk()) {
+        if child.kind() == KIND_TYPE_IDENT {
+            if let Ok(text) = child.utf8_text(source) {
+                parts.push(text.to_string());
+            }
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("."))
+    }
 }
 
 fn extract_subject_identifier(subject_node: &tree_sitter::Node, source: &[u8]) -> Option<String> {

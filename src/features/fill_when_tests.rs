@@ -209,3 +209,51 @@ fun handle(f: Foo) {
     let action = build_fill_when_action(&idx, &u, cursor_at(1, 6));
     assert!(action.is_none(), "no action for regular class");
 }
+
+#[test]
+fn local_val_with_space_before_colon() {
+    let src = "\
+fun test() {
+    val tip : Color = Color.RED
+    when(tip){
+    }
+}
+";
+    let idx = setup(&[("/Color.kt", ENUM_SRC), ("/main.kt", src)]);
+    let u = uri("/main.kt");
+    let action = build_fill_when_action(&idx, &u, cursor_at(2, 6));
+    assert!(
+        action.is_some(),
+        "should resolve type from CST even with space before colon"
+    );
+    match action.unwrap() {
+        CodeActionOrCommand::CodeAction(ca) => {
+            let edit = ca.edit.unwrap();
+            let changes = edit.changes.unwrap();
+            let edits = changes.get(&u).unwrap();
+            let text = &edits[0].new_text;
+            assert!(text.contains("Color.GREEN"), "missing GREEN: {text}");
+            assert!(text.contains("Color.BLUE"), "missing BLUE: {text}");
+            // RED is already assigned but not in the when — all 3 should be generated
+            assert!(text.contains("Color.RED"), "missing RED: {text}");
+        }
+        _ => panic!("expected CodeAction"),
+    }
+}
+
+#[test]
+fn function_parameter_type_resolution() {
+    let src = "\
+fun handle(c: Color) {
+    when (c) {
+    }
+}
+";
+    let idx = setup(&[("/Color.kt", ENUM_SRC), ("/main.kt", src)]);
+    let u = uri("/main.kt");
+    let action = build_fill_when_action(&idx, &u, cursor_at(1, 6));
+    assert!(
+        action.is_some(),
+        "should resolve type from function parameter"
+    );
+}
