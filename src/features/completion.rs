@@ -15,8 +15,7 @@ use tower_lsp::lsp_types::{
 use crate::indexer::resolution::{enrich_at_line, IndexRead, ResolveOptions, SubstitutionContext};
 use crate::indexer::Indexer;
 use crate::indexer::{
-    find_it_element_type, find_it_element_type_in_lines, find_named_lambda_param_type,
-    find_this_element_type_in_lines, is_lambda_param, last_ident_in,
+    find_it_element_type, find_named_lambda_param_type, is_lambda_param, last_ident_in,
 };
 use crate::resolver::complete::{
     complete_symbol, complete_symbol_with_context, is_annotation_context,
@@ -272,33 +271,16 @@ fn resolve_lambda_recv_type(
             },
         );
     }
-    // Prefer the unified inference path (same as hover/inlay-hints).
+    // Unified inference path (same as hover/inlay-hints) — handles multi-line
+    // scan, enclosing_class_at for this, and call-arg type fallback.
     let position = Position::new(cursor_line as u32, cursor_col as u32);
     if let Some(ty) = index.infer_lambda_param_type_at(recv, uri, position) {
         return Some(ty);
     }
-    // Legacy fallback: single-line text heuristic
-    let t = find_it_element_type(before, index, uri);
-    if t.is_some() && recv == IT {
-        return t;
-    }
-    let lines = index.mem_lines_for(uri.as_str());
-    let pos = CursorPos {
-        line: cursor_line,
-        utf16_col: cursor_col,
-    };
-    let ml = lines.and_then(|ls| {
-        if recv == THIS {
-            find_this_element_type_in_lines(&ls, pos, index, uri)
-        } else {
-            find_it_element_type_in_lines(&ls, pos, index, uri)
-        }
-    });
-    if ml.is_some() {
-        return ml;
-    }
-    if recv == THIS {
-        return index.enclosing_class_at(uri, cursor_line as u32);
+    // Single-line fallback: when mem_lines is unavailable (e.g. file not yet
+    // opened), use the raw before-cursor text to find the lambda receiver.
+    if recv == IT {
+        return find_it_element_type(before, index, uri);
     }
     None
 }
