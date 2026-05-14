@@ -751,7 +751,9 @@ fn cst_it_or_this_type(
                         lambda_receiver_type_named_arg_ml(&before_brace, 0, lines, ln, idx, uri)
                     })
                     .or_else(|| cst_lambda_param_type_via_call(doc, &cur, idx, uri, 0));
-                if result.is_some() {
+                // Generic params (T/R/E) are not useful — skip and let
+                // outer lambda or text fallback resolve a concrete type.
+                if result.as_deref().is_some_and(|t| !is_generic_param(t)) {
                     return result;
                 }
             }
