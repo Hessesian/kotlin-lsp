@@ -2395,3 +2395,48 @@ fn inline_lambda_also_nested_in_outer_lambda() {
         "inner it inside .also nested in collect lambda should be String: {r:?}"
     );
 }
+
+// ── Synthetic enum members ───────────────────────────────────────────────────
+
+#[test]
+fn synthetic_enum_entries_field_type() {
+    let (_, idx) = indexed("/Color.kt", "enum class Color { RED, GREEN, BLUE }");
+    let ty = idx.find_field_type("Color", "entries");
+    assert_eq!(ty.as_deref(), Some("List<Color>"));
+}
+
+#[test]
+fn synthetic_enum_name_field_type() {
+    let (_, idx) = indexed("/Color.kt", "enum class Color { RED, GREEN, BLUE }");
+    let ty = idx.find_field_type("Color", "name");
+    assert_eq!(ty.as_deref(), Some("String"));
+}
+
+#[test]
+fn synthetic_enum_ordinal_field_type() {
+    let (_, idx) = indexed("/Color.kt", "enum class Color { RED, GREEN, BLUE }");
+    let ty = idx.find_field_type("Color", "ordinal");
+    assert_eq!(ty.as_deref(), Some("Int"));
+}
+
+#[test]
+fn synthetic_enum_values_method() {
+    let (_, idx) = indexed("/Color.kt", "enum class Color { RED, GREEN, BLUE }");
+    let ty = idx.find_method_return_type_for_type("Color", "values");
+    assert_eq!(ty.as_deref(), Some("Array<Color>"));
+}
+
+#[test]
+fn synthetic_enum_valueof_method() {
+    let (_, idx) = indexed("/Color.kt", "enum class Color { RED, GREEN, BLUE }");
+    let ty = idx.find_method_return_type_for_type("Color", "valueOf");
+    assert_eq!(ty.as_deref(), Some("Color"));
+}
+
+#[test]
+fn synthetic_not_applied_to_non_enum() {
+    let (_, idx) = indexed("/Foo.kt", "class Foo { val entries: String = \"\" }");
+    let ty = idx.find_field_type("Foo", "entries");
+    // Should resolve from actual source, not synthetic
+    assert_ne!(ty.as_deref(), Some("List<Foo>"));
+}
