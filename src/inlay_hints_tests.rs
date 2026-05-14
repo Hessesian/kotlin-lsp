@@ -264,3 +264,39 @@ class Vm {
         "must not emit ': suspend' hint for it inside nested lambda, got: {hints:?}"
     );
 }
+
+#[test]
+fn fun_expr_body_comparison_hint() {
+    let src = "fun check(n: Int) = n > 0";
+    let hints = hints_for(src);
+    assert!(
+        hints
+            .iter()
+            .any(|h| matches!(&h.label, InlayHintLabel::String(s) if s == ": Boolean")),
+        "expected ': Boolean' hint for comparison expression body, got: {hints:?}",
+    );
+}
+
+#[test]
+fn fun_expr_body_prefix_not_hint() {
+    let src = "fun neg(b: Boolean) = !b";
+    let hints = hints_for(src);
+    assert!(
+        hints
+            .iter()
+            .any(|h| matches!(&h.label, InlayHintLabel::String(s) if s == ": Boolean")),
+        "expected ': Boolean' hint for !b expression body, got: {hints:?}",
+    );
+}
+
+#[test]
+fn fun_expr_body_range_hint() {
+    let src = "fun r() = 1..10";
+    let hints = hints_for(src);
+    assert!(
+        hints
+            .iter()
+            .any(|h| matches!(&h.label, InlayHintLabel::String(s) if s == ": IntRange")),
+        "expected ': IntRange' hint for range expression body, got: {hints:?}",
+    );
+}
