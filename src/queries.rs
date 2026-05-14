@@ -481,6 +481,13 @@ pub(crate) const KIND_BOOLEAN_LITERAL: &str = "boolean_literal";
 pub(crate) const KIND_NULL_LITERAL: &str = "null";
 pub(crate) const KIND_CHARACTER_LITERAL: &str = "character_literal";
 
+// ─── Kotlin when expression ───────────────────────────────────────────────────
+pub(crate) const KIND_WHEN_EXPR: &str = "when_expression";
+pub(crate) const KIND_WHEN_SUBJECT: &str = "when_subject";
+pub(crate) const KIND_WHEN_ENTRY: &str = "when_entry";
+pub(crate) const KIND_WHEN_CONDITION: &str = "when_condition";
+pub(crate) const KIND_TYPE_TEST: &str = "type_test";
+
 // ─── Comment kinds ────────────────────────────────────────────────────────────
 pub(crate) const KIND_LINE_COMMENT: &str = "line_comment";
 pub(crate) const KIND_MULTILINE_COMMENT: &str = "multiline_comment";

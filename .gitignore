@@ -5,3 +5,4 @@ contrib/**/target
 __pycache__/
 copilot-rename-args-worktree
 src/lib.rs
+perf.data
