@@ -2135,7 +2135,7 @@ fn lambda_param_dotted_nested_class_chain() {
         ),
     );
     // Cursor on `familyAccount` at line 5 (0-based), col inside the lambda body
-    let col = "            ".len() as u32;
+    let _col = "            ".len() as u32;
 
     // Step 1: find_var_type("resultState") should resolve the function param
     let var_type = crate::resolver::infer::infer_variable_type_raw(&idx, "resultState", &vm_uri);

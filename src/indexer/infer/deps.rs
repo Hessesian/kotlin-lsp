@@ -201,20 +201,6 @@ impl TestDeps {
         );
         self
     }
-
-    /// Register `(class_name, method_name)` → raw params text.
-    pub(crate) fn with_method_params(
-        mut self,
-        class_name: &str,
-        method_name: &str,
-        params: &str,
-    ) -> Self {
-        self.method_params.insert(
-            (class_name.to_string(), method_name.to_string()),
-            params.to_string(),
-        );
-        self
-    }
 }
 
 #[cfg(test)]
