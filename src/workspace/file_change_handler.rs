@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use tokio::task::JoinHandle;
@@ -15,6 +16,9 @@ pub(crate) struct FileChangeHandler {
     indexer: Arc<Indexer>,
     client: Option<Client>,
     pending_reindex: HashMap<String, JoinHandle<()>>,
+    /// Per-URI generation counter. Bumped on every edit so debounce tasks
+    /// can detect whether a newer edit arrived while they were running.
+    diagnostic_generation: HashMap<String, Arc<AtomicU64>>,
 }
 
 impl FileChangeHandler {
@@ -23,6 +27,7 @@ impl FileChangeHandler {
             indexer,
             client,
             pending_reindex: HashMap::new(),
+            diagnostic_generation: HashMap::new(),
         }
     }
 
@@ -42,6 +47,15 @@ impl FileChangeHandler {
         let Some(text) = self.drain_file_changed_batch(changes) else {
             return;
         };
+
+        // Bump generation — any in-flight debounce task with an older
+        // generation will skip publishing diagnostics.
+        let key = uri.to_string();
+        let generation = self
+            .diagnostic_generation
+            .entry(key)
+            .or_insert_with(|| Arc::new(AtomicU64::new(0)));
+        generation.fetch_add(1, Ordering::Release);
 
         // Clear stale diagnostics immediately so old positions don't linger
         // while the debounced reindex is pending.
@@ -82,6 +96,12 @@ impl FileChangeHandler {
         let indexer = Arc::clone(&self.indexer);
         let diag_indexer = Arc::clone(&self.indexer);
         let semaphore = indexer.parse_sem();
+        let generation = Arc::clone(
+            self.diagnostic_generation
+                .entry(key.clone())
+                .or_insert_with(|| Arc::new(AtomicU64::new(0))),
+        );
+        let my_generation = generation.load(Ordering::Acquire);
         let handle = tokio::spawn(async move {
             tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
             let Ok(permit) = semaphore.acquire_owned().await else {
@@ -97,6 +117,12 @@ impl FileChangeHandler {
             .await;
 
             let Some(client) = client else { return };
+
+            // If a newer edit arrived while we were working, skip publishing
+            // — a newer debounce task will handle it.
+            if generation.load(Ordering::Acquire) != my_generation {
+                return;
+            }
 
             // Parse tree from the exact same text that was just indexed —
             // this guarantees CST and indexed data are consistent.
@@ -116,6 +142,13 @@ impl FileChangeHandler {
             if let Some(ref doc) = live_doc {
                 diagnostics.extend(call_arg_diagnostics(&diag_indexer, &diagnostics_uri, doc));
             }
+
+            // Final generation check before publishing — prevents stale
+            // diagnostics from overwriting a newer clear/publish.
+            if generation.load(Ordering::Acquire) != my_generation {
+                return;
+            }
+
             client
                 .publish_diagnostics(diagnostics_uri, diagnostics, None)
                 .await;
