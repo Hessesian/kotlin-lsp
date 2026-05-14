@@ -1398,14 +1398,21 @@ fn container_nested_class() {
 fn container_companion_object() {
     let src = "class Host {\n    companion object {\n        fun factory() {}\n    }\n}";
     let data = parse_kotlin(src);
-    // companion object is named "Companion" by Kotlin convention if unnamed
-    // But tree-sitter may give it a different name — check what we get
     let factory = sym(&data, "factory").unwrap();
-    // factory's container should be either "Companion" or "Host" depending on
-    // whether the companion object is extracted as a separate symbol
-    assert!(
-        factory.container.is_some(),
-        "factory inside companion should have a container"
+    // Unnamed companion objects aren't extracted as separate symbols,
+    // so factory's container is the enclosing class.
+    assert_eq!(factory.container.as_deref(), Some("Host"));
+}
+
+#[test]
+fn container_single_line_class() {
+    let src = "class Foo { fun bar() {} }";
+    let data = parse_kotlin(src);
+    let bar = sym(&data, "bar").unwrap();
+    assert_eq!(
+        bar.container.as_deref(),
+        Some("Foo"),
+        "single-line class member should have container"
     );
 }
 

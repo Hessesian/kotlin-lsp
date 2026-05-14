@@ -394,19 +394,23 @@ fn assign_containers(symbols: &mut [SymbolEntry]) {
 
     for i in 0..symbols.len() {
         let sym_range = symbols[i].range;
-        let sym_start = sym_range.start.line;
 
         // Find tightest enclosing container (smallest range that fully encloses this symbol).
-        // Skip self (same range = same symbol, not a parent).
+        // Skip self: a container with identical start AND end position is the symbol itself.
         let parent = containers
             .iter()
             .filter(|(ci, cr)| {
                 *ci != i
-                    && cr.start.line <= sym_start
+                    && cr.start.line <= sym_range.start.line
                     && cr.end.line >= sym_range.end.line
-                    && (cr.start.line != sym_range.start.line || cr.end.line != sym_range.end.line)
+                    && (cr.start != sym_range.start || cr.end != sym_range.end)
             })
-            .min_by_key(|(_, cr)| cr.end.line - cr.start.line);
+            .min_by_key(|(_, cr)| {
+                (
+                    cr.end.line - cr.start.line,
+                    cr.end.character.saturating_sub(cr.start.character),
+                )
+            });
 
         if let Some(&(pi, _)) = parent {
             symbols[i].container = Some(symbols[pi].name.clone());

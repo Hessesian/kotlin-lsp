@@ -773,8 +773,8 @@ impl Indexer {
         if let Ok(mut last) = self.last_completion.lock() {
             *last = None;
         }
-        // Invalidate signature cache entries for this URI (definition may have changed).
-        self.sig_cache.retain(|k, _| k.1 != uri_str);
+        // Invalidate entire signature cache — a changed file may affect lookups from any caller.
+        self.sig_cache.clear();
 
         let result = Self::parse_file(uri, content);
         self.apply_file_result(&result);
