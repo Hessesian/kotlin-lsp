@@ -931,6 +931,24 @@ fn chain_inference_single_hop_optional_let() {
 }
 
 #[test]
+fn stdlib_let_generic_param_not_leaked() {
+    // When stdlib `let` is indexed (sourcePaths includes stdlib sources),
+    // its signature `block: (T) -> R` contains generic param `T`.
+    // We must NOT leak `T` as the inferred type — the receiver's concrete
+    // type should win via the uppercase fallback.
+    let u = test_uri();
+    let deps = super::super::TestDeps::new()
+        .with_var(u.as_str(), "familyCreationDate", "Long?")
+        .with_fun(u.as_str(), "let", "block: (T) -> R");
+    let result = lambda_receiver_type_from_context("familyCreationDate.let", &deps, &u);
+    assert_eq!(
+        result.as_deref(),
+        Some("Long"),
+        "should resolve to receiver type Long, not generic param T"
+    );
+}
+
+#[test]
 fn chain_inference_two_hop_field_method_also() {
     // `resultState.value.getOrNull()?.also { account -> }`
     // resultState: ResultState<Account>, value: Result<T>

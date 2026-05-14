@@ -446,3 +446,35 @@ fn no_diagnostic_on_withcontext_after_deletion() {
         "withContext with trailing lambda should not be flagged: {diags:?}"
     );
 }
+
+#[test]
+fn no_false_diagnostic_on_let_lambda_chain() {
+    let src = concat!(
+        "fun toMillis(days: Int): Long = 0L\n",
+        "class Foo {\n",
+        "  var familyCreationDate: Long? = null\n",
+        "  fun test() {\n",
+        "    val result = familyCreationDate\n",
+        "      ?.let {\n",
+        "        if (it == 0L) System.currentTimeMillis().also {\n",
+        "          familyCreationDate = it\n",
+        "        } else it\n",
+        "      }\n",
+        "      ?.let { System.currentTimeMillis() - it }\n",
+        "      ?.let { it > toMillis(2) } ?: false\n",
+        "  }\n",
+        "}\n",
+    );
+    let (uri, idx, _) = setup(&[("/chain.kt", src)]);
+    let diags = run_diagnostics(&idx, &uri, src);
+    for d in &diags {
+        eprintln!(
+            "  UNEXPECTED diag line={} col={}: {}",
+            d.range.start.line, d.range.start.character, d.message
+        );
+    }
+    assert!(
+        diags.is_empty(),
+        "let/also lambda chains should not produce diagnostics: {diags:?}"
+    );
+}

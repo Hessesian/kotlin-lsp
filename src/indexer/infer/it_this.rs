@@ -539,6 +539,9 @@ fn first_concrete_type_arg_str(ty: &str) -> Option<String> {
     Some(base.to_owned())
 }
 
+/// Kotlin stdlib scope functions whose `T` parameter IS the receiver type.
+const SCOPE_FUNCTIONS: &[&str] = &["let", "also", "run", "apply", "takeIf", "takeUnless"];
+
 fn inferred_receiver_lambda_type(
     raw_type: &str,
     method: &str,
@@ -546,7 +549,15 @@ fn inferred_receiver_lambda_type(
     uri: &Url,
 ) -> Option<String> {
     extract_collection_element_type(raw_type)
-        .or_else(|| method_lambda_input_type_aware(raw_type, method, deps, uri))
+        .or_else(|| {
+            let from_sig = method_lambda_input_type_aware(raw_type, method, deps, uri);
+            match from_sig.as_deref() {
+                Some(t) if is_generic_param(t) && SCOPE_FUNCTIONS.contains(&method) => {
+                    uppercase_ident_prefix(raw_type).or(from_sig)
+                }
+                _ => from_sig,
+            }
+        })
         .or_else(|| uppercase_ident_prefix(raw_type))
 }
 
