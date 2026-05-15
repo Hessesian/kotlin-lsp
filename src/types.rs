@@ -2,6 +2,19 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tower_lsp::lsp_types::{Range, SymbolKind};
 
+/// Classification of a file's source set.
+/// Determined at scan time based on file path and workspace configuration.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum SourceSet {
+    /// Production source code
+    #[default]
+    Main,
+    /// Test source code (src/test/, src/androidTest/, etc.)
+    Test,
+    /// Library/SDK source from sourcePaths — excluded from references and rename
+    Library,
+}
+
 /// File language, derived from path extension.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Language {
@@ -153,6 +166,33 @@ pub(crate) struct ImportEntry {
     pub is_star: bool,
 }
 
+impl ImportEntry {
+    /// Does this import make `symbol_name` accessible when defined in `def_pkg`?
+    ///
+    /// Handles:
+    /// - Star import: `import com.example.*` covers any symbol in package `com.example`
+    /// - Direct import: `import com.example.Foo` covers `Foo` from `com.example`
+    /// - Nested class import: `import com.example.Outer.Config` covers `Config` from `com.example`
+    ///   (the nested container `Outer` is an intermediate segment)
+    pub(crate) fn covers(&self, def_pkg: &str, symbol_name: &str) -> bool {
+        if self.is_star {
+            return self.full_path == def_pkg;
+        }
+        if self.local_name != symbol_name {
+            return false;
+        }
+        if self.full_path == format!("{def_pkg}.{symbol_name}") {
+            return true;
+        }
+        if let Some(rest) = self.full_path.strip_prefix(def_pkg) {
+            if let Some(rest) = rest.strip_prefix('.') {
+                return rest == symbol_name || rest.ends_with(&format!(".{symbol_name}"));
+            }
+        }
+        false
+    }
+}
+
 /// A structural syntax error detected by tree-sitter.
 ///
 /// These are zero-false-positive issues: missing brackets, unclosed strings,
@@ -175,6 +215,9 @@ pub(crate) struct FileData {
     /// Wrapped in Arc so that `clone()` is a cheap atomic refcount bump,
     /// not a full Vec<String> copy (which allocates one heap block per line).
     pub lines: Arc<Vec<String>>,
+    /// Source set classification for this file.
+    #[serde(default)]
+    pub source_set: SourceSet,
     /// Lower-cased identifiers found before `:` on non-comment lines.
     /// Populated once at parse time; used by completion without re-scanning.
     pub declared_names: Vec<String>,
@@ -294,3 +337,7 @@ pub(crate) struct WorkspaceIndexResult {
     /// cache is a complete snapshot of the workspace.
     pub complete_scan: bool,
 }
+
+#[cfg(test)]
+#[path = "types_tests.rs"]
+mod tests;

@@ -3,6 +3,12 @@
 //! Covers pure string helpers that can be tested without any `Indexer` state.
 
 use super::*;
+use crate::indexer::Indexer;
+use tower_lsp::lsp_types::Url;
+
+fn test_uri(path: &str) -> Url {
+    Url::parse(&format!("file://{path}")).unwrap()
+}
 
 // ─── collect_signature ────────────────────────────────────────────────────────
 
@@ -265,30 +271,177 @@ fn nth_param_type_gt_operator_in_default() {
 
 // ─── is_import_reachable ─────────────────────────────────────────────────────
 
+#[test]
+fn resolve_qualified_skips_top_level_function_before_type_body() {
+    let caller_uri = test_uri("/Caller.kt");
+    let idx = Indexer::new();
+    idx.index_content(
+        &caller_uri,
+        "package com.example\nfun run(unrelated: Int, extra: Int) {}\nclass Service {\n    fun run(name: String) {}\n}\nclass Caller(private val service: Service) {\n    fun invoke() {\n        service.run(1)\n    }\n}\n",
+    );
+
+    let call = CallSite {
+        name: "run",
+        qualifier: Some("service"),
+        caller_uri: &caller_uri,
+    };
+
+    match resolve_call_signature(&call, &idx) {
+        SignatureResult::Unique {
+            param_counts,
+            params_text,
+        } => {
+            assert_eq!(param_counts, (1, 1));
+            assert_eq!(params_text, "name: String");
+        }
+        other => panic!("expected unique class member match, got {other:?}"),
+    }
+}
+
+#[test]
+fn resolve_qualified_matches_method_via_container() {
+    let caller_uri = test_uri("/Caller.kt");
+    let idx = Indexer::new();
+    idx.index_content(
+        &caller_uri,
+        "package com.example\nclass Api {\n    fun fetch(id: String, force: Boolean = false) {}\n}\nclass Caller(private val api: Api) {\n    fun invoke() {\n        api.fetch(1)\n    }\n}\n",
+    );
+
+    let call = CallSite {
+        name: "fetch",
+        qualifier: Some("api"),
+        caller_uri: &caller_uri,
+    };
+
+    match resolve_call_signature(&call, &idx) {
+        SignatureResult::Unique {
+            param_counts,
+            params_text,
+        } => {
+            assert_eq!(param_counts, (1, 2));
+            assert_eq!(params_text, "id: String, force: Boolean = false");
+        }
+        other => panic!("expected unique class member match, got {other:?}"),
+    }
+}
+
+#[test]
+fn resolve_unqualified_data_class_constructor() {
+    let caller_uri = test_uri("/Config.kt");
+    let idx = Indexer::new();
+    idx.index_content(
+        &caller_uri,
+        "package com.example\ndata class Config(\n    val host: String,\n    val port: Int = 443,\n)\n\nfun build(): Config {\n    return Config(host = \"localhost\")\n}\n",
+    );
+
+    let call = CallSite {
+        name: "Config",
+        qualifier: None,
+        caller_uri: &caller_uri,
+    };
+
+    match resolve_call_signature(&call, &idx) {
+        SignatureResult::Unique {
+            param_counts,
+            params_text,
+        } => {
+            assert_eq!(param_counts, (1, 2));
+            assert!(params_text.contains("host: String"));
+        }
+        other => panic!("expected unique constructor match, got {other:?}"),
+    }
+}
+
+#[test]
+fn resolve_unqualified_test_definition_visible_only_to_test_callers() {
+    let idx = Indexer::new();
+    let helper_uri = test_uri("/workspace/src/test/kotlin/com/example/TestHelper.kt");
+    let test_caller_uri = test_uri("/workspace/src/test/kotlin/com/example/TestCaller.kt");
+    let main_caller_uri = test_uri("/workspace/src/main/kotlin/com/example/MainCaller.kt");
+
+    idx.index_content(
+        &helper_uri,
+        "package com.example\nfun testOnlyHelper(arg: String) {}\n",
+    );
+    idx.index_content(
+        &test_caller_uri,
+        "package com.example\nfun invokeFromTest() { testOnlyHelper() }\n",
+    );
+    idx.index_content(
+        &main_caller_uri,
+        "package com.example\nfun invokeFromMain() { testOnlyHelper() }\n",
+    );
+
+    let test_call = CallSite {
+        name: "testOnlyHelper",
+        qualifier: None,
+        caller_uri: &test_caller_uri,
+    };
+    match resolve_call_signature(&test_call, &idx) {
+        SignatureResult::Unique {
+            param_counts,
+            params_text,
+        } => {
+            assert_eq!(param_counts, (1, 1));
+            assert_eq!(params_text, "arg: String");
+        }
+        other => panic!("expected test caller to resolve test helper, got {other:?}"),
+    }
+
+    let main_call = CallSite {
+        name: "testOnlyHelper",
+        qualifier: None,
+        caller_uri: &main_caller_uri,
+    };
+    assert!(
+        matches!(
+            resolve_call_signature(&main_call, &idx),
+            SignatureResult::NotFound
+        ),
+        "main caller must not resolve same-package test helper"
+    );
+}
+
 #[cfg(test)]
 mod import_reachable {
-    use super::is_import_reachable;
+    use super::{collect_params_from_file, is_import_reachable, ResolutionScope};
     use crate::indexer::Indexer;
-    use crate::types::{FileData, ImportEntry};
+    use crate::types::{FileData, ImportEntry, SymbolEntry, Visibility};
     use std::sync::Arc;
+    use tower_lsp::lsp_types::{Position, Range, SymbolKind};
 
     fn make_url(path: &str) -> String {
         format!("file://{}", path)
     }
 
     fn index_file(idx: &Indexer, uri: &str, pkg: &str, imports: Vec<ImportEntry>) {
+        index_file_with_symbols(idx, uri, pkg, imports, vec![]);
+    }
+
+    fn index_file_with_symbols(
+        idx: &Indexer,
+        uri: &str,
+        pkg: &str,
+        imports: Vec<ImportEntry>,
+        symbols: Vec<SymbolEntry>,
+    ) {
         let data = FileData {
             package: Some(pkg.to_owned()),
             imports,
+            symbols,
             ..FileData::default()
         };
         idx.files.insert(uri.to_owned(), Arc::new(data));
     }
 
     fn explicit_import(pkg: &str, name: &str) -> ImportEntry {
+        explicit_import_path(&format!("{}.{}", pkg, name), name)
+    }
+
+    fn explicit_import_path(full_path: &str, local_name: &str) -> ImportEntry {
         ImportEntry {
-            full_path: format!("{}.{}", pkg, name),
-            local_name: name.to_owned(),
+            full_path: full_path.to_owned(),
+            local_name: local_name.to_owned(),
             is_star: false,
         }
     }
@@ -298,6 +451,23 @@ mod import_reachable {
             full_path: pkg.to_owned(),
             local_name: "*".to_owned(),
             is_star: true,
+        }
+    }
+
+    fn nested_class(name: &str, container: &str) -> SymbolEntry {
+        let range = Range::new(Position::new(0, 0), Position::new(0, name.len() as u32));
+        SymbolEntry {
+            name: name.to_owned(),
+            kind: SymbolKind::CLASS,
+            visibility: Visibility::Public,
+            range,
+            selection_range: range,
+            detail: String::new(),
+            params: String::new(),
+            param_counts: (0, 0),
+            type_params: vec![],
+            extension_receiver: String::new(),
+            container: Some(container.to_owned()),
         }
     }
 
@@ -342,6 +512,67 @@ mod import_reachable {
         );
         index_file(&idx, &def, "com.other", vec![]);
         assert!(is_import_reachable(&idx, &caller, &def, "Foo"));
+    }
+
+    #[test]
+    fn nested_class_explicit_import_reachable() {
+        let idx = Indexer::new();
+        let caller = make_url("/a/A.kt");
+        let def = make_url("/b/Outer.kt");
+        index_file(
+            &idx,
+            &caller,
+            "com.client",
+            vec![explicit_import_path("com.example.Outer.Config", "Config")],
+        );
+        index_file(&idx, &def, "com.example", vec![]);
+        assert!(is_import_reachable(&idx, &caller, &def, "Config"));
+    }
+
+    #[test]
+    fn deeply_nested_import_reachable() {
+        let idx = Indexer::new();
+        let caller = make_url("/a/A.kt");
+        let def = make_url("/b/Outer.kt");
+        index_file(
+            &idx,
+            &caller,
+            "com.client",
+            vec![explicit_import_path(
+                "com.example.Outer.Inner.Config",
+                "Config",
+            )],
+        );
+        index_file(&idx, &def, "com.example", vec![]);
+        assert!(is_import_reachable(&idx, &caller, &def, "Config"));
+    }
+
+    #[test]
+    fn nested_class_star_import_not_reachable_cross_file() {
+        let idx = Indexer::new();
+        let caller = make_url("/a/A.kt");
+        let def = make_url("/b/Outer.kt");
+        index_file(
+            &idx,
+            &caller,
+            "com.client",
+            vec![star_import("com.example")],
+        );
+        index_file_with_symbols(
+            &idx,
+            &def,
+            "com.example",
+            vec![],
+            vec![nested_class("Config", "Outer")],
+        );
+        assert!(collect_params_from_file(
+            "Config",
+            &def,
+            &idx,
+            &caller,
+            ResolutionScope::CrossFile,
+        )
+        .is_empty());
     }
 
     #[test]

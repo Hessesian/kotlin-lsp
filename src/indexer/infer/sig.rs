@@ -6,10 +6,11 @@
 //! mutability (`index_content`) and perform disk reads when a symbol is not yet
 //! in the in-memory index.
 
-use tower_lsp::lsp_types::{SymbolKind, Url};
+use tower_lsp::lsp_types::{Range, SymbolKind, Url};
 
 use crate::indexer::Indexer;
 use crate::resolver::{infer_receiver_type, ReceiverKind};
+use crate::types::SourceSet;
 
 // ─── Call-site resolution types ──────────────────────────────────────────────
 
@@ -100,26 +101,9 @@ pub(crate) fn is_import_reachable(
         return true;
     }
 
-    // Precompute once to avoid repeated heap allocation inside the loop.
-    let expected_fqn = format!("{}.{}", def_pkg, symbol_name);
-
-    // Check caller's imports
     for import in &caller_data.imports {
-        if import.is_star {
-            // `import com.example.*` covers `com.example.Foo`
-            if import.full_path == def_pkg {
-                return true;
-            }
-        } else {
-            // Explicit import: local name matches AND FQN matches package.SymbolName.
-            // Also matches nested class imports like `import pkg.Outer.Config` where
-            // local_name="Config" and full_path ends with the expected_fqn suffix.
-            if import.local_name == symbol_name
-                && (import.full_path == expected_fqn
-                    || import.full_path.ends_with(&format!(".{}", expected_fqn)))
-            {
-                return true;
-            }
+        if import.covers(def_pkg, symbol_name) {
+            return true;
         }
     }
 
@@ -667,8 +651,9 @@ fn collect_params_from_file(
     {
         return vec![];
     }
-    // A nested class/struct is reachable cross-file when the caller has an
-    // explicit import for it by local name (e.g. `import pkg.Outer.Config`).
+    // This is only the nested-class allowlist by local name (e.g. `import
+    // pkg.Outer.Config`); `is_import_reachable()` still does the full package/path
+    // validation via `ImportEntry::covers()`.
     let caller_imports_by_name = if scope == ResolutionScope::CrossFile {
         idx.files
             .get(caller_uri)
@@ -710,8 +695,22 @@ fn collect_params_from_file(
 /// Resolves the receiver type, then searches for `name` within that type's body.
 /// Returns `SignatureResult::UnresolvableReceiver` when the receiver type cannot
 /// be determined (prevents a fallback global scan that would match unrelated fns).
+fn is_container_symbol_kind(kind: SymbolKind) -> bool {
+    matches!(
+        kind,
+        SymbolKind::CLASS
+            | SymbolKind::INTERFACE
+            | SymbolKind::STRUCT
+            | SymbolKind::ENUM
+            | SymbolKind::OBJECT
+    )
+}
+
+fn range_contains(range: &Range, candidate: &Range) -> bool {
+    range.start.line <= candidate.start.line && candidate.end.line <= range.end.line
+}
+
 fn resolve_qualified(call: &CallSite<'_>, qualifier: &str, idx: &Indexer) -> SignatureResult {
-    use crate::resolver::infer::{infer_receiver_type, ReceiverKind};
     let Some(rt) = infer_receiver_type(idx, ReceiverKind::Variable(qualifier), call.caller_uri)
     else {
         return SignatureResult::UnresolvableReceiver;
@@ -721,22 +720,25 @@ fn resolve_qualified(call: &CallSite<'_>, qualifier: &str, idx: &Indexer) -> Sig
         let Some(data) = idx.files.get(loc.uri.as_str()) else {
             continue;
         };
-        // Look for the method directly within the resolved type.
-        let type_end = data
+        let type_sym = data
             .symbols
             .iter()
-            .find(|s| s.name == rt.outer)
-            .map(|s| s.range.end.line)
-            .unwrap_or(u32::MAX);
-        // Filter by container membership first (exact), then fall back to range
-        // containment for symbols whose container field wasn't populated.
+            .find(|s| s.name == rt.outer && is_container_symbol_kind(s.kind));
         let members: Vec<_> = data
             .symbols
             .iter()
             .filter(|s| {
-                s.name == call.name
-                    && (s.container.as_deref() == Some(&rt.outer)
-                        || (s.container.is_none() && s.range.start.line <= type_end))
+                if s.name != call.name {
+                    return false;
+                }
+                if s.container.as_deref() == Some(&rt.outer) {
+                    return true;
+                }
+                if call.name == rt.outer && is_container_symbol_kind(s.kind) {
+                    return true;
+                }
+                s.container.is_none()
+                    && type_sym.is_some_and(|type_sym| range_contains(&type_sym.range, &s.range))
             })
             .collect();
         if members.is_empty() {
@@ -789,11 +791,22 @@ fn resolve_unqualified(call: &CallSite<'_>, idx: &Indexer) -> SignatureResult {
         return build_result(same_file);
     }
 
+    let caller_source_set = idx
+        .files
+        .get(call.caller_uri.as_str())
+        .map(|file| file.source_set)
+        .unwrap_or_default();
+
     // Cross-file: definitions map with import + nested-class filtering.
     let mut all: Vec<(String, (u8, u8))> = Vec::new();
     if let Some(locs) = idx.definitions.get(call.name) {
         for loc in locs.iter() {
-            if crate::util::is_test_file(loc.uri.as_str()) {
+            let definition_source_set = idx
+                .files
+                .get(loc.uri.as_str())
+                .map(|file| file.source_set)
+                .unwrap_or_default();
+            if definition_source_set == SourceSet::Test && caller_source_set != SourceSet::Test {
                 continue;
             }
             let sigs = collect_params_from_file(

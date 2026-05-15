@@ -711,8 +711,7 @@ fn method_call_same_file_wins_over_workspace_overloads() {
         // Each has loadData with a different number of args
         let other_src = format!(
             "class Other{i} {{\n  fun loadData({}) {{}}\n}}\n",
-            std::iter::repeat("x: Int")
-                .take(i + 2)
+            std::iter::repeat_n("x: Int", i + 2)
                 .collect::<Vec<_>>()
                 .join(", ")
         );

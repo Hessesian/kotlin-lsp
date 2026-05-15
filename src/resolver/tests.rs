@@ -1118,6 +1118,30 @@ fn complete_bare_local_before_same_pkg() {
     );
 }
 
+#[test]
+fn complete_bare_test_symbols_visible_only_to_test_callers() {
+    let idx = Indexer::new();
+    let main_uri = Url::parse("file:///workspace/src/main/kotlin/a/Main.kt").unwrap();
+    let test_uri = Url::parse("file:///workspace/src/test/kotlin/a/TestCaller.kt").unwrap();
+    let helper_uri = Url::parse("file:///workspace/src/test/kotlin/a/TestHelper.kt").unwrap();
+
+    idx.index_content(&main_uri, "package a\nfun mainCaller() {}");
+    idx.index_content(&test_uri, "package a\nfun testCaller() {}");
+    idx.index_content(&helper_uri, "package a\nfun testOnlyHelper() {}");
+
+    let (main_items, _) = complete_bare(&idx, "testOnly", &main_uri, false, false);
+    assert!(
+        main_items.iter().all(|item| item.label != "testOnlyHelper"),
+        "main callers must not see same-package test symbols: {main_items:?}"
+    );
+
+    let (test_items, _) = complete_bare(&idx, "testOnly", &test_uri, false, false);
+    assert!(
+        test_items.iter().any(|item| item.label == "testOnlyHelper"),
+        "test callers must see same-package test symbols: {test_items:?}"
+    );
+}
+
 // ── dot_completions_for type filtering ────────────────────────────────────
 
 #[test]

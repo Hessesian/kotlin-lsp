@@ -28,8 +28,24 @@ use crate::indexer::cache::{build_qualified_keys, FileCacheEntry};
 use crate::indexer::discover::find_source_files_unconstrained;
 use crate::parser::parse_by_extension;
 use crate::resolver::symbols_from_uri_as_completions_pub;
-use crate::types::{FileData, FileIndexResult, Visibility, WorkspaceIndexResult};
+use crate::types::{FileData, FileIndexResult, SourceSet, Visibility, WorkspaceIndexResult};
 use crate::StrExt;
+
+fn classify_source_set(uri: &str, source_paths: &[String]) -> SourceSet {
+    for source_path in source_paths {
+        if uri.contains(source_path) || uri.starts_with(&format!("file://{}", source_path)) {
+            return SourceSet::Library;
+        }
+    }
+    if uri.contains("/src/test/")
+        || uri.contains("/src/androidTest/")
+        || uri.contains("/src/commonTest/")
+        || uri.contains("/src/iosTest/")
+    {
+        return SourceSet::Test;
+    }
+    SourceSet::Main
+}
 
 // ─── Source-path scan helpers ─────────────────────────────────────────────────
 
@@ -332,7 +348,8 @@ impl LibraryBatch {
             indexer.content_hashes.insert(k, v);
         }
         for (k, v) in self.files {
-            indexer.files.insert(k, v);
+            let file_data = indexer.with_classified_source_set(&k, v);
+            indexer.files.insert(k, file_data);
         }
         for (name, locs) in self.definitions {
             indexer.definitions.entry(name).or_default().extend(locs);
@@ -355,6 +372,21 @@ impl LibraryBatch {
 // ─── impl Indexer ─────────────────────────────────────────────────────────────
 
 impl Indexer {
+    fn source_set_for_uri(&self, uri: &str) -> SourceSet {
+        let source_paths = self.source_paths_raw.read().unwrap().clone();
+        classify_source_set(uri, &source_paths)
+    }
+
+    fn with_classified_source_set(&self, uri: &str, file_data: Arc<FileData>) -> Arc<FileData> {
+        let source_set = self.source_set_for_uri(uri);
+        if file_data.source_set == source_set {
+            return file_data;
+        }
+        let mut file_data = (*file_data).clone();
+        file_data.source_set = source_set;
+        Arc::new(file_data)
+    }
+
     /// Parse a single file via tree-sitter and extract symbols, supertypes, and a
     /// content hash.  Pure — no writes to any `Indexer` field.
     pub(crate) fn parse_file(uri: &Url, content: &str) -> FileIndexResult {
@@ -663,6 +695,7 @@ impl Indexer {
     fn apply_contributions(&self, contrib: FileContributions) {
         let (uri_str, file_data) = contrib.file_data;
         let (hash_key, hash_val) = contrib.content_hash;
+        let file_data = self.with_classified_source_set(&uri_str, file_data);
 
         self.content_hashes.insert(hash_key, hash_val);
         self.files.insert(uri_str.clone(), file_data);
@@ -781,7 +814,7 @@ impl Indexer {
         // Rebuild bare-name cache so complete_bare doesn't iterate definitions.
         self.rebuild_bare_name_cache();
 
-        Some(Arc::new(result.data))
+        Some(self.with_classified_source_set(uri.as_str(), Arc::new(result.data)))
     }
 
     /// Spawn background tasks to pre-warm the completion cache for all types

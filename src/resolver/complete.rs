@@ -7,7 +7,7 @@ use crate::indexer::Indexer;
 use crate::parser::parse_by_extension;
 use crate::stdlib::bare_completions;
 use crate::stdlib_tail::dot_completions_for_lang;
-use crate::types::{CallerContext, FileData, ImportEntry, SymbolEntry, Visibility};
+use crate::types::{CallerContext, FileData, ImportEntry, SourceSet, SymbolEntry, Visibility};
 use crate::LinesExt;
 use crate::StrExt;
 
@@ -934,18 +934,23 @@ impl<'a> BareCompletionWalk<'a> {
         let Some(package_uris) = self.indexer.packages.get(&package_name) else {
             return;
         };
-        let from_test_file = crate::util::is_test_file(self.from_uri.as_str());
+        let caller_source_set = self
+            .indexer
+            .files
+            .get(self.from_uri.as_str())
+            .map(|file| file.source_set)
+            .unwrap_or_default();
 
         for package_uri in package_uris.iter() {
             if package_uri == self.from_uri.as_str() {
                 continue;
             }
-            if !from_test_file && crate::util::is_test_file(package_uri.as_str()) {
-                continue;
-            }
             let Some(file) = self.indexer.files.get(package_uri.as_str()) else {
                 continue;
             };
+            if file.source_set == SourceSet::Test && caller_source_set != SourceSet::Test {
+                continue;
+            }
             for symbol in &file.symbols {
                 self.completer.add(
                     &symbol.name,

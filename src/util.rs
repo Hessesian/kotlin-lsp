@@ -10,6 +10,9 @@ pub(crate) fn home_dir() -> Option<PathBuf> {
 }
 
 /// Heuristic: a file path likely belongs to a test source set.
+// TODO: replace callers with FileData.source_set.
+// Retained temporarily for callers outside the FileData.source_set migration.
+#[allow(dead_code)]
 pub(crate) fn is_test_file(uri_str: &str) -> bool {
     uri_str.contains("/src/test/")
         || uri_str.contains("/src/androidTest/")
