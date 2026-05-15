@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use tower_lsp::lsp_types::Url;
+use tower_lsp::lsp_types::{Position, Url};
 
 use crate::indexer::resolution::{enrich_at_line, ResolveOptions, SubstitutionContext};
 use crate::indexer::Indexer;
@@ -24,12 +24,20 @@ pub(crate) fn hover_at(indexer: &Arc<Indexer>, file: &Path, line: u32, col: u32)
         col.saturating_sub(1),
         SubstitutionContext::None,
         &ResolveOptions::hover(),
-    )?;
-
-    let mut out = resolved.signature;
-    if !resolved.doc.is_empty() {
-        out.push_str("\n\n");
-        out.push_str(&resolved.doc);
+    );
+    if let Some(resolved) = resolved {
+        let mut out = resolved.signature;
+        if !resolved.doc.is_empty() {
+            out.push_str("\n\n");
+            out.push_str(&resolved.doc);
+        }
+        return Some(out);
     }
-    Some(out)
+
+    // Fallback for local bindings (e.g., function parameters) that may not
+    // have a dedicated SymbolEntry at the usage line.
+    let pos = Position::new(line.saturating_sub(1), col.saturating_sub(1));
+    let word = indexer.word_at(&uri, pos)?;
+    let ty = crate::resolver::infer::infer_variable_type(indexer.as_ref(), &word, &uri)?;
+    Some(format!("val {word}: {ty}"))
 }

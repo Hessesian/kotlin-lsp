@@ -107,8 +107,33 @@ fn regular_symbol_hover<W: WorkspaceRead>(
         uri,
         position.line,
     )
-    .or_else(|| crate::stdlib::hover(&ctx.word))?;
-    Some(make_markdown_hover(markdown))
+    .or_else(|| crate::stdlib::hover(&ctx.word));
+    if let Some(markdown) = markdown {
+        return Some(make_markdown_hover(markdown));
+    }
+    fallback_local_binding_hover(workspace, ctx, uri, position.line)
+}
+
+fn fallback_local_binding_hover<W: WorkspaceRead>(
+    workspace: &W,
+    ctx: &CursorContext,
+    uri: &Url,
+    line: u32,
+) -> Option<Hover> {
+    if ctx.qualifier.is_some() {
+        return None;
+    }
+    let indexer = workspace.as_indexer()?;
+    let type_name = crate::resolver::infer::infer_variable_type(indexer, &ctx.word, uri)?;
+    let signature = format!("{} {}: {type_name}", hover_binding_keyword(uri), ctx.word);
+    let leaf = type_name.rsplit('.').next().unwrap_or(type_name.as_str());
+    let detail = resolve_hover_markdown(workspace, leaf, None, uri, line)
+        .or_else(|| crate::stdlib::hover(leaf));
+    Some(make_markdown_hover(format_contextual_hover(
+        &signature,
+        uri.path(),
+        detail.as_deref(),
+    )))
 }
 
 fn resolve_hover_markdown<W: WorkspaceRead>(
