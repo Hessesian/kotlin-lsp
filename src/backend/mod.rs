@@ -19,10 +19,34 @@ where
     F: std::future::Future<Output = Result<T>> + Send,
     T: Send + 'static,
 {
-    // Signal the panic hook that this panic is recoverable.
-    crate::PANIC_CAUGHT.with(|c| c.set(true));
-    let result = std::panic::AssertUnwindSafe(future).catch_unwind().await;
-    crate::PANIC_CAUGHT.with(|c| c.set(false));
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    // Wrapper that sets PANIC_CAUGHT on each poll so the panic hook
+    // always sees the flag regardless of which thread resumes the future.
+    struct PanicGuarded<Fut>(Pin<Box<Fut>>);
+
+    impl<Fut: Future> Future for PanicGuarded<Fut> {
+        type Output = Fut::Output;
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            crate::PANIC_CAUGHT.with(|c| c.set(true));
+            let result = self.0.as_mut().poll(cx);
+            if result.is_ready() {
+                crate::PANIC_CAUGHT.with(|c| c.set(false));
+            }
+            result
+        }
+    }
+
+    impl<Fut> Drop for PanicGuarded<Fut> {
+        fn drop(&mut self) {
+            crate::PANIC_CAUGHT.with(|c| c.set(false));
+        }
+    }
+
+    let guarded = PanicGuarded(Box::pin(future));
+    let result = std::panic::AssertUnwindSafe(guarded).catch_unwind().await;
 
     match result {
         Ok(result) => result,

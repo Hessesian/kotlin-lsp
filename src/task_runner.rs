@@ -3,6 +3,7 @@
 //! Single responsibility: execute async work items concurrently and collect results.
 //! Separated from indexer logic for testability.
 
+use futures::FutureExt;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
@@ -32,21 +33,33 @@ where
     let worker = Arc::new(worker);
     let mut handles = Vec::with_capacity(items.len());
 
-    // Spawn all tasks immediately - semaphore is only for throttling spawn_blocking inside worker
+    // Spawn all tasks immediately - semaphore is only for throttling spawn_blocking inside worker.
+    // Each task sets PANIC_CAUGHT so the global panic hook emits a brief log
+    // instead of a full crash report for recoverable task panics.
     for item in items {
         let sem = Arc::clone(&semaphore);
         let worker = Arc::clone(&worker);
 
-        handles.push(tokio::spawn(async move { worker(item, sem).await }));
+        handles.push(tokio::spawn(async move {
+            crate::PANIC_CAUGHT.with(|c| c.set(true));
+            let result = std::panic::AssertUnwindSafe(worker(item, sem))
+                .catch_unwind()
+                .await;
+            crate::PANIC_CAUGHT.with(|c| c.set(false));
+            result
+        }));
     }
 
-    // Collect results — skip panicked tasks instead of propagating the panic.
+    // Collect results — skip panicked tasks instead of propagating.
     let mut results = Vec::with_capacity(handles.len());
     for handle in handles {
         match handle.await {
-            Ok(result) => results.push(result),
+            Ok(Ok(result)) => results.push(result),
+            Ok(Err(_)) => {
+                log::error!("Background task panicked (caught inside spawn)");
+            }
             Err(e) => {
-                log::error!("Background task panicked: {e}");
+                log::error!("Background task JoinError: {e}");
             }
         }
     }
