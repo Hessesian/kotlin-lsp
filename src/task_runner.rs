@@ -40,12 +40,14 @@ where
         handles.push(tokio::spawn(async move { worker(item, sem).await }));
     }
 
-    // Collect results
+    // Collect results — skip panicked tasks instead of propagating the panic.
     let mut results = Vec::with_capacity(handles.len());
     for handle in handles {
         match handle.await {
             Ok(result) => results.push(result),
-            Err(e) => panic!("Task panicked: {}", e),
+            Err(e) => {
+                log::error!("Background task panicked: {e}");
+            }
         }
     }
     results
@@ -154,5 +156,23 @@ mod tests {
             "Max concurrent spawn_blocking was {}, expected >= 2",
             max
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_run_concurrent_survives_task_panic() {
+        let items = vec![1, 2, 3, 4, 5];
+        let sem = Arc::new(Semaphore::new(4));
+
+        let results: Vec<i32> = run_concurrent(items, sem, |n, _sem| async move {
+            if n == 3 {
+                panic!("intentional panic for testing");
+            }
+            n * 10
+        })
+        .await;
+
+        // Panicked task (n=3) is skipped; 4 results remain
+        assert_eq!(results.len(), 4);
+        assert_eq!(results, vec![10, 20, 40, 50]);
     }
 }
