@@ -533,6 +533,13 @@ impl LanguageServer for Backend {
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
+        // Update live_lines synchronously so that any subsequent request
+        // (e.g. completion) on the same transport sees the latest content,
+        // even before the actor processes the event.
+        if let Some(change) = params.content_changes.last() {
+            self.indexer
+                .set_live_lines(&params.text_document.uri, &change.text);
+        }
         let _ = self
             .event_tx
             .send(Event::FileChanged {

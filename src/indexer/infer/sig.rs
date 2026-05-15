@@ -214,11 +214,9 @@ pub(crate) fn extract_params_from_detail(detail: &str) -> Option<String> {
     let close_pos = end_pos?;
     let inner = &detail[open_pos + 1..close_pos];
     let trimmed = inner.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
+    // Return Some("") for zero-param functions — distinct from None (couldn't parse).
+    // This ensures 0-param overloads are visible for overload detection.
+    Some(trimmed.to_string())
 }
 
 /// Walk forward from `start_line`, accumulating characters until the outermost
