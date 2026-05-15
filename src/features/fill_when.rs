@@ -450,6 +450,7 @@ fn resolve_type_members(
     if locations.is_empty() {
         return None;
     }
+    let subtype_locations = indexer.subtypes_of(type_name);
 
     let mut fallback: Option<(TypeKind, Vec<WhenMember>)> = None;
 
