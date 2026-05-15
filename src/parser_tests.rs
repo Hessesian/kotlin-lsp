@@ -1333,6 +1333,33 @@ fn param_counts_zero_params() {
 }
 
 #[test]
+fn param_counts_primary_constructor_with_defaults() {
+    // Regression: `=` is a child of `class_parameter`, not a sibling at the
+    // primary_constructor level — ensure defaults are counted correctly.
+    let src = "data class User(val name: String, val age: Int = 0, val active: Boolean = true)";
+    let data = super::parse_kotlin(src);
+    let sym = data
+        .symbols
+        .iter()
+        .find(|s| s.name == "User")
+        .expect("User should be indexed");
+    // 1 required (name), 3 total
+    assert_eq!(sym.param_counts, (1, 3));
+}
+
+#[test]
+fn param_counts_primary_constructor_all_required() {
+    let src = "class Point(val x: Int, val y: Int)";
+    let data = super::parse_kotlin(src);
+    let sym = data
+        .symbols
+        .iter()
+        .find(|s| s.name == "Point")
+        .expect("Point should be indexed");
+    assert_eq!(sym.param_counts, (2, 2));
+}
+
+#[test]
 fn rhs_types_class_literal_java_suffix() {
     // `val api = retrofit.create(DashboardApi::class.java)` — the type should
     // be extracted directly from the callable_reference argument, not stored

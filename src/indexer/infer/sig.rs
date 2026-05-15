@@ -100,6 +100,9 @@ pub(crate) fn is_import_reachable(
         return true;
     }
 
+    // Precompute once to avoid repeated heap allocation inside the loop.
+    let expected_fqn = format!("{}.{}", def_pkg, symbol_name);
+
     // Check caller's imports
     for import in &caller_data.imports {
         if import.is_star {
@@ -108,12 +111,14 @@ pub(crate) fn is_import_reachable(
                 return true;
             }
         } else {
-            // Explicit import: local name matches AND FQN matches package.SymbolName
-            if import.local_name == symbol_name {
-                let expected = format!("{}.{}", def_pkg, symbol_name);
-                if import.full_path == expected {
-                    return true;
-                }
+            // Explicit import: local name matches AND FQN matches package.SymbolName.
+            // Also matches nested class imports like `import pkg.Outer.Config` where
+            // local_name="Config" and full_path ends with the expected_fqn suffix.
+            if import.local_name == symbol_name
+                && (import.full_path == expected_fqn
+                    || import.full_path.ends_with(&format!(".{}", expected_fqn)))
+            {
+                return true;
             }
         }
     }
@@ -646,7 +651,8 @@ fn is_class_like(kind: SymbolKind) -> bool {
 /// in `file_data`, applying `scope` filtering rules.
 ///
 /// `CrossFile` scope: skips `CLASS`/`STRUCT` symbols with a container (nested
-/// classes) and excludes files not import-reachable from the caller.
+/// classes) unless the caller has an explicit import for that symbol by local
+/// name, and excludes files not import-reachable from the caller.
 fn collect_params_from_file(
     name: &str,
     file_uri: &str,
@@ -661,6 +667,16 @@ fn collect_params_from_file(
     {
         return vec![];
     }
+    // A nested class/struct is reachable cross-file when the caller has an
+    // explicit import for it by local name (e.g. `import pkg.Outer.Config`).
+    let caller_imports_by_name = if scope == ResolutionScope::CrossFile {
+        idx.files
+            .get(caller_uri)
+            .map(|d| d.imports.iter().any(|i| !i.is_star && i.local_name == name))
+            .unwrap_or(true) // fail-open
+    } else {
+        false
+    };
     let is_java = file_uri.ends_with(".java");
     data.symbols
         .iter()
@@ -668,7 +684,8 @@ fn collect_params_from_file(
             s.name == name
                 && !(scope == ResolutionScope::CrossFile
                     && s.container.is_some()
-                    && matches!(s.kind, SymbolKind::CLASS | SymbolKind::STRUCT))
+                    && matches!(s.kind, SymbolKind::CLASS | SymbolKind::STRUCT)
+                    && !caller_imports_by_name)
                 && (s.kind == SymbolKind::FUNCTION
                     || s.kind == SymbolKind::METHOD
                     || s.kind == SymbolKind::CONSTRUCTOR
@@ -711,23 +728,42 @@ fn resolve_qualified(call: &CallSite<'_>, qualifier: &str, idx: &Indexer) -> Sig
             .find(|s| s.name == rt.outer)
             .map(|s| s.range.end.line)
             .unwrap_or(u32::MAX);
-        for sym in data
+        // Filter by container membership first (exact), then fall back to range
+        // containment for symbols whose container field wasn't populated.
+        let members: Vec<_> = data
             .symbols
             .iter()
-            .filter(|s| s.name == call.name && s.range.start.line <= type_end)
-        {
-            let params_text = if !sym.params.is_empty() {
-                sym.params.clone()
-            } else if let Some(p) = extract_params_from_detail(&sym.detail) {
-                p
-            } else {
-                continue;
-            };
-            return SignatureResult::Unique {
-                param_counts: (sym.param_counts.0 as usize, sym.param_counts.1 as usize),
-                params_text,
-            };
+            .filter(|s| {
+                s.name == call.name
+                    && (s.container.as_deref() == Some(&rt.outer)
+                        || (s.container.is_none() && s.range.start.line <= type_end))
+            })
+            .collect();
+        if members.is_empty() {
+            continue;
         }
+        // Collect all distinct param_counts to detect overloads.
+        let mut seen: Vec<(u8, u8)> = vec![];
+        for sym in &members {
+            if !seen.contains(&sym.param_counts) {
+                seen.push(sym.param_counts);
+            }
+        }
+        if seen.len() > 1 {
+            return SignatureResult::Overloaded;
+        }
+        let sym = members[0];
+        let params_text = if !sym.params.is_empty() {
+            sym.params.clone()
+        } else if let Some(p) = extract_params_from_detail(&sym.detail) {
+            p
+        } else {
+            continue;
+        };
+        return SignatureResult::Unique {
+            param_counts: (sym.param_counts.0 as usize, sym.param_counts.1 as usize),
+            params_text,
+        };
     }
     SignatureResult::NotFound
 }
