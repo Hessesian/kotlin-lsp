@@ -38,8 +38,8 @@ use super::{
 
 use crate::indexer::NodeExt;
 use crate::queries::{
-    KIND_CALL_EXPR, KIND_CALL_SUFFIX, KIND_LAMBDA_LIT, KIND_NAV_EXPR, KIND_SIMPLE_IDENT,
-    KIND_TYPE_IDENT, KIND_VALUE_ARG,
+    KIND_CALL_EXPR, KIND_CALL_SUFFIX, KIND_LAMBDA_LIT, KIND_NAV_EXPR, KIND_NAV_SUFFIX,
+    KIND_SIMPLE_IDENT, KIND_TYPE_IDENT, KIND_VALUE_ARG,
 };
 use crate::resolver::{extract_collection_element_type, infer_lines::first_type_arg};
 use crate::StrExt;
@@ -753,10 +753,10 @@ fn cst_it_or_this_type(
                     .or_else(|| cst_lambda_param_type_via_call(doc, &cur, idx, uri, 0));
                 match result.as_deref() {
                     Some(t) if is_generic_param(t) => {
-                        // Generic T from indexed signature — try CST scope
-                        // function receiver substitution before walking up.
+                        // Generic T from indexed signature — try forward
+                        // chain resolution before walking up.
                         if let Some(concrete) =
-                            cst_scope_fn_receiver_type(&cur, &doc.bytes, idx, uri)
+                            cst_forward_resolve_receiver_type(&cur, &doc.bytes, idx, uri)
                         {
                             return Some(concrete);
                         }
@@ -1195,104 +1195,259 @@ fn cst_lambda_param_type_via_call(
         Some(param_type) => {
             let extracted = lambda_type_nth_input(&param_type, param_pos)?;
             if is_generic_param(&extracted) {
-                // Generic param (T/R/E) — never return as-is. Try scope
-                // function receiver substitution; otherwise return None so
-                // the text-based fallback path can resolve from context.
-                cst_scope_fn_receiver_type(lambda, &doc.bytes, deps, uri)
+                // Generic param (T/R/E) — resolve via forward chain walk.
+                cst_forward_resolve_receiver_type(lambda, &doc.bytes, deps, uri)
             } else {
                 Some(extracted)
             }
         }
         None => {
-            // Function not indexed — if it's a known scope function,
-            // `it` is the receiver type directly
-            cst_scope_fn_receiver_type(lambda, &doc.bytes, deps, uri)
+            // Function not indexed — resolve via forward chain walk
+            // (handles scope functions and dotted receivers).
+            cst_forward_resolve_receiver_type(lambda, &doc.bytes, deps, uri)
         }
     }
 }
 
-/// For a lambda that is a trailing argument of a scope function (let/also/etc),
-/// resolve the receiver's type from the enclosing call_expression's
-/// navigation_expression.
-fn cst_scope_fn_receiver_type(
+/// Forward-walk chain resolution for the receiver type of a lambda's enclosing
+/// call expression. Given `a.b.method { lambda }`, resolves left-to-right:
+///   1. Find root identifier (`a`) → resolve its type
+///   2. Walk through each navigation suffix (`.b`, `.method`) tracking the type
+///   3. Return the type of the expression just before the final method call
+///
+/// This handles arbitrary chains like `settings.familyCreationDate?.let { }`
+/// without backward heuristics.
+fn cst_forward_resolve_receiver_type(
     lambda: &tree_sitter::Node<'_>,
     bytes: &[u8],
     deps: &impl InferDeps,
     uri: &Url,
 ) -> Option<String> {
     let call_expr = lambda.enclosing_call_expression()?;
-    let (fn_name, qualifier) = call_expr.call_fn_and_qualifier(bytes)?;
-    if !SCOPE_FUNCTIONS.contains(&fn_name.as_str()) {
-        return None;
-    }
-    let recv_text = qualifier.as_deref()?;
-    // Try direct resolution first
-    if let Some(ty) = resolve_dotted_receiver_type(recv_text, deps, uri) {
-        return Some(ty);
-    }
-    // Receiver might be a complex expression (e.g. result of previous chain).
-    // Walk the CST to find the root variable of the navigation chain.
-    walk_chain_root_receiver(call_expr, bytes, deps, uri)
-}
+    let callee = call_expr.child(0)?;
 
-/// Walk a nested call_expression / navigation_expression chain to find the
-/// root receiver variable and resolve its type. Handles `a.b.let{}.let{}`
-/// chains by descending into the leftmost navigation_expression child.
-fn walk_chain_root_receiver(
-    call_expr: tree_sitter::Node<'_>,
-    bytes: &[u8],
-    deps: &impl InferDeps,
-    uri: &Url,
-) -> Option<String> {
-    let mut node = call_expr;
-    for _ in 0..10 {
-        let callee = node.child(0)?;
-        if callee.kind() == KIND_NAV_EXPR {
-            let receiver_node = callee.named_child(0)?;
-            match receiver_node.kind() {
-                k if k == KIND_CALL_EXPR => {
-                    node = receiver_node;
-                    continue;
-                }
-                k if k == KIND_NAV_EXPR => {
-                    // Dotted access like `settings.familyCreationDate`
-                    let text = receiver_node.utf8_text_owned(bytes)?;
-                    if let Some(ty) = resolve_dotted_receiver_type(&text, deps, uri) {
-                        return Some(ty);
-                    }
-                    node = receiver_node;
-                    continue;
-                }
-                k if k == KIND_SIMPLE_IDENT || k == KIND_TYPE_IDENT => {
-                    let name = receiver_node.utf8_text_owned(bytes)?;
-                    return resolve_dotted_receiver_type(&name, deps, uri);
-                }
-                _ => return None,
-            }
-        } else if callee.kind() == KIND_SIMPLE_IDENT || callee.kind() == KIND_TYPE_IDENT {
-            let name = callee.utf8_text_owned(bytes)?;
-            return resolve_dotted_receiver_type(&name, deps, uri);
-        } else {
-            return None;
-        }
+    // Collect the chain segments: (root_node, [suffix_member_names])
+    // For `settings.familyCreationDate?.let`, we get:
+    //   root = "settings", segments = ["familyCreationDate", "let"]
+    let (root_type, final_method) = resolve_callee_chain(callee, bytes, deps, uri)?;
+
+    // For scope functions, `it` type is the receiver type.
+    // For collection methods (map/filter/etc), we'd need more complex logic.
+    if SCOPE_FUNCTIONS.contains(&final_method.as_str()) {
+        return Some(root_type);
     }
     None
 }
 
-/// Resolve the type of a possibly dotted receiver expression like
-/// `settings.familyCreationDate` by walking the chain:
-/// find type of first segment, then resolve each subsequent segment as a field.
-fn resolve_dotted_receiver_type(
-    recv_text: &str,
+/// Resolve the callee navigation chain left-to-right, returning the type
+/// of the expression before the final method call, and the final method name.
+///
+/// For `settings.familyCreationDate?.let`:
+///   - root = "settings" → type "IFamilySettings"
+///   - ".familyCreationDate" → type "Long" (field on IFamilySettings)
+///   - returns ("Long", "let")
+fn resolve_callee_chain(
+    callee: tree_sitter::Node<'_>,
+    bytes: &[u8],
+    deps: &impl InferDeps,
+    uri: &Url,
+) -> Option<(String, String)> {
+    match callee.kind() {
+        k if k == KIND_NAV_EXPR => {
+            // Collect segments from the navigation expression
+            let segments = collect_nav_segments(callee, bytes);
+            if segments.is_empty() {
+                return None;
+            }
+            forward_resolve_segments(&segments, bytes, deps, uri)
+        }
+        k if k == KIND_SIMPLE_IDENT || k == KIND_TYPE_IDENT => {
+            // Simple call like `let { }` — no receiver chain
+            let name = callee.utf8_text_owned(bytes)?;
+            None.or_else(|| {
+                // No receiver, return the function name but no resolvable type
+                let _ = name;
+                None
+            })
+        }
+        _ => None,
+    }
+}
+
+/// A segment in a navigation chain: either a root identifier or a suffix member.
+#[derive(Debug)]
+enum NavSegment<'a> {
+    /// Root identifier node (leftmost expression in the chain)
+    Root(tree_sitter::Node<'a>),
+    /// A navigation suffix member name (the identifier after `.` or `?.`)
+    Suffix(String),
+    /// A call_expression intermediate (e.g. previous `.let { }` in a chain)
+    /// — its return type depends on the lambda body; for scope functions
+    /// the return type equals the receiver type (also) or lambda result (let/run).
+    CallExpr(tree_sitter::Node<'a>),
+}
+
+/// Collect navigation segments from a navigation_expression tree, left to right.
+/// The structure is nested: `(a.b).c` is nav_expr(nav_expr(a, .b), .c)
+fn collect_nav_segments<'a>(node: tree_sitter::Node<'a>, bytes: &[u8]) -> Vec<NavSegment<'a>> {
+    let mut segments = Vec::new();
+    collect_nav_segments_recursive(node, bytes, &mut segments);
+    segments
+}
+
+fn collect_nav_segments_recursive<'a>(
+    node: tree_sitter::Node<'a>,
+    bytes: &[u8],
+    segments: &mut Vec<NavSegment<'a>>,
+) {
+    if node.kind() != KIND_NAV_EXPR {
+        // Base case: not a navigation expression
+        segments.push(NavSegment::Root(node));
+        return;
+    }
+
+    // Left child: either another nav_expr, call_expr, or identifier
+    if let Some(left) = node.named_child(0) {
+        match left.kind() {
+            k if k == KIND_NAV_EXPR => {
+                collect_nav_segments_recursive(left, bytes, segments);
+            }
+            k if k == KIND_CALL_EXPR => {
+                // Intermediate call expression (e.g. `a.let { }.let { }`)
+                // Recurse into its callee to get the chain up to that point
+                if let Some(inner_callee) = left.child(0) {
+                    collect_nav_segments_recursive(inner_callee, bytes, segments);
+                }
+                segments.push(NavSegment::CallExpr(left));
+            }
+            _ => {
+                segments.push(NavSegment::Root(left));
+            }
+        }
+    }
+
+    // Right child: navigation_suffix → extract member name
+    if let Some(suffix) = node.first_child_of_kind(KIND_NAV_SUFFIX) {
+        let member = (0..suffix.child_count())
+            .filter_map(|i| suffix.child(i))
+            .find(|c| c.kind() == KIND_SIMPLE_IDENT || c.kind() == KIND_TYPE_IDENT)
+            .and_then(|n| n.utf8_text_owned(bytes));
+        if let Some(name) = member {
+            segments.push(NavSegment::Suffix(name));
+        }
+    }
+}
+
+/// Forward-resolve a chain of segments to get (receiver_type_before_last, last_method_name).
+fn forward_resolve_segments(
+    segments: &[NavSegment<'_>],
+    bytes: &[u8],
+    deps: &impl InferDeps,
+    uri: &Url,
+) -> Option<(String, String)> {
+    if segments.is_empty() {
+        return None;
+    }
+
+    let mut current_type: Option<String> = None;
+    let mut last_suffix: Option<String> = None;
+
+    for segment in segments {
+        match segment {
+            NavSegment::Root(node) => {
+                current_type = resolve_root_node_type(*node, bytes, deps, uri);
+            }
+            NavSegment::Suffix(member) => {
+                // Before updating, save the current type as "type before this suffix"
+                let prev_type = current_type.clone();
+                // Try to resolve through this suffix
+                if let Some(ref cur) = current_type {
+                    let type_name = cur.dotted_ident_prefix();
+                    if !type_name.is_empty() {
+                        if let Some(field_ty) = deps.find_field_type(&type_name, member) {
+                            current_type = uppercase_ident_prefix(&field_ty);
+                        } else if let Some(ret_ty) =
+                            deps.find_method_return_type_for_type(&type_name, member)
+                        {
+                            current_type = uppercase_ident_prefix(&ret_ty);
+                        } else if SCOPE_FUNCTIONS.contains(&member.as_str()) {
+                            // Scope function: receiver type flows through
+                            // (let/run return lambda result, also/apply return receiver)
+                            // For `it` inference, the receiver IS the `it` type.
+                        } else {
+                            // Can't resolve further — keep current type as best guess
+                        }
+                    }
+                }
+                last_suffix = Some(member.clone());
+                // For the return value: we want type BEFORE this last suffix
+                // We'll handle this at the end
+                let _ = prev_type;
+            }
+            NavSegment::CallExpr(call_node) => {
+                // An intermediate call like `.let { body }` in the chain.
+                // For scope functions: `also`/`apply` return receiver,
+                // `let`/`run` return lambda body type.
+                // Without full type inference of lambda bodies, assume scope
+                // functions pass through the receiver type (correct for also,
+                // approximation for let/run in homogeneous chains).
+                let fn_name = call_node.call_fn_name(bytes);
+                if let Some(ref name) = fn_name {
+                    if !SCOPE_FUNCTIONS.contains(&name.as_str()) {
+                        // Non-scope call — try to resolve return type
+                        if let Some(ref cur) = current_type {
+                            let type_name = cur.dotted_ident_prefix();
+                            if !type_name.is_empty() {
+                                if let Some(ret_ty) =
+                                    deps.find_method_return_type_for_type(&type_name, name)
+                                {
+                                    current_type = uppercase_ident_prefix(&ret_ty);
+                                }
+                            }
+                        }
+                    }
+                    // For scope functions, current_type stays the same (pass-through)
+                }
+            }
+        }
+    }
+
+    // Return (type_before_last_suffix, last_suffix_name)
+    let method = last_suffix?;
+    let receiver_type = current_type?;
+    Some((receiver_type, method))
+}
+
+/// Resolve the type of a root node (identifier, navigation_expression for dotted access).
+fn resolve_root_node_type(
+    node: tree_sitter::Node<'_>,
+    bytes: &[u8],
     deps: &impl InferDeps,
     uri: &Url,
 ) -> Option<String> {
-    // Try the full text as a single variable first (handles simple `myVar?.let`)
-    if let Some(raw) = deps.find_var_type(recv_text, uri) {
+    match node.kind() {
+        k if k == KIND_SIMPLE_IDENT || k == KIND_TYPE_IDENT => {
+            let name = node.utf8_text_owned(bytes)?;
+            let raw = deps.find_var_type(&name, uri)?;
+            uppercase_ident_prefix(&raw)
+        }
+        k if k == KIND_NAV_EXPR => {
+            // Dotted like `settings.familyCreationDate` that wasn't further split
+            let text = node.utf8_text_owned(bytes)?;
+            resolve_dotted_text_type(&text, deps, uri)
+        }
+        _ => None,
+    }
+}
+
+/// Resolve the type of a dotted text expression like `settings.familyCreationDate`.
+fn resolve_dotted_text_type(text: &str, deps: &impl InferDeps, uri: &Url) -> Option<String> {
+    // Try as single variable first
+    if let Some(raw) = deps.find_var_type(text, uri) {
         return uppercase_ident_prefix(&raw);
     }
-    // Dotted: resolve chain segment by segment
-    let parts: Vec<&str> = recv_text.split('.').collect();
+    // Split on dots and resolve segment by segment
+    let parts: Vec<&str> = text.split('.').collect();
     if parts.len() < 2 {
         return None;
     }
