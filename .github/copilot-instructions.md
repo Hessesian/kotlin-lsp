@@ -480,6 +480,81 @@ self.indexer.workspace_root.set(new_root);
 
 When you see "must also", ask: who should own both halves so the contract is enforced by construction?
 
+### 18. Tree-sitter node traversal: use cursor API, not index arithmetic
+
+When iterating over a node's children, **always** use the tree-sitter `TreeCursor` API or
+`next_sibling()` / `next_named_sibling()`. Never use `for i in 0..node.child_count()` with
+`node.child(i)` — it's brittle, enables `i + 1` bugs, and bypasses tree-sitter's efficient
+internal iteration.
+
+**Iterating all children:**
+```rust
+// Wrong: index arithmetic, Option noise, off-by-one risk
+for i in 0..node.child_count() {
+    let Some(child) = node.child(i) else { continue };
+    // ...
+}
+
+// Right: cursor walks the sibling chain directly
+let mut cursor = node.walk();
+if cursor.goto_first_child() {
+    loop {
+        let child = cursor.node();
+        // ...
+        if !cursor.goto_next_sibling() {
+            break;
+        }
+    }
+}
+```
+
+**Peeking at the next sibling:**
+```rust
+// Wrong: manual index tracking, requires passing container + index
+let next = container.child(param_idx + 1)?;
+if next.kind() == "=" { /* ... */ }
+
+// Right: tree-sitter handles the linked-list walk
+if param.next_sibling().is_some_and(|s| s.kind() == "=") { /* ... */ }
+```
+
+**Finding a child of a specific kind:**
+
+Use `NodeExt::first_child_of_kind` (defined in `src/indexer/node_ext.rs`) instead of writing
+a manual loop:
+```rust
+// Wrong: reinventing first_child_of_kind
+for i in 0..node.child_count() {
+    if let Some(c) = node.child(i) {
+        if c.kind() == KIND_FORMAL_PARAMS {
+            return Some(c);
+        }
+    }
+}
+
+// Right: use the existing helper
+node.first_child_of_kind(KIND_FORMAL_PARAMS)
+```
+
+Similarly, `children_of_kind(kind)` collects all matching children.
+
+**Key helpers (all in `src/indexer/node_ext.rs` on `NodeExt` trait):**
+
+| Method | Purpose |
+|---|---|
+| `first_child_of_kind(kind)` | Find first direct child with matching `kind()` |
+| `children_of_kind(kind)` | Collect all direct children with matching `kind()` |
+| `next_sibling()` / `next_named_sibling()` | Walk to adjacent sibling (built-in tree-sitter) |
+| `node.walk()` + cursor | Efficient iteration without index allocation |
+
+**Exception:** `node.child(0)` for a known-first-child (e.g. callee in `call_expression`) is
+fine — the position is structural, not arithmetic.
+
+**Rationale:** index loops on CST nodes caused three bugs in this project:
+- `param_has_default` had a 4-parameter signature with manual `while j < container_len` walking
+- `named_arg_label` used `child(i + 1)` which fails if `child(i)` returns `None` early
+- `count_provided_args` reinvented `children_of_kind` with 8 lines of boilerplate
+
 ## SOLID principles (Rust mapping)
 
 These are mapped to Rust idioms. Good examples are added here as they emerge from refactoring — when you write code that cleanly illustrates a principle, add it below.

@@ -45,9 +45,13 @@ fn collect_call_nodes(
         }
     }
 
-    for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
-            collect_call_nodes(child, bytes, indexer, uri, diagnostics);
+    let mut cursor = node.walk();
+    if cursor.goto_first_child() {
+        loop {
+            collect_call_nodes(cursor.node(), bytes, indexer, uri, diagnostics);
+            if !cursor.goto_next_sibling() {
+                break;
+            }
         }
     }
 }
@@ -234,15 +238,19 @@ fn has_trailing_lambda(call_node: &tree_sitter::Node) -> bool {
 }
 
 fn check_lambda_in_children(node: &tree_sitter::Node) -> bool {
-    for i in 0..node.child_count() {
-        let Some(child) = node.child(i) else {
-            continue;
-        };
-        if child.kind() == KIND_LAMBDA_LIT {
-            return true;
-        }
-        if child.kind() == KIND_CALL_SUFFIX && contains_lambda(&child) {
-            return true;
+    let mut cursor = node.walk();
+    if cursor.goto_first_child() {
+        loop {
+            let child = cursor.node();
+            if child.kind() == KIND_LAMBDA_LIT {
+                return true;
+            }
+            if child.kind() == KIND_CALL_SUFFIX && contains_lambda(&child) {
+                return true;
+            }
+            if !cursor.goto_next_sibling() {
+                break;
+            }
         }
     }
     false
@@ -250,19 +258,28 @@ fn check_lambda_in_children(node: &tree_sitter::Node) -> bool {
 
 /// Recursively check if a node contains a lambda_literal (up to 3 levels deep).
 fn contains_lambda(node: &tree_sitter::Node) -> bool {
-    for i in 0..node.child_count() {
-        let Some(child) = node.child(i) else {
-            continue;
-        };
-        if child.kind() == KIND_LAMBDA_LIT {
-            return true;
-        }
-        // Check annotated_lambda → lambda_literal
-        for j in 0..child.child_count() {
-            if let Some(gc) = child.child(j) {
-                if gc.kind() == KIND_LAMBDA_LIT {
-                    return true;
+    let mut cursor = node.walk();
+    if cursor.goto_first_child() {
+        loop {
+            let child = cursor.node();
+            if child.kind() == KIND_LAMBDA_LIT {
+                return true;
+            }
+
+            let mut gc_cursor = child.walk();
+            if gc_cursor.goto_first_child() {
+                loop {
+                    if gc_cursor.node().kind() == KIND_LAMBDA_LIT {
+                        return true;
+                    }
+                    if !gc_cursor.goto_next_sibling() {
+                        break;
+                    }
                 }
+            }
+
+            if !cursor.goto_next_sibling() {
+                break;
             }
         }
     }
@@ -270,20 +287,11 @@ fn contains_lambda(node: &tree_sitter::Node) -> bool {
 }
 
 /// Count `value_argument` children inside a `value_arguments` node.
-fn count_provided_args(value_arguments: Option<&tree_sitter::Node>, bytes: &[u8]) -> usize {
+fn count_provided_args(value_arguments: Option<&tree_sitter::Node>, _bytes: &[u8]) -> usize {
     let Some(va) = value_arguments else {
         return 0;
     };
-    let _ = bytes; // reserved for future use
-    let mut count = 0;
-    for i in 0..va.child_count() {
-        if let Some(child) = va.child(i) {
-            if child.kind() == KIND_VALUE_ARG {
-                count += 1;
-            }
-        }
-    }
-    count
+    va.children_of_kind(KIND_VALUE_ARG).len()
 }
 
 /// Check if any argument uses named-argument syntax (`label = expr`).
@@ -291,14 +299,9 @@ fn has_named_args(value_arguments: Option<&tree_sitter::Node>, bytes: &[u8]) -> 
     let Some(va) = value_arguments else {
         return false;
     };
-    for i in 0..va.child_count() {
-        if let Some(child) = va.child(i) {
-            if child.kind() == KIND_VALUE_ARG && child.named_arg_label(bytes).is_some() {
-                return true;
-            }
-        }
-    }
-    false
+    va.children_of_kind(KIND_VALUE_ARG)
+        .iter()
+        .any(|child| child.named_arg_label(bytes).is_some())
 }
 
 /// Return `true` if `node` is nested inside a `function_declaration` whose name

@@ -1026,14 +1026,22 @@ fn extract_params_and_counts(root: Node, bytes: &[u8], range: &Range) -> (String
         return (String::new(), (0, 0));
     };
     let decl = find_ancestor_decl(node);
-    for i in 0..decl.child_count() {
-        let Some(child) = decl.child(i) else { continue };
-        let kind = child.kind();
-        if kind == KIND_FUN_VALUE_PARAMS || kind == KIND_FORMAL_PARAMS || kind == KIND_PRIMARY_CTOR
-        {
-            let text = extract_inner_text(&child, bytes);
-            let counts = count_params_from_node(&child);
-            return (text, counts);
+    let mut cursor = decl.walk();
+    if cursor.goto_first_child() {
+        loop {
+            let child = cursor.node();
+            let kind = child.kind();
+            if kind == KIND_FUN_VALUE_PARAMS
+                || kind == KIND_FORMAL_PARAMS
+                || kind == KIND_PRIMARY_CTOR
+            {
+                let text = extract_inner_text(&child, bytes);
+                let counts = count_params_from_node(&child);
+                return (text, counts);
+            }
+            if !cursor.goto_next_sibling() {
+                break;
+            }
         }
     }
     (String::new(), (0, 0))
@@ -1083,16 +1091,19 @@ fn extract_inner_text(node: &Node, bytes: &[u8]) -> String {
 fn count_params_from_node(params_node: &Node) -> (u8, u8) {
     let mut total: u8 = 0;
     let mut optional: u8 = 0;
-    let count = params_node.child_count();
-    for i in 0..count {
-        let Some(child) = params_node.child(i) else {
-            continue;
-        };
-        let ck = child.kind();
-        if ck == KIND_PARAMETER || ck == KIND_FORMAL_PARAM || ck == KIND_CLASS_PARAM {
-            total += 1;
-            if param_has_default(&child) {
-                optional += 1;
+    let mut cursor = params_node.walk();
+    if cursor.goto_first_child() {
+        loop {
+            let child = cursor.node();
+            let ck = child.kind();
+            if ck == KIND_PARAMETER || ck == KIND_FORMAL_PARAM || ck == KIND_CLASS_PARAM {
+                total += 1;
+                if param_has_default(&child) {
+                    optional += 1;
+                }
+            }
+            if !cursor.goto_next_sibling() {
+                break;
             }
         }
     }
@@ -1108,9 +1119,15 @@ fn count_params_from_node(params_node: &Node) -> (u8, u8) {
 /// Both cases are handled by checking direct children first, then `next_sibling()`.
 fn param_has_default(param: &Node) -> bool {
     // class_parameter: `=` is a child of the param node itself.
-    for i in 0..param.child_count() {
-        if param.child(i).is_some_and(|c| c.kind() == "=") {
-            return true;
+    let mut cursor = param.walk();
+    if cursor.goto_first_child() {
+        loop {
+            if cursor.node().kind() == "=" {
+                return true;
+            }
+            if !cursor.goto_next_sibling() {
+                break;
+            }
         }
     }
     // parameter / formal_parameter: `=` follows as a sibling in the container.
@@ -2033,13 +2050,10 @@ impl crate::types::FileData {
 /// Extract `(params_text, (required, total))` from the `formal_parameters` child
 /// of a Java method or constructor declaration node.
 fn java_params_and_counts(node: &Node, bytes: &[u8]) -> (String, (u8, u8)) {
-    for i in 0..node.child_count() {
-        let Some(child) = node.child(i) else { continue };
-        if child.kind() == KIND_FORMAL_PARAMS {
-            let text = extract_inner_text(&child, bytes);
-            let counts = count_params_from_node(&child);
-            return (text, counts);
-        }
+    if let Some(child) = node.first_child_of_kind(KIND_FORMAL_PARAMS) {
+        let text = extract_inner_text(&child, bytes);
+        let counts = count_params_from_node(&child);
+        return (text, counts);
     }
     (String::new(), (0, 0))
 }

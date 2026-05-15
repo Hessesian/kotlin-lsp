@@ -194,10 +194,17 @@ fn kotlin_prop_token(node: Node<'_>, src: &Source<'_>, out: &mut Vec<RawToken>) 
             push_token(name, token_type, mods, src, out);
         }
     } else if let Some(multi) = first_child_of_kind(node, KIND_MULTI_VAR_DECL) {
-        for i in 0..multi.named_child_count() {
-            if let Some(vd) = multi.named_child(i) {
-                if let Some(name) = child_ident(vd) {
-                    push_token(name, token_type, mods, src, out);
+        let mut cursor = multi.walk();
+        if cursor.goto_first_child() {
+            loop {
+                let vd = cursor.node();
+                if vd.is_named() {
+                    if let Some(name) = child_ident(vd) {
+                        push_token(name, token_type, mods, src, out);
+                    }
+                }
+                if !cursor.goto_next_sibling() {
+                    break;
                 }
             }
         }

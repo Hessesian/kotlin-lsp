@@ -166,9 +166,13 @@ fn collect_when_nodes(
         }
     }
 
-    for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
-            collect_when_nodes(child, source, indexer, uri, diagnostics);
+    let mut cursor = node.walk();
+    if cursor.goto_first_child() {
+        loop {
+            collect_when_nodes(cursor.node(), source, indexer, uri, diagnostics);
+            if !cursor.goto_next_sibling() {
+                break;
+            }
         }
     }
 }

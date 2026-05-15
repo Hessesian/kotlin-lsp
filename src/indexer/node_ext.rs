@@ -132,16 +132,34 @@ impl<'a> NodeExt<'a> for Node<'a> {
     }
 
     fn first_child_of_kind(self, kind: &str) -> Option<Node<'a>> {
-        (0..self.child_count())
-            .filter_map(|i| self.child(i))
-            .find(|c| c.kind() == kind)
+        let mut cursor = self.walk();
+        if cursor.goto_first_child() {
+            loop {
+                if cursor.node().kind() == kind {
+                    return Some(cursor.node());
+                }
+                if !cursor.goto_next_sibling() {
+                    break;
+                }
+            }
+        }
+        None
     }
 
     fn children_of_kind(self, kind: &str) -> Vec<Node<'a>> {
-        (0..self.child_count())
-            .filter_map(|i| self.child(i))
-            .filter(|c| c.kind() == kind)
-            .collect()
+        let mut cursor = self.walk();
+        let mut result = Vec::new();
+        if cursor.goto_first_child() {
+            loop {
+                if cursor.node().kind() == kind {
+                    result.push(cursor.node());
+                }
+                if !cursor.goto_next_sibling() {
+                    break;
+                }
+            }
+        }
+        result
     }
 
     fn call_fn_name(self, bytes: &[u8]) -> Option<String> {
@@ -149,11 +167,20 @@ impl<'a> NodeExt<'a> for Node<'a> {
     }
 
     fn named_arg_label(self, bytes: &[u8]) -> Option<String> {
-        let count = self.child_count();
-        for i in 0..count.saturating_sub(1) {
-            let (c, next) = (self.child(i)?, self.child(i + 1)?);
-            if c.kind() == KIND_SIMPLE_IDENT && next.kind() == KIND_EQ {
-                return c.utf8_text_owned(bytes);
+        let mut cursor = self.walk();
+        if cursor.goto_first_child() {
+            loop {
+                let c = cursor.node();
+                if c.kind() == KIND_SIMPLE_IDENT {
+                    if let Some(next) = c.next_sibling() {
+                        if next.kind() == KIND_EQ {
+                            return c.utf8_text_owned(bytes);
+                        }
+                    }
+                }
+                if !cursor.goto_next_sibling() {
+                    break;
+                }
             }
         }
         None
@@ -281,9 +308,7 @@ impl<'a> NodeExt<'a> for Node<'a> {
 
     fn first_value_argument_text(self, bytes: &[u8]) -> Option<String> {
         let args = self.find_value_arguments()?;
-        (0..args.child_count())
-            .filter_map(|i| args.child(i))
-            .find(|c| c.kind() == KIND_VALUE_ARG)
+        args.first_child_of_kind(KIND_VALUE_ARG)
             .and_then(|arg| arg.utf8_text_owned(bytes))
             .map(|t| t.trim().to_owned())
             .filter(|t| !t.is_empty())
@@ -294,16 +319,37 @@ impl<'a> NodeExt<'a> for Node<'a> {
             return None;
         }
 
-        let receiver = (0..self.child_count())
-            .filter_map(|i| self.child(i))
-            .find(|child| child.is_named() && child.kind() != KIND_NAV_SUFFIX)?
-            .utf8_text_owned(bytes)?;
+        let mut cursor = self.walk();
+        let mut receiver = None;
+        if cursor.goto_first_child() {
+            loop {
+                let child = cursor.node();
+                if child.is_named() && child.kind() != KIND_NAV_SUFFIX {
+                    receiver = child.utf8_text_owned(bytes);
+                    break;
+                }
+                if !cursor.goto_next_sibling() {
+                    break;
+                }
+            }
+        }
+        let receiver = receiver?;
         let suffix = self.first_child_of_kind(KIND_NAV_SUFFIX)?;
-        let member = (0..suffix.child_count())
-            .filter_map(|i| suffix.child(i))
-            .find(|child| child.kind() == KIND_SIMPLE_IDENT || child.kind() == KIND_TYPE_IDENT)?
-            .utf8_text_owned(bytes)?;
-        Some((receiver, member))
+        let mut member_cursor = suffix.walk();
+        let mut member = None;
+        if member_cursor.goto_first_child() {
+            loop {
+                let child = member_cursor.node();
+                if child.kind() == KIND_SIMPLE_IDENT || child.kind() == KIND_TYPE_IDENT {
+                    member = child.utf8_text_owned(bytes);
+                    break;
+                }
+                if !member_cursor.goto_next_sibling() {
+                    break;
+                }
+            }
+        }
+        Some((receiver, member?))
     }
 
     fn extract_type_name(self, bytes: &[u8]) -> Option<String> {
@@ -314,17 +360,22 @@ impl<'a> NodeExt<'a> for Node<'a> {
                 }
             }
         }
-        for i in 0..self.child_count() {
-            if let Some(child) = self.child(i) {
-                if matches!(
-                    child.kind(),
-                    k if k == KIND_TYPE_IDENT || k == KIND_SIMPLE_IDENT || k == KIND_IDENTIFIER
-                ) {
+        let mut cursor = self.walk();
+        if cursor.goto_first_child() {
+            loop {
+                let child = cursor.node();
+                if child.kind() == KIND_TYPE_IDENT
+                    || child.kind() == KIND_SIMPLE_IDENT
+                    || child.kind() == KIND_IDENTIFIER
+                {
                     if let Some(s) = child.utf8_text_owned(bytes) {
                         if s.starts_with_uppercase() {
                             return Some(s);
                         }
                     }
+                }
+                if !cursor.goto_next_sibling() {
+                    break;
                 }
             }
         }

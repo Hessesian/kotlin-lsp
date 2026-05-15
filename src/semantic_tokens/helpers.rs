@@ -40,13 +40,19 @@ pub(super) fn find_annotation_ident(annotation_node: Node<'_>) -> Option<Node<'_
 
 /// Find the first direct child with a name identifier (simple_identifier or identifier).
 pub(super) fn child_ident<'a>(node: Node<'a>) -> Option<Node<'a>> {
-    for i in 0..node.child_count() {
-        let child = node.child(i)?;
-        if child.kind() == KIND_SIMPLE_IDENT
-            || child.kind() == KIND_IDENTIFIER
-            || child.kind() == KIND_TYPE_IDENT
-        {
-            return Some(child);
+    let mut cursor = node.walk();
+    if cursor.goto_first_child() {
+        loop {
+            let child = cursor.node();
+            if child.kind() == KIND_SIMPLE_IDENT
+                || child.kind() == KIND_IDENTIFIER
+                || child.kind() == KIND_TYPE_IDENT
+            {
+                return Some(child);
+            }
+            if !cursor.goto_next_sibling() {
+                break;
+            }
         }
     }
     None
@@ -85,8 +91,10 @@ pub(super) fn has_keyword_child(node: Node<'_>, keyword: &str) -> bool {
 
 /// Check whether a Kotlin node has a modifier keyword (e.g. "suspend", "abstract").
 pub(super) fn has_modifier(node: Node<'_>, src: &Source<'_>, keyword: &str) -> bool {
-    for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
+    let mut cursor = node.walk();
+    if cursor.goto_first_child() {
+        loop {
+            let child = cursor.node();
             if child.kind() == KIND_MODIFIERS
                 && node_text(child, src.bytes)
                     .split_whitespace()
@@ -96,6 +104,9 @@ pub(super) fn has_modifier(node: Node<'_>, src: &Source<'_>, keyword: &str) -> b
             }
             if child.kind() == keyword {
                 return true;
+            }
+            if !cursor.goto_next_sibling() {
+                break;
             }
         }
     }
