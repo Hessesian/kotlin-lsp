@@ -505,9 +505,18 @@ impl Indexer {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         let effective_root = crate::rg::effective_rg_root(workspace_root.as_deref(), open_file);
-        // Always pass source_roots through — RgSearch::scoped will use them when
-        // non-empty, and fall back to effective_root when empty.
-        (effective_root, source_roots, matcher)
+
+        // source_roots belong to the configured workspace — when rg switches to
+        // an external project (effective_root != workspace_root), they must not
+        // leak into the search.
+        let scoped_source_roots = match (&effective_root, &workspace_root) {
+            (Some(effective_root), Some(workspace_root)) if effective_root == workspace_root => {
+                source_roots
+            }
+            _ => vec![],
+        };
+
+        (effective_root, scoped_source_roots, matcher)
     }
 
     pub(crate) fn remove_live_lines(&self, uri: &Url) {

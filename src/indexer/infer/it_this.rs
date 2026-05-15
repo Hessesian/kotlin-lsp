@@ -1161,7 +1161,7 @@ fn lambda_receiver_type_named_arg_ml(
             // Try ALL symbols named `fn_name` in the outer-class file — the file
             // may have multiple same-named nested classes (e.g. two `SheetReloadActions`
             // in different reducers).  Pick the first one whose params contain `named_arg`.
-            let sigs = collect_all_fun_params_texts(fn_name, &file_uri, idx, false);
+            let sigs = collect_all_fun_params_texts(fn_name, &file_uri, idx);
             let found = sigs
                 .into_iter()
                 .find_map(|s| find_named_param_type_in_sig(&s, named_arg).map(|ty| (s, ty)));

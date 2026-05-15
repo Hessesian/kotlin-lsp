@@ -240,7 +240,7 @@ pub(crate) fn collect_fun_params_text(
     uri_str: &str,
     idx: &Indexer,
 ) -> Option<String> {
-    collect_all_fun_params_texts(fn_name, uri_str, idx, false)
+    collect_all_fun_params_texts(fn_name, uri_str, idx)
         .into_iter()
         .next()
 }
@@ -250,15 +250,10 @@ pub(crate) fn collect_fun_params_text(
 ///
 /// For Java files, CLASS symbols are excluded because Java class nodes never carry
 /// constructor params — use the indexed CONSTRUCTOR symbols instead.
-///
-/// When `skip_nested` is `true`, symbols with a non-`None` `container` are excluded.
-/// Use this for cross-file lookups: an unqualified `Foo()` call in another file
-/// cannot refer to a nested class `Outer.Foo` — those require a qualifier.
 pub(crate) fn collect_all_fun_params_texts(
     fn_name: &str,
     uri_str: &str,
     idx: &Indexer,
-    skip_nested: bool,
 ) -> Vec<String> {
     let data = match idx.files.get(uri_str) {
         Some(d) => d,
@@ -269,9 +264,6 @@ pub(crate) fn collect_all_fun_params_texts(
         .iter()
         .filter(|s| {
             s.name == fn_name
-                && !(skip_nested
-                    && s.container.is_some()
-                    && matches!(s.kind, SymbolKind::CLASS | SymbolKind::STRUCT))
                 && (s.kind == SymbolKind::FUNCTION
                     || s.kind == SymbolKind::METHOD
                     || s.kind == SymbolKind::CONSTRUCTOR
