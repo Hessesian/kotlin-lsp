@@ -42,9 +42,18 @@ impl Backend {
             .unwrap_or_default();
         let is_kotlin = crate::Language::from_path(uri.path()) == crate::Language::Kotlin;
 
-        let actions = features::code_actions::compute_code_actions(
+        let mut actions = features::code_actions::compute_code_actions(
             &line_text, &all_lines, uri, range, is_kotlin,
         );
+
+        // Indexed code actions (require live tree + symbol index)
+        if is_kotlin {
+            if let Some(action) =
+                features::fill_when::build_fill_when_action(self.indexer.as_ref(), uri, range)
+            {
+                actions.push(action);
+            }
+        }
 
         Ok(if actions.is_empty() {
             None

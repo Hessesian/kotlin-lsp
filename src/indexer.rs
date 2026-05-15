@@ -235,6 +235,9 @@ impl crate::indexer::infer::InferDeps for Indexer {
         infer_variable_type_raw(self, var_name, uri)
     }
     fn find_field_type(&self, class_name: &str, field_name: &str) -> Option<String> {
+        if let Some(ty) = synthetic_enum_field(self, class_name, field_name) {
+            return Some(ty);
+        }
         crate::resolver::infer::find_field_type_in_class(self, class_name, field_name)
     }
     fn find_fun_return_type(&self, fn_name: &str) -> Option<String> {
@@ -262,6 +265,9 @@ impl crate::indexer::infer::InferDeps for Indexer {
         class_name: &str,
         method_name: &str,
     ) -> Option<String> {
+        if let Some(ty) = synthetic_enum_method(self, class_name, method_name) {
+            return Some(ty);
+        }
         crate::resolver::infer::find_method_return_type(self, class_name, method_name)
     }
     fn find_method_params_text(&self, class_name: &str, method_name: &str) -> Option<String> {
@@ -269,6 +275,65 @@ impl crate::indexer::infer::InferDeps for Indexer {
     }
     fn live_doc(&self, uri: &Url) -> Option<Arc<LiveDoc>> {
         self.live_doc(uri)
+    }
+}
+
+// ─── Synthetic enum members ──────────────────────────────────────────────────
+//
+// Kotlin generates these on every enum class:
+//   .entries  → EnumEntries<T>  (effectively List<T>)
+//   .values() → Array<T>
+//   .valueOf(String) → T
+//   .name     → String  (instance)
+//   .ordinal  → Int     (instance)
+
+fn is_enum_class(indexer: &Indexer, class_name: &str) -> bool {
+    let Some(locs) = indexer.definitions.get(class_name) else {
+        return false;
+    };
+    for loc in locs.iter() {
+        if let Some(fd) = indexer.files.get(loc.uri.as_str()) {
+            if fd
+                .symbols
+                .iter()
+                .any(|s| s.name == class_name && s.kind == SymbolKind::ENUM)
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn synthetic_enum_field(indexer: &Indexer, class_name: &str, field_name: &str) -> Option<String> {
+    // Check name first to avoid expensive is_enum_class lookup for non-synthetic fields
+    match field_name {
+        "entries" | "name" | "ordinal" => {}
+        _ => return None,
+    }
+    if !is_enum_class(indexer, class_name) {
+        return None;
+    }
+    match field_name {
+        "entries" => Some(format!("List<{class_name}>")),
+        "name" => Some("String".to_string()),
+        "ordinal" => Some("Int".to_string()),
+        _ => None,
+    }
+}
+
+fn synthetic_enum_method(indexer: &Indexer, class_name: &str, method_name: &str) -> Option<String> {
+    match method_name {
+        "values" | "valueOf" => {}
+        _ => return None,
+    }
+    if !is_enum_class(indexer, class_name) {
+        return None;
+    }
+    match method_name {
+        "values" => Some(format!("Array<{class_name}>")),
+        "valueOf" => Some(class_name.to_string()),
+        _ => None,
     }
 }
 

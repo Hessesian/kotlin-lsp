@@ -448,6 +448,7 @@ pub(crate) const KIND_MOD_ABSTRACT: &str = "abstract";
 
 // ─── Kotlin class parameter ───────────────────────────────────────────────────
 pub(crate) const KIND_CLASS_PARAM: &str = "class_parameter";
+pub(crate) const KIND_PRIMARY_CTOR: &str = "primary_constructor";
 
 // ─── Kotlin soft keywords (anonymous CST nodes) ───────────────────────────────
 pub(crate) const KIND_KW_IS: &str = "is";
@@ -480,6 +481,16 @@ pub(crate) const KIND_MULTILINE_STRING_LITERAL: &str = "multiline_string_literal
 pub(crate) const KIND_BOOLEAN_LITERAL: &str = "boolean_literal";
 pub(crate) const KIND_NULL_LITERAL: &str = "null";
 pub(crate) const KIND_CHARACTER_LITERAL: &str = "character_literal";
+
+// ─── Kotlin when expression ───────────────────────────────────────────────────
+pub(crate) const KIND_WHEN_EXPR: &str = "when_expression";
+pub(crate) const KIND_WHEN_SUBJECT: &str = "when_subject";
+pub(crate) const KIND_WHEN_ENTRY: &str = "when_entry";
+pub(crate) const KIND_WHEN_CONDITION: &str = "when_condition";
+pub(crate) const KIND_TYPE_TEST: &str = "type_test";
+pub(crate) const KIND_ELSE: &str = "else";
+pub(crate) const KIND_LBRACE: &str = "{";
+pub(crate) const KIND_RBRACE: &str = "}";
 
 // ─── Comment kinds ────────────────────────────────────────────────────────────
 pub(crate) const KIND_LINE_COMMENT: &str = "line_comment";
