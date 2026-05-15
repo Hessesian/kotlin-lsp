@@ -2484,6 +2484,8 @@ fn synthetic_not_applied_to_non_enum() {
     // Should resolve from actual source, not synthetic
     assert_ne!(ty.as_deref(), Some("List<Foo>"));
 }
+
+#[test]
 fn nullable_let_chain_it_type_resolves() {
     // Multi-line ?.let chain — `it` inside each lambda should get a type.
     //
