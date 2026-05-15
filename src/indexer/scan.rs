@@ -517,6 +517,8 @@ async fn run_parse_phase<R: ProgressReporter + 'static>(
     .await;
 
     progress_handle.abort();
+    // Send final 100% so editors never get stuck at <100% before the End.
+    reporter.report(token, parse_count, parse_count).await;
     counters.log_summary(results.len());
     (results, aborted)
 }
