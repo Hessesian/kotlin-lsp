@@ -38,8 +38,8 @@ use super::{
 
 use crate::indexer::NodeExt;
 use crate::queries::{
-    KIND_CALL_EXPR, KIND_CALL_SUFFIX, KIND_LAMBDA_LIT, KIND_NAV_EXPR, KIND_NAV_SUFFIX,
-    KIND_SIMPLE_IDENT, KIND_TYPE_IDENT, KIND_VALUE_ARG,
+    KIND_CALL_EXPR, KIND_CALL_SUFFIX, KIND_CLASS_DECL, KIND_LAMBDA_LIT, KIND_NAV_EXPR,
+    KIND_NAV_SUFFIX, KIND_OBJECT_DECL, KIND_SIMPLE_IDENT, KIND_TYPE_IDENT, KIND_VALUE_ARG,
 };
 use crate::resolver::{extract_collection_element_type, infer_lines::first_type_arg};
 use crate::StrExt;
@@ -1385,28 +1385,35 @@ fn forward_resolve_segments(
                 let _ = prev_type;
             }
             NavSegment::CallExpr(call_node) => {
-                // An intermediate call like `.let { body }` in the chain.
-                // For scope functions: `also`/`apply` return receiver,
-                // `let`/`run` return lambda body type.
-                // Without full type inference of lambda bodies, assume scope
-                // functions pass through the receiver type (correct for also,
-                // approximation for let/run in homogeneous chains).
                 let fn_name = call_node.call_fn_name(bytes);
                 if let Some(ref name) = fn_name {
-                    if !SCOPE_FUNCTIONS.contains(&name.as_str()) {
-                        // Non-scope call — try to resolve return type
-                        if let Some(ref cur) = current_type {
-                            let type_name = cur.dotted_ident_prefix();
-                            if !type_name.is_empty() {
-                                if let Some(ret_ty) =
-                                    deps.find_method_return_type_for_type(&type_name, name)
-                                {
-                                    current_type = uppercase_ident_prefix(&ret_ty);
-                                }
+                    if SCOPE_FUNCTIONS.contains(&name.as_str()) {
+                        // Scope function: receiver passes through
+                        continue;
+                    }
+                    // Non-scope call — resolve return type
+                    if let Some(ref cur) = current_type {
+                        let type_name = cur.dotted_ident_prefix();
+                        if !type_name.is_empty() {
+                            if let Some(ret_ty) =
+                                deps.find_method_return_type_for_type(&type_name, name)
+                            {
+                                current_type = uppercase_ident_prefix(&ret_ty);
+                                continue;
                             }
                         }
                     }
-                    // For scope functions, current_type stays the same (pass-through)
+                    // No receiver type or method not found — try as standalone function
+                    if let Some(ret_ty) = deps.find_fun_return_type(name) {
+                        current_type = uppercase_ident_prefix(&ret_ty);
+                    } else if let Some(class_name) = enclosing_class_name(*call_node, bytes) {
+                        // Try as implicit `this.method()` on enclosing class
+                        if let Some(ret_ty) =
+                            deps.find_method_return_type_for_type(&class_name, name)
+                        {
+                            current_type = uppercase_ident_prefix(&ret_ty);
+                        }
+                    }
                 }
             }
         }
@@ -1416,6 +1423,21 @@ fn forward_resolve_segments(
     let method = last_suffix?;
     let receiver_type = current_type?;
     Some((receiver_type, method))
+}
+
+/// Walk up from a node to find the enclosing class/object declaration name.
+fn enclosing_class_name(node: tree_sitter::Node<'_>, bytes: &[u8]) -> Option<String> {
+    let mut cur = node;
+    loop {
+        match cur.kind() {
+            KIND_CLASS_DECL | KIND_OBJECT_DECL => {
+                return cur.extract_type_name(bytes);
+            }
+            _ => {
+                cur = cur.parent()?;
+            }
+        }
+    }
 }
 
 /// Resolve the type of a root node (identifier, navigation_expression for dotted access).

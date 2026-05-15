@@ -2538,3 +2538,33 @@ fn nullable_let_chain_it_type_resolves() {
         "it in third ?.let lambda should be Long: {r11:?}"
     );
 }
+
+#[test]
+fn function_call_dot_let_named_param_resolves() {
+    // `childCategory(child).let { categoryAge -> ... }` — categoryAge should get the
+    // return type of childCategory(), not generic T from indexed `let`.
+    // childCategory is a member function of the enclosing class.
+    let src = concat!(
+        "class Child { val ownerAge: Int = 0 }\n",              // 0
+        "fun <T, R> T.let(block: (T) -> R): R = block(this)\n", // 1
+        "class ShowChildNewTipsInteractor {\n",                 // 2
+        "  fun childCategory(child: Child): Int = 0\n",         // 3
+        "  fun test(child: Child) {\n",                         // 4
+        "    childCategory(child)\n",                           // 5
+        "      .let { categoryAge ->\n",                        // 6
+        "        categoryAge + 1\n",                            // 7
+        "      }\n",                                            // 8
+        "  }\n",                                                // 9
+        "}\n",                                                  // 10
+    );
+    let (u, idx) = indexed("/fn_call_let.kt", src);
+    idx.store_live_tree(&u, src);
+
+    // Line 7: `categoryAge` inside .let — should be Int (return type of childCategory)
+    let r = idx.infer_lambda_param_type_at("categoryAge", &u, Position::new(7, 8));
+    assert_eq!(
+        r.as_deref(),
+        Some("Int"),
+        "categoryAge in .let after member function call should be Int: {r:?}"
+    );
+}
