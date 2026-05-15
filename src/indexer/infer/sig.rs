@@ -262,6 +262,10 @@ pub(crate) fn collect_params_from_line(lines: &[String], start_line: usize) -> O
         let chars = line.char_indices().peekable();
         for (_, ch) in chars {
             match ch {
+                // If we hit '{' before finding any '(', the class has no constructor params
+                '{' if !found_open && found_keyword => {
+                    return Some(String::new());
+                }
                 '(' => {
                     paren_depth += 1;
                     if paren_depth == 1 {

@@ -436,8 +436,12 @@ fn resolve_type_members(indexer: &Indexer, type_name: &str) -> Option<(TypeKind,
     }
 
     for location in &locations {
-        let file_data = indexer.file_data_for(location.uri.as_str())?;
-        let symbol = find_symbol_at(&file_data, location)?;
+        let Some(file_data) = indexer.file_data_for(location.uri.as_str()) else {
+            continue;
+        };
+        let Some(symbol) = find_symbol_at(&file_data, location) else {
+            continue;
+        };
 
         if symbol.kind == SymbolKind::ENUM {
             let members = collect_enum_members(&file_data, &symbol);
@@ -510,10 +514,21 @@ fn collect_sealed_members(indexer: &Indexer, sealed_name: &str) -> Vec<WhenMembe
         Some((loc.uri.clone(), parent_sym.range))
     });
 
+    // Sealed subtypes must be in the same file or same package as the sealed class.
+    // Filter to same file to avoid false positives from identically-named sealed
+    // classes in different packages.
+    let parent_uri = parent_info.as_ref().map(|(uri, _)| uri.as_str());
+
     let subtype_locations = indexer.subtypes_of(sealed_name);
     let mut members = Vec::new();
 
     for location in &subtype_locations {
+        // Only consider subtypes in the same file as the sealed parent
+        if let Some(p_uri) = parent_uri {
+            if location.uri.as_str() != p_uri {
+                continue;
+            }
+        }
         let Some(file_data) = indexer.file_data_for(location.uri.as_str()) else {
             continue;
         };

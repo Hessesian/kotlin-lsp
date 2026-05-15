@@ -549,3 +549,223 @@ fn trailing_lambda_same_line_three_args_skipped() {
         "trailing lambda same line should be skipped: {diags:?}"
     );
 }
+
+#[test]
+fn same_file_diagnostic_retype_cycle() {
+    // Regression: type loadData() → delete → retype should still emit diagnostic.
+    // Tests that index_content + call_arg_diagnostics work correctly on re-index
+    // when content returns to a previously-seen state.
+    let idx = Indexer::new();
+    let u = uri("/a.kt");
+
+    let with_call = concat!(
+        "fun loadData(arg: String) {}\n",
+        "fun main() {\n",
+        "    loadData()\n",
+        "}\n",
+    );
+    let without_call = concat!("fun loadData(arg: String) {}\n", "fun main() {\n", "}\n",);
+
+    // Step 1: type the call → should get diagnostic
+    idx.index_content(&u, with_call);
+    let diags1 = run_diagnostics(&idx, &u, with_call);
+    assert!(!diags1.is_empty(), "step1: expected diagnostic, got none");
+
+    // Step 2: delete the call → should be clear
+    idx.index_content(&u, without_call);
+    let diags2 = run_diagnostics(&idx, &u, without_call);
+    assert!(
+        diags2.is_empty(),
+        "step2: expected no diagnostic after delete"
+    );
+
+    // Step 3: retype the call → should get diagnostic again
+    idx.index_content(&u, with_call);
+    let diags3 = run_diagnostics(&idx, &u, with_call);
+    assert!(
+        !diags3.is_empty(),
+        "step3: expected diagnostic after retype, got none"
+    );
+}
+
+#[test]
+fn same_file_diagnostic_with_live_lines_cycle() {
+    // Mirrors production: set_live_lines called before index_content.
+    // Tests that even when index_content returns None (hash-cache hit),
+    // call_arg_diagnostics still fires using diag_indexer.files.
+    let idx = Indexer::new();
+    let u = uri("/a.kt");
+
+    let with_call = concat!(
+        "fun loadData(arg: String) {}\n",
+        "fun main() {\n",
+        "    loadData()\n",
+        "}\n",
+    );
+    let without_call = concat!("fun loadData(arg: String) {}\n", "fun main() {\n", "}\n",);
+
+    // Step 1: type the call (production: set_live_lines THEN index_content)
+    idx.set_live_lines(&u, with_call);
+    idx.index_content(&u, with_call);
+    let diags1 = run_diagnostics(&idx, &u, with_call);
+    assert!(!diags1.is_empty(), "step1: expected diagnostic");
+
+    // Step 2: delete call
+    idx.set_live_lines(&u, without_call);
+    idx.index_content(&u, without_call);
+    let diags2 = run_diagnostics(&idx, &u, without_call);
+    assert!(diags2.is_empty(), "step2: expected no diagnostic");
+
+    // Step 3: simulate save from disk (re-indexes H1) — mimics handle_file_saved
+    // racing with or preceding the debounce task
+    idx.index_content(&u, with_call); // ← now content_hash = H1 again
+
+    // Step 4: retype — index_content called with H1, but content_hash already H1
+    // (from step 3), so it returns None. Diagnostics must still work via files.
+    idx.set_live_lines(&u, with_call);
+    let none_result = idx.index_content(&u, with_call); // should be None = hash-cache hit
+                                                        // We still need diagnostics to fire using stale diag_indexer.files (set in step 3)
+    let diags3 = if none_result.is_none() {
+        // Production code: use diag_indexer.files when index_content returned None
+        let doc = crate::indexer::live_tree::parse_live(with_call, tree_sitter_kotlin::language())
+            .unwrap();
+        call_arg_diagnostics(&idx, &u, &doc)
+    } else {
+        run_diagnostics(&idx, &u, with_call)
+    };
+    assert!(
+        !diags3.is_empty(),
+        "step4: expected diagnostic after retype (hash-cache hit path)"
+    );
+}
+
+/// Regression: method call with wrong args inside a coroutine lambda (withContext)
+/// should still produce a diagnostic. The function is defined in the same class.
+#[test]
+fn method_call_wrong_args_inside_coroutine_lambda() {
+    let (uri, idx, src) = setup(&[(
+        "/Interactor.kt",
+        concat!(
+            "class Interactor {\n",
+            "  suspend fun loadData(args: String): String {\n",
+            "    return withContext(Dispatchers.IO) {\n",
+            "      loadData()\n",
+            "    }\n",
+            "  }\n",
+            "}\n",
+        ),
+    )]);
+    let diags = run_diagnostics(&idx, &uri, &src);
+    assert!(
+        !diags.is_empty(),
+        "expected diagnostic for loadData() inside withContext lambda: {diags:?}"
+    );
+}
+
+/// Regression: override with base class also indexed — both define loadData with 1 arg.
+/// The override in the derived class should still produce a diagnostic for loadData().
+#[test]
+fn method_call_wrong_args_with_base_class_indexed() {
+    let idx = Indexer::new();
+    let base_uri = uri("/LoadingInteractor.kt");
+    let base_src = concat!(
+        "abstract class LoadingInteractor<Args : Any, Result : Any> {\n",
+        "  abstract suspend fun loadData(args: Args): Result\n",
+        "}\n",
+    );
+    idx.index_content(&base_uri, base_src);
+    idx.store_live_tree(&base_uri, base_src);
+
+    let impl_src = concat!(
+        "class ShowChildNewTipsInteractor : LoadingInteractor<String, String>() {\n",
+        "  override suspend fun loadData(args: String): String {\n",
+        "    return withContext(ioDispatcher) {\n",
+        "      loadData()\n", // ← 0 args — should fire diagnostic
+        "      \"\"\n",
+        "    }\n",
+        "  }\n",
+        "}\n",
+    );
+    let impl_uri = uri("/ShowChildNewTipsInteractor.kt");
+    idx.index_content(&impl_uri, impl_src);
+    idx.store_live_tree(&impl_uri, impl_src);
+
+    let doc = parse_live(impl_src, tree_sitter_kotlin::language()).unwrap();
+    let diags = call_arg_diagnostics(&idx, &impl_uri, &doc);
+    assert!(
+        !diags.is_empty(),
+        "expected diagnostic for loadData() with base class indexed: {diags:?}"
+    );
+}
+
+/// Regression: workspace has many same-name functions with different arities.
+/// Unqualified call should be resolved against the CURRENT FILE only,
+/// not skipped because of 945+ same-name functions in the workspace.
+#[test]
+fn method_call_same_file_wins_over_workspace_overloads() {
+    let idx = Indexer::new();
+
+    // Simulate 3 other files with different arities for "loadData"
+    for i in 0..3 {
+        let other_uri = uri(&format!("/Other{i}.kt"));
+        // Each has loadData with a different number of args
+        let other_src = format!(
+            "class Other{i} {{\n  fun loadData({}) {{}}\n}}\n",
+            std::iter::repeat("x: Int")
+                .take(i + 2)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        idx.index_content(&other_uri, &other_src);
+    }
+
+    // Current file has loadData with 1 required arg — call with 0 should diagnose
+    let src = concat!(
+        "class MyClass {\n",
+        "  fun loadData(arg: String) {}\n",
+        "  fun test() {\n",
+        "    loadData()\n",
+        "  }\n",
+        "}\n",
+    );
+    let u = uri("/MyClass.kt");
+    idx.index_content(&u, src);
+    let doc = parse_live(src, tree_sitter_kotlin::language()).unwrap();
+    let diags = call_arg_diagnostics(&idx, &u, &doc);
+    assert!(
+        !diags.is_empty(),
+        "expected diagnostic even with many workspace overloads: {diags:?}"
+    );
+}
+
+/// Regression: same as above but with multiple chained lambdas inside withContext,
+/// mirroring the actual production file shape that was showing 0 diagnostics.
+#[test]
+fn method_call_wrong_args_inside_complex_coroutine_lambda() {
+    let (uri, idx, src) = setup(&[(
+        "/Interactor.kt",
+        concat!(
+            "class ShowChildNewTipsInteractor {\n",
+            "  sealed interface TipsResult {\n",
+            "    data object No : TipsResult\n",
+            "  }\n",
+            "  override suspend fun loadData(args: String): TipsResult {\n",
+            "    return withContext(ioDispatcher) {\n",
+            "      loadData()\n", // ← the call under test
+            "      val x = settings?.let {\n",
+            "        if (it == 0L) System.currentTimeMillis().also {\n",
+            "          settings = it\n",
+            "        } else it\n",
+            "      }?.let { it > 0L } ?: false\n",
+            "      TipsResult.No\n",
+            "    }\n",
+            "  }\n",
+            "}\n",
+        ),
+    )]);
+    let diags = run_diagnostics(&idx, &uri, &src);
+    assert!(
+        !diags.is_empty(),
+        "expected diagnostic for loadData() in complex coroutine context: {diags:?}"
+    );
+}

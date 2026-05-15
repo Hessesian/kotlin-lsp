@@ -984,19 +984,41 @@ fn extract_params_and_counts(root: Node, bytes: &[u8], range: &Range) -> (String
     (String::new(), (0, 0))
 }
 
-/// Extract text between `(` and `)` of a params container node.
+/// Extract text between the first `(` and its matching `)` inside a params container node.
+///
+/// Handles annotated nodes like `@JvmOverloads constructor(...)` where the node does
+/// not start directly with `(`. Uses depth-tracked matching to find the correct `)`.
 fn extract_inner_text(node: &Node, bytes: &[u8]) -> String {
-    let start = node.start_byte();
-    let end = node.end_byte();
-    if end > start + 2 {
-        if let Ok(s) = std::str::from_utf8(&bytes[start + 1..end - 1]) {
-            return s
-                .lines()
-                .map(|l| l.trim())
-                .filter(|l| !l.is_empty())
-                .collect::<Vec<_>>()
-                .join(" ");
+    let node_bytes = &bytes[node.start_byte()..node.end_byte()];
+    let Some(open) = node_bytes.iter().position(|&b| b == b'(') else {
+        return String::new();
+    };
+    // Find the matching ')' using depth tracking.
+    let mut depth: i32 = 0;
+    let mut close = None;
+    for (i, &b) in node_bytes[open..].iter().enumerate() {
+        match b {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(open + i);
+                    break;
+                }
+            }
+            _ => {}
         }
+    }
+    let Some(close) = close else {
+        return String::new();
+    };
+    if let Ok(s) = std::str::from_utf8(&node_bytes[open + 1..close]) {
+        return s
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
     }
     String::new()
 }
@@ -1874,6 +1896,12 @@ impl crate::types::FileData {
             let type_params = node.extract_type_params(bytes);
             // Java extension methods (static methods in a class annotated with @JvmName etc.)
             // are not real Kotlin extensions; leave extension_receiver empty for Java.
+            let (params, param_counts) =
+                if matches!(kind, SymbolKind::METHOD | SymbolKind::CONSTRUCTOR) {
+                    java_params_and_counts(node, bytes)
+                } else {
+                    (String::new(), (0, 0))
+                };
             self.symbols.push(SymbolEntry {
                 name,
                 kind,
@@ -1884,8 +1912,8 @@ impl crate::types::FileData {
                 type_params,
                 extension_receiver: String::new(),
                 container: None,
-                params: String::new(),
-                param_counts: (0, 0),
+                params,
+                param_counts,
             });
         }
     }
@@ -1941,7 +1969,21 @@ impl crate::types::FileData {
     }
 }
 
-// ─── tests ───────────────────────────────────────────────────────────────────
+// ─── Java extraction helpers ──────────────────────────────────────────────────
+
+/// Extract `(params_text, (required, total))` from the `formal_parameters` child
+/// of a Java method or constructor declaration node.
+fn java_params_and_counts(node: &Node, bytes: &[u8]) -> (String, (u8, u8)) {
+    for i in 0..node.child_count() {
+        let Some(child) = node.child(i) else { continue };
+        if child.kind() == KIND_FORMAL_PARAMS {
+            let text = extract_inner_text(&child, bytes);
+            let counts = count_params_from_node(&child);
+            return (text, counts);
+        }
+    }
+    (String::new(), (0, 0))
+}
 
 #[cfg(test)]
 #[path = "parser_tests.rs"]

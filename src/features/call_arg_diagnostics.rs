@@ -17,6 +17,7 @@ use crate::indexer::{
     split_params_at_depth_zero, Indexer, NodeExt,
 };
 use crate::queries::{KIND_CALL_EXPR, KIND_CALL_SUFFIX, KIND_LAMBDA_LIT, KIND_VALUE_ARG};
+use crate::util::is_test_file;
 
 /// Scan a file for call-argument count mismatches and return diagnostics.
 ///
@@ -63,6 +64,13 @@ fn check_call_args(
 
     let (fn_name, qualifier) = call_node.call_fn_and_qualifier(bytes)?;
 
+    // Skip unqualified calls inside scope-function lambdas (apply/run/with/let/also).
+    // These have an implicit `this` receiver that we cannot resolve, so global lookup
+    // would match the wrong overload.
+    if qualifier.is_none() && is_inside_scope_function_lambda(call_node, bytes) {
+        return None;
+    }
+
     // Skip calls with named arguments — positional counting is invalid
     let value_arguments = call_node.find_value_arguments();
     let provided_count = count_provided_args(value_arguments.as_ref(), bytes);
@@ -81,8 +89,11 @@ fn check_call_args(
 
     let params_text = &signatures[0];
 
-    // Skip vararg functions
-    if params_text.contains("vararg ") || params_text.contains("vararg\t") {
+    // Skip vararg functions (Kotlin `vararg` or Java `...`)
+    if params_text.contains("vararg ")
+        || params_text.contains("vararg\t")
+        || params_text.contains("...")
+    {
         return None;
     }
 
@@ -119,6 +130,52 @@ fn check_call_args(
         });
     }
 
+    None
+}
+
+/// Check if the call is inside a lambda that belongs to a scope function
+/// (apply, run, with, let, also). Unqualified calls inside these lambdas
+/// have an implicit `this` receiver we cannot resolve.
+fn is_inside_scope_function_lambda(call_node: &tree_sitter::Node, bytes: &[u8]) -> bool {
+    const SCOPE_FUNCTIONS: &[&str] = &[
+        "apply",
+        "run",
+        "with",
+        "let",
+        "also",
+        "takeIf",
+        "takeUnless",
+    ];
+
+    let mut node = *call_node;
+    for _ in 0..15 {
+        let Some(parent) = node.parent() else {
+            return false;
+        };
+        if parent.kind() == KIND_LAMBDA_LIT {
+            // Walk up from the lambda to find the enclosing call_expression
+            if let Some(call_ancestor) = find_enclosing_call(&parent) {
+                if let Some((name, _)) = call_ancestor.call_fn_and_qualifier(bytes) {
+                    if SCOPE_FUNCTIONS.contains(&name.as_str()) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+        node = parent;
+    }
+    false
+}
+
+fn find_enclosing_call<'a>(node: &tree_sitter::Node<'a>) -> Option<tree_sitter::Node<'a>> {
+    let mut current = node.parent()?;
+    for _ in 0..5 {
+        if current.kind() == KIND_CALL_EXPR {
+            return Some(current);
+        }
+        current = current.parent()?;
+    }
     None
 }
 
@@ -264,6 +321,29 @@ fn resolve_param_counts(
     }
     // Unqualified: check definitions and current file
     let mut found: Option<(u8, u8)> = None;
+
+    // For unqualified calls, prefer same-file definitions to avoid false
+    // "overloaded" results from hundreds of same-name functions across the workspace.
+    if qualifier.is_none() {
+        if let Some(data) = indexer.files.get(uri.as_str()) {
+            for sym in data
+                .symbols
+                .iter()
+                .filter(|s| s.name == fn_name && is_callable_kind(s.kind))
+            {
+                if let Some(prev) = found {
+                    if prev != sym.param_counts {
+                        return None;
+                    }
+                }
+                found = Some(sym.param_counts);
+            }
+        }
+        if found.is_some() {
+            return found.map(|(r, t)| (r as usize, t as usize));
+        }
+    }
+
     if let Some(locs) = indexer.definitions.get(fn_name) {
         for loc in locs.iter() {
             if is_test_file(loc.uri.as_str()) {
@@ -336,6 +416,25 @@ fn resolve_signatures(
     // Also collect all same-name signatures across indexed files for overload detection
     let mut all_sigs: Vec<String> = Vec::new();
 
+    // For unqualified calls (no receiver), check the current file first.
+    // If the function is defined here, use only those definitions — global
+    // lookup across the whole workspace would match hundreds of unrelated
+    // same-name overrides (e.g. 945 `loadData` implementations) causing
+    // a false "overloaded — skip" result.
+    let current_sigs = collect_all_fun_params_texts(fn_name, uri.as_str(), indexer);
+    if qualifier.is_none() && !current_sigs.is_empty() {
+        // For unqualified calls, don't use receiver_sig — it comes from a global
+        // name scan that may find only one overload, masking same-file overloads.
+        // Check arity diversity first; if ambiguous, return all so caller skips.
+        let arities: Vec<(usize, usize)> = current_sigs.iter().map(|s| count_params(s)).collect();
+        let unique: std::collections::HashSet<_> = arities.into_iter().collect();
+        return if unique.len() > 1 {
+            current_sigs // caller sees len > 1 → skip
+        } else {
+            current_sigs.into_iter().take(1).collect()
+        };
+    }
+
     // Check definitions map for the function name
     if let Some(locs) = indexer.definitions.get(fn_name) {
         for loc in locs.iter() {
@@ -347,8 +446,7 @@ fn resolve_signatures(
         }
     }
 
-    // Also check current file
-    let current_sigs = collect_all_fun_params_texts(fn_name, uri.as_str(), indexer);
+    // Also include current file (may already be in definitions, but ensure coverage)
     for sig in &current_sigs {
         if !all_sigs.contains(sig) {
             all_sigs.push(sig.clone());
@@ -372,15 +470,6 @@ fn resolve_signatures(
     } else {
         Vec::new()
     }
-}
-
-/// Heuristic: a file path likely belongs to a test source set.
-fn is_test_file(uri_str: &str) -> bool {
-    // Common Android/Gradle test source sets
-    uri_str.contains("/src/test/")
-        || uri_str.contains("/src/androidTest/")
-        || uri_str.contains("/src/commonTest/")
-        || uri_str.contains("/src/iosTest/")
 }
 
 /// Parse a parameter list and return `(required_count, total_count)`.

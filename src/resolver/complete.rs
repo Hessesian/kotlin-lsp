@@ -939,6 +939,9 @@ impl<'a> BareCompletionWalk<'a> {
             if package_uri == self.from_uri.as_str() {
                 continue;
             }
+            if crate::util::is_test_file(package_uri.as_str()) {
+                continue;
+            }
             let Some(file) = self.indexer.files.get(package_uri.as_str()) else {
                 continue;
             };

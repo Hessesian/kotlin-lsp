@@ -120,7 +120,17 @@ impl FileChangeHandler {
 
             // If a newer edit arrived while we were working, skip publishing
             // — a newer debounce task will handle it.
-            if generation.load(Ordering::Acquire) != my_generation {
+            let current_gen = generation.load(Ordering::Acquire);
+            log::warn!(
+                "diag[gen={}]: generation check — current={current_gen} path={}",
+                my_generation,
+                diagnostics_uri.path(),
+            );
+            if current_gen != my_generation {
+                log::warn!(
+                    "diag[gen={}]: generation mismatch (current={current_gen}) — skipping publish",
+                    my_generation
+                );
                 return;
             }
 
@@ -129,6 +139,17 @@ impl FileChangeHandler {
             let live_doc = lang_for_path(diagnostics_uri.path())
                 .and_then(|lang| parse_live(&diagnostics_text, lang));
 
+            let index_hit_cache = matches!(result, Ok(None));
+            log::warn!(
+                "diag[gen={}]: index_content returned {} for {}",
+                my_generation,
+                if index_hit_cache {
+                    "None (hash-cache hit)"
+                } else {
+                    "Some (reindexed)"
+                },
+                diagnostics_uri.path(),
+            );
             let mut diagnostics = match result {
                 Ok(Some(data)) => syntax_diagnostics(&data.syntax_errors),
                 Ok(None) => diag_indexer
@@ -140,7 +161,18 @@ impl FileChangeHandler {
             };
             diagnostics.extend(when_diagnostics(&diag_indexer, &diagnostics_uri));
             if let Some(ref doc) = live_doc {
-                diagnostics.extend(call_arg_diagnostics(&diag_indexer, &diagnostics_uri, doc));
+                let arg_diags = call_arg_diagnostics(&diag_indexer, &diagnostics_uri, doc);
+                log::warn!(
+                    "diag[gen={}]: call_arg_diagnostics returned {} items",
+                    my_generation,
+                    arg_diags.len(),
+                );
+                diagnostics.extend(arg_diags);
+            } else {
+                log::warn!(
+                    "diag[gen={}]: live_doc is None — no call-arg diagnostics",
+                    my_generation,
+                );
             }
 
             // Final generation check before publishing — prevents stale
