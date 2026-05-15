@@ -1296,6 +1296,43 @@ fn params_field_skips_annotation_line() {
 }
 
 #[test]
+fn param_counts_required_and_optional() {
+    let src = "fun create(name: String, age: Int = 0, active: Boolean = true) {}";
+    let data = super::parse_kotlin(src);
+    let sym = data
+        .symbols
+        .iter()
+        .find(|s| s.name == "create")
+        .expect("create should be indexed");
+    // 1 required (name), 3 total
+    assert_eq!(sym.param_counts, (1, 3));
+}
+
+#[test]
+fn param_counts_all_required() {
+    let src = "fun add(a: Int, b: Int): Int = a + b";
+    let data = super::parse_kotlin(src);
+    let sym = data
+        .symbols
+        .iter()
+        .find(|s| s.name == "add")
+        .expect("add should be indexed");
+    assert_eq!(sym.param_counts, (2, 2));
+}
+
+#[test]
+fn param_counts_zero_params() {
+    let src = "fun noop() {}";
+    let data = super::parse_kotlin(src);
+    let sym = data
+        .symbols
+        .iter()
+        .find(|s| s.name == "noop")
+        .expect("noop should be indexed");
+    assert_eq!(sym.param_counts, (0, 0));
+}
+
+#[test]
 fn rhs_types_class_literal_java_suffix() {
     // `val api = retrofit.create(DashboardApi::class.java)` — the type should
     // be extracted directly from the callable_reference argument, not stored

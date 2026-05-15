@@ -108,6 +108,11 @@ pub(crate) struct SymbolEntry {
     /// e.g. `"x: Int, y: String = \"\""`. Empty for zero-param functions or non-callable symbols.
     #[serde(default)]
     pub params: String,
+    /// `(required, total)` parameter counts derived from tree nodes at index time.
+    /// A param is "required" when it has no `=` default value sibling in the CST.
+    /// `(0, 0)` for non-callable symbols or zero-param functions.
+    #[serde(default)]
+    pub param_counts: (u8, u8),
     /// Generic type parameter names extracted from the CST at parse time.
     /// e.g. `class Foo<T, U>` → `["T", "U"]`.
     /// Empty for non-generic symbols.

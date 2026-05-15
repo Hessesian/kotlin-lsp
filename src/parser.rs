@@ -356,16 +356,17 @@ fn push_def_symbols(
             } else {
                 String::new()
             };
-            let params = if matches!(
+            let (params, param_counts) = if matches!(
                 kind,
-                SymbolKind::FUNCTION | SymbolKind::METHOD | SymbolKind::CONSTRUCTOR
+                SymbolKind::FUNCTION
+                    | SymbolKind::METHOD
+                    | SymbolKind::CONSTRUCTOR
+                    | SymbolKind::CLASS
+                    | SymbolKind::STRUCT
             ) {
-                extract_params_from_tree(root, bytes, &range)
-            } else if matches!(kind, SymbolKind::CLASS | SymbolKind::STRUCT) {
-                // data class primary constructor params
-                extract_params_from_tree(root, bytes, &range)
+                extract_params_and_counts(root, bytes, &range)
             } else {
-                String::new()
+                (String::new(), (0, 0))
             };
             symbols.push(SymbolEntry {
                 name,
@@ -378,6 +379,7 @@ fn push_def_symbols(
                 extension_receiver,
                 container: None,
                 params,
+                param_counts,
             });
         }
     }
@@ -688,6 +690,7 @@ fn push_interface_symbol(
         extension_receiver: String::new(),
         container: None,
         params: String::new(),
+        param_counts: (0, 0),
     });
 }
 
@@ -952,21 +955,20 @@ fn skip_balanced(s: &str, open: char, close: char) -> usize {
 /// its `function_value_parameters` or `formal_parameters` child (the content
 /// between `(` and `)`). Returns empty string if not found.
 ///
-/// This is the CST-based replacement for line-scanning heuristics. The param text
-/// is stored on `SymbolEntry::params` at index time, immune to annotations and
-/// multi-line formatting issues.
-fn extract_params_from_tree(root: Node, bytes: &[u8], range: &Range) -> String {
+/// Extract parameter text and `(required, total)` counts from the CST.
+///
+/// Walks the tree to find the params container node (`function_value_parameters`,
+/// `formal_parameters`, or `primary_constructor`), extracts its inner text, and
+/// counts `parameter` children — marking those followed by `=` as optional.
+fn extract_params_and_counts(root: Node, bytes: &[u8], range: &Range) -> (String, (u8, u8)) {
     let start_point = tree_sitter::Point {
         row: range.start.line as usize,
         column: range.start.character as usize,
     };
     let Some(node) = root.descendant_for_point_range(start_point, start_point) else {
-        return String::new();
+        return (String::new(), (0, 0));
     };
-    // Walk up to find the declaration node (function_declaration, class_declaration, etc.)
     let decl = find_ancestor_decl(node);
-    // Find function_value_parameters, formal_parameters, or class_parameters child
-    // (class primary constructor params are inside `primary_constructor` node directly)
     for i in 0..decl.child_count() {
         let Some(child) = decl.child(i) else { continue };
         let kind = child.kind();
@@ -975,24 +977,67 @@ fn extract_params_from_tree(root: Node, bytes: &[u8], range: &Range) -> String {
             || kind == "class_parameters"
             || kind == "primary_constructor"
         {
-            let start = child.start_byte();
-            let end = child.end_byte();
-            if end > start + 2 {
-                let inner = &bytes[start + 1..end - 1];
-                if let Ok(s) = std::str::from_utf8(inner) {
-                    let trimmed = s
-                        .lines()
-                        .map(|l| l.trim())
-                        .filter(|l| !l.is_empty())
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    return trimmed;
-                }
-            }
-            return String::new();
+            let text = extract_inner_text(&child, bytes);
+            let counts = count_params_from_node(&child);
+            return (text, counts);
+        }
+    }
+    (String::new(), (0, 0))
+}
+
+/// Extract text between `(` and `)` of a params container node.
+fn extract_inner_text(node: &Node, bytes: &[u8]) -> String {
+    let start = node.start_byte();
+    let end = node.end_byte();
+    if end > start + 2 {
+        if let Ok(s) = std::str::from_utf8(&bytes[start + 1..end - 1]) {
+            return s
+                .lines()
+                .map(|l| l.trim())
+                .filter(|l| !l.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
         }
     }
     String::new()
+}
+
+/// Count (required, total) params by examining tree children.
+/// A `parameter` node followed by an `=` sibling is optional.
+fn count_params_from_node(params_node: &Node) -> (u8, u8) {
+    let mut total: u8 = 0;
+    let mut optional: u8 = 0;
+    let count = params_node.child_count();
+    for i in 0..count {
+        let Some(child) = params_node.child(i) else {
+            continue;
+        };
+        let ck = child.kind();
+        if ck == "parameter" || ck == "formal_parameter" || ck == "class_parameter" {
+            total += 1;
+            // Check if next non-comma sibling is `=`
+            let mut j = i + 1;
+            while j < count {
+                let Some(sibling) = params_node.child(j) else {
+                    break;
+                };
+                let sk = sibling.kind();
+                if sk == "," {
+                    // comma between params — no default for this param
+                    break;
+                }
+                if sk == "=" {
+                    optional += 1;
+                    break;
+                }
+                if sk == "parameter" || sk == "formal_parameter" || sk == "class_parameter" {
+                    break;
+                }
+                j += 1;
+            }
+        }
+    }
+    (total.saturating_sub(optional), total)
 }
 
 /// Walk up from a node to find the enclosing declaration (function/class/object).
@@ -1841,6 +1886,7 @@ impl crate::types::FileData {
                 extension_receiver: String::new(),
                 container: None,
                 params: String::new(),
+                param_counts: (0, 0),
             });
         }
     }
@@ -1877,6 +1923,7 @@ impl crate::types::FileData {
                     extension_receiver: String::new(),
                     container: None,
                     params: String::new(),
+                    param_counts: (0, 0),
                 });
             }
         }

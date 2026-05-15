@@ -86,7 +86,9 @@ fn check_call_args(
         return None;
     }
 
-    let (required, total) = count_params(params_text);
+    // Prefer CST-derived param_counts from index; fall back to text-based counting
+    let (required, total) = resolve_param_counts(indexer, uri, &fn_name, qualifier.as_deref())
+        .unwrap_or_else(|| count_params(params_text));
 
     if provided_count < required {
         let range = diagnostic_range(call_node, value_arguments.as_ref());
@@ -230,6 +232,81 @@ fn has_named_args(value_arguments: Option<&tree_sitter::Node>, bytes: &[u8]) -> 
         }
     }
     false
+}
+
+/// Resolve `(required, total)` param counts directly from `SymbolEntry::param_counts`.
+/// Returns `None` if no matching symbol found or if the symbol was never indexed
+/// with param_counts (non-callable symbols like interfaces/fields).
+fn resolve_param_counts(
+    indexer: &Indexer,
+    uri: &Url,
+    fn_name: &str,
+    qualifier: Option<&str>,
+) -> Option<(usize, usize)> {
+    // If qualified, resolve receiver type first
+    if let Some(recv) = qualifier {
+        use crate::resolver::infer::{infer_receiver_type, ReceiverKind};
+        let rt = infer_receiver_type(indexer, ReceiverKind::Variable(recv), uri)?;
+        let locs = indexer.resolve_symbol(&rt.outer, None, uri);
+        for loc in &locs {
+            if let Some(data) = indexer.files.get(loc.uri.as_str()) {
+                if let Some(sym) = data
+                    .symbols
+                    .iter()
+                    .find(|s| s.name == fn_name && is_callable_kind(s.kind))
+                {
+                    return Some((sym.param_counts.0 as usize, sym.param_counts.1 as usize));
+                }
+            }
+        }
+        return None;
+    }
+    // Unqualified: check definitions and current file
+    let mut found: Option<(u8, u8)> = None;
+    if let Some(locs) = indexer.definitions.get(fn_name) {
+        for loc in locs.iter() {
+            if is_test_file(loc.uri.as_str()) {
+                continue;
+            }
+            if let Some(data) = indexer.files.get(loc.uri.as_str()) {
+                for sym in data
+                    .symbols
+                    .iter()
+                    .filter(|s| s.name == fn_name && is_callable_kind(s.kind))
+                {
+                    if let Some(prev) = found {
+                        if prev != sym.param_counts {
+                            return None; // overloaded — let caller skip
+                        }
+                    }
+                    found = Some(sym.param_counts);
+                }
+            }
+        }
+    }
+    // Also current file
+    if let Some(data) = indexer.files.get(uri.as_str()) {
+        for sym in data
+            .symbols
+            .iter()
+            .filter(|s| s.name == fn_name && is_callable_kind(s.kind))
+        {
+            if let Some(prev) = found {
+                if prev != sym.param_counts {
+                    return None;
+                }
+            }
+            found = Some(sym.param_counts);
+        }
+    }
+    found.map(|(r, t)| (r as usize, t as usize))
+}
+
+fn is_callable_kind(kind: SymbolKind) -> bool {
+    matches!(
+        kind,
+        SymbolKind::FUNCTION | SymbolKind::METHOD | SymbolKind::CONSTRUCTOR
+    )
 }
 
 /// Resolve all known signatures for a function name.

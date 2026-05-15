@@ -68,6 +68,7 @@ fn make_sym(name: &str, kind: SymbolKind, start_line: u32, end_line: u32) -> Sym
         extension_receiver: String::new(),
         container: None,
         params: String::new(),
+        param_counts: (0, 0),
     }
 }
 
@@ -264,6 +265,7 @@ fn make_sym_col(
         extension_receiver: String::new(),
         container: None,
         params: String::new(),
+        param_counts: (0, 0),
     }
 }
 
