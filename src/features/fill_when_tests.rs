@@ -647,3 +647,29 @@ fun test(e: Event) {
         diags
     );
 }
+
+#[test]
+fn diagnostics_no_report_when_complete_with_bare_object_branch() {
+    let sealed = "\
+sealed class Event {
+    data class BuildingInput(val id: Int) : Event()
+    object OnAddMultibankClick : Event()
+}
+";
+    let src = "\
+fun test(event: Event) {
+    when (event) {
+        is Event.BuildingInput -> println(\"b\")
+        OnAddMultibankClick -> println(\"a\")
+    }
+}
+";
+    let idx = setup(&[("/Event.kt", sealed), ("/main.kt", src)]);
+    let u = uri("/main.kt");
+    let diags = when_diagnostics(&idx, &u);
+    assert!(
+        diags.is_empty(),
+        "no diagnostic when bare object branch is present; got: {:?}",
+        diags
+    );
+}

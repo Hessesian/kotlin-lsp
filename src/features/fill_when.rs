@@ -621,6 +621,7 @@ fn collect_existing_branches(when_node: &tree_sitter::Node, source: &[u8]) -> Ve
 /// - `is Effect.ShowToast` → "ShowToast"
 /// - `Color.RED` → "RED"
 /// - `is ShowToast` → "ShowToast"
+/// - `OnAddMultibankClick` → "OnAddMultibankClick"
 fn extract_branch_name(condition: &tree_sitter::Node, source: &[u8]) -> Option<String> {
     for child in condition.children(&mut condition.walk()) {
         match child.kind() {
@@ -631,6 +632,10 @@ fn extract_branch_name(condition: &tree_sitter::Node, source: &[u8]) -> Option<S
             KIND_NAV_EXPR => {
                 // navigation_expression → simple_identifier "." simple_identifier
                 return extract_nav_last_ident(&child, source);
+            }
+            // Bare identifier/type_identifier branch for object/data object entries.
+            KIND_SIMPLE_IDENT | KIND_TYPE_IDENT => {
+                return child.utf8_text(source).ok().map(|s| s.to_string());
             }
             // Boolean literals: `true` / `false`
             KIND_BOOLEAN_LITERAL => {
