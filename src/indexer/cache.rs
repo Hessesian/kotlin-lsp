@@ -21,7 +21,7 @@ use crate::types::{FileData, FileIndexResult, Visibility};
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 /// Bump when the serialized format changes; invalidates any older cache files.
-pub(crate) const CACHE_VERSION: u32 = 20;
+pub(crate) const CACHE_VERSION: u32 = 21;
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -475,6 +475,11 @@ pub(super) fn save_library_cache(
                     !matches!(s.visibility, Visibility::Private | Visibility::Internal)
                 });
                 filtered.lines = Arc::new(Vec::new());
+                // Library files are never opened for editing — completion and
+                // hover work from `symbols` and `type_annotations`. Drop the
+                // identifier-scan results that are only used for in-file completion.
+                filtered.declared_names = Vec::new();
+                filtered.imports = Vec::new();
                 let filtered = Arc::new(filtered);
                 let qualified_keys = build_qualified_keys(&filtered, file_stem.as_deref());
                 entries.insert(

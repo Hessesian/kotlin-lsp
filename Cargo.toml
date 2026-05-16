@@ -53,6 +53,9 @@ zip = "2"
 futures = "0.3.32"
 lexopt = "0.3"
 parking_lot = "0.12.5"
+# jemalloc: dramatically reduces RSS on long-running processes by avoiding
+# glibc malloc arena fragmentation (same pattern as rust-analyzer)
+tikv-jemallocator = "0.6"
 
 [profile.release]
 opt-level = 3

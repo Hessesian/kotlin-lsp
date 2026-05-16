@@ -1,4 +1,7 @@
 #![warn(unreachable_pub)]
+
+#[global_allocator]
+static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 mod backend;
 mod cli;
 mod features;
