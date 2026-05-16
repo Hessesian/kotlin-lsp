@@ -1566,3 +1566,53 @@ fn nullable_receiver_function_type_no_syntax_error() {
         data.syntax_errors
     );
 }
+
+#[test]
+fn annotated_suspend_extension_fn_has_receiver() {
+    let content = r#"@Deprecated("old") suspend fun <T> List<T>.myExt(x: (T) -> Unit) {}"#;
+    let data = crate::parser::parse_kotlin(content);
+    let sym = data
+        .symbols
+        .iter()
+        .find(|s| s.name == "myExt")
+        .expect("myExt should be parsed");
+    assert_eq!(sym.kind, SymbolKind::FUNCTION);
+    assert_eq!(sym.extension_receiver, "List");
+    assert_eq!(sym.extension_receiver_type, "List<T>");
+}
+
+#[test]
+fn multiline_annotated_extension_fn_has_receiver() {
+    let content = concat!(
+        "@Deprecated(\n",
+        "  message = \"old\",\n",
+        "  replaceWith = ReplaceWith(\"new\")\n",
+        ")\n",
+        "suspend fun <E, S> Flow<ReducedResult<E, S>>.collectState(\n",
+        "  setState: suspend (S) -> Unit\n",
+        ")\n",
+    );
+    let data = crate::parser::parse_kotlin(content);
+    let sym = data
+        .symbols
+        .iter()
+        .find(|s| s.name == "collectState")
+        .expect("collectState should be parsed");
+    assert_eq!(sym.kind, SymbolKind::FUNCTION);
+    assert_eq!(sym.extension_receiver, "Flow");
+    assert_eq!(sym.extension_receiver_type, "Flow<ReducedResult<E, S>>");
+}
+
+#[test]
+fn plain_extension_fn_has_receiver() {
+    let content = "fun <T> List<T>.myFunc(x: (T) -> Unit) {}";
+    let data = crate::parser::parse_kotlin(content);
+    let sym = data
+        .symbols
+        .iter()
+        .find(|s| s.name == "myFunc")
+        .expect("myFunc should be parsed");
+    assert_eq!(sym.kind, SymbolKind::FUNCTION);
+    assert_eq!(sym.extension_receiver, "List");
+    assert_eq!(sym.extension_receiver_type, "List<T>");
+}

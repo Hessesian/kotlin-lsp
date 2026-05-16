@@ -772,9 +772,26 @@ fn cst_it_or_this_type(
     uri: &Url,
 ) -> Option<String> {
     let mut cur = start_node;
+    log::debug!(
+        "cst_it_or_this_type: start_node kind={}, text={:?}",
+        start_node.kind(),
+        start_node
+            .utf8_text(&doc.bytes)
+            .ok()
+            .map(|s| s.chars().take(40).collect::<String>())
+    );
     loop {
+        log::debug!(
+            "cst_it_or_this_type: cur kind={} at {:?}",
+            cur.kind(),
+            cur.start_position()
+        );
         if cur.kind() == KIND_LAMBDA_LIT && !cur.has_lambda_named_params(&doc.bytes) {
             let Some((before_brace, ln)) = lambda_before_brace_context(cur, doc) else {
+                log::debug!(
+                    "cst_it_or_this_type: no before_brace context for lambda at {:?}",
+                    cur.start_position()
+                );
                 let p = cur.parent()?;
                 cur = p;
                 continue;
@@ -800,9 +817,12 @@ fn cst_it_or_this_type(
                 }
             } else {
                 // CST-first: use the unified resolver (no rg spawns, HashMap only).
+                log::debug!("cst_it_or_this_type: trying resolve_lambda_param_type_cst");
                 if let Some(resolved) = resolve_lambda_param_type_cst(doc, &cur, idx, uri, 0) {
+                    log::debug!("cst_it_or_this_type: CST resolved to {resolved}");
                     return Some(resolved);
                 }
+                log::debug!("cst_it_or_this_type: CST resolver returned None, trying text fallback with before_brace={before_brace:?}");
                 // Text fallback for cases the CST resolver can't handle yet
                 // (function not indexed, no call_expression parent).
                 let result = lambda_receiver_type_from_context(&before_brace, idx, uri)
@@ -1249,11 +1269,17 @@ fn resolve_lambda_param_type_cst(
 
     // Step 3: Check if it's a declared generic type param.
     let fn_name = call_expr.call_fn_name(bytes)?;
+    log::debug!("resolve_lambda_param_type_cst: fn_name={fn_name}, raw_param_type={raw_param_type}, extracted={extracted}");
     let info = deps.find_fun_callable_info(&fn_name, uri);
     let is_generic = match &info {
         Some(ci) => is_declared_type_param(&extracted, &ci.type_params),
         None => is_generic_param(&extracted),
     };
+    log::debug!(
+        "resolve_lambda_param_type_cst: is_generic={is_generic}, info={:?}",
+        info.as_ref()
+            .map(|i| (&i.type_params, &i.extension_receiver_type))
+    );
     if !is_generic {
         return Some(extracted);
     }
@@ -1262,11 +1288,13 @@ fn resolve_lambda_param_type_cst(
     let info = info?;
     if info.extension_receiver_type.is_empty() {
         // Not an extension function — try scope-function fallback.
+        log::debug!("resolve_lambda_param_type_cst: not ext fn, trying scope-function fallback");
         return resolve_callee_receiver_type(&call_expr, bytes, deps, uri);
     }
 
     let callee = call_expr.child(0)?;
     let (receiver_type, _final_method) = resolve_callee_chain(callee, bytes, deps, uri)?;
+    log::debug!("resolve_lambda_param_type_cst: receiver_type={receiver_type}");
 
     // Step 5: Build substitution map and apply.
     let subst = build_ext_fn_type_subst(
@@ -1274,6 +1302,7 @@ fn resolve_lambda_param_type_cst(
         &receiver_type,
         &info.type_params,
     );
+    log::debug!("resolve_lambda_param_type_cst: subst={subst:?}");
     subst.get(&extracted).cloned().or(Some(extracted))
 }
 
@@ -1292,6 +1321,10 @@ fn find_enclosing_call_and_param<'a>(
     loop {
         let parent = cur.parent()?;
         let kind = parent.kind();
+        log::debug!(
+            "find_enclosing_call_and_param: parent kind={kind} at {:?}",
+            parent.start_position()
+        );
         if kind == KIND_VALUE_ARG {
             let call_expr = parent.enclosing_call_expression()?;
             let sig = receiver_aware_params(call_expr, bytes, deps, uri).or_else(|| {
@@ -1307,10 +1340,18 @@ fn find_enclosing_call_and_param<'a>(
         }
         if kind == KIND_CALL_SUFFIX {
             let call_expr = lambda.enclosing_call_expression()?;
+            log::debug!(
+                "find_enclosing_call_and_param: call_suffix, call_expr fn={:?}",
+                call_expr.call_fn_name(bytes)
+            );
             let sig = receiver_aware_params(call_expr, bytes, deps, uri).or_else(|| {
                 let fn_name = call_expr.call_fn_name(bytes)?;
+                log::debug!(
+                    "find_enclosing_call_and_param: looking up params for fn_name={fn_name}"
+                );
                 deps.find_fun_params_text(&fn_name, uri)
             })?;
+            log::debug!("find_enclosing_call_and_param: sig={sig}");
             let last_type = last_fun_param_type_str(&sig)?;
             return Some((call_expr, last_type.to_owned()));
         }
@@ -1422,7 +1463,6 @@ fn resolve_callee_chain(
 ) -> Option<(String, String)> {
     match callee.kind() {
         k if k == KIND_NAV_EXPR => {
-            // Collect segments from the navigation expression
             let segments = collect_nav_segments(callee, bytes);
             if segments.is_empty() {
                 return None;
@@ -1430,10 +1470,8 @@ fn resolve_callee_chain(
             forward_resolve_segments(&segments, bytes, deps, uri)
         }
         k if k == KIND_SIMPLE_IDENT || k == KIND_TYPE_IDENT => {
-            // Simple call like `let { }` — no receiver chain
             let name = callee.utf8_text_owned(bytes)?;
             None.or_else(|| {
-                // No receiver, return the function name but no resolvable type
                 let _ = name;
                 None
             })
@@ -1529,12 +1567,17 @@ fn forward_resolve_segments(
         match segment {
             NavSegment::Root(node) => {
                 current_type = resolve_root_node_type(*node, bytes, deps, uri);
+                // If the root is a call_expression, record its fn name so that
+                // a subsequent CallExpr for the same call (trailing-lambda wrapper)
+                // is recognized as redundant by the dedup check below.
+                if node.kind() == KIND_CALL_EXPR {
+                    last_suffix = node.call_fn_name(bytes);
+                }
             }
             NavSegment::Suffix {
                 ref name,
                 safe_call,
             } => {
-                // Safe-call `?.` strips nullability from the receiver type.
                 if *safe_call {
                     if let Some(ref mut t) = current_type {
                         if t.ends_with('?') {
@@ -1542,40 +1585,14 @@ fn forward_resolve_segments(
                         }
                     }
                 }
-                let prev_type = current_type.clone();
                 if let Some(ref cur) = current_type {
-                    let type_name = cur.dotted_ident_prefix();
-                    let type_base = type_name.last_segment();
-                    let effective_type =
-                        if !type_base.is_empty() && type_base.starts_with_uppercase() {
-                            type_base.to_owned()
-                        } else if !type_base.is_empty() {
-                            capitalize_first_char(type_base)
-                        } else {
-                            String::new()
-                        };
-                    if !effective_type.is_empty() {
-                        if let Some(field_ty) = deps.find_field_type(&effective_type, name) {
-                            let subst = build_type_arg_subst(deps, &effective_type, cur);
-                            let applied = crate::indexer::apply_type_subst(&field_ty, &subst);
-                            current_type = Some(applied);
-                        } else if let Some(ret_ty) =
-                            deps.find_method_return_type_for_type(&effective_type, name)
-                        {
-                            let subst = build_type_arg_subst(deps, &effective_type, cur);
-                            let applied = crate::indexer::apply_type_subst(&ret_ty, &subst);
-                            current_type = Some(applied);
-                        } else if SCOPE_FUNCTIONS.contains(&name.as_str()) {
-                            // Scope function: receiver type flows through.
-                        } else {
-                            // Can't resolve further — keep current type as best guess
-                        }
+                    if let Some(resolved) = resolve_member_type_on(cur, name, deps) {
+                        current_type = Some(resolved);
+                    } else if SCOPE_FUNCTIONS.contains(&name.as_str()) {
+                        // Scope function: receiver type flows through.
                     }
                 }
                 last_suffix = Some(name.clone());
-                // For the return value: we want type BEFORE this last suffix
-                // We'll handle this at the end
-                let _ = prev_type;
             }
             NavSegment::CallExpr(call_node) => {
                 let fn_name = call_node.call_fn_name(bytes);
@@ -1583,26 +1600,15 @@ fn forward_resolve_segments(
                     if SCOPE_FUNCTIONS.contains(&name.as_str()) {
                         continue;
                     }
+                    // If the preceding Suffix already resolved this method's return type,
+                    // the CallExpr is redundant — skip re-resolution.
+                    if last_suffix.as_deref() == Some(name.as_str()) {
+                        continue;
+                    }
                     if let Some(ref cur) = current_type {
-                        let type_name = cur.dotted_ident_prefix();
-                        let type_base = type_name.last_segment();
-                        let effective_type =
-                            if !type_base.is_empty() && type_base.starts_with_uppercase() {
-                                type_base.to_owned()
-                            } else if !type_base.is_empty() {
-                                capitalize_first_char(type_base)
-                            } else {
-                                String::new()
-                            };
-                        if !effective_type.is_empty() {
-                            if let Some(ret_ty) =
-                                deps.find_method_return_type_for_type(&effective_type, name)
-                            {
-                                let subst = build_type_arg_subst(deps, &effective_type, cur);
-                                current_type =
-                                    Some(crate::indexer::apply_type_subst(&ret_ty, &subst));
-                                continue;
-                            }
+                        if let Some(resolved) = resolve_member_type_on(cur, name, deps) {
+                            current_type = Some(resolved);
+                            continue;
                         }
                     }
                     if let Some(ret_ty) = deps.find_fun_return_type(name) {
@@ -1623,6 +1629,33 @@ fn forward_resolve_segments(
     let method = last_suffix?;
     let receiver_type = current_type?;
     Some((receiver_type, method))
+}
+
+/// Given a current receiver type string, resolve a member access (field or method) and
+/// return the resulting type with type substitution applied.
+fn resolve_member_type_on(
+    current_type: &str,
+    member: &str,
+    deps: &impl InferDeps,
+) -> Option<String> {
+    let type_name = current_type.dotted_ident_prefix();
+    let type_base = type_name.last_segment();
+    let effective_type = if !type_base.is_empty() && type_base.starts_with_uppercase() {
+        type_base.to_owned()
+    } else if !type_base.is_empty() {
+        capitalize_first_char(type_base)
+    } else {
+        return None;
+    };
+    if let Some(field_ty) = deps.find_field_type(&effective_type, member) {
+        let subst = build_type_arg_subst(deps, &effective_type, current_type);
+        return Some(crate::indexer::apply_type_subst(&field_ty, &subst));
+    }
+    if let Some(ret_ty) = deps.find_method_return_type_for_type(&effective_type, member) {
+        let subst = build_type_arg_subst(deps, &effective_type, current_type);
+        return Some(crate::indexer::apply_type_subst(&ret_ty, &subst));
+    }
+    None
 }
 
 /// Walk up from a node to find the enclosing class/object declaration name.
@@ -1661,8 +1694,73 @@ fn resolve_root_node_type(
             let text = node.utf8_text_owned(bytes)?;
             resolve_dotted_text_type(&text, deps, uri)
         }
+        k if k == KIND_CALL_EXPR => resolve_call_expr_type(node, bytes, deps, uri),
         _ => None,
     }
+}
+
+/// Resolve the return type of a call_expression node used as a root in a nav chain.
+///
+/// Handles both simple calls (`foo()`) and method calls (`receiver.method()`).
+fn resolve_call_expr_type(
+    node: tree_sitter::Node<'_>,
+    bytes: &[u8],
+    deps: &impl InferDeps,
+    uri: &Url,
+) -> Option<String> {
+    let fn_name = node.call_fn_name(bytes)?;
+    if SCOPE_FUNCTIONS.contains(&fn_name.as_str()) {
+        let callee = node.child(0)?;
+        return resolve_root_node_type(callee, bytes, deps, uri);
+    }
+    let callee = node.child(0)?;
+    let receiver_type = if callee.kind() == KIND_NAV_EXPR {
+        let segments = collect_nav_segments(callee, bytes);
+        if segments.len() >= 2 {
+            resolve_segments_type(&segments[..segments.len() - 1], bytes, deps, uri)
+        } else {
+            None
+        }
+    } else {
+        resolve_root_node_type(callee, bytes, deps, uri)
+    };
+    if let Some(ref recv_ty) = receiver_type {
+        let type_base = recv_ty.dotted_ident_prefix().last_segment().to_owned();
+        let effective_type = if type_base.starts_with_uppercase() {
+            type_base
+        } else {
+            capitalize_first_char(&type_base)
+        };
+        if !effective_type.is_empty() {
+            if let Some(ret_ty) = deps.find_method_return_type_for_type(&effective_type, &fn_name) {
+                let subst = build_type_arg_subst(deps, &effective_type, recv_ty);
+                return Some(crate::indexer::apply_type_subst(&ret_ty, &subst));
+            }
+        }
+    }
+    deps.find_fun_return_type(&fn_name)
+}
+
+/// Resolve a chain of segments to a type (without returning method name).
+/// Used when we need just the final type after processing all segments.
+fn resolve_segments_type(
+    segments: &[NavSegment<'_>],
+    bytes: &[u8],
+    deps: &impl InferDeps,
+    uri: &Url,
+) -> Option<String> {
+    if segments.is_empty() {
+        return None;
+    }
+    // If there's just a root, resolve it directly.
+    if segments.len() == 1 {
+        if let NavSegment::Root(node) = &segments[0] {
+            return resolve_root_node_type(*node, bytes, deps, uri);
+        }
+    }
+    // Otherwise use forward_resolve_segments which returns (final_type, last_suffix).
+    // The final type after all segments is what we want.
+    forward_resolve_segments(segments, bytes, deps, uri).map(|(ty, _)| ty)
 }
 
 /// Resolve the type of a dotted text expression like `settings.familyCreationDate`.

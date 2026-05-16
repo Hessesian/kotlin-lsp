@@ -17,6 +17,14 @@ pub(crate) fn hover_at(indexer: &Arc<Indexer>, file: &Path, line: u32, col: u32)
     // Index on-demand if this file wasn't already in cache.
     indexer.ensure_indexed(&uri);
 
+    // Parse a live tree so that CST-based inference (lambda `it`/`this`,
+    // chain resolution) works in CLI mode without a running LSP session.
+    if indexer.live_doc(&uri).is_none() {
+        if let Ok(content) = std::fs::read_to_string(&abs) {
+            indexer.store_live_tree(&uri, &content);
+        }
+    }
+
     let resolved = enrich_at_line(
         indexer.as_ref(),
         uri.as_str(),
@@ -38,6 +46,20 @@ pub(crate) fn hover_at(indexer: &Arc<Indexer>, file: &Path, line: u32, col: u32)
     // have a dedicated SymbolEntry at the usage line.
     let pos = Position::new(line.saturating_sub(1), col.saturating_sub(1));
     let word = indexer.word_at(&uri, pos)?;
+
+    // Handle `it` / `this` via contextual lambda-param inference.
+    if word == "it" || word == "this" {
+        let kind = crate::resolver::ReceiverKind::Contextual {
+            name: &word,
+            position: pos,
+        };
+        if let Some(receiver) =
+            crate::resolver::infer::infer_receiver_type(indexer.as_ref(), kind, &uri)
+        {
+            return Some(format!("val {word}: {}", receiver.raw));
+        }
+    }
+
     let ty = crate::resolver::infer::infer_variable_type(indexer.as_ref(), &word, &uri)?;
     Some(format!("val {word}: {ty}"))
 }

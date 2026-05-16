@@ -1208,3 +1208,121 @@ fn build_ext_fn_type_subst_nested_generics() {
         "VMEffect not in receiver, should be unmapped"
     );
 }
+
+#[test]
+fn cst_resolve_it_in_collect_state_chain() {
+    // Full end-to-end: hover over `it` inside the first trailing lambda of
+    // `collectState` called on a chained `reducer.reduce(event) { state }` result.
+    //
+    // The chain: reducer.reduce(event) { state }.collectState( { it } )
+    //   - reducer: BuildingSavingsReducer
+    //   - reduce returns: Flow<ReducedResult<BuildingSavingsEffect, SheetState>>
+    //   - collectState declared as:
+    //       fun <EffectType, StateType, VMState, VMEffect>
+    //         Flow<ReducedResult<EffectType, StateType>>.collectState(
+    //           setState: suspend (StateType) -> VMState,
+    //           setEffect: suspend (EffectType) -> VMEffect)
+    //   - So `it` in the first lambda → StateType → SheetState
+
+    let reducer_src = r#"
+class BuildingSavingsReducer {
+    fun reduce(event: Event): Flow<ReducedResult<BuildingSavingsEffect, SheetState>> {
+    }
+}
+"#;
+    let ext_fn_src = r#"
+@JvmStatic
+suspend fun <EffectType, StateType, VMState, VMEffect> Flow<ReducedResult<EffectType, StateType>>.collectState(
+    setState: suspend (StateType) -> VMState,
+    setEffect: suspend (EffectType) -> VMEffect
+) {}
+"#;
+    let code_src = r#"fun example(reducer: BuildingSavingsReducer) {
+    reducer.reduce(event) { state() }.collectState({ it })
+}"#;
+
+    let u_reducer = uri("/reducer.kt");
+    let u_ext = uri("/ext.kt");
+    let u_code = uri("/code.kt");
+    let idx = Indexer::new();
+    idx.index_content(&u_reducer, reducer_src);
+    idx.index_content(&u_ext, ext_fn_src);
+    idx.index_content(&u_code, code_src);
+    idx.store_live_tree(&u_code, code_src);
+    idx.set_live_lines(&u_code, code_src);
+
+    let lines: Vec<String> = code_src.lines().map(String::from).collect();
+    // `it` is inside `collectState({ it })` on line 1
+    let line1 = &lines[1];
+    let it_offset = line1.find("{ it }").unwrap() + 2; // skip `{ ` to land on `i`
+    let pos = crate::types::CursorPos {
+        line: 1,
+        utf16_col: it_offset,
+    };
+    let result = find_it_element_type_in_lines(&lines, pos, &idx, &u_code);
+    assert_eq!(
+        result.as_deref(),
+        Some("SheetState"),
+        "it inside collectState first lambda should resolve StateType → SheetState via chain resolution"
+    );
+}
+
+#[test]
+fn cst_resolve_it_with_long_type_names_triggering_detail_truncation() {
+    // Regression test: when the `reduce` override has a long enough signature
+    // (> 120 chars when flattened), the `detail` field is truncated with `…`.
+    // The truncated return type must NOT poison the substitution map.
+    //
+    // Type names are chosen so that the override signature exceeds 120 chars:
+    //   "fun reduce(event: ConcreteEventType, state: () -> ConcreteStateType): Flow<ReducedResult<ConcreteEffectType, ConcreteStateType>>"
+    //   = 128 chars → truncated in detail.
+    //
+    // Expected: `it` in the first collectState lambda → ConcreteStateType.
+
+    let base_src = r#"
+interface ReducerBase<EventType, EffectType, StateType> {
+    fun reduce(event: EventType, state: () -> StateType): Flow<ReducedResult<EffectType, StateType>>
+}
+"#;
+    let reducer_src = r#"
+class ConcreteReducer : ReducerBase<ConcreteEventType, ConcreteEffectType, ConcreteStateType> {
+    fun reduce(event: ConcreteEventType, state: () -> ConcreteStateType): Flow<ReducedResult<ConcreteEffectType, ConcreteStateType>> {}
+}
+"#;
+    let ext_fn_src = r#"
+suspend fun <EffectType, StateType, VMState, VMEffect> Flow<ReducedResult<EffectType, StateType>>.collectState(
+    setState: suspend (StateType) -> VMState,
+    setEffect: suspend (EffectType) -> VMEffect
+) {}
+"#;
+    let code_src = r#"fun example(reducer: ConcreteReducer) {
+    reducer.reduce(event) { state() }.collectState({ it }, { it })
+}"#;
+
+    let u_base = uri("/base.kt");
+    let u_reducer = uri("/reducer.kt");
+    let u_ext = uri("/ext.kt");
+    let u_code = uri("/code.kt");
+    let idx = Indexer::new();
+    idx.index_content(&u_base, base_src);
+    idx.index_content(&u_reducer, reducer_src);
+    idx.index_content(&u_ext, ext_fn_src);
+    idx.index_content(&u_code, code_src);
+    idx.store_live_tree(&u_code, code_src);
+    idx.set_live_lines(&u_code, code_src);
+
+    let lines: Vec<String> = code_src.lines().map(String::from).collect();
+    // First `it` — in setState lambda → should resolve to ConcreteStateType
+    let line1 = &lines[1];
+    let it_offset = line1.find("{ it }").unwrap() + 2;
+    let pos = crate::types::CursorPos {
+        line: 1,
+        utf16_col: it_offset,
+    };
+    let result = find_it_element_type_in_lines(&lines, pos, &idx, &u_code);
+    assert_eq!(
+        result.as_deref(),
+        Some("ConcreteStateType"),
+        "it inside collectState first lambda should resolve despite truncated detail"
+    );
+}

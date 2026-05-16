@@ -351,17 +351,26 @@ pub(super) fn has_dot_after_first_call(rhs: &str, paren_pos: usize) -> bool {
 /// `"fun getDetail(req: Req): Response<Data>"` → `"Response<Data>"`
 /// `"fun doSomething()"` → `None`
 pub(super) fn extract_return_type_from_detail(detail: &str) -> Option<String> {
-    let close_paren = detail.rfind(')')?;
-    let after = detail[close_paren + 1..].trim_start();
-    if !after.starts_with(':') {
+    // If the detail was truncated (ends with `…`), parsing it would yield an
+    // incomplete return type string that poisons downstream type substitution.
+    // Return None so callers can fall back to the full source-line signature.
+    if detail.contains('\u{2026}') {
         return None;
     }
-    let type_part = after[1..].trim_start();
-    let type_name = extract_type_with_generics(type_part);
-    if !type_name.is_empty() && type_name.starts_with_uppercase() {
-        Some(type_name)
-    } else {
-        None
+    // Find the closing paren of the parameter list. We search backward for `):` pattern
+    // because `= expr()` at the end can place a later `)` that isn't the params close.
+    let mut search_from = detail.len();
+    loop {
+        let close_paren = detail[..search_from].rfind(')')?;
+        let after = detail[close_paren + 1..].trim_start();
+        if after.starts_with(':') {
+            let type_part = after.strip_prefix(':').map(str::trim_start).unwrap_or("");
+            let type_name = extract_type_with_generics(type_part);
+            if !type_name.is_empty() && type_name.starts_with_uppercase() {
+                return Some(type_name);
+            }
+        }
+        search_from = close_paren;
     }
 }
 

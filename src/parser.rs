@@ -356,20 +356,10 @@ fn push_def_symbols(
         if kind != SymbolKind::NULL {
             let visibility = vis_fn(lines, sel.start.line as usize);
             let detail = extract_detail(lines, range.start.line, range.end.line);
-            let extension_receiver = if kind == SymbolKind::FUNCTION {
-                extract_extension_receiver(&detail).to_owned()
+            let (extension_receiver, extension_receiver_type) = if kind == SymbolKind::FUNCTION {
+                extract_extension_receiver_from_cst(root, bytes, &range)
             } else {
-                String::new()
-            };
-            let extension_receiver_type = if !extension_receiver.is_empty() {
-                let full = crate::parser::extract_extension_receiver_full(&detail);
-                if full.contains('<') {
-                    full.to_owned()
-                } else {
-                    String::new()
-                }
-            } else {
-                String::new()
+                (String::new(), String::new())
             };
             let (params, param_counts) = if matches!(
                 kind,
@@ -953,6 +943,7 @@ const MAX_DETAIL_CHARS: usize = 120;
 /// - `fun Foo.Bar.baz()` → `"Bar"` (last qualified segment)
 /// - `fun bar()` (no receiver) → `""`
 /// - Non-`fun` details → `""`
+#[cfg(test)]
 pub(crate) fn extract_extension_receiver(detail: &str) -> &str {
     let receiver_with_generics = extract_extension_receiver_full(detail);
     if receiver_with_generics.is_empty() {
@@ -972,6 +963,7 @@ pub(crate) fn extract_extension_receiver(detail: &str) -> &str {
 /// returns `"Flow<ReducedResult<E, S>>"`.
 ///
 /// Returns an empty string when the detail is not an extension function.
+#[cfg(test)]
 pub(crate) fn extract_extension_receiver_full(detail: &str) -> &str {
     let s = detail.trim_start();
     // Must start with `fun` (possibly after annotations/visibility modifiers).
@@ -981,19 +973,27 @@ pub(crate) fn extract_extension_receiver_full(detail: &str) -> &str {
         }
         rest
     } else {
-        // Try stripping a leading keyword before `fun` (e.g. `private fun`, `inline fun`).
-        let word_end = s
-            .find(|c: char| !c.is_alphanumeric() && c != '_')
-            .unwrap_or(s.len());
-        let rest = s[word_end..].trim_start();
-        if let Some(r) = rest.strip_prefix("fun") {
-            if r.starts_with(|c: char| c.is_alphanumeric() || c == '_') {
+        // Try stripping leading keywords before `fun` (e.g. `private fun`,
+        // `suspend fun`, `inline suspend fun`).  Walk past any sequence of
+        // word tokens separated by whitespace until we hit `fun`.
+        let mut remaining = s;
+        loop {
+            let word_end = remaining
+                .find(|c: char| !c.is_alphanumeric() && c != '_')
+                .unwrap_or(remaining.len());
+            if word_end == 0 {
                 return "";
             }
-            r
-        } else {
-            return "";
+            let word = &remaining[..word_end];
+            remaining = remaining[word_end..].trim_start();
+            if word == "fun" {
+                break;
+            }
+            if remaining.is_empty() {
+                return "";
+            }
         }
+        remaining
     };
     let after_fun = after_fun.trim_start();
     // Skip optional type params `<T, R>`.
@@ -1018,6 +1018,7 @@ pub(crate) fn extract_extension_receiver_full(detail: &str) -> &str {
 
 /// Skip over balanced delimiters starting at index 0 of `s`.
 /// Returns the index *after* the closing delimiter.
+#[cfg(test)]
 fn skip_balanced(s: &str, open: char, close: char) -> usize {
     let mut depth = 0usize;
     for (i, c) in s.char_indices() {
@@ -1032,6 +1033,67 @@ fn skip_balanced(s: &str, open: char, close: char) -> usize {
         }
     }
     s.len()
+}
+
+/// Extract extension receiver name and full type from the CST.
+///
+/// Walks the `function_declaration` children looking for a `user_type` node
+/// followed by `"."` — this is the extension receiver in the Kotlin grammar.
+/// Returns `(base_name, full_type_with_generics)`, e.g. `("Flow", "Flow<ReducedResult<E, S>>")`.
+/// Returns `("", "")` when the function is not an extension function.
+fn extract_extension_receiver_from_cst(
+    root: Node,
+    bytes: &[u8],
+    range: &Range,
+) -> (String, String) {
+    let empty = (String::new(), String::new());
+    let start_point = tree_sitter::Point {
+        row: range.start.line as usize,
+        column: range.start.character as usize,
+    };
+    let Some(node) = root.descendant_for_point_range(start_point, start_point) else {
+        return empty;
+    };
+    let decl = find_ancestor_decl(node);
+    if decl.kind() != KIND_FUN_DECL {
+        return empty;
+    }
+    // Walk children: if we find `user_type` immediately followed by `"."` (skipping
+    // anonymous whitespace nodes), this is the extension receiver.
+    let child_count = decl.child_count();
+    for i in 0..child_count.saturating_sub(1) {
+        let Some(child) = decl.child(i) else { continue };
+        if child.kind() != KIND_USER_TYPE {
+            continue;
+        }
+        // Check if the next named/anonymous sibling is `"."`.
+        let Some(next) = decl.child(i + 1) else {
+            continue;
+        };
+        if next.kind() != "." {
+            continue;
+        }
+        // This user_type is the extension receiver.
+        let full = child
+            .utf8_text(bytes)
+            .unwrap_or("")
+            .lines()
+            .map(|l| l.trim())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let base = child
+            .child(0)
+            .and_then(|c| c.utf8_text(bytes).ok())
+            .unwrap_or("");
+        // Only store extension_receiver_type when it has generics.
+        let receiver_type = if full.contains('<') {
+            full.clone()
+        } else {
+            String::new()
+        };
+        return (base.to_owned(), receiver_type);
+    }
+    empty
 }
 
 /// Find the declaration node at `range` in the tree and extract the text inside

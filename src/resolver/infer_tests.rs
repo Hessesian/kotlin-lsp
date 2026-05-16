@@ -197,3 +197,30 @@ fn find_field_type_in_class_resolves_unannotated_field_access() {
         "find_field_type_in_class should resolve unannotated val with field_access_rhs"
     );
 }
+
+#[test]
+fn supertype_subst_replaces_generic_params() {
+    let raw = "Flow<ReducedResult<EffectType, StateType>>";
+    let params = vec!["EventType".into(), "EffectType".into(), "StateType".into()];
+    let args = vec![
+        "BuildingSavingsInputEvent".into(),
+        "BuildingSavingsEffect".into(),
+        "Sheet".into(),
+    ];
+    assert_eq!(
+        super::apply_supertype_subst(raw, &params, &args),
+        "Flow<ReducedResult<BuildingSavingsEffect, Sheet>>"
+    );
+}
+
+#[test]
+fn supertype_subst_whole_word_only() {
+    let raw = "EventTypeHandler<EventType>";
+    let params = vec!["EventType".into()];
+    let args = vec!["Click".into()];
+    // "EventType" inside "EventTypeHandler" should NOT be replaced
+    assert_eq!(
+        super::apply_supertype_subst(raw, &params, &args),
+        "EventTypeHandler<Click>"
+    );
+}

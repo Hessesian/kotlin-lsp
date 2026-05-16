@@ -139,6 +139,9 @@ async fn build_index(root: &Path, no_stdlib: bool) -> Arc<Indexer> {
 
 async fn build_index_inner(root: &Path, source_paths: Vec<String>) -> Arc<Indexer> {
     let idx = Arc::new(Indexer::new());
+    // Set workspace root so save_cache_to_disk can persist the index.
+    let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    idx.workspace_root.set(canonical);
     if !source_paths.is_empty() {
         *idx.source_paths_raw.write().unwrap() = source_paths;
     }

@@ -527,6 +527,105 @@ pub(crate) fn find_method_return_type(
     None
 }
 
+/// Walk the class hierarchy to find an inherited method's return type.
+///
+/// When `find_method_return_type(idx, "BuildingSavingsReducer", "reduce")` returns
+/// `None` because `reduce` is declared on supertype `FlowReducer`, this function:
+/// 1. Finds the subclass's supertype declarations (with type args)
+/// 2. Looks up the method on each supertype
+/// 3. Substitutes the supertype's generic type params with the concrete type args
+///
+/// Returns `None` if the method is not found on any supertype.
+pub(crate) fn find_method_return_type_via_supertypes(
+    idx: &Indexer,
+    class_name: &str,
+    method_name: &str,
+) -> Option<String> {
+    let class_base = class_name.split('<').next().unwrap_or(class_name);
+    let class_locs = idx.definitions.get(class_base)?;
+
+    for class_loc in class_locs.iter() {
+        let file_data = idx.files.get(class_loc.uri.as_str())?;
+        let class_sym = file_data.symbols.iter().find(|s| s.name == class_base)?;
+        let class_line = class_sym.selection_start();
+
+        for (line, super_name, type_args) in file_data.supers.iter() {
+            if *line != class_line {
+                continue;
+            }
+            let raw_return_type = find_method_return_type(idx, super_name, method_name);
+            let Some(raw) = raw_return_type else {
+                continue;
+            };
+
+            if type_args.is_empty() {
+                return Some(raw);
+            }
+
+            let super_type_params = find_class_type_params(idx, super_name);
+            if super_type_params.is_empty() {
+                return Some(raw);
+            }
+
+            let substituted = apply_supertype_subst(&raw, &super_type_params, type_args);
+            return Some(substituted);
+        }
+    }
+    None
+}
+
+fn find_class_type_params(idx: &Indexer, class_name: &str) -> Vec<String> {
+    let Some(locations) = idx.definitions.get(class_name) else {
+        return Vec::new();
+    };
+    for loc in locations.iter() {
+        if let Some(file_data) = idx.files.get(loc.uri.as_str()) {
+            if let Some(sym) = file_data
+                .symbols
+                .iter()
+                .find(|s| s.name == class_name && !s.type_params.is_empty())
+            {
+                return sym.type_params.clone();
+            }
+        }
+    }
+    Vec::new()
+}
+
+/// Replace generic type parameter names with concrete type arguments.
+///
+/// Given `raw = "Flow<ReducedResult<EffectType, StateType>>"`,
+/// `params = ["EventType", "EffectType", "StateType"]`,
+/// `args = ["BuildingSavingsInputEvent", "BuildingSavingsEffect", "Sheet"]`,
+/// returns `"Flow<ReducedResult<BuildingSavingsEffect, Sheet>>"`.
+fn apply_supertype_subst(raw: &str, params: &[String], args: &[String]) -> String {
+    let mut result = raw.to_string();
+    for (param, arg) in params.iter().zip(args.iter()) {
+        // Replace whole-word occurrences only (not substrings of other type names).
+        let mut new_result = String::with_capacity(result.len());
+        let mut remaining = result.as_str();
+        while let Some(pos) = remaining.find(param.as_str()) {
+            new_result.push_str(&remaining[..pos]);
+            let after = pos + param.len();
+            let before_ok = pos == 0
+                || !remaining.as_bytes()[pos - 1].is_ascii_alphanumeric()
+                    && remaining.as_bytes()[pos - 1] != b'_';
+            let after_ok = after >= remaining.len()
+                || !remaining.as_bytes()[after].is_ascii_alphanumeric()
+                    && remaining.as_bytes()[after] != b'_';
+            if before_ok && after_ok {
+                new_result.push_str(arg);
+            } else {
+                new_result.push_str(param);
+            }
+            remaining = &remaining[after..];
+        }
+        new_result.push_str(remaining);
+        result = new_result;
+    }
+    result
+}
+
 #[cfg(test)]
 #[path = "infer_tests.rs"]
 mod infer_tests;
