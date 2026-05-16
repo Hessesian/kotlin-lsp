@@ -333,6 +333,13 @@ pub(super) fn save_cache(
 /// average entry size is ~3–5 KB, so 2 000 files ≈ 6–10 MB per chunk.
 const LIBRARY_CHUNK_SIZE: usize = 2000;
 
+/// Upper bound on the number of library cache chunks.
+///
+/// A corrupt-but-deserializable manifest could set `chunk_count` to `u32::MAX`,
+/// causing `Vec::with_capacity(chunk_count as usize)` to OOM.  Guard against that.
+/// Even the largest Android SDK (≈ 60 000 files) produces at most 30 chunks.
+const MAX_LIBRARY_CHUNKS: u32 = 10_000;
+
 /// Tiny commit-point file written last; its presence signals a complete save.
 #[derive(Serialize, Deserialize)]
 struct LibraryManifest {
@@ -386,6 +393,18 @@ pub(super) fn try_load_library_manifest(source_paths: &[String]) -> Option<(Path
     if manifest.version != CACHE_VERSION {
         return None;
     }
+    if manifest.chunk_count > MAX_LIBRARY_CHUNKS {
+        log::warn!(
+            "Library cache manifest has implausible chunk_count={}, treating as corrupt",
+            manifest.chunk_count
+        );
+        return None;
+    }
+    // Pre-flight: if non-empty, the first chunk must exist — catches manifests left
+    // over from an aborted save or a manual cache deletion.
+    if manifest.chunk_count > 0 && !library_chunk_path(&dir, 0).exists() {
+        return None;
+    }
     Some((dir, manifest.chunk_count))
 }
 
@@ -406,16 +425,16 @@ pub(super) fn load_library_chunk(dir: &Path, idx: u32) -> Option<HashMap<String,
 ///
 /// Two-tier check:
 /// 1. Manifest mtime — catches additions/deletions in source directories (fast, 1 stat per dir).
-/// 2. A random sample of up to 256 entries drawn from the first chunk AND the last chunk
-///    (if more than one chunk exists) — catches in-place file edits.
+/// 2. A random sample of up to 256 entries drawn from the first chunk, the middle chunk
+///    (if ≥ 3 chunks), and the last chunk (if ≥ 2 chunks) — catches in-place file edits.
 ///
 /// Tier 1 covers the common case (Gradle re-extracts entire source directories).
 /// Tier 2 covers in-place edits: modifying a file updates the file's own mtime but
 /// not the parent directory mtime, so Tier 1 alone would miss it.  Sampling from
-/// both ends of the corpus reduces the probability of missing a changed file.
+/// first, middle, and last chunks reduces the probability of missing a changed file.
 ///
 /// Callers must have already loaded the first chunk; `cache_dir` and `chunk_count`
-/// are used to optionally load the last chunk for the tail sample.
+/// are used to optionally load the last and middle chunks for the tail/mid samples.
 pub(super) fn library_cache_is_fresh(
     source_paths: &[PathBuf],
     manifest_path: &Path,
@@ -445,6 +464,17 @@ pub(super) fn library_cache_is_fresh(
     if chunk_count > 1 {
         if let Some(last_chunk) = load_library_chunk(cache_dir, chunk_count - 1) {
             if !sample_entries_fresh(&last_chunk, 128) {
+                return false;
+            }
+        }
+    }
+
+    // Sample a middle chunk so edits to files in neither the first nor last
+    // chunk are also caught.
+    if chunk_count > 2 {
+        let mid_idx = chunk_count / 2;
+        if let Some(mid_chunk) = load_library_chunk(cache_dir, mid_idx) {
+            if !sample_entries_fresh(&mid_chunk, 64) {
                 return false;
             }
         }

@@ -361,3 +361,45 @@ fn library_cache_is_fresh_empty_cache() {
         );
     });
 }
+
+/// A manifest with an implausibly large `chunk_count` is rejected to prevent OOM.
+#[test]
+fn library_manifest_absurd_chunk_count_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    with_xdg_cache(tmp.path(), || {
+        let source_paths = vec![tmp.path().to_string_lossy().to_string()];
+        let dir = library_chunks_dir(&source_paths);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let manifest = LibraryManifest {
+            version: CACHE_VERSION,
+            chunk_count: u32::MAX,
+        };
+        let bytes = bincode::serialize(&manifest).unwrap();
+        std::fs::write(library_manifest_path(&dir), bytes).unwrap();
+
+        assert!(
+            try_load_library_manifest(&source_paths).is_none(),
+            "manifest with u32::MAX chunk_count should be rejected"
+        );
+    });
+}
+
+/// A manifest pointing to a non-existent first chunk is rejected.
+#[test]
+fn library_manifest_missing_chunk0_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    with_xdg_cache(tmp.path(), || {
+        let source_paths = vec![tmp.path().to_string_lossy().to_string()];
+        let dir = library_chunks_dir(&source_paths);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Write manifest claiming 2 chunks but write no chunk files.
+        write_manifest(&dir, 2);
+
+        assert!(
+            try_load_library_manifest(&source_paths).is_none(),
+            "manifest with missing chunk-0000.bin should be rejected"
+        );
+    });
+}

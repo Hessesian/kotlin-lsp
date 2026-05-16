@@ -526,6 +526,11 @@ impl Indexer {
             return;
         };
 
+        // Empty library cache — nothing to restore; skip loading any chunks.
+        if chunk_count == 0 {
+            return;
+        }
+
         // Load first chunk for Tier 2 freshness sampling (~20 MB read).
         let Some(first_chunk) = crate::indexer::cache::load_library_chunk(&cache_dir, 0) else {
             let scan = self
