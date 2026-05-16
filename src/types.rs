@@ -136,6 +136,13 @@ pub(crate) struct SymbolEntry {
     /// Empty string for non-extension symbols.
     #[serde(default)]
     pub extension_receiver: String,
+    /// For extension functions: the full receiver type including generics.
+    /// e.g. `fun <T> List<T>.bar()` → `"List<T>"`,
+    ///      `fun <E, S> Flow<ReducedResult<E, S>>.collectState(…)` → `"Flow<ReducedResult<E, S>>"`.
+    /// Empty string for non-extension symbols or when the receiver has no generics
+    /// (in which case `extension_receiver` already carries the full type).
+    #[serde(default)]
+    pub extension_receiver_type: String,
     /// Enclosing class/object/interface name (immediate parent only).
     /// `None` for top-level declarations; `Some("ClassName")` for members.
     /// Assigned by `assign_containers()` after extraction.

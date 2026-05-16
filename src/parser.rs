@@ -361,6 +361,16 @@ fn push_def_symbols(
             } else {
                 String::new()
             };
+            let extension_receiver_type = if !extension_receiver.is_empty() {
+                let full = crate::parser::extract_extension_receiver_full(&detail);
+                if full.contains('<') {
+                    full.to_owned()
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
             let (params, param_counts) = if matches!(
                 kind,
                 SymbolKind::FUNCTION
@@ -382,6 +392,7 @@ fn push_def_symbols(
                 detail,
                 type_params,
                 extension_receiver,
+                extension_receiver_type,
                 container: None,
                 params,
                 param_counts,
@@ -693,6 +704,7 @@ fn push_interface_symbol(
         detail,
         type_params,
         extension_receiver: String::new(),
+        extension_receiver_type: String::new(),
         container: None,
         params: String::new(),
         param_counts: (0, 0),
@@ -799,6 +811,7 @@ fn extract_secondary_constructors(root: Node, bytes: &[u8], data: &mut FileData)
                     detail,
                     type_params: Vec::new(),
                     extension_receiver: String::new(),
+                    extension_receiver_type: String::new(),
                     container: None,
                     params,
                     param_counts,
@@ -941,6 +954,25 @@ const MAX_DETAIL_CHARS: usize = 120;
 /// - `fun bar()` (no receiver) → `""`
 /// - Non-`fun` details → `""`
 pub(crate) fn extract_extension_receiver(detail: &str) -> &str {
+    let receiver_with_generics = extract_extension_receiver_full(detail);
+    if receiver_with_generics.is_empty() {
+        return "";
+    }
+    let base_end = receiver_with_generics
+        .find('<')
+        .unwrap_or(receiver_with_generics.len());
+    let base = receiver_with_generics[..base_end].trim_end();
+    // Return only the last qualified segment (e.g. `Outer.Inner` → `Inner`).
+    base.rsplit('.').next().unwrap_or(base)
+}
+
+/// Extract the full extension receiver type including generics from a detail string.
+///
+/// Given `"fun <E, S> Flow<ReducedResult<E, S>>.collectState(…)"`,
+/// returns `"Flow<ReducedResult<E, S>>"`.
+///
+/// Returns an empty string when the detail is not an extension function.
+pub(crate) fn extract_extension_receiver_full(detail: &str) -> &str {
     let s = detail.trim_start();
     // Must start with `fun` (possibly after annotations/visibility modifiers).
     let after_fun = if let Some(rest) = s.strip_prefix("fun") {
@@ -980,14 +1012,8 @@ pub(crate) fn extract_extension_receiver(detail: &str) -> &str {
         Some(p) => p,
         None => return "",
     };
-    // Receiver portion is everything before that dot; strip generics for the base name.
-    let receiver_with_generics = before_paren[..dot_pos].trim();
-    let base_end = receiver_with_generics
-        .find('<')
-        .unwrap_or(receiver_with_generics.len());
-    let base = receiver_with_generics[..base_end].trim_end();
-    // Return only the last qualified segment (e.g. `Outer.Inner` → `Inner`).
-    base.rsplit('.').next().unwrap_or(base)
+    // Receiver portion is everything before that dot, including generics.
+    before_paren[..dot_pos].trim()
 }
 
 /// Skip over balanced delimiters starting at index 0 of `s`.
@@ -1987,6 +2013,7 @@ impl crate::types::FileData {
                 detail,
                 type_params,
                 extension_receiver: String::new(),
+                extension_receiver_type: String::new(),
                 container: None,
                 params,
                 param_counts,
@@ -2024,6 +2051,7 @@ impl crate::types::FileData {
                     detail: detail.clone(),
                     type_params: Vec::new(),
                     extension_receiver: String::new(),
+                    extension_receiver_type: String::new(),
                     container: None,
                     params: String::new(),
                     param_counts: (0, 0),

@@ -1045,3 +1045,101 @@ fn chain_inference_dotted_nested_class_type() {
         "dotted nested class: ResultState.Success<Optional<FamilyAccount>>.value.getOrNull()?.also should yield FamilyAccount"
     );
 }
+
+#[test]
+fn inline_lambda_generic_ext_fn_substitution_second_param() {
+    // collectState(
+    //   { sendState(state().copy(sheetState = it)) },   // it: StateType → SheetState
+    //   { sendEffect(BuildingSavingsEffects(it)) })     // it: EffectType → BuildingSavingsEffect
+    //
+    // collectState declared as:
+    //   fun <EffectType, StateType, VMState, VMEffect>
+    //     Flow<ReducedResult<EffectType, StateType>>.collectState(
+    //       setState: suspend (StateType) -> VMState,
+    //       setEffect: suspend (EffectType) -> VMEffect)
+    let u = test_uri();
+    let deps = super::super::TestDeps::new()
+        .with_var(u.as_str(), "reducer", "BuildingSavingsReducer")
+        .with_method_return_for_type(
+            "BuildingSavingsReducer",
+            "reduce",
+            "Flow<ReducedResult<BuildingSavingsEffect, SheetState>>",
+        )
+        .with_fun(
+            u.as_str(),
+            "collectState",
+            "setState: suspend (StateType) -> VMState, setEffect: suspend (EffectType) -> VMEffect",
+        )
+        .with_callable_info(
+            "collectState",
+            &["EffectType", "StateType", "VMState", "VMEffect"],
+            "Flow<ReducedResult<EffectType, StateType>>",
+        );
+    // Second lambda (comma_count=1) → setEffect param → EffectType → BuildingSavingsEffect
+    let before_brace = "reducer.reduce(event.events) { state().sheetState }\n    .collectState(\n            { sendState(state().copy(sheetState = it)) },\n            ";
+    let result = lambda_receiver_type_from_context(before_brace, &deps, &u);
+    assert_eq!(
+        result.as_deref(),
+        Some("BuildingSavingsEffect"),
+        "second inline lambda param should substitute EffectType → BuildingSavingsEffect"
+    );
+}
+
+#[test]
+fn inline_lambda_generic_ext_fn_substitution_first_param() {
+    // Same as above but for the first lambda: it → StateType → SheetState
+    let u = test_uri();
+    let deps = super::super::TestDeps::new()
+        .with_var(u.as_str(), "reducer", "BuildingSavingsReducer")
+        .with_method_return_for_type(
+            "BuildingSavingsReducer",
+            "reduce",
+            "Flow<ReducedResult<BuildingSavingsEffect, SheetState>>",
+        )
+        .with_fun(
+            u.as_str(),
+            "collectState",
+            "setState: suspend (StateType) -> VMState, setEffect: suspend (EffectType) -> VMEffect",
+        )
+        .with_callable_info(
+            "collectState",
+            &["EffectType", "StateType", "VMState", "VMEffect"],
+            "Flow<ReducedResult<EffectType, StateType>>",
+        );
+    // First lambda (comma_count=0) → setState param → StateType → SheetState
+    let before_brace =
+        "reducer.reduce(event.events) { state().sheetState }\n    .collectState(\n            ";
+    let result = lambda_receiver_type_from_context(before_brace, &deps, &u);
+    assert_eq!(
+        result.as_deref(),
+        Some("SheetState"),
+        "first inline lambda param should substitute StateType → SheetState"
+    );
+}
+
+#[test]
+fn build_ext_fn_type_subst_nested_generics() {
+    let map = build_ext_fn_type_subst(
+        "Flow<ReducedResult<EffectType, StateType>>",
+        "Flow<ReducedResult<BuildingSavingsEffect, SheetState>>",
+        &[
+            "EffectType".to_string(),
+            "StateType".to_string(),
+            "VMState".to_string(),
+            "VMEffect".to_string(),
+        ],
+    );
+    assert_eq!(
+        map.get("EffectType").map(|s| s.as_str()),
+        Some("BuildingSavingsEffect")
+    );
+    assert_eq!(map.get("StateType").map(|s| s.as_str()), Some("SheetState"));
+    assert!(
+        map.get("VMState").is_none(),
+        "VMState not in receiver, should be unmapped"
+    );
+    assert!(
+        map.get("VMEffect").is_none(),
+        "VMEffect not in receiver, should be unmapped"
+    );
+}

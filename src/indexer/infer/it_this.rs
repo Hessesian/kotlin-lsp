@@ -524,6 +524,63 @@ fn split_top_level_commas(s: &str) -> Vec<&str> {
     result
 }
 
+/// Build a type-parameter substitution map for a generic extension function by
+/// recursively matching the declared receiver type against the concrete receiver type.
+///
+/// Example: for `collectState` with
+///   declared receiver `Flow<ReducedResult<EffectType, StateType>>`
+///   concrete receiver `Flow<ReducedResult<BuildingSavingsEffect, SheetState>>`
+///   fun type params `[EffectType, StateType, VMState, VMEffect]`
+/// → returns `{EffectType → BuildingSavingsEffect, StateType → SheetState}`
+fn build_ext_fn_type_subst(
+    declared_receiver: &str,
+    concrete_receiver: &str,
+    fun_type_params: &[String],
+) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    match_type_args_recursive(
+        declared_receiver,
+        concrete_receiver,
+        fun_type_params,
+        &mut map,
+    );
+    map
+}
+
+/// Recursively match declared and concrete type structures to extract
+/// generic parameter → concrete type mappings.
+fn match_type_args_recursive(
+    declared: &str,
+    concrete: &str,
+    params: &[String],
+    map: &mut std::collections::HashMap<String, String>,
+) {
+    let decl_base = declared.trim().trim_end_matches('?');
+    let conc_base = concrete.trim().trim_end_matches('?');
+    if decl_base.is_empty() || conc_base.is_empty() {
+        return;
+    }
+    // If the declared type is one of the function's type params, map it directly.
+    if params.iter().any(|p| p == decl_base) {
+        map.insert(decl_base.to_owned(), conc_base.to_owned());
+        return;
+    }
+    // Otherwise recurse into type arguments.
+    if let (Some(d_inner), Some(c_inner)) = (type_args_inner(decl_base), type_args_inner(conc_base))
+    {
+        let d_args = split_top_level_commas(d_inner);
+        let c_args = split_top_level_commas(c_inner);
+        for (d, c) in d_args.iter().zip(c_args.iter()) {
+            match_type_args_recursive(d, c, params, map);
+        }
+    }
+}
+
+/// Check whether `name` is a declared type parameter of the given function.
+fn is_declared_type_param(name: &str, fun_type_params: &[String]) -> bool {
+    fun_type_params.iter().any(|p| p == name)
+}
+
 /// Returns `true` if `name` looks like a generic type parameter: a short
 /// all-uppercase identifier like `T`, `R`, `IN`, `OUT`, `KEY`, `VAL`.
 fn is_generic_param(name: &str) -> bool {
@@ -1196,10 +1253,21 @@ fn cst_lambda_param_type_via_call(
             let extracted = lambda_type_nth_input(&param_type, param_pos)?;
             if is_generic_param(&extracted) {
                 // Generic param (T/R/E) — resolve via forward chain walk.
-                cst_forward_resolve_receiver_type(lambda, &doc.bytes, deps, uri)
-            } else {
-                Some(extracted)
+                return cst_forward_resolve_receiver_type(lambda, &doc.bytes, deps, uri);
             }
+            // Check longer generic param names (e.g. EffectType, StateType) against
+            // the function's declared type params.
+            if let Some(call_expr) = lambda.enclosing_call_expression() {
+                if let Some(fn_name) = call_expr.call_fn_name(&doc.bytes) {
+                    let before = cst_before_open_text(call_expr, doc);
+                    if let Some(concrete) =
+                        try_substitute_ext_fn_type_param(&extracted, &fn_name, &before, deps, uri)
+                    {
+                        return Some(concrete);
+                    }
+                }
+            }
+            Some(extracted)
         }
         None => {
             // Function not indexed — resolve via forward chain walk
@@ -1612,7 +1680,16 @@ fn inline_lambda_param_type(
     let sig = receiver_aware_params_from_text(before_open, fn_name, deps, uri)
         .or_else(|| deps.find_fun_params_text(fn_name, uri))?;
     let param_type = nth_fun_param_type_str(&sig, comma_count)?;
-    lambda_type_first_input(&param_type)
+    let raw_input = lambda_type_first_input(&param_type)?;
+
+    // If the extracted type is a declared type param of a generic extension function,
+    // substitute it with the concrete type from the call-site receiver.
+    if let Some(concrete) =
+        try_substitute_ext_fn_type_param(&raw_input, fn_name, before_open, deps, uri)
+    {
+        return Some(concrete);
+    }
+    Some(raw_input)
 }
 
 /// Look up a function by name, find its last parameter's type, and return the
@@ -1636,6 +1713,142 @@ fn fun_trailing_lambda_this_type(
     let sig = deps.find_fun_params_text(fn_name, uri)?;
     let last_type = last_fun_param_type_str(&sig)?;
     lambda_type_receiver(&last_type)
+}
+
+/// Extract the text before the opening `(` of a call expression from the CST.
+/// Used to provide the `before_open` argument for `try_substitute_ext_fn_type_param`.
+fn cst_before_open_text(
+    call_expr: tree_sitter::Node<'_>,
+    doc: &crate::indexer::live_tree::LiveDoc,
+) -> String {
+    // The callee is the first child of the call expression (before call_suffix).
+    let Some(callee) = call_expr.child(0) else {
+        return String::new();
+    };
+    let start = callee.start_byte();
+    let end = callee.end_byte();
+    std::str::from_utf8(&doc.bytes[start..end])
+        .unwrap_or("")
+        .to_owned()
+}
+
+// ─── Generic extension function type substitution ────────────────────────────
+
+/// Try to substitute a generic type parameter with its concrete type by resolving
+/// the extension function's receiver type from the call-site context.
+///
+/// Given a raw lambda input like `"EffectType"` from `collectState`'s params,
+/// checks if it's a declared type param and, if so, resolves the concrete receiver
+/// expression to build a substitution map.
+///
+/// Works for both text-based and CST-based paths.
+fn try_substitute_ext_fn_type_param(
+    raw_input: &str,
+    fn_name: &str,
+    before_open: &str,
+    deps: &impl InferDeps,
+    uri: &Url,
+) -> Option<String> {
+    let info = deps.find_fun_callable_info(fn_name, uri)?;
+    if !is_declared_type_param(raw_input, &info.type_params) {
+        return None;
+    }
+    if info.extension_receiver_type.is_empty() {
+        return None;
+    }
+
+    // Resolve the concrete receiver type from the method chain before `.fnName(`.
+    let concrete_receiver = resolve_chain_receiver_type(before_open, fn_name, deps, uri)?;
+    let subst = build_ext_fn_type_subst(
+        &info.extension_receiver_type,
+        &concrete_receiver,
+        &info.type_params,
+    );
+    subst.get(raw_input).cloned()
+}
+
+/// Resolve the concrete type of the receiver expression in a method chain.
+///
+/// Given `before_open` = `"  buildingSavingsReducer.reduce(event.events) { ... }\n    .collectState"`,
+/// strips the final `.fnName`, trailing lambdas and call args, then resolves the
+/// remaining chain `base.method` to its return type with type substitution.
+fn resolve_chain_receiver_type(
+    before_open: &str,
+    fn_name: &str,
+    deps: &impl InferDeps,
+    uri: &Url,
+) -> Option<String> {
+    // Strip the final `.fnName` to get the receiver expression.
+    let trimmed = before_open.trim_end();
+    let receiver_expr = trimmed.strip_suffix(fn_name)?.trim_end_matches('.');
+    let receiver_expr = receiver_expr.trim_end();
+    if receiver_expr.is_empty() {
+        return None;
+    }
+
+    // Strip trailing lambda `{ ... }` and call args `(...)`.
+    let stripped = strip_trailing_lambda_and_args(receiver_expr);
+    if stripped.is_empty() {
+        return None;
+    }
+
+    // Try to resolve as `base.method(...)` chain.
+    if let Some(dot) = find_last_dot_at_depth_zero(stripped) {
+        let base_expr = stripped[..dot].trim();
+        let method = stripped[dot + 1..].trim().ident_prefix();
+        if !base_expr.is_empty() && !method.is_empty() {
+            let base_var = last_ident_in(base_expr);
+            if let Some(base_type) = deps.find_var_type(base_var, uri) {
+                let base_dotted = base_type.dotted_ident_prefix();
+                let base_name = base_dotted.last_segment();
+                if let Some(return_type) = deps.find_method_return_type_for_type(base_name, &method)
+                {
+                    let subst = build_type_arg_subst(deps, base_name, &base_type);
+                    let applied = crate::indexer::apply_type_subst(&return_type, &subst);
+                    return Some(applied);
+                }
+            }
+        }
+    }
+
+    // Fallback: try as a simple variable.
+    let var = last_ident_in(stripped);
+    if !var.is_empty() {
+        return deps.find_var_type(var, uri);
+    }
+    None
+}
+
+/// Strip trailing lambda `{ ... }` and call args `(...)` from a receiver expression.
+///
+/// Handles: `expr(args) { lambda }` → `expr`
+fn strip_trailing_lambda_and_args(s: &str) -> &str {
+    let mut result = s.trim_end();
+    // Strip trailing `{ ... }` (trailing lambda)
+    if result.ends_with('}') {
+        if let Some(open) = rfind_balanced(result, '{', '}') {
+            result = result[..open].trim_end();
+        }
+    }
+    // Strip trailing `(...)` (call args)
+    result = strip_trailing_call_args(result);
+    result.trim_end()
+}
+
+/// Find the matching opening delimiter scanning right-to-left.
+fn rfind_balanced(s: &str, open: char, close: char) -> Option<usize> {
+    let mut depth = 0i32;
+    for (i, ch) in s.char_indices().rev() {
+        if ch == close {
+            depth += 1;
+        } else if ch == open {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i);
+            }
+        }
+    }
+    None
 }
 
 // ─── cluster-exclusive pure utilities ────────────────────────────────────────

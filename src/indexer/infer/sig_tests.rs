@@ -467,6 +467,7 @@ mod import_reachable {
             param_counts: (0, 0),
             type_params: vec![],
             extension_receiver: String::new(),
+            extension_receiver_type: String::new(),
             container: Some(container.to_owned()),
         }
     }

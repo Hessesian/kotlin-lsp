@@ -282,6 +282,28 @@ impl crate::indexer::infer::InferDeps for Indexer {
     fn live_doc(&self, uri: &Url) -> Option<Arc<LiveDoc>> {
         self.live_doc(uri)
     }
+    fn find_fun_callable_info(
+        &self,
+        fn_name: &str,
+        _uri: &Url,
+    ) -> Option<crate::indexer::infer::CallableInfo> {
+        let locations = self.definitions.get(fn_name)?;
+        for loc in locations.iter() {
+            if let Some(file_data) = self.files.get(loc.uri.as_str()) {
+                if let Some(sym) = file_data
+                    .symbols
+                    .iter()
+                    .find(|s| s.name == fn_name && !s.type_params.is_empty())
+                {
+                    return Some(crate::indexer::infer::CallableInfo {
+                        type_params: sym.type_params.clone(),
+                        extension_receiver_type: sym.extension_receiver_type.clone(),
+                    });
+                }
+            }
+        }
+        None
+    }
 }
 
 // ─── Synthetic enum members ──────────────────────────────────────────────────

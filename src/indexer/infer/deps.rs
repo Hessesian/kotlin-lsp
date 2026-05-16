@@ -24,6 +24,17 @@ use tower_lsp::lsp_types::Url;
 
 use crate::indexer::LiveDoc;
 
+/// Metadata about a resolved callable (function or method) used for generic
+/// type substitution in lambda parameter inference.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct CallableInfo {
+    /// Declared type parameter names (e.g. `["EffectType", "StateType"]`).
+    pub type_params: Vec<String>,
+    /// Full extension receiver type with generics (e.g. `"Flow<ReducedResult<E, S>>"`).
+    /// Empty for non-extension functions.
+    pub extension_receiver_type: String,
+}
+
 /// Minimum dependency surface for pure inference helpers and their lightweight
 /// orchestration layers.
 ///
@@ -109,6 +120,15 @@ pub(crate) trait InferDeps {
     fn find_method_params_text(&self, _class_name: &str, _method_name: &str) -> Option<String> {
         None
     }
+
+    /// Return callable metadata (type params + extension receiver type) for a
+    /// function resolved by name.  Used to apply generic type substitution when
+    /// a lambda parameter type is a generic type parameter.
+    ///
+    /// The default implementation returns `None`; overridden by `Indexer`.
+    fn find_fun_callable_info(&self, _fn_name: &str, _uri: &Url) -> Option<CallableInfo> {
+        None
+    }
 }
 
 // ─── Test stub ───────────────────────────────────────────────────────────────
@@ -133,6 +153,8 @@ pub(crate) struct TestDeps {
     pub method_return_types: std::collections::HashMap<(String, String), String>,
     /// `(class_name, method_name)` → raw params text
     pub method_params: std::collections::HashMap<(String, String), String>,
+    /// `fn_name` → callable info (type params + extension receiver type)
+    pub callable_infos: std::collections::HashMap<String, CallableInfo>,
 }
 
 #[cfg(test)]
@@ -146,6 +168,7 @@ impl TestDeps {
             class_params: std::collections::HashMap::new(),
             method_return_types: std::collections::HashMap::new(),
             method_params: std::collections::HashMap::new(),
+            callable_infos: std::collections::HashMap::new(),
         }
     }
 
@@ -216,6 +239,24 @@ impl TestDeps {
         );
         self
     }
+
+    /// Register `fn_name` → callable info for generic extension function tests.
+    #[allow(dead_code)]
+    pub(crate) fn with_callable_info(
+        mut self,
+        fn_name: &str,
+        type_params: &[&str],
+        extension_receiver_type: &str,
+    ) -> Self {
+        self.callable_infos.insert(
+            fn_name.to_string(),
+            CallableInfo {
+                type_params: type_params.iter().map(|s| s.to_string()).collect(),
+                extension_receiver_type: extension_receiver_type.to_string(),
+            },
+        );
+        self
+    }
 }
 
 #[cfg(test)]
@@ -257,5 +298,8 @@ impl InferDeps for TestDeps {
         self.method_params
             .get(&(class_name.to_string(), method_name.to_string()))
             .cloned()
+    }
+    fn find_fun_callable_info(&self, fn_name: &str, _uri: &Url) -> Option<CallableInfo> {
+        self.callable_infos.get(fn_name).cloned()
     }
 }
