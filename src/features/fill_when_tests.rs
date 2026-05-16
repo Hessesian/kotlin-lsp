@@ -167,6 +167,9 @@ fun handle(e: Effect) {
 
 #[test]
 fn sealed_same_package_subclasses_in_other_files_offered() {
+    // Both `Loading` and `ShowToast` are in a sibling file but the same package.
+    // The fill-when action must offer them even though they are not in the same
+    // file as the sealed class declaration.
     let idx = setup(&[
         ("/pkg/Effect.kt", "package com.example\nsealed class Effect"),
         (
@@ -175,7 +178,8 @@ fn sealed_same_package_subclasses_in_other_files_offered() {
         ),
         (
             "/pkg/main.kt",
-            "package com.example\nfun handle(e: Effect) {\n    when (e) {\n        Loading -> println(\"loading\")\n    }\n}",
+            // Empty when — neither branch is covered yet.
+            "package com.example\nfun handle(e: Effect) {\n    when (e) {\n    }\n}",
         ),
     ]);
     let u = uri("/pkg/main.kt");

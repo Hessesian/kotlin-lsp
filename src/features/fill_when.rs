@@ -450,7 +450,6 @@ fn resolve_type_members(
     if locations.is_empty() {
         return None;
     }
-    let subtype_locations = indexer.subtypes_of(type_name);
 
     let mut fallback: Option<(TypeKind, Vec<WhenMember>)> = None;
 
@@ -475,12 +474,8 @@ fn resolve_type_members(
         }
 
         if is_sealed(&symbol) {
-            let members = collect_sealed_members(
-                &file_data,
-                &subtype_locations,
-                &location.uri,
-                &symbol.range,
-            );
+            let members =
+                collect_sealed_members(indexer, &symbol.name, &location.uri, &symbol.range);
             if !members.is_empty() {
                 if branches_fit_members(existing_branches, &members) {
                     return Some((TypeKind::Sealed, members));
@@ -546,27 +541,17 @@ fn collect_enum_members(
         .collect()
 }
 
-fn collect_sealed_members(indexer: &Indexer, sealed_name: &str) -> Vec<WhenMember> {
-    // Find the sealed parent's full declaration range to detect nested subtypes.
-    // `definitions` stores selection_range (identifier only), so look up the full
-    // SymbolEntry.range from the file data.
-    let parent_info = indexer.definitions.get(sealed_name).and_then(|locs| {
-        let loc = locs.first()?;
-        let file_data = indexer.file_data_for(loc.uri.as_str())?;
-        let parent_sym = file_data
-            .symbols
-            .iter()
-            .find(|s| s.name == sealed_name && s.selection_range == loc.range)?;
-        Some((loc.uri.clone(), parent_sym.range, file_data.package.clone()))
-    });
-
-    // Sealed subtypes must be in the same package as the sealed class.
-    // Keep same-file nested classes too, but reject identically-named sealed
-    // classes from other packages.
-    let parent_uri = parent_info.as_ref().map(|(uri, _, _)| uri.as_str());
-    let parent_package = parent_info
-        .as_ref()
-        .and_then(|(_, _, package_name)| package_name.as_deref());
+fn collect_sealed_members(
+    indexer: &Indexer,
+    sealed_name: &str,
+    parent_uri: &Url,
+    parent_range: &Range,
+) -> Vec<WhenMember> {
+    // Use the parent's package for same-package subclass filtering (PR #103: allow
+    // sealed subtypes that live in sibling files in the same package).
+    let parent_package = indexer
+        .file_data_for(parent_uri.as_str())
+        .and_then(|fd| fd.package.clone());
 
     let subtype_locations = indexer.subtypes_of(sealed_name);
     let mut members = Vec::new();
@@ -575,20 +560,19 @@ fn collect_sealed_members(indexer: &Indexer, sealed_name: &str) -> Vec<WhenMembe
         let Some(file_data) = indexer.file_data_for(location.uri.as_str()) else {
             continue;
         };
-        let same_parent_file = parent_uri.is_some_and(|p_uri| location.uri.as_str() == p_uri);
-        let same_package = parent_package == file_data.package.as_deref();
+        // Accept subtypes in the same file as the sealed class OR in a sibling file
+        // in the same package.  This rejects identically-named sealed classes from
+        // unrelated packages while still finding all valid subtypes.
+        let same_parent_file = location.uri == *parent_uri;
+        let same_package = parent_package.as_deref() == file_data.package.as_deref();
         if !same_parent_file && !same_package {
             continue;
         }
         if let Some(symbol) = find_symbol_at(&file_data, location) {
             let is_object = symbol.kind == SymbolKind::OBJECT;
-            let is_nested = parent_info
-                .as_ref()
-                .is_some_and(|(parent_uri, parent_range, _)| {
-                    location.uri == *parent_uri
-                        && symbol.range.start.line > parent_range.start.line
-                        && symbol.range.end.line <= parent_range.end.line
-                });
+            let is_nested = location.uri == *parent_uri
+                && symbol.range.start.line > parent_range.start.line
+                && symbol.range.end.line <= parent_range.end.line;
             members.push(WhenMember {
                 name: symbol.name.clone(),
                 is_object,
