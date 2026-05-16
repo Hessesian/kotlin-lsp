@@ -119,27 +119,24 @@ pub(crate) fn find_this_element_type_in_lines(
     find_it_element_type_in_lines_impl(lines, pos, idx, uri, LambdaParamKind::This)
 }
 
-/// Multi-line version of `find_named_lambda_param_type` for hover/goto-def.
+/// Multi-line version of `find_named_lambda_param_type` for hover/inlay-hint paths.
 ///
 /// Scans the whole file (not just `before_cursor`) for `{ param_name ->`,
-/// including the CURRENT line (needed when cursor is on the param name before
-/// the `->` is written, or when scanning the declaration line itself).
+/// including the CURRENT line.  Also handles multi-param lambdas `{ id, scan -> }`.
 ///
-/// Also handles multi-param lambdas `{ id, scan -> }`.
-/// Resolve a named lambda parameter's type for hover/inlay-hint paths.
+/// `cursor_utf16_col` is the UTF-16 column of the parameter name at `cursor_line`.
 ///
-/// `cursor_utf16_col` is the UTF-16 column of the parameter name at `cursor_line`
-/// (e.g. the position of `categoryAge` in `.let { categoryAge ->`).  Pass `0`
-/// when the column is not known (e.g. from tests); the text fallback will still
-/// run and may resolve simpler same-line cases.
-///
-/// The CST path (preferred) requires `idx.live_doc(uri)` to be present.
-/// The text scan (fallback) handles no-live-doc scenarios.
+/// `live_doc` must be the **same** snapshot that produced `cursor_line`/
+/// `cursor_utf16_col`.  Passing a different snapshot (or re-calling `idx.live_doc`
+/// internally) risks position mismatches when a `did_change` races with
+/// inlay-hint computation.  Pass `None` to skip the CST path; the text
+/// fallback will still run.
 pub(crate) fn find_named_lambda_param_type_in_lines(
     lines: &[String],
     param_name: &str,
     cursor_line: usize,
     cursor_utf16_col: usize,
+    live_doc: Option<&crate::indexer::live_tree::LiveDoc>,
     idx: &Indexer,
     uri: &Url,
 ) -> Option<String> {
@@ -149,8 +146,8 @@ pub(crate) fn find_named_lambda_param_type_in_lines(
         line: cursor_line,
         utf16_col: cursor_utf16_col,
     };
-    if let Some(doc) = idx.live_doc(uri) {
-        if let Some(result) = cst_named_lambda_param_type(pos, param_name, &doc, idx, uri) {
+    if let Some(doc) = live_doc {
+        if let Some(result) = cst_named_lambda_param_type(pos, param_name, doc, idx, uri) {
             return Some(result);
         }
     }

@@ -234,7 +234,16 @@ fn named_lambda_param_type_in_lines_cst_uses_param_position() {
     let sig_src = "fun zipUsers(block: (LeftUser, RightUser) -> Unit) {}";
     let code_src = "zipUsers { left, right ->\n    right.name\n}";
     let (u, idx, lines) = indexed_with_live("/t.kt", sig_src, code_src);
-    let result = find_named_lambda_param_type_in_lines(&lines, "right", 1, 0, &idx, &u);
+    let live_doc_arc = idx.live_doc(&u);
+    let result = find_named_lambda_param_type_in_lines(
+        &lines,
+        "right",
+        1,
+        0,
+        live_doc_arc.as_deref(),
+        &idx,
+        &u,
+    );
     assert_eq!(result.as_deref(), Some("RightUser"));
 }
 
@@ -248,7 +257,17 @@ fn named_lambda_param_multiline_receiver_via_function_call() {
     let (u, idx, lines) = indexed_with_live("/t.kt", sig_src, code_src);
     // Compute the UTF-16 column of `categoryAge` in line 1.
     let col = lines[1].find("categoryAge").unwrap();
-    let result = find_named_lambda_param_type_in_lines(&lines, "categoryAge", 1, col, &idx, &u);
+    // Pass the live_doc snapshot to ensure CST and position use the same tree.
+    let live_doc_arc = idx.live_doc(&u);
+    let result = find_named_lambda_param_type_in_lines(
+        &lines,
+        "categoryAge",
+        1,
+        col,
+        live_doc_arc.as_deref(),
+        &idx,
+        &u,
+    );
     assert_eq!(
         result.as_deref(),
         Some("Int"),

@@ -261,8 +261,20 @@ impl Indexer {
             // For named params: scan backward for `{ name ->` pattern.
             // Pass the real UTF-16 column so the CST fast-path places the cursor
             // inside the correct lambda_literal (multi-line receiver chain case).
+            // Snapshot live_doc ONCE here so the CST path uses the same tree
+            // that produced `position` — prevents a race where did_change updates
+            // live_doc between the caller's position derivation and our CST lookup.
             let utf16_col = position.character as usize;
-            find_named_lambda_param_type_in_lines(&lines, name, line_no, utf16_col, self, uri)
+            let live_doc_arc = self.live_doc(uri);
+            find_named_lambda_param_type_in_lines(
+                &lines,
+                name,
+                line_no,
+                utf16_col,
+                live_doc_arc.as_deref(),
+                self,
+                uri,
+            )
         }
     }
 
