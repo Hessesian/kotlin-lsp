@@ -238,6 +238,22 @@ fn named_lambda_param_type_in_lines_cst_uses_param_position() {
     assert_eq!(result.as_deref(), Some("RightUser"));
 }
 
+#[test]
+fn named_lambda_param_multiline_receiver_via_function_call() {
+    // childCategory(child) is on line 0; .let { categoryAge -> on line 1.
+    // Before this fix: col=0 CST found outer context, text fallback got
+    // before_brace=".let " → fun_trailing_lambda_it_type("let") → "T".
+    let sig_src = "fun childCategory(child: ChildAccount): Int { return 0 }";
+    let code_src = "childCategory(child)\n    .let { categoryAge ->\n        categoryAge\n    }";
+    let (u, idx, lines) = indexed_with_live("/t.kt", sig_src, code_src);
+    let result = find_named_lambda_param_type_in_lines(&lines, "categoryAge", 1, &idx, &u);
+    assert_eq!(
+        result.as_deref(),
+        Some("Int"),
+        "categoryAge should resolve to Int (return type of childCategory), got: {result:?}"
+    );
+}
+
 // ── line_has_lambda_param ────────────────────────────────────────────────────
 
 #[test]

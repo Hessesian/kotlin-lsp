@@ -153,6 +153,25 @@ pub(crate) fn find_named_lambda_param_type_in_lines(
         let Some((brace_pos, pos)) = find_lambda_brace_for_param(line, param_name) else {
             continue;
         };
+
+        // The initial CST call used utf16_col=0, which for multi-line chains
+        // (receiver on a previous line, `{ param ->` on its own line) lands
+        // outside the lambda.  Retry with the param's actual column so
+        // cursor_node_at finds the correct lambda_literal.
+        if let Some(doc) = idx.live_doc(uri) {
+            if let Some(param_utf16_col) = param_name_utf16_col(line, brace_pos, param_name) {
+                let precise_pos = CursorPos {
+                    line: ln,
+                    utf16_col: param_utf16_col,
+                };
+                if let Some(result) =
+                    cst_named_lambda_param_type(precise_pos, param_name, &doc, idx, uri)
+                {
+                    return Some(result);
+                }
+            }
+        }
+
         let before_brace = &line[..brace_pos];
         let result = lambda_receiver_type_from_context(before_brace, idx, uri)
             .or_else(|| lambda_receiver_type_named_arg_ml(before_brace, pos, lines, ln, idx, uri));
@@ -161,6 +180,21 @@ pub(crate) fn find_named_lambda_param_type_in_lines(
         }
     }
     None
+}
+
+/// Return the UTF-16 column of `param_name` inside a lambda opening like
+/// `    .let { categoryAge ->`, searching after `brace_pos`.
+/// Returns `None` if the name is not found as a word boundary after the brace.
+fn param_name_utf16_col(line: &str, brace_pos: usize, param_name: &str) -> Option<usize> {
+    let after = line.get(brace_pos..)?;
+    let rel = after.find(param_name)?;
+    // Ensure it's a whole-word match (not a substring of a longer identifier).
+    let end = rel + param_name.len();
+    if after[end..].starts_with(|c: char| c.is_alphanumeric() || c == '_') {
+        return None;
+    }
+    let byte_col = brace_pos + rel;
+    Some(line[..byte_col].encode_utf16().count())
 }
 
 /// Resolve the element/receiver type for an EXPLICITLY NAMED lambda parameter.
