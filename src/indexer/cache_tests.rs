@@ -174,3 +174,190 @@ fn save_and_load_cache_roundtrip() {
         );
     });
 }
+
+// ── Chunked library cache tests ──────────────────────────────────────────────
+
+fn make_dummy_entry(_path: &std::path::Path) -> FileCacheEntry {
+    FileCacheEntry {
+        mtime_secs: 0,
+        file_size: 0,
+        content_hash: 0,
+        file_data: Arc::new(FileData::default()),
+        qualified_keys: vec![],
+    }
+}
+
+fn write_dummy_chunk(dir: &std::path::Path, idx: u32, keys: &[&str]) {
+    let entries: HashMap<String, FileCacheEntry> = keys
+        .iter()
+        .map(|k| (k.to_string(), make_dummy_entry(std::path::Path::new(k))))
+        .collect();
+    let cache = IndexCache {
+        version: CACHE_VERSION,
+        complete_scan: true,
+        entries,
+    };
+    let bytes = bincode::serialize(&cache).unwrap();
+    std::fs::write(library_chunk_path(dir, idx), bytes).unwrap();
+}
+
+fn write_manifest(dir: &std::path::Path, chunk_count: u32) {
+    let manifest = LibraryManifest {
+        version: CACHE_VERSION,
+        chunk_count,
+    };
+    let bytes = bincode::serialize(&manifest).unwrap();
+    std::fs::write(library_manifest_path(dir), bytes).unwrap();
+}
+
+/// Missing manifest → `try_load_library_manifest` returns `None`.
+#[test]
+fn library_manifest_missing_returns_none() {
+    let tmp = tempfile::tempdir().unwrap();
+    with_xdg_cache(tmp.path(), || {
+        let source_paths = vec![tmp.path().to_string_lossy().to_string()];
+        assert!(
+            try_load_library_manifest(&source_paths).is_none(),
+            "should return None when no manifest exists"
+        );
+    });
+}
+
+/// Present manifest + all chunks → round-trip returns correct chunk count.
+#[test]
+fn library_manifest_roundtrip() {
+    let tmp = tempfile::tempdir().unwrap();
+    with_xdg_cache(tmp.path(), || {
+        let source_paths = vec![tmp.path().to_string_lossy().to_string()];
+        let dir = library_chunks_dir(&source_paths);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        write_dummy_chunk(&dir, 0, &["/lib/A.kt"]);
+        write_dummy_chunk(&dir, 1, &["/lib/B.kt"]);
+        write_manifest(&dir, 2);
+
+        let result = try_load_library_manifest(&source_paths);
+        assert!(result.is_some(), "should find manifest");
+        let (returned_dir, chunk_count) = result.unwrap();
+        assert_eq!(returned_dir, dir);
+        assert_eq!(chunk_count, 2);
+    });
+}
+
+/// Loading a missing chunk returns `None` without panicking.
+#[test]
+fn load_library_chunk_missing_returns_none() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    assert!(
+        load_library_chunk(dir, 0).is_none(),
+        "missing chunk should return None"
+    );
+}
+
+/// A chunk with a wrong CACHE_VERSION is rejected.
+#[test]
+fn load_library_chunk_version_mismatch_returns_none() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+
+    // Write a chunk with the wrong version.
+    let cache = IndexCache {
+        version: 0, // intentionally wrong
+        complete_scan: true,
+        entries: HashMap::new(),
+    };
+    let bytes = bincode::serialize(&cache).unwrap();
+    std::fs::write(library_chunk_path(dir, 0), bytes).unwrap();
+
+    assert!(
+        load_library_chunk(dir, 0).is_none(),
+        "version-mismatched chunk should return None"
+    );
+}
+
+/// A corrupt (truncated) chunk file returns `None` without panicking.
+#[test]
+fn load_library_chunk_corrupt_returns_none() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    std::fs::write(library_chunk_path(dir, 0), b"not valid bincode").unwrap();
+    assert!(
+        load_library_chunk(dir, 0).is_none(),
+        "corrupt chunk should return None"
+    );
+}
+
+/// Saving with zero library files produces a manifest with chunk_count=0.
+/// `try_load_library_manifest` returns `Some` with 0 chunks.
+#[test]
+fn save_library_cache_zero_files_writes_empty_manifest() {
+    use dashmap::{DashMap, DashSet};
+    let tmp = tempfile::tempdir().unwrap();
+    with_xdg_cache(tmp.path(), || {
+        let source_paths = vec![tmp.path().to_string_lossy().to_string()];
+        let files: DashMap<String, Arc<crate::types::FileData>> = DashMap::new();
+        let hashes: DashMap<String, u64> = DashMap::new();
+        let library_uris: DashSet<String> = DashSet::new();
+
+        save_library_cache(&source_paths, &files, &hashes, &library_uris);
+
+        // Empty library still writes a valid manifest (chunk_count=0).
+        let result = try_load_library_manifest(&source_paths);
+        assert!(
+            result.is_some(),
+            "manifest expected even for zero-entry library"
+        );
+        let (_, chunk_count) = result.unwrap();
+        assert_eq!(chunk_count, 0, "chunk_count should be 0 for empty library");
+    });
+}
+
+/// Manifest with wrong CACHE_VERSION is rejected.
+#[test]
+fn library_manifest_version_mismatch_returns_none() {
+    let tmp = tempfile::tempdir().unwrap();
+    with_xdg_cache(tmp.path(), || {
+        let source_paths = vec![tmp.path().to_string_lossy().to_string()];
+        let dir = library_chunks_dir(&source_paths);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let manifest = LibraryManifest {
+            version: 0, // wrong version
+            chunk_count: 1,
+        };
+        let bytes = bincode::serialize(&manifest).unwrap();
+        std::fs::write(library_manifest_path(&dir), bytes).unwrap();
+
+        assert!(
+            try_load_library_manifest(&source_paths).is_none(),
+            "version-mismatched manifest should be rejected"
+        );
+    });
+}
+
+/// `library_cache_is_fresh` with an empty first chunk and no second chunk
+/// returns `true` (nothing to invalidate).
+#[test]
+fn library_cache_is_fresh_empty_cache() {
+    let tmp = tempfile::tempdir().unwrap();
+    with_xdg_cache(tmp.path(), || {
+        let source_paths_str = vec![tmp.path().to_string_lossy().to_string()];
+        let dir = library_chunks_dir(&source_paths_str);
+        std::fs::create_dir_all(&dir).unwrap();
+        write_manifest(&dir, 1);
+
+        // Touch the manifest to make it newer than any source directory.
+        let manifest_path = library_manifest_path(&dir);
+        let source_paths: Vec<std::path::PathBuf> = source_paths_str
+            .iter()
+            .map(std::path::PathBuf::from)
+            .collect();
+
+        let fresh = library_cache_is_fresh(&source_paths, &manifest_path, &HashMap::new(), &dir, 1);
+        assert!(
+            fresh,
+            "empty first chunk with nothing to check should be considered fresh"
+        );
+    });
+}

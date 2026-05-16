@@ -542,9 +542,15 @@ impl Indexer {
             &source_paths,
             &manifest_path,
             &first_chunk,
+            &cache_dir,
+            chunk_count,
         ) {
-            // Cache is stale: reload all chunks into a combined HashMap for
-            // per-file hit checking, then proceed with the slow scan.
+            // Cache is stale: load all chunks into a combined HashMap so
+            // scan_source_paths_slow can reuse per-file entries that haven't changed.
+            //
+            // Memory note: this reassembles the full library HashMap (~same peak as
+            // the pre-chunked code).  The stale path is rare in practice — it only
+            // triggers when a library source directory mtime or a sampled file changes.
             let mut combined = first_chunk;
             for idx in 1..chunk_count {
                 if let Some(chunk) = crate::indexer::cache::load_library_chunk(&cache_dir, idx) {
@@ -560,33 +566,45 @@ impl Indexer {
             return;
         }
 
-        // Pre-flight: validate all chunks exist before mutating any index state.
-        for idx in 1..chunk_count {
-            if !crate::indexer::cache::library_chunk_path(&cache_dir, idx).exists() {
-                log::warn!(
-                    "Library cache chunk {idx}/{chunk_count} missing — falling back to slow path"
-                );
-                let scan = self
-                    .scan_source_paths_slow(&source_paths, None, &workspace_root)
-                    .await;
-                if self.workspace_root.generation() == gen {
-                    self.apply_source_path_scan(scan, &raw_paths);
+        // Fast path: load every chunk first to validate all are readable, then
+        // flush in order.  Loading before flushing prevents partial DashMap
+        // mutations when a later chunk is corrupt or version-mismatched.
+        //
+        // Memory note: all N chunks are held simultaneously during flushing
+        // (~total stripped cache size, typically 100–200 MB with field stripping).
+        // Chunks are dropped as they are flushed to reclaim memory promptly.
+        let all_chunks = {
+            let mut chunks = Vec::with_capacity(chunk_count as usize);
+            chunks.push(first_chunk);
+            for idx in 1..chunk_count {
+                match crate::indexer::cache::load_library_chunk(&cache_dir, idx) {
+                    Some(chunk) => chunks.push(chunk),
+                    None => {
+                        log::warn!(
+                            "Library cache chunk {idx}/{chunk_count} failed to load — \
+                             falling back to slow scan"
+                        );
+                        // Invalidate manifest so next startup does a fresh save.
+                        let _ = std::fs::remove_file(crate::indexer::cache::library_manifest_path(
+                            &cache_dir,
+                        ));
+                        let scan = self
+                            .scan_source_paths_slow(&source_paths, None, &workspace_root)
+                            .await;
+                        if self.workspace_root.generation() == gen {
+                            self.apply_source_path_scan(scan, &raw_paths);
+                        }
+                        return;
+                    }
                 }
-                return;
             }
-        }
+            chunks
+        };
 
-        // Fast path: restore one chunk at a time.  Each chunk is dropped before
-        // the next is loaded, keeping the instantaneous working set small.
-        log::debug!(
-            "Library cache fresh: restoring {} chunks without re-scanning",
-            chunk_count
-        );
-        self.restore_library_chunk(first_chunk, &workspace_root);
-        for idx in 1..chunk_count {
-            if let Some(chunk) = crate::indexer::cache::load_library_chunk(&cache_dir, idx) {
-                self.restore_library_chunk(chunk, &workspace_root);
-            }
+        let loaded_chunks = all_chunks.len();
+        log::debug!("Library cache fresh: restoring {loaded_chunks} chunks without re-scanning");
+        for chunk in all_chunks {
+            self.restore_library_chunk(chunk, &workspace_root);
         }
         self.rebuild_bare_name_cache();
         log::debug!(

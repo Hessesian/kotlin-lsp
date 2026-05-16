@@ -326,7 +326,11 @@ pub(super) fn save_cache(
 // previous incomplete write with the same chunk index are harmless because they
 // are overwritten at the start of the next save.
 
-/// Max files per library cache chunk.  2 000 × average ~250 B on-disk ≈ 20 MB/chunk.
+/// Max files per library cache chunk.
+///
+/// Each chunk deserialises to roughly `LIBRARY_CHUNK_SIZE × average_entry_size`.
+/// With fields stripped (no `lines`, no `imports`, no RHS inference data),
+/// average entry size is ~3–5 KB, so 2 000 files ≈ 6–10 MB per chunk.
 const LIBRARY_CHUNK_SIZE: usize = 2000;
 
 /// Tiny commit-point file written last; its presence signals a complete save.
@@ -402,14 +406,22 @@ pub(super) fn load_library_chunk(dir: &Path, idx: u32) -> Option<HashMap<String,
 ///
 /// Two-tier check:
 /// 1. Manifest mtime — catches additions/deletions in source directories (fast, 1 stat per dir).
-/// 2. A random sample of up to 256 entries from the first chunk — catches in-place edits.
+/// 2. A random sample of up to 256 entries drawn from the first chunk AND the last chunk
+///    (if more than one chunk exists) — catches in-place file edits.
 ///
-/// Callers must have already loaded the first chunk for the Tier 2 sample;
-/// passing it here avoids a redundant re-read.
+/// Tier 1 covers the common case (Gradle re-extracts entire source directories).
+/// Tier 2 covers in-place edits: modifying a file updates the file's own mtime but
+/// not the parent directory mtime, so Tier 1 alone would miss it.  Sampling from
+/// both ends of the corpus reduces the probability of missing a changed file.
+///
+/// Callers must have already loaded the first chunk; `cache_dir` and `chunk_count`
+/// are used to optionally load the last chunk for the tail sample.
 pub(super) fn library_cache_is_fresh(
     source_paths: &[PathBuf],
     manifest_path: &Path,
     first_chunk_entries: &HashMap<String, FileCacheEntry>,
+    cache_dir: &Path,
+    chunk_count: u32,
 ) -> bool {
     let cache_mtime = match std::fs::metadata(manifest_path).and_then(|m| m.modified()) {
         Ok(t) => t,
@@ -424,12 +436,31 @@ pub(super) fn library_cache_is_fresh(
     if !dirs_fresh {
         return false;
     }
-    let sample_size = 256_usize.min(first_chunk_entries.len());
+
+    if !sample_entries_fresh(first_chunk_entries, 128) {
+        return false;
+    }
+
+    // Also sample the last chunk if it differs from the first.
+    if chunk_count > 1 {
+        if let Some(last_chunk) = load_library_chunk(cache_dir, chunk_count - 1) {
+            if !sample_entries_fresh(&last_chunk, 128) {
+                return false;
+            }
+        }
+    }
+
+    true
+}
+
+/// Sample up to `limit` entries from `chunk` and verify each file's mtime and size match.
+fn sample_entries_fresh(chunk: &HashMap<String, FileCacheEntry>, limit: usize) -> bool {
+    let sample_size = limit.min(chunk.len());
     if sample_size == 0 {
         return true;
     }
-    let stride = (first_chunk_entries.len() / sample_size).max(1);
-    first_chunk_entries
+    let stride = (chunk.len() / sample_size).max(1);
+    chunk
         .iter()
         .step_by(stride)
         .take(sample_size)
@@ -474,7 +505,10 @@ pub(super) fn save_library_cache(
 
     let entries = collect_library_entries(files, content_hashes, library_uris);
     let total_files = entries.len();
-    let total_bytes = write_library_chunks(&dir, entries);
+    let Some(total_bytes) = write_library_chunks(&dir, entries) else {
+        // At least one chunk failed — manifest is absent, cache is invalid.
+        return;
+    };
     let chunk_count = total_files.div_ceil(LIBRARY_CHUNK_SIZE) as u32;
 
     commit_library_manifest(&manifest_path, chunk_count, total_files, total_bytes, &dir);
@@ -528,6 +562,12 @@ fn collect_library_entries(
 }
 
 /// Drop fields not needed for library symbols at runtime.
+///
+/// `lines` is stripped intentionally: restoring ~25k library files' source text
+/// would add ~300 MB of steady-state heap.  Callers that fall back to
+/// `data.lines` (e.g. `collect_params_from_line` in `infer/sig.rs`) silently
+/// return `None` for library symbols — this is acceptable since `SymbolEntry.params`
+/// and `detail` carry the same information for well-formed library classes.
 fn strip_library_file_data(data: &FileData) -> Arc<FileData> {
     let mut filtered = (*data).clone();
     filtered
@@ -544,8 +584,11 @@ fn strip_library_file_data(data: &FileData) -> Arc<FileData> {
     Arc::new(filtered)
 }
 
-/// Write entries as sequential chunks.  Returns total bytes written.
-fn write_library_chunks(dir: &Path, entries: Vec<(String, FileCacheEntry)>) -> usize {
+/// Write entries as sequential chunks.
+///
+/// Returns `Some(total_bytes)` if all chunks were written successfully.
+/// Returns `None` if any chunk failed; the manifest must NOT be written in that case.
+fn write_library_chunks(dir: &Path, entries: Vec<(String, FileCacheEntry)>) -> Option<usize> {
     let chunk_count = entries.len().div_ceil(LIBRARY_CHUNK_SIZE) as u32;
     let mut total_bytes = 0_usize;
     let mut entries_iter = entries.into_iter();
@@ -564,16 +607,16 @@ fn write_library_chunks(dir: &Path, entries: Vec<(String, FileCacheEntry)>) -> u
                 let chunk_path = library_chunk_path(dir, idx);
                 if let Err(e) = std::fs::write(&chunk_path, &bytes) {
                     log::warn!("Library cache chunk {idx} write failed: {e}");
-                    return total_bytes; // manifest absent → cache invalid on next load
+                    return None; // manifest absent → cache invalid on next load
                 }
             }
             Err(e) => {
                 log::warn!("Library cache chunk {idx} serialize failed: {e}");
-                return total_bytes;
+                return None;
             }
         }
     }
-    total_bytes
+    Some(total_bytes)
 }
 
 /// Write the manifest (commit point).  No manifest → cache invalid.
