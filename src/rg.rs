@@ -879,15 +879,29 @@ fn qualifier_hints_owner(content: &str, name_byte_col: usize, owner_class: &str)
 
 /// Returns `true` if `content` declares `name` specifically (e.g. `fun create()`),
 /// as opposed to a line that merely calls `name` inside a different declaration
-/// (e.g. `fun build() = factory.create()`).
+/// (e.g. `fun build() = factory.create()` or `fun createWidget() = factory.create()`).
+///
+/// Requires a word boundary *after* `name` to avoid matching declarations of
+/// longer identifiers that share a prefix — e.g. `fun createWidget` must not be
+/// treated as a declaration of `create`.
 ///
 /// Used by [`owner_scoped_reference_locations`] to filter out sibling
 /// declarations of the same method name that appear in files which also reference
 /// the outer class.
 pub(crate) fn is_declaration_of(content: &str, name: &str) -> bool {
-    REFERENCE_DECLARATION_KEYWORDS
-        .iter()
-        .any(|kw| content.contains(&format!("{kw}{name}")))
+    REFERENCE_DECLARATION_KEYWORDS.iter().any(|kw| {
+        let prefix = format!("{kw}{name}");
+        if let Some(idx) = content.find(&prefix) {
+            let end = idx + prefix.len();
+            // Word-boundary check: name must not be followed by more identifier chars.
+            content
+                .as_bytes()
+                .get(end)
+                .is_none_or(|&b| !b.is_ascii_alphanumeric() && b != b'_')
+        } else {
+            false
+        }
+    })
 }
 
 /// Run `rg` to find all *usages* of `name` in the project.
