@@ -26,12 +26,13 @@ impl Backend {
     ) -> Result<Option<Vec<Location>>> {
         let uri = &params.text_document_position.text_document.uri;
         let position = params.text_document_position.position;
-        let Some((name, _)) = self.indexer.word_and_qualifier_at(uri, position) else {
+        let Some((name, qualifier)) = self.indexer.word_and_qualifier_at(uri, position) else {
             return Ok(None);
         };
 
-        let locations = crate::features::references::find_references(
+        let locations = crate::features::references::find_references_with_qualifier(
             &name,
+            qualifier.as_deref(),
             uri,
             position.line,
             params.context.include_declaration,

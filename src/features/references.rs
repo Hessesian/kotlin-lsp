@@ -13,14 +13,25 @@ use crate::StrExt;
 
 // ─── Public entry point ───────────────────────────────────────────────────────
 
-pub(crate) async fn find_references(
+/// Finds all references to `name`, optionally scoped by `qualifier`.
+///
+/// When `qualifier` is `Some("ReducerA")` (cursor was on `ReducerA.Factory`),
+/// the qualifier is used directly as the `parent_class` scope, bypassing the
+/// fallible index-lookup that `resolve_scope` uses for unresolved nested types.
+/// This prevents false positives when multiple classes define an inner class
+/// with the same name (e.g. every class defines a `Factory` or `Builder`).
+///
+/// When `qualifier` is `None`, scope is inferred from imports and the index.
+pub(crate) async fn find_references_with_qualifier(
     name: &str,
+    qualifier: Option<&str>,
     uri: &Url,
     line: u32,
     include_decl: bool,
     index: &(impl SymbolIndex + DocumentAccess + ScopeQuery + SearchAccess + Send + Sync),
 ) -> Vec<Location> {
-    let (parent_class, declared_pkg) = resolve_scope(index, uri, line, name);
+    let (parent_class, declared_pkg) =
+        resolve_scope_with_qualifier(index, uri, line, name, qualifier);
     let decl_files = declaration_files_for(index, name, parent_class.as_deref());
 
     let search = ReferenceSearch {
@@ -52,9 +63,38 @@ pub(crate) fn resolve_scope(
     line: u32,
     name: &str,
 ) -> (Option<String>, Option<String>) {
+    resolve_scope_with_qualifier(index, uri, line, name, None)
+}
+
+/// Like [`resolve_scope`] but accepts a dot-qualifier (the segment immediately
+/// preceding `name` at the cursor, e.g. `"ReducerA"` for `ReducerA.Factory`).
+///
+/// An uppercase qualifier is used directly as the `parent_class`, which avoids
+/// the index-lookup fallback that picks an arbitrary definition when multiple
+/// classes define an inner class with the same name.
+pub(crate) fn resolve_scope_with_qualifier(
+    index: &(impl SymbolIndex + ScopeQuery),
+    uri: &Url,
+    line: u32,
+    name: &str,
+    qualifier: Option<&str>,
+) -> (Option<String>, Option<String>) {
     if !name.starts_with_uppercase() {
         return (None, None);
     }
+
+    // Fast path: an uppercase dot-qualifier (e.g. "ReducerA" in "ReducerA.Factory")
+    // unambiguously identifies the parent class — use it directly rather than
+    // guessing from the index (which is non-deterministic when multiple classes
+    // share the same inner-class name).
+    if let Some(q) = qualifier.filter(|q| q.starts_with_uppercase()) {
+        let parent_pkg = index
+            .declared_package_of(q)
+            .map(|p| format!("{p}.{q}"))
+            .or_else(|| index.declared_package_of(name));
+        return (Some(q.to_string()), parent_pkg);
+    }
+
     let on_decl = index.is_declared_in(uri, name)
         && index
             .definition_locations(name)

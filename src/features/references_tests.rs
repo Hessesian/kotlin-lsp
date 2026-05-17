@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use tower_lsp::lsp_types::Url;
 
-use crate::features::references::find_references;
+use crate::features::references::find_references_with_qualifier;
 use crate::indexer::Indexer;
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
@@ -65,7 +65,7 @@ async fn find_references_cross_file_with_workspace_root() {
     idx.workspace_root.set(root.to_path_buf());
     idx.index_content(&foo_uri, foo_src);
 
-    let locs = find_references("MyClass", &foo_uri, 1, true, &*idx).await;
+    let locs = find_references_with_qualifier("MyClass", None, &foo_uri, 1, true, &*idx).await;
     let files = hit_files(&locs);
 
     assert!(
@@ -100,7 +100,7 @@ async fn find_references_cross_file_without_workspace_root() {
     let idx = Arc::new(Indexer::new());
     idx.index_content(&foo_uri, foo_src);
 
-    let locs = find_references("MyClass", &foo_uri, 1, true, &*idx).await;
+    let locs = find_references_with_qualifier("MyClass", None, &foo_uri, 1, true, &*idx).await;
     let files = hit_files(&locs);
 
     assert!(
@@ -145,7 +145,7 @@ async fn find_references_package_scoped_cross_file() {
 
     // line=1: declaration of MyClass → resolve_scope returns (None, Some("com.example"))
     // → package_scoped_reference_locations is used
-    let locs = find_references("MyClass", &foo_uri, 1, true, &*idx).await;
+    let locs = find_references_with_qualifier("MyClass", None, &foo_uri, 1, true, &*idx).await;
     let files = hit_files(&locs);
 
     assert!(
@@ -208,7 +208,7 @@ async fn actor_scan_then_find_references_cross_file() {
         .expect("workspace scan must complete within 10s")
         .unwrap();
 
-    let locs = find_references("MyClass", &foo_uri, 1, true, &*indexer).await;
+    let locs = find_references_with_qualifier("MyClass", None, &foo_uri, 1, true, &*indexer).await;
     let files = hit_files(&locs);
 
     assert!(
@@ -245,13 +245,118 @@ async fn find_references_stale_workspace_root_does_not_suppress_results() {
     idx.workspace_root.set(other_project.path().to_path_buf());
     idx.index_content(&foo_uri, foo_src);
 
-    let locs = find_references("MyClass", &foo_uri, 1, true, &*idx).await;
+    let locs = find_references_with_qualifier("MyClass", None, &foo_uri, 1, true, &*idx).await;
     let files = hit_files(&locs);
 
     assert!(
         files.iter().any(|f| f == "Bar.kt"),
         "find_references must search the file's actual project when workspace_root \
          points to a different directory; got files: {:?}",
+        files
+    );
+}
+
+/// **Regression: nested Factory scoped by qualifier**
+///
+/// Two classes `ReducerA` and `ReducerB` both have a nested `Factory` interface.
+/// Class `ViewModel` injects `ReducerA.Factory` in its constructor.
+/// The file does NOT import `ReducerA.Factory` directly — only `ReducerA`.
+///
+/// `find_references("Factory", …, qualifier=Some("ReducerA"))` must return
+/// only usages of `ReducerA.Factory`, NOT every use of `ReducerB.Factory`
+/// or bare `Factory` in other files.
+///
+/// Without the fix the qualifier is discarded, `declared_parent_class_of`
+/// picks an arbitrary `Factory` definition from the index (non-deterministic
+/// when multiple classes define `Factory`), and results bleed across the
+/// whole project.
+#[tokio::test]
+async fn find_references_nested_factory_scoped_by_qualifier() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    // Two different reducers each with a nested Factory.
+    let reducer_a = "\
+package com.example.a
+class ReducerA {
+    interface Factory {
+        fun create(): ReducerA
+    }
+}
+";
+    let reducer_b = "\
+package com.example.b
+class ReducerB {
+    interface Factory {
+        fun create(): ReducerB
+    }
+}
+";
+    // ViewModel uses ReducerA.Factory in its constructor.
+    // No direct `import com.example.a.ReducerA.Factory` — only `import com.example.a.ReducerA`.
+    let viewmodel = "\
+package com.example
+import com.example.a.ReducerA
+import com.example.b.ReducerB
+class ViewModel(
+    private val reducerAFactory: ReducerA.Factory,
+    private val reducerBFactory: ReducerB.Factory,
+)
+";
+    // A second caller that uses ReducerB.Factory only.
+    let other_caller = "\
+package com.example
+import com.example.b.ReducerB
+class OtherCaller(val f: ReducerB.Factory)
+";
+
+    write(root, "ReducerA.kt", reducer_a);
+    write(root, "ReducerB.kt", reducer_b);
+    let (_, vm_uri) = write(root, "ViewModel.kt", viewmodel);
+    write(root, "OtherCaller.kt", other_caller);
+
+    // Write workspace.json to prevent scanning ~/.kotlin-lsp/sources.
+    std::fs::write(root.join("workspace.json"), r#"{"sourcePaths":[]}"#).unwrap();
+
+    let idx = Arc::new(Indexer::new());
+    idx.workspace_root.set(root.to_path_buf());
+    idx.index_content(&vm_uri, viewmodel);
+
+    // Index the companion files so `declared_parent_class_of` has both entries.
+    let (_, ra_uri) = (
+        root.join("ReducerA.kt"),
+        Url::from_file_path(root.join("ReducerA.kt")).unwrap(),
+    );
+    let (_, rb_uri) = (
+        root.join("ReducerB.kt"),
+        Url::from_file_path(root.join("ReducerB.kt")).unwrap(),
+    );
+    let (_, oc_uri) = (
+        root.join("OtherCaller.kt"),
+        Url::from_file_path(root.join("OtherCaller.kt")).unwrap(),
+    );
+    idx.index_content(&ra_uri, reducer_a);
+    idx.index_content(&rb_uri, reducer_b);
+    idx.index_content(&oc_uri, other_caller);
+
+    // Cursor is on `Factory` in `private val reducerAFactory: ReducerA.Factory`
+    // (line 4, after the dot — qualifier = "ReducerA").
+    // Line 4 (0-based) = `    private val reducerAFactory: ReducerA.Factory,`
+    let locs =
+        find_references_with_qualifier("Factory", Some("ReducerA"), &vm_uri, 4, false, &*idx).await;
+
+    let files = hit_files(&locs);
+
+    // Must find the ViewModel itself (it uses ReducerA.Factory).
+    assert!(
+        files.iter().any(|f| f == "ViewModel.kt"),
+        "ReducerA.Factory usage in ViewModel.kt must be found; got: {:?}",
+        files
+    );
+    // Must NOT bleed into OtherCaller (uses ReducerB.Factory, different class).
+    assert!(
+        !files.iter().any(|f| f == "OtherCaller.kt"),
+        "OtherCaller.kt uses ReducerB.Factory and must NOT appear; got: {:?}",
         files
     );
 }
