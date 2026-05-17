@@ -62,7 +62,9 @@ pub(crate) async fn find_references_with_qualifier(
 ///
 /// Uppercase symbols are narrowed via import analysis or declaration-site lookup
 /// so that rg can restrict to the specific class variant.
-/// Lowercase symbols return `(None, None)` — bare-word search via rg.
+/// Lowercase symbols at the **declaration site** return `(None, Some(package))` —
+/// rg is scoped to same-package files.  Off-declaration-site lowercase names
+/// return `(None, None)` — codebase-wide bare-word search via rg.
 pub(crate) fn resolve_scope(
     index: &(impl SymbolIndex + ScopeQuery),
     uri: &Url,

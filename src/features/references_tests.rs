@@ -1,9 +1,9 @@
-//! End-to-end tests for [`find_references`].
+//! End-to-end tests for [`find_references_with_qualifier`].
 //!
 //! These tests write real `.kt` files to a temp directory so that `rg`
-//! can search them, then drive the full `find_references → rg_scope_for_path
-//! → rg_find_references` pipeline against an [`Indexer`] whose
-//! `workspace_root` is (or isn't) configured.
+//! can search them, then drive the full `find_references_with_qualifier →
+//! rg_scope_for_path → rg_find_references` pipeline against an [`Indexer`]
+//! whose `workspace_root` is (or isn't) configured.
 //!
 //! The scenarios targeted by these tests:
 //!

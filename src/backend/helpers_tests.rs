@@ -178,12 +178,11 @@ fn make_indexer_with(src: &str, uri: &tower_lsp::lsp_types::Url) -> crate::index
     idx
 }
 
-/// Lowercase member names must always yield (None, None) regardless of context.
-/// This prevents the caller from injecting a parent_class derived from this/it
 /// Lowercase names at the declaration site should get package scope (not parent_class).
 /// This narrows rg search to same-package files rather than the whole codebase,
 /// without wrongly attempting to qualify with a class name (which would produce
 /// `ClassName.methodName` patterns that almost never appear in real Kotlin code).
+/// Off-declaration-site lowercase names still return `(None, None)`.
 #[test]
 fn scope_lowercase_decl_gets_package_scope() {
     let uri = tower_lsp::lsp_types::Url::parse("file:///t.kt").unwrap();

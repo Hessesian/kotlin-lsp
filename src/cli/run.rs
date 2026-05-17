@@ -575,9 +575,7 @@ fn run_tree(file: &Path) {
 async fn run_diagnose(root: &Path, file: &Path, _verbose: bool) {
     use crate::features::call_arg_diagnostics::call_arg_diagnostics;
     use crate::features::fill_when::when_diagnostics;
-    use crate::indexer::live_tree::{lang_for_path, LiveDoc};
     use tower_lsp::lsp_types::Url;
-    use tree_sitter::Parser;
 
     eprintln!("Indexing {}...", root.display());
     let index = build_index(root, true).await;
@@ -603,25 +601,19 @@ async fn run_diagnose(root: &Path, file: &Path, _verbose: bool) {
     });
 
     let path_str = abs_path.to_string_lossy();
-    let lang = lang_for_path(&path_str).unwrap_or_else(|| {
+    // Validate the extension before spending time reading the file.
+    if crate::indexer::live_tree::lang_for_path(&path_str).is_none() {
         eprintln!("error: unsupported file extension");
         std::process::exit(1);
-    });
+    }
 
-    let mut parser = Parser::new();
-    parser.set_language(&lang).unwrap();
-    let tree = parser.parse(source.as_bytes(), None).unwrap_or_else(|| {
+    // store_live_tree parses the file once; retrieve the result via live_doc()
+    // so call_arg_diagnostics can use the same tree without a second parse.
+    index.store_live_tree(&uri, &source);
+    let doc = index.live_doc(&uri).unwrap_or_else(|| {
         eprintln!("error: failed to parse file");
         std::process::exit(1);
     });
-
-    // Register the file as a live doc so when_diagnostics can read the CST.
-    index.store_live_tree(&uri, &source);
-
-    let doc = LiveDoc {
-        bytes: source.into_bytes(),
-        tree,
-    };
 
     let mut diagnostics = call_arg_diagnostics(&index, &uri, &doc);
     diagnostics.extend(when_diagnostics(&index, &uri));
