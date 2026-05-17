@@ -757,14 +757,28 @@ class Dashboard(private val reducerAFactory: ReducerA.Factory) {
     fun build() = reducerAFactory.create()
 }
 ";
+    // A file that imports ReducerA (so it appears in owner-class candidate files)
+    // AND declares its own unrelated `fun create()` — must NOT appear as an FP.
+    let reducer_c = "\
+package com.example.a
+import com.example.a.ReducerA
+class ReducerC {
+    interface Factory {
+        fun create(): ReducerC
+    }
+    fun useA(f: ReducerA.Factory) = Unit
+}
+";
 
     let ra_uri = Url::from_file_path(root.join("ReducerA.kt")).unwrap();
     let rb_uri = Url::from_file_path(root.join("ReducerB.kt")).unwrap();
     let dash_uri = Url::from_file_path(root.join("Dashboard.kt")).unwrap();
+    let rc_uri = Url::from_file_path(root.join("ReducerC.kt")).unwrap();
 
     write(root, "ReducerA.kt", reducer_a);
     write(root, "ReducerB.kt", reducer_b);
     write(root, "Dashboard.kt", dashboard);
+    write(root, "ReducerC.kt", reducer_c);
     std::fs::write(root.join("workspace.json"), r#"{"sourcePaths":[]}"#).unwrap();
 
     let idx = Arc::new(Indexer::new());
@@ -772,6 +786,7 @@ class Dashboard(private val reducerAFactory: ReducerA.Factory) {
     idx.index_content(&ra_uri, reducer_a);
     idx.index_content(&rb_uri, reducer_b);
     idx.index_content(&dash_uri, dashboard);
+    idx.index_content(&rc_uri, reducer_c);
 
     // Cursor on `create` in `fun create(): ReducerA` — line 3 (0-based).
     let locs = find_references_with_qualifier("create", None, &ra_uri, 3, false, &*idx).await;
@@ -784,10 +799,16 @@ class Dashboard(private val reducerAFactory: ReducerA.Factory) {
         "Dashboard.kt (parent-package caller) must appear; got: {:?}",
         files
     );
-    // Sibling factory's `fun create` declaration must NOT appear.
+    // Sibling factory in same package — must NOT appear.
     assert!(
         !files.iter().any(|f| f == "ReducerB.kt"),
-        "ReducerB.kt (sibling factory) must NOT appear; got: {:?}",
+        "ReducerB.kt (sibling factory, same pkg) must NOT appear; got: {:?}",
+        files
+    );
+    // File that imports ReducerA but declares its own create() — must NOT appear.
+    assert!(
+        !files.iter().any(|f| f == "ReducerC.kt"),
+        "ReducerC.kt (imports ReducerA but declares own create) must NOT appear; got: {:?}",
         files
     );
 }

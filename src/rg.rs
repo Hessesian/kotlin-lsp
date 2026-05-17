@@ -802,12 +802,35 @@ fn owner_scoped_reference_locations(
 
     // Bare search for the method name in candidate files; qualifier filter is
     // intentionally skipped since callers use variable names, not class names.
+    //
+    // Declaration lines (e.g. `fun create()` in a sibling factory that happens to
+    // import the outer class) are dropped across ALL files, not just `from_uri`,
+    // because we are looking for call sites only.
     rg_word_in_files(&safe_name, &candidate_files)
         .into_iter()
         .filter_map(|(loc, content)| {
-            (!should_skip_reference(&loc, &content, request)).then_some(loc)
+            if should_skip_reference(&loc, &content, request) {
+                return None;
+            }
+            if !request.include_decl && is_declaration_of(&content, request.name) {
+                return None;
+            }
+            Some(loc)
         })
         .collect()
+}
+
+/// Returns `true` if `content` declares `name` specifically (e.g. `fun create()`),
+/// as opposed to a line that merely calls `name` inside a different declaration
+/// (e.g. `fun build() = factory.create()`).
+///
+/// Used by [`owner_scoped_reference_locations`] to filter out sibling
+/// declarations of the same method name that appear in files which also reference
+/// the outer class.
+fn is_declaration_of(content: &str, name: &str) -> bool {
+    REFERENCE_DECLARATION_KEYWORDS
+        .iter()
+        .any(|kw| content.contains(&format!("{kw}{name}")))
 }
 
 /// Run `rg` to find all *usages* of `name` in the project.
