@@ -80,7 +80,12 @@ impl FileChangeHandler {
     fn spawn_live_tree_update(&self, uri: Url, text: String) {
         let indexer = Arc::clone(&self.indexer);
         drop(tokio::task::spawn_blocking(move || {
-            indexer.store_live_tree(&uri, &text);
+            // Guard: if the file was closed or deleted while we were blocked,
+            // live_lines will have been removed. Re-inserting the live tree
+            // after that would leave stale data in the index.
+            if indexer.live_lines.contains_key(uri.as_str()) {
+                indexer.store_live_tree(&uri, &text);
+            }
         }));
     }
 
@@ -110,6 +115,12 @@ impl FileChangeHandler {
             let diagnostics_uri = uri.clone();
             let diagnostics_text = text.clone();
             let result = tokio::task::spawn_blocking(move || {
+                // Guard: if the file was closed or deleted before the debounce
+                // fired, skip re-indexing to avoid reinserting stale content.
+                if !indexer.live_lines.contains_key(uri.as_str()) {
+                    drop(permit);
+                    return None;
+                }
                 let data = indexer.index_content(&uri, &text);
                 drop(permit);
                 data

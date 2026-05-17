@@ -14,6 +14,13 @@ use super::hover::hover_at;
 use super::output::{print_results, CliResult};
 use super::tokens::{dump_tree, print_token_rows, token_rows, token_rows_phases};
 
+/// Severity label strings used when printing diagnostics in text mode.
+const SEVERITY_ERROR: &str = "error";
+const SEVERITY_WARNING: &str = "warning";
+const SEVERITY_INFO: &str = "info";
+const SEVERITY_HINT: &str = "hint";
+const SEVERITY_DIAG: &str = "diag";
+
 // ── Root resolution ───────────────────────────────────────────────────────────
 
 /// Resolve the workspace root: explicit --root, then nearest .git ancestor, then cwd.
@@ -574,9 +581,8 @@ fn run_tree(file: &Path) {
 
 async fn run_diagnose(root: &Path, file: &Path, _verbose: bool) {
     use crate::features::call_arg_diagnostics::call_arg_diagnostics;
-    use crate::indexer::live_tree::{lang_for_path, LiveDoc};
+    use crate::features::fill_when::when_diagnostics;
     use tower_lsp::lsp_types::Url;
-    use tree_sitter::Parser;
 
     eprintln!("Indexing {}...", root.display());
     let index = build_index(root, true).await;
@@ -602,31 +608,40 @@ async fn run_diagnose(root: &Path, file: &Path, _verbose: bool) {
     });
 
     let path_str = abs_path.to_string_lossy();
-    let lang = lang_for_path(&path_str).unwrap_or_else(|| {
+    // Validate the extension now that the path is resolved.
+    if crate::indexer::live_tree::lang_for_path(&path_str).is_none() {
         eprintln!("error: unsupported file extension");
         std::process::exit(1);
-    });
+    }
 
-    let mut parser = Parser::new();
-    parser.set_language(&lang).unwrap();
-    let tree = parser.parse(source.as_bytes(), None).unwrap_or_else(|| {
+    // store_live_tree parses the file once; retrieve the result via live_doc()
+    // so call_arg_diagnostics can use the same tree without a second parse.
+    index.store_live_tree(&uri, &source);
+    let doc = index.live_doc(&uri).unwrap_or_else(|| {
         eprintln!("error: failed to parse file");
         std::process::exit(1);
     });
 
-    let doc = LiveDoc {
-        bytes: source.into_bytes(),
-        tree,
-    };
+    let mut diagnostics = call_arg_diagnostics(&index, &uri, &doc);
+    diagnostics.extend(when_diagnostics(&index, &uri));
 
-    let diagnostics = call_arg_diagnostics(&index, &uri, &doc);
     if diagnostics.is_empty() {
         println!("No diagnostics.");
     } else {
         for diag in &diagnostics {
             let line = diag.range.start.line + 1;
             let col = diag.range.start.character + 1;
-            println!("{}:{}: {}", line, col, diag.message);
+            let severity = diag
+                .severity
+                .map(|s| match s {
+                    tower_lsp::lsp_types::DiagnosticSeverity::ERROR => SEVERITY_ERROR,
+                    tower_lsp::lsp_types::DiagnosticSeverity::WARNING => SEVERITY_WARNING,
+                    tower_lsp::lsp_types::DiagnosticSeverity::INFORMATION => SEVERITY_INFO,
+                    tower_lsp::lsp_types::DiagnosticSeverity::HINT => SEVERITY_HINT,
+                    _ => SEVERITY_DIAG,
+                })
+                .unwrap_or(SEVERITY_DIAG);
+            println!("{}:{} [{}]: {}", line, col, severity, diag.message);
         }
     }
 }

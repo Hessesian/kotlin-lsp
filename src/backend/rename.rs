@@ -15,12 +15,15 @@ impl Backend {
         params: TextDocumentPositionParams,
     ) -> Result<Option<PrepareRenameResponse>> {
         let uri = &params.text_document.uri;
+        // Same async did_open race as references — file may not be indexed yet.
+        self.indexer.ensure_indexed(uri);
         crate::features::rename::prepare_rename_impl(&self.indexer, uri, params.position).await
     }
 
     pub(super) async fn rename_impl(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
         let position = params.text_document_position.position;
         let uri = &params.text_document_position.text_document.uri;
+        self.indexer.ensure_indexed(uri);
         crate::features::rename::rename_impl(&self.indexer, uri, position, &params.new_name).await
     }
 }

@@ -601,6 +601,32 @@ fn enclosing_class_cst_nested() {
 }
 
 #[test]
+fn enclosing_class_cst_annotated_nested_interface() {
+    // Regression: `@AssistedFactory` on line 2 pushes the interface_declaration
+    // start row to 2 while the cursor is on line 3 (`interface Factory`).
+    // Before the fix, enclosing_class_at returned Some("Factory") because
+    // start_row(2) < cursor_row(3) was satisfied by Factory's own node.
+    // After the fix, it correctly skips Factory (cursor not inside its body)
+    // and returns the outer class.
+    let src = "\
+class Outer {
+    class Inner {
+        @SomeAnnotation
+        interface Factory {
+            fun create(): Inner
+        }
+    }
+}
+";
+    let (u, idx) = indexed_with_live("/Outer.kt", src);
+    // Line 3 = `        interface Factory {` — on the declaration header.
+    // enclosing_class_at must return "Inner", not "Factory".
+    assert_eq!(idx.enclosing_class_at(&u, 3), Some("Inner".into()));
+    // Line 4 = `            fun create(): Inner` — inside Factory's body.
+    assert_eq!(idx.enclosing_class_at(&u, 4), Some("Factory".into()));
+}
+
+#[test]
 fn lambda_params_at_col_cst_collects_named() {
     let src = "val x = items.map { item ->\n    item.id\n}";
     let (u, idx) = indexed_with_live("/t.kt", src);

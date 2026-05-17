@@ -534,10 +534,8 @@ use crate::features::fill_when::when_diagnostics;
 #[test]
 fn diagnostics_reports_missing_enum_branches() {
     let src = "\
-fun test(c: Color) {
-    when (c) {
-        Color.RED -> println(\"red\")
-    }
+fun test(c: Color): String = when (c) {
+    Color.RED -> \"red\"
 }
 ";
     let idx = setup(&[("/Color.kt", ENUM_SRC), ("/main.kt", src)]);
@@ -594,10 +592,8 @@ fun test(c: Color) {
 #[test]
 fn diagnostics_boolean_missing() {
     let src = "\
-fun test(flag: Boolean) {
-    when(flag) {
-        true -> println(\"yes\")
-    }
+fun test(flag: Boolean): String = when(flag) {
+    true -> \"yes\"
 }
 ";
     let idx = setup(&[("/main.kt", src)]);
@@ -701,9 +697,7 @@ sealed class Event {
     let src = "\
 package main
 import b.Event
-fun test(e: Event) {
-    when (e) {
-    }
+fun test(e: Event): String = when (e) {
 }
 ";
     let idx = setup(&[
@@ -752,9 +746,7 @@ sealed class Event {
 ";
     let src = "\
 package b
-fun test(e: Event) {
-    when (e) {
-    }
+fun test(e: Event): String = when (e) {
 }
 ";
     let idx = setup(&[
@@ -779,5 +771,27 @@ fun test(e: Event) {
         !diags[0].message.contains("A"),
         "should NOT report a.Event members; got: {}",
         diags[0].message
+    );
+}
+
+#[test]
+fn diagnostics_no_report_for_statement_form_when() {
+    // Statement-form `when` (parent = statements block) is not exhaustive
+    // in Kotlin — only expression-form is.  Must not emit a diagnostic even
+    // when branches are missing.
+    let src = "\
+fun test(c: Color) {
+    when (c) {
+        Color.RED -> println(\"red\")
+    }
+}
+";
+    let idx = setup(&[("/Color.kt", ENUM_SRC), ("/main.kt", src)]);
+    let u = uri("/main.kt");
+    let diags = when_diagnostics(&idx, &u);
+    assert!(
+        diags.is_empty(),
+        "statement-form when must not produce diagnostics; got: {:?}",
+        diags
     );
 }

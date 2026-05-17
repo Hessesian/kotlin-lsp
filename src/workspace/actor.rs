@@ -89,8 +89,9 @@ impl<R: ProgressReporter + 'static> Actor<R> {
     pub(crate) async fn run(mut self) {
         let mut was_ready = false;
         loop {
+            // No `biased;` — both arms compete fairly so that a flood of
+            // FileChanged events cannot starve scan completions indefinitely.
             tokio::select! {
-                biased;
                 maybe_event = self.rx.recv() => {
                     let Some(event) = maybe_event else { break };
                     self.handle_event(event).await;
@@ -201,7 +202,10 @@ impl<R: ProgressReporter + 'static> Actor<R> {
             .await;
     }
 
-    async fn handle_file_deleted(&self, uri: Url) {
+    async fn handle_file_deleted(&mut self, uri: Url) {
+        // Cancel any pending debounce task — same as close, so the spawn_blocking
+        // inside it has the best chance of being aborted before it re-indexes the file.
+        self.file_change_handler.cancel_pending_reindex(&uri);
         self.document_handler.handle_file_deleted(uri).await;
     }
 }

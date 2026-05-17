@@ -147,22 +147,33 @@ fn collect_when_nodes(
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     if node.kind() == KIND_WHEN_EXPR {
-        if let Some(analysis) = analyze_when(indexer, uri, node, source) {
-            let missing_names: Vec<&str> =
-                analysis.missing.iter().map(|m| m.name.as_str()).collect();
-            let message = format!("'when' is missing branches: {}", missing_names.join(", "));
-            let start = node.start_position();
-            let keyword_end_col = start.column + 4; // "when" is 4 chars
-            diagnostics.push(Diagnostic {
-                range: Range::new(
-                    Position::new(start.row as u32, start.column as u32),
-                    Position::new(start.row as u32, keyword_end_col as u32),
-                ),
-                severity: Some(DiagnosticSeverity::WARNING),
-                source: Some("kotlin-lsp".into()),
-                message,
-                ..Default::default()
-            });
+        // Statement-form `when` (parent is `statements`) is not required to be
+        // exhaustive in Kotlin — only expression-form is.  Skip to avoid FPs.
+        //
+        // Known limitation: a `when` that is the last expression in a lambda body
+        // (e.g. `run { when(c) { ... } }`) also has `statements` as its parent
+        // but IS expression-form.  Detecting that case requires knowing whether
+        // the enclosing block's value is used, which needs type inference beyond
+        // what tree-sitter provides.  Such cases produce false negatives.
+        let is_statement = node.parent().is_some_and(|p| p.kind() == KIND_STATEMENTS);
+        if !is_statement {
+            if let Some(analysis) = analyze_when(indexer, uri, node, source) {
+                let missing_names: Vec<&str> =
+                    analysis.missing.iter().map(|m| m.name.as_str()).collect();
+                let message = format!("'when' is missing branches: {}", missing_names.join(", "));
+                let start = node.start_position();
+                let keyword_end_col = start.column + 4; // "when" is 4 chars
+                diagnostics.push(Diagnostic {
+                    range: Range::new(
+                        Position::new(start.row as u32, start.column as u32),
+                        Position::new(start.row as u32, keyword_end_col as u32),
+                    ),
+                    severity: Some(DiagnosticSeverity::WARNING),
+                    source: Some("kotlin-lsp".into()),
+                    message,
+                    ..Default::default()
+                });
+            }
         }
     }
 
