@@ -803,18 +803,28 @@ fn owner_scoped_reference_locations(
     // Bare search for the method name in candidate files; qualifier filter is
     // intentionally skipped since callers use variable names, not class names.
     //
-    // Declaration lines of the same method name in OTHER files (e.g. `fun create()`
-    // in a sibling factory, or in a same-named class in a different feature) are
-    // always dropped, regardless of `include_decl`.  In `from_uri` itself the
-    // `should_skip_reference` logic already handles the `include_decl` flag correctly.
+    // Filtering rules:
+    // - `from_uri`: the declaring file. Only the declaration line is relevant;
+    //   all other `create()` calls in it are to OTHER injected factory instances
+    //   (the declaring file doesn't call its own Factory.create()).
+    // - Other files: skip declaration lines of the same method name (e.g. sibling
+    //   Factory.create() in a file that also imports the outer class).
     rg_word_in_files(&safe_name, &candidate_files)
         .into_iter()
         .filter_map(|(loc, content)| {
             if should_skip_reference(&loc, &content, request) {
                 return None;
             }
-            let is_other_file = loc.uri.as_str() != request.from_uri.as_str();
-            if is_other_file && is_declaration_of(&content, request.name) {
+            let is_from_uri = loc.uri.as_str() == request.from_uri.as_str();
+            if is_from_uri {
+                // In the declaring file, only the declaration itself is relevant.
+                return if request.include_decl && is_declaration_of(&content, request.name) {
+                    Some(loc)
+                } else {
+                    None
+                };
+            }
+            if is_declaration_of(&content, request.name) {
                 return None;
             }
             Some(loc)
