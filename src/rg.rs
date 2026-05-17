@@ -622,41 +622,52 @@ fn scope_decl_files<'a>(
     std::borrow::Cow::Owned(filtered)
 }
 
-/// Returns `true` when `content` contains `.<name>` preceded by a qualifier word
-/// that is NOT `expected_parent`.  A bare `name` (no qualifier) is always allowed.
+/// Returns `true` if `c` is a valid identifier or qualifier-chain character.
 ///
-/// This prevents sibling qualified names from bleeding into results: when searching
-/// for `ReducerA.Factory`, a line containing `ReducerC.Factory` must be excluded even
-/// though it also contains the bare word `Factory`.
-pub(crate) fn has_wrong_qualifier(content: &str, name: &str, expected_parent: &str) -> bool {
-    let dotname = format!(".{name}");
-    let mut offset = 0;
-    while let Some(rel) = content[offset..].find(&dotname) {
-        let match_start = offset + rel;
-        let name_end = match_start + dotname.len();
-        // Confirm word boundary after the name (not a prefix of a longer identifier).
-        let after_ch = content[name_end..].chars().next();
-        if after_ch.is_some_and(|c| c.is_alphanumeric() || c == '_') {
-            offset = name_end;
-            continue;
-        }
-        // Extract the full qualifier chain immediately before the dot
-        // (e.g. "Outer.Inner" for "Outer.Inner.Factory", "ReducerA" for "ReducerA.Factory").
-        // We walk back over [A-Za-z0-9_.] so multi-segment chains are captured whole.
-        let qualifier: String = content[..match_start]
+/// Used when walking backward over text to extract the dot-qualified chain
+/// preceding a name (e.g. `"ReducerA"` in `ReducerA.Factory` or
+/// `"Outer.Inner"` in `Outer.Inner.Factory`).
+fn is_qualifier_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '.'
+}
+
+/// Returns `true` if the `.<name>` occurrence whose name starts at **byte** offset
+/// `name_byte_col` has a qualifier that doesn't match `expected_parent`.
+///
+/// This inspects only the single occurrence at `name_byte_col`, preventing false
+/// positives on lines that contain multiple qualified names
+/// (e.g. `ReducerA.Factory, ReducerC.Factory` — the hit for `ReducerA.Factory`
+/// at its specific column should not be dropped because `ReducerC.Factory` appears
+/// later on the same line).
+///
+/// `name_byte_col` is the 0-based byte offset of the start of `name` within
+/// `content` (matching the `character` field in [`Location`] as returned by rg).
+pub(crate) fn has_wrong_qualifier_at_col(
+    content: &str,
+    name: &str,
+    expected_parent: &str,
+    name_byte_col: u32,
+) -> bool {
+    let col = name_byte_col as usize;
+    // Verify the occurrence is actually `name` at this position (guards against
+    // byte-offset mismatches with multi-byte content).
+    if content.get(col..col + name.len()).is_none_or(|s| s != name) {
+        return false;
+    }
+    // A dot immediately before the name signals a qualified reference.
+    if col > 0 && content.as_bytes().get(col - 1) == Some(&b'.') {
+        let qualifier: String = content[..col - 1]
             .chars()
             .rev()
-            .take_while(|&c| c.is_alphanumeric() || c == '_' || c == '.')
+            .take_while(|&c| is_qualifier_char(c))
             .collect::<String>()
             .chars()
             .rev()
-            .collect::<String>();
+            .collect();
         let qualifier = qualifier.trim_start_matches('.');
-        if !qualifier.is_empty() && qualifier != expected_parent {
-            return true;
-        }
-        offset = name_end;
+        return !qualifier.is_empty() && qualifier != expected_parent;
     }
+    // No dot immediately before: bare name usage at this position — always allowed.
     false
 }
 
@@ -681,7 +692,12 @@ fn append_unique_reference_hits(
             continue;
         }
         if let Some(parent) = request.parent_class {
-            if has_wrong_qualifier(&content, request.name, parent) {
+            if has_wrong_qualifier_at_col(
+                &content,
+                request.name,
+                parent,
+                location.range.start.character,
+            ) {
                 continue;
             }
         }

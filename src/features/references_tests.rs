@@ -622,17 +622,19 @@ fun buildReducer(f: ReducerA.Factory): ReducerA = f.create()
     );
 }
 
-/// **Regression: multi-segment qualifier is normalised to immediate parent**
+/// **Regression: multi-segment qualifier is matched against the full extracted chain**
 ///
 /// `word_and_qualifier_at` returns the full dot-chain, so for cursor on
 /// `Factory` in `Outer.Inner.Factory` the qualifier is `"Outer.Inner"`, not
-/// just `"Inner"`.  The old code stored the full chain as `parent_class` and
-/// passed it to `has_wrong_qualifier`; that function extracts the *single*
-/// token immediately before the dot in each line, so `"Inner" != "Outer.Inner"`
-/// caused every valid reference to be dropped (false negatives).
+/// just `"Inner"`.  The old (whole-line) qualifier check extracted only the
+/// *single* token immediately before the dot in each line, so
+/// `"Inner" != "Outer.Inner"` caused every valid reference to be dropped (false
+/// negatives).
 ///
-/// The fix: `resolve_scope_with_qualifier` takes `.split('.').next_back()` to
-/// normalise `"Outer.Inner"` → `"Inner"` before storing `parent_class`.
+/// The fix: `has_wrong_qualifier_at_col` walks backward over `[A-Za-z0-9_.]`
+/// to extract the full dot-chain from the specific column of each hit, so
+/// `"Outer.Inner" == "Outer.Inner"` matches correctly and valid references are
+/// preserved.
 #[tokio::test]
 async fn find_references_multi_segment_qualifier_normalised() {
     let dir = tempfile::tempdir().unwrap();

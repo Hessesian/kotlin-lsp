@@ -127,8 +127,8 @@ pub(crate) fn resolve_scope_with_qualifier(
     //
     // `word_and_qualifier_at` returns the full dot-chain (e.g. "Outer.Inner" for
     // "Outer.Inner.Factory").  We preserve the full chain as `parent_class` so
-    // `has_wrong_qualifier` can match it against the full extracted chain on each
-    // line, rather than just the immediate token.
+    // `has_wrong_qualifier_at_col` can match it against the full extracted chain on each
+    // hit, rather than just the immediate token.
     if let Some(q) = qualifier.filter(|q| q.starts_with_uppercase()) {
         let parent_pkg = index
             .declared_package_of(q)
@@ -247,12 +247,25 @@ fn add_current_file_locations(
         if has_reference_line(locations, uri, line_number) {
             continue;
         }
-        if let Some(parent) = parent_class {
-            if crate::rg::has_wrong_qualifier(line, name, parent) {
+        // Check qualifier per-occurrence so that a line containing both a valid
+        // and an invalid qualified reference (e.g. `ReducerA.Factory, ReducerC.Factory`)
+        // keeps the valid hit instead of dropping the whole line.
+        for loc in line_reference_locations(uri, name, line_number, line) {
+            if has_reference_start(locations, &loc) {
                 continue;
             }
+            if let Some(parent) = parent_class {
+                if crate::rg::has_wrong_qualifier_at_col(
+                    line,
+                    name,
+                    parent,
+                    loc.range.start.character,
+                ) {
+                    continue;
+                }
+            }
+            locations.push(loc);
         }
-        append_line_reference_locations(uri, name, line_number, line, locations);
     }
 }
 
@@ -260,20 +273,6 @@ fn has_reference_line(locations: &[Location], uri: &Url, line_number: u32) -> bo
     locations
         .iter()
         .any(|loc| loc.uri == *uri && loc.range.start.line == line_number)
-}
-
-fn append_line_reference_locations(
-    uri: &Url,
-    name: &str,
-    line_number: u32,
-    line: &str,
-    locations: &mut Vec<Location>,
-) {
-    for loc in line_reference_locations(uri, name, line_number, line) {
-        if !has_reference_start(locations, &loc) {
-            locations.push(loc);
-        }
-    }
 }
 
 fn line_reference_locations(uri: &Url, name: &str, line_number: u32, line: &str) -> Vec<Location> {

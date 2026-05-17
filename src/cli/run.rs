@@ -14,6 +14,13 @@ use super::hover::hover_at;
 use super::output::{print_results, CliResult};
 use super::tokens::{dump_tree, print_token_rows, token_rows, token_rows_phases};
 
+/// Severity label strings used when printing diagnostics in text mode.
+const SEVERITY_ERROR: &str = "error";
+const SEVERITY_WARNING: &str = "warning";
+const SEVERITY_INFO: &str = "info";
+const SEVERITY_HINT: &str = "hint";
+const SEVERITY_DIAG: &str = "diag";
+
 // ── Root resolution ───────────────────────────────────────────────────────────
 
 /// Resolve the workspace root: explicit --root, then nearest .git ancestor, then cwd.
@@ -601,7 +608,7 @@ async fn run_diagnose(root: &Path, file: &Path, _verbose: bool) {
     });
 
     let path_str = abs_path.to_string_lossy();
-    // Validate the extension before spending time reading the file.
+    // Validate the extension now that the path is resolved.
     if crate::indexer::live_tree::lang_for_path(&path_str).is_none() {
         eprintln!("error: unsupported file extension");
         std::process::exit(1);
@@ -627,13 +634,13 @@ async fn run_diagnose(root: &Path, file: &Path, _verbose: bool) {
             let severity = diag
                 .severity
                 .map(|s| match s {
-                    tower_lsp::lsp_types::DiagnosticSeverity::ERROR => "error",
-                    tower_lsp::lsp_types::DiagnosticSeverity::WARNING => "warning",
-                    tower_lsp::lsp_types::DiagnosticSeverity::INFORMATION => "info",
-                    tower_lsp::lsp_types::DiagnosticSeverity::HINT => "hint",
-                    _ => "diag",
+                    tower_lsp::lsp_types::DiagnosticSeverity::ERROR => SEVERITY_ERROR,
+                    tower_lsp::lsp_types::DiagnosticSeverity::WARNING => SEVERITY_WARNING,
+                    tower_lsp::lsp_types::DiagnosticSeverity::INFORMATION => SEVERITY_INFO,
+                    tower_lsp::lsp_types::DiagnosticSeverity::HINT => SEVERITY_HINT,
+                    _ => SEVERITY_DIAG,
                 })
-                .unwrap_or("diag");
+                .unwrap_or(SEVERITY_DIAG);
             println!("{}:{} [{}]: {}", line, col, severity, diag.message);
         }
     }

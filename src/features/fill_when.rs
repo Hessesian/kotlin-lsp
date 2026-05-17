@@ -149,6 +149,12 @@ fn collect_when_nodes(
     if node.kind() == KIND_WHEN_EXPR {
         // Statement-form `when` (parent is `statements`) is not required to be
         // exhaustive in Kotlin — only expression-form is.  Skip to avoid FPs.
+        //
+        // Known limitation: a `when` that is the last expression in a lambda body
+        // (e.g. `run { when(c) { ... } }`) also has `statements` as its parent
+        // but IS expression-form.  Detecting that case requires knowing whether
+        // the enclosing block's value is used, which needs type inference beyond
+        // what tree-sitter provides.  Such cases produce false negatives.
         let is_statement = node.parent().is_some_and(|p| p.kind() == KIND_STATEMENTS);
         if !is_statement {
             if let Some(analysis) = analyze_when(indexer, uri, node, source) {
