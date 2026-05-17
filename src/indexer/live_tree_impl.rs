@@ -33,12 +33,15 @@ impl Indexer {
     /// receives `did_open` asynchronously so the live tree may not exist yet
     /// when a navigation request arrives.  Content is taken from `live_lines`
     /// (if present), the indexed file, or disk (cold-start fallback); the
-    /// result is stored into `live_trees` so later calls in the same request
-    /// are free.
+    /// result is stored into `live_trees` **only when the file is currently open**
+    /// (i.e. `live_lines` is present) so that `live_trees` does not accumulate
+    /// parse trees for files that were never opened by the editor.
     pub(crate) fn live_doc_or_parse(&self, uri: &Url) -> Option<Arc<LiveDoc>> {
         if let Some(doc) = self.live_doc(uri) {
             return Some(doc);
         }
+
+        let is_open = self.live_lines.contains_key(uri.as_str());
 
         let content: String = if let Some(ll) = self.live_lines.get(uri.as_str()) {
             ll.join("\n")
@@ -53,7 +56,9 @@ impl Indexer {
         let lang = lang_for_path(uri.path())?;
         let doc = parse_live(&content, lang)?;
         let doc = Arc::new(doc);
-        self.live_trees.insert(uri.to_string(), Arc::clone(&doc));
+        if is_open {
+            self.live_trees.insert(uri.to_string(), Arc::clone(&doc));
+        }
         Some(doc)
     }
 

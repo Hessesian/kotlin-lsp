@@ -272,6 +272,11 @@ fn add_current_file_locations(
             if has_reference_start(locations, &loc) {
                 continue;
             }
+            // Respect include_decl: if the caller asked to exclude the declaration,
+            // skip lines that declare this name (mirrors the rg path behaviour).
+            if !include_decl && crate::rg::is_declaration_of(line, name) {
+                continue;
+            }
             if let Some(parent) = parent_class {
                 if crate::rg::has_wrong_qualifier_at_col(
                     line,
