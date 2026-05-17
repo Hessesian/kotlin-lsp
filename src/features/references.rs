@@ -45,7 +45,13 @@ pub(crate) async fn find_references_with_qualifier(
 
     let mut locations = rg_locations(&search, index).await;
     locations.retain(|loc| !index.is_library_uri(&loc.uri));
-    add_current_file_locations(index, uri, name, &mut locations);
+    add_current_file_locations(
+        index,
+        uri,
+        name,
+        search.parent_class.as_deref(),
+        &mut locations,
+    );
 
     locations
 }
@@ -79,8 +85,19 @@ pub(crate) fn resolve_scope_with_qualifier(
     name: &str,
     qualifier: Option<&str>,
 ) -> (Option<String>, Option<String>) {
+    // Lowercase names: only scope if we're on the declaration — restrict to the
+    // declaring file's package so the bare-word search doesn't scan the whole codebase.
     if !name.starts_with_uppercase() {
-        return (None, None);
+        let on_decl = index.is_declared_in(uri, name)
+            && index
+                .definition_locations(name)
+                .iter()
+                .any(|l| l.uri == *uri && l.range.start.line == line);
+        return if on_decl {
+            (None, index.package_of(uri))
+        } else {
+            (None, None)
+        };
     }
 
     // Fast path: an uppercase dot-qualifier (e.g. "ReducerA" in "ReducerA.Factory")
@@ -174,6 +191,7 @@ fn add_current_file_locations(
     index: &impl DocumentAccess,
     uri: &Url,
     name: &str,
+    parent_class: Option<&str>,
     locations: &mut Vec<Location>,
 ) {
     let Some(lines) = index.mem_lines_for(uri.as_str()) else {
@@ -183,6 +201,11 @@ fn add_current_file_locations(
         let line_number = line_idx as u32;
         if has_reference_line(locations, uri, line_number) {
             continue;
+        }
+        if let Some(parent) = parent_class {
+            if crate::rg::has_wrong_qualifier(line, name, parent) {
+                continue;
+            }
         }
         append_line_reference_locations(uri, name, line_number, line, locations);
     }

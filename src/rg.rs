@@ -607,6 +607,37 @@ fn scope_decl_files<'a>(
     std::borrow::Cow::Owned(filtered)
 }
 
+/// Returns `true` when `content` contains `.<name>` preceded by a qualifier word
+/// that is NOT `expected_parent`.  A bare `name` (no qualifier) is always allowed.
+///
+/// This prevents sibling qualified names from bleeding into results: when searching
+/// for `ReducerA.Factory`, a line containing `ReducerC.Factory` must be excluded even
+/// though it also contains the bare word `Factory`.
+pub(crate) fn has_wrong_qualifier(content: &str, name: &str, expected_parent: &str) -> bool {
+    let dotname = format!(".{name}");
+    let mut offset = 0;
+    while let Some(rel) = content[offset..].find(&dotname) {
+        let match_start = offset + rel;
+        let name_end = match_start + dotname.len();
+        // Confirm word boundary after the name (not a prefix of a longer identifier).
+        let after_ch = content[name_end..].chars().next();
+        if after_ch.is_some_and(|c| c.is_alphanumeric() || c == '_') {
+            offset = name_end;
+            continue;
+        }
+        // Extract the qualifier word immediately before the dot.
+        let qualifier = content[..match_start]
+            .rsplit(|c: char| !c.is_alphanumeric() && c != '_')
+            .next()
+            .unwrap_or("");
+        if !qualifier.is_empty() && qualifier != expected_parent {
+            return true;
+        }
+        offset = name_end;
+    }
+    false
+}
+
 fn append_unique_reference_hits(
     locations: &mut Vec<Location>,
     hits: Vec<(Location, String)>,
@@ -626,6 +657,11 @@ fn append_unique_reference_hits(
     for (location, content) in hits {
         if should_skip_reference(&location, &content, request) {
             continue;
+        }
+        if let Some(parent) = request.parent_class {
+            if has_wrong_qualifier(&content, request.name, parent) {
+                continue;
+            }
         }
 
         let key = (

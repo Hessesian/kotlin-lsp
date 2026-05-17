@@ -460,3 +460,164 @@ class OtherCaller(val f: ReducerB.Factory)
         files
     );
 }
+
+/// **Regression: sibling qualifier bleed**
+///
+/// When a single file (`ViewModel.kt`) has BOTH `ReducerA.Factory` AND `ReducerC.Factory`
+/// as constructor parameters, searching for references of `ReducerA.Factory` must not
+/// include the line that has `ReducerC.Factory`.
+///
+/// Root cause: the bare-word step in `parent_scoped_reference_locations` searches for
+/// `Factory` word-boundary in candidate files without checking whether a specific hit
+/// has a *different* qualifier on the same line.
+#[tokio::test]
+async fn find_references_sibling_qualifier_does_not_bleed() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    let reducer_a = "\
+package com.example.a
+class ReducerA {
+    interface Factory {
+        fun create(): ReducerA
+    }
+}
+";
+    let reducer_b = "\
+package com.example.b
+class ReducerB {
+    interface Factory {
+        fun create(): ReducerB
+    }
+}
+";
+    let reducer_c = "\
+package com.example.c
+class ReducerC {
+    interface Factory {
+        fun create(): ReducerC
+    }
+}
+";
+    // ViewModel has BOTH ReducerA.Factory AND ReducerC.Factory as params.
+    let viewmodel = "\
+package com.example
+import com.example.a.ReducerA
+import com.example.b.ReducerB
+import com.example.c.ReducerC
+class ViewModel(
+    private val reducerAFactory: ReducerA.Factory,
+    private val reducerBFactory: ReducerB.Factory,
+    private val reducerCFactory: ReducerC.Factory,
+)
+";
+
+    write(root, "ReducerA.kt", reducer_a);
+    write(root, "ReducerB.kt", reducer_b);
+    write(root, "ReducerC.kt", reducer_c);
+    let (_, vm_uri) = write(root, "ViewModel.kt", viewmodel);
+    std::fs::write(root.join("workspace.json"), r#"{"sourcePaths":[]}"#).unwrap();
+
+    let idx = Arc::new(Indexer::new());
+    idx.workspace_root.set(root.to_path_buf());
+    let ra_uri = Url::from_file_path(root.join("ReducerA.kt")).unwrap();
+    let rb_uri = Url::from_file_path(root.join("ReducerB.kt")).unwrap();
+    let rc_uri = Url::from_file_path(root.join("ReducerC.kt")).unwrap();
+    idx.index_content(&ra_uri, reducer_a);
+    idx.index_content(&rb_uri, reducer_b);
+    idx.index_content(&rc_uri, reducer_c);
+    idx.index_content(&vm_uri, viewmodel);
+
+    // Search refs of ReducerA.Factory (qualifier = "ReducerA").
+    // Line 5 = `    private val reducerAFactory: ReducerA.Factory,` (0-based)
+    let locs =
+        find_references_with_qualifier("Factory", Some("ReducerA"), &vm_uri, 5, false, &*idx).await;
+
+    let lines: Vec<u32> = locs
+        .iter()
+        .filter(|l| l.uri == vm_uri)
+        .map(|l| l.range.start.line)
+        .collect();
+
+    // Line 5 (ReducerA.Factory) must appear; lines 6 and 7 (ReducerB/C.Factory) must not.
+    assert!(
+        lines.contains(&5),
+        "ReducerA.Factory line (5) must be found; got lines: {:?}",
+        lines
+    );
+    assert!(
+        !lines.contains(&7),
+        "ReducerC.Factory line (7) must NOT appear in ReducerA.Factory search; got lines: {:?}",
+        lines
+    );
+}
+
+/// **Regression: lowercase method names at declaration site are scoped to package**
+///
+/// `fun create()` declared inside a nested `Factory` interface was previously
+/// treated as "no scope" (lowercase early-return) and fell through to a
+/// codebase-wide rg search, returning every file with `create` in the entire
+/// workspace.
+///
+/// The fix: when cursor is at the declaration site (`on_decl=true`) of a lowercase
+/// name, use the declaring file's package as the search scope instead of None.
+#[tokio::test]
+async fn find_references_lowercase_method_scoped_to_package_on_decl() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    let reducer_a = "\
+package com.example.a
+class ReducerA {
+    interface Factory {
+        fun create(): ReducerA
+    }
+}
+";
+    // A totally unrelated file in a *different* package that also has `fun create`.
+    let unrelated = "\
+package com.unrelated
+class Unrelated {
+    fun create(): Unrelated = Unrelated()
+}
+";
+    // Same-package caller that calls reducer factory.
+    let caller = "\
+package com.example.a
+import com.example.a.ReducerA
+fun buildReducer(f: ReducerA.Factory): ReducerA = f.create()
+";
+
+    let ra_uri = Url::from_file_path(root.join("ReducerA.kt")).unwrap();
+    let unrelated_uri = Url::from_file_path(root.join("Unrelated.kt")).unwrap();
+    let caller_uri = Url::from_file_path(root.join("Caller.kt")).unwrap();
+
+    write(root, "ReducerA.kt", reducer_a);
+    write(root, "Unrelated.kt", unrelated);
+    write(root, "Caller.kt", caller);
+    std::fs::write(root.join("workspace.json"), r#"{"sourcePaths":[]}"#).unwrap();
+
+    let idx = Arc::new(Indexer::new());
+    idx.workspace_root.set(root.to_path_buf());
+    idx.index_content(&ra_uri, reducer_a);
+    idx.index_content(&unrelated_uri, unrelated);
+    idx.index_content(&caller_uri, caller);
+
+    // Cursor on `create` in `fun create(): ReducerA` — line 3 (0-based).
+    let locs = find_references_with_qualifier("create", None, &ra_uri, 3, false, &*idx).await;
+
+    let files = hit_files(&locs);
+
+    // Same-package caller must be found (calls f.create()).
+    assert!(
+        files.iter().any(|f| f == "Caller.kt"),
+        "Caller.kt (same package) must appear; got: {:?}",
+        files
+    );
+    // Unrelated.kt in a different package must NOT be returned.
+    assert!(
+        !files.iter().any(|f| f == "Unrelated.kt"),
+        "Unrelated.kt (different package) must NOT appear; got: {:?}",
+        files
+    );
+}
