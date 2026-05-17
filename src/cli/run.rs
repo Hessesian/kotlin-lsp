@@ -574,6 +574,7 @@ fn run_tree(file: &Path) {
 
 async fn run_diagnose(root: &Path, file: &Path, _verbose: bool) {
     use crate::features::call_arg_diagnostics::call_arg_diagnostics;
+    use crate::features::fill_when::when_diagnostics;
     use crate::indexer::live_tree::{lang_for_path, LiveDoc};
     use tower_lsp::lsp_types::Url;
     use tree_sitter::Parser;
@@ -614,19 +615,34 @@ async fn run_diagnose(root: &Path, file: &Path, _verbose: bool) {
         std::process::exit(1);
     });
 
+    // Register the file as a live doc so when_diagnostics can read the CST.
+    index.store_live_tree(&uri, &source);
+
     let doc = LiveDoc {
         bytes: source.into_bytes(),
         tree,
     };
 
-    let diagnostics = call_arg_diagnostics(&index, &uri, &doc);
+    let mut diagnostics = call_arg_diagnostics(&index, &uri, &doc);
+    diagnostics.extend(when_diagnostics(&index, &uri));
+
     if diagnostics.is_empty() {
         println!("No diagnostics.");
     } else {
         for diag in &diagnostics {
             let line = diag.range.start.line + 1;
             let col = diag.range.start.character + 1;
-            println!("{}:{}: {}", line, col, diag.message);
+            let severity = diag
+                .severity
+                .map(|s| match s {
+                    tower_lsp::lsp_types::DiagnosticSeverity::ERROR => "error",
+                    tower_lsp::lsp_types::DiagnosticSeverity::WARNING => "warning",
+                    tower_lsp::lsp_types::DiagnosticSeverity::INFORMATION => "info",
+                    tower_lsp::lsp_types::DiagnosticSeverity::HINT => "hint",
+                    _ => "diag",
+                })
+                .unwrap_or("diag");
+            println!("{}:{} [{}]: {}", line, col, severity, diag.message);
         }
     }
 }
