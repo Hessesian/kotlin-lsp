@@ -22,6 +22,11 @@ use crate::StrExt;
 /// with the same name (e.g. every class defines a `Factory` or `Builder`).
 ///
 /// When `qualifier` is `None`, scope is inferred from imports and the index.
+/// For lowercase methods at their declaration site that are declared inside a
+/// doubly-nested class (e.g. `create` inside `Factory` inside `RegularReducer`),
+/// the outer class is used for file discovery so callers that reference the outer
+/// class via a variable name (`factory.create()`) are found while sibling
+/// factories in the same package are excluded.
 pub(crate) async fn find_references_with_qualifier(
     name: &str,
     qualifier: Option<&str>,
@@ -32,6 +37,18 @@ pub(crate) async fn find_references_with_qualifier(
 ) -> Vec<Location> {
     let (parent_class, declared_pkg) =
         resolve_scope_with_qualifier(index, uri, line, name, qualifier);
+
+    // For lowercase methods at their declaration site, check if they are declared
+    // inside a doubly-nested class (e.g. `create` inside `Factory` inside `Reducer`).
+    // `declared_pkg.is_some()` is the on_decl proxy for lowercase names: resolve_scope
+    // returns (None, Some(pkg)) on_decl and (None, None) off-decl for lowercase names.
+    let owner_class =
+        if !name.starts_with_uppercase() && declared_pkg.is_some() && qualifier.is_none() {
+            outer_class_for_decl_site(index, uri, line)
+        } else {
+            None
+        };
+
     let decl_files = declaration_files_for(index, name, parent_class.as_deref());
 
     let search = ReferenceSearch {
@@ -41,6 +58,7 @@ pub(crate) async fn find_references_with_qualifier(
         parent_class,
         declared_pkg,
         decl_files,
+        owner_class,
     };
 
     let mut locations = rg_locations(&search, index).await;
@@ -152,6 +170,22 @@ fn declaration_files_for(
         .collect()
 }
 
+/// For a lowercase method at its declaration site, returns the outer-outer class
+/// if the method is inside a doubly-nested class
+/// (e.g. `create` inside `Factory` inside `RegularReducer` → `"RegularReducer"`).
+///
+/// Returns `None` if the method has only one level of nesting or none.
+/// Uses `enclosing_class_at` (line-specific CST walk) for the direct parent, then
+/// `declared_parent_class_of` (preferred-URI-first index lookup) for the outer parent.
+fn outer_class_for_decl_site(
+    index: &(impl SymbolIndex + ScopeQuery),
+    uri: &Url,
+    line: u32,
+) -> Option<String> {
+    let direct_parent = index.enclosing_class_at(uri, line)?;
+    index.declared_parent_class_of(&direct_parent, uri)
+}
+
 fn reference_matches_parent_class(
     index: &impl SymbolIndex,
     location: &Location,
@@ -186,6 +220,10 @@ async fn rg_locations(
             &request.decl_files,
         )
         .with_source_paths(&source_roots);
+        let rg_req = match request.owner_class.as_deref() {
+            Some(owner) => rg_req.with_owner_class(owner),
+            None => rg_req,
+        };
         crate::rg::rg_find_references(&rg_req, matcher.as_deref())
     })
     .await
@@ -278,6 +316,8 @@ struct ReferenceSearch {
     parent_class: Option<String>,
     declared_pkg: Option<String>,
     decl_files: Vec<String>,
+    /// Outer-outer class for owner-scoped file discovery; see [`outer_class_for_decl_site`].
+    owner_class: Option<String>,
 }
 
 #[cfg(test)]

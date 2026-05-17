@@ -708,3 +708,84 @@ class Caller(val f: Outer.Inner.Factory)
         files
     );
 }
+
+/// **Regression: `create()` inside nested Factory finds callers in parent package**
+///
+/// `fun create()` declared inside `ReducerA.Factory` must:
+///   1. Return callers in a *parent* package that use variable-name syntax
+///      (`reducerAFactory.create()`), and
+///   2. NOT return `fun create` declarations in sibling factories that live in
+///      the same package as `ReducerA`.
+///
+/// Root cause: package-scoped search (patterns matching `package com.example.a`)
+/// finds all sibling factories in the same package → FPs, while callers in
+/// `com.example` (parent) are outside the package scope → FNs.
+///
+/// Fix: `outer_class_for_decl_site` walks the CST chain to find that `create`
+/// is inside `Factory` inside `ReducerA`; the outer class `ReducerA` is used for
+/// file discovery so only files that reference `ReducerA` are searched.
+#[tokio::test]
+async fn find_references_nested_factory_create_finds_callers_not_siblings() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    // ReducerA in package a with a nested Factory.
+    let reducer_a = "\
+package com.example.a
+class ReducerA {
+    interface Factory {
+        fun create(): ReducerA
+    }
+}
+";
+    // Sibling in same package — also has Factory.create (must NOT appear).
+    let reducer_b = "\
+package com.example.a
+class ReducerB {
+    interface Factory {
+        fun create(): ReducerB
+    }
+}
+";
+    // Caller in PARENT package that references ReducerA.Factory via a variable.
+    let dashboard = "\
+package com.example
+import com.example.a.ReducerA
+class Dashboard(private val reducerAFactory: ReducerA.Factory) {
+    fun build() = reducerAFactory.create()
+}
+";
+
+    let ra_uri = Url::from_file_path(root.join("ReducerA.kt")).unwrap();
+    let rb_uri = Url::from_file_path(root.join("ReducerB.kt")).unwrap();
+    let dash_uri = Url::from_file_path(root.join("Dashboard.kt")).unwrap();
+
+    write(root, "ReducerA.kt", reducer_a);
+    write(root, "ReducerB.kt", reducer_b);
+    write(root, "Dashboard.kt", dashboard);
+    std::fs::write(root.join("workspace.json"), r#"{"sourcePaths":[]}"#).unwrap();
+
+    let idx = Arc::new(Indexer::new());
+    idx.workspace_root.set(root.to_path_buf());
+    idx.index_content(&ra_uri, reducer_a);
+    idx.index_content(&rb_uri, reducer_b);
+    idx.index_content(&dash_uri, dashboard);
+
+    // Cursor on `create` in `fun create(): ReducerA` — line 3 (0-based).
+    let locs = find_references_with_qualifier("create", None, &ra_uri, 3, false, &*idx).await;
+
+    let files = hit_files(&locs);
+
+    // Caller in parent package must be found.
+    assert!(
+        files.iter().any(|f| f == "Dashboard.kt"),
+        "Dashboard.kt (parent-package caller) must appear; got: {:?}",
+        files
+    );
+    // Sibling factory's `fun create` declaration must NOT appear.
+    assert!(
+        !files.iter().any(|f| f == "ReducerB.kt"),
+        "ReducerB.kt (sibling factory) must NOT appear; got: {:?}",
+        files
+    );
+}

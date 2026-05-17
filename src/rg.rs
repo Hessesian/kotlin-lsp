@@ -253,6 +253,15 @@ pub(crate) struct RgSearchRequest<'a> {
     name: &'a str,
     parent_class: Option<&'a str>,
     declared_pkg: Option<&'a str>,
+    /// Outer-outer class for a lowercase method declared inside a doubly-nested
+    /// class (e.g. `create` inside `Factory` inside `RegularReducer`).
+    ///
+    /// When set, file discovery searches for files that mention this class (via
+    /// `\bOwnerClass\b`) rather than using import or package patterns.  This
+    /// ensures callers that reference the outer class via a variable name
+    /// (`factory.create()`) are found, while sibling factories in the same
+    /// package are excluded because they do not reference the outer class.
+    owner_class: Option<&'a str>,
     search_root: std::borrow::Cow<'a, Path>,
     /// Source-root directories from workspace config; when non-empty, rg is
     /// scoped to these directories instead of the full workspace root.
@@ -474,6 +483,7 @@ impl<'a> RgSearchRequest<'a> {
             name,
             parent_class,
             declared_pkg,
+            owner_class: None,
             search_root,
             source_paths: &[],
             include_decl,
@@ -484,6 +494,11 @@ impl<'a> RgSearchRequest<'a> {
 
     pub(crate) fn with_source_paths(mut self, source_paths: &'a [String]) -> Self {
         self.source_paths = source_paths;
+        self
+    }
+
+    pub(crate) fn with_owner_class(mut self, owner_class: &'a str) -> Self {
+        self.owner_class = Some(owner_class);
         self
     }
 }
@@ -737,6 +752,48 @@ fn package_scoped_reference_locations(
         .collect()
 }
 
+/// Find references to a lowercase method declared inside a doubly-nested class
+/// (e.g. `create` inside `Factory` inside `RegularReducer`).
+///
+/// Callers use variable-name syntax (`factory.create()`) rather than qualified
+/// syntax (`RegularReducer.create()`), so standard parent-class scoping misses
+/// them.  Instead we find candidate files by searching for any mention of the
+/// outer class, then do a bare-word search for the method name within those
+/// files.  Sibling factories in the same package are naturally excluded because
+/// they do not reference the outer class.
+fn owner_scoped_reference_locations(
+    request: &RgSearchRequest<'_>,
+    matcher: Option<&IgnoreMatcher>,
+) -> Vec<Location> {
+    let owner_class = request.owner_class.expect("owner_class must be set");
+    let safe_owner = regex_escape(owner_class);
+    let safe_name = regex_escape(request.name);
+
+    // Find files that mention the outer class (as a type, import, or constructor param).
+    let owner_pattern = format!(r"\b{safe_owner}\b");
+    let candidate_files = filter_candidate_files(
+        rg_files_with_matches_scoped(
+            &owner_pattern,
+            request.source_paths,
+            request.search_root.as_ref(),
+        ),
+        matcher,
+    );
+
+    if candidate_files.is_empty() {
+        return vec![];
+    }
+
+    // Bare search for the method name in candidate files; qualifier filter is
+    // intentionally skipped since callers use variable names, not class names.
+    rg_word_in_files(&safe_name, &candidate_files)
+        .into_iter()
+        .filter_map(|(loc, content)| {
+            (!should_skip_reference(&loc, &content, request)).then_some(loc)
+        })
+        .collect()
+}
+
 /// Run `rg` to find all *usages* of `name` in the project.
 ///
 /// Uses `--word-regexp` so only whole-word matches are returned.
@@ -750,13 +807,17 @@ pub(crate) fn rg_find_references(
     request: &RgSearchRequest<'_>,
     matcher: Option<&IgnoreMatcher>,
 ) -> Vec<Location> {
-    let patterns = build_rg_patterns(request);
-    let result = if request.parent_class.is_some() {
-        parent_scoped_reference_locations(request, &patterns, matcher)
-    } else if request.declared_pkg.is_some() {
-        package_scoped_reference_locations(request, &patterns, matcher)
+    let result = if request.owner_class.is_some() {
+        owner_scoped_reference_locations(request, matcher)
     } else {
-        run_rg_search(request, &patterns)
+        let patterns = build_rg_patterns(request);
+        if request.parent_class.is_some() {
+            parent_scoped_reference_locations(request, &patterns, matcher)
+        } else if request.declared_pkg.is_some() {
+            package_scoped_reference_locations(request, &patterns, matcher)
+        } else {
+            run_rg_search(request, &patterns)
+        }
     };
 
     if let Some(matcher) = matcher {
