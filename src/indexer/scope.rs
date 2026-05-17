@@ -13,7 +13,8 @@ use super::{
 use crate::indexer::live_tree::utf16_col_to_byte;
 use crate::indexer::NodeExt;
 use crate::queries::{
-    KIND_CLASS_DECL, KIND_COMPANION_OBJ, KIND_INTERFACE_DECL, KIND_LAMBDA_LIT, KIND_OBJECT_DECL,
+    KIND_CLASS_BODY, KIND_CLASS_DECL, KIND_COMPANION_OBJ, KIND_INTERFACE_DECL, KIND_LAMBDA_LIT,
+    KIND_OBJECT_DECL,
 };
 use crate::types::CursorPos;
 use crate::StrExt;
@@ -422,8 +423,17 @@ impl Indexer {
                         | KIND_COMPANION_OBJ
                             if cur.start_position().row < row =>
                         {
-                            if let Some(name) = cur.extract_type_name(&doc.bytes) {
-                                return Some(name);
+                            // Guard: cursor must be inside the class body, not on the
+                            // declaration header (annotations can push the start row
+                            // of the declaration *above* the `class/interface` keyword
+                            // line, so `start_position().row < row` is insufficient).
+                            let body_inside = cur.children(&mut cur.walk()).any(|c| {
+                                c.kind() == KIND_CLASS_BODY && c.start_position().row < row
+                            });
+                            if body_inside {
+                                if let Some(name) = cur.extract_type_name(&doc.bytes) {
+                                    return Some(name);
+                                }
                             }
                         }
                         _ => {}

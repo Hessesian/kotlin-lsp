@@ -262,14 +262,23 @@ async fn find_references_stale_workspace_root_does_not_suppress_results() {
 /// the source text), `on_decl=true` and `enclosing_class_at` must return the
 /// parent class (`ReducerA`).  Without this the scope falls back to bare-word
 /// search and bleeds across all reducers.
+///
+/// Also covers the annotation case: `@AssistedFactory\n interface Factory {` —
+/// the annotation pushes the tree-sitter `interface_declaration` start row above
+/// the `interface` keyword line, tricking `enclosing_class_at` into returning
+/// `"Factory"` itself (start_row < cursor_row satisfied by Factory's own node).
+/// The fix checks that the cursor is inside the class *body*, not the header.
 #[tokio::test]
 async fn find_references_nested_factory_from_declaration_site() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
 
+    // @AssistedFactory is on line 2 (0-based), `interface Factory` on line 3.
+    // This triggers the annotation-offset bug in enclosing_class_at.
     let reducer_a = "\
 package com.example.a
 class ReducerA {
+    @SomeAnnotation
     interface Factory {
         fun create(): ReducerA
     }
@@ -328,9 +337,10 @@ class OtherCaller(val f: ReducerB.Factory)
     idx.index_content(&vm_uri, viewmodel);
     idx.index_content(&oc_uri, other_caller);
 
-    // Cursor on `Factory` in `    interface Factory {` — line 2 (0-based) in ReducerA.kt.
-    // No dot-qualifier in the source → qualifier=None, on_decl=true.
-    let locs = find_references_with_qualifier("Factory", None, &ra_uri, 2, false, &*idx).await;
+    // Cursor on `Factory` in `    interface Factory {` — line 3 (0-based) in ReducerA.kt
+    // (line 2 is `@SomeAnnotation`).  No dot-qualifier → qualifier=None, on_decl=true.
+    // enclosing_class_at must return "ReducerA", not "Factory".
+    let locs = find_references_with_qualifier("Factory", None, &ra_uri, 3, false, &*idx).await;
 
     let files = hit_files(&locs);
 
