@@ -809,6 +809,10 @@ fn owner_scoped_reference_locations(
     //   (the declaring file doesn't call its own Factory.create()).
     // - Other files: skip declaration lines of the same method name (e.g. sibling
     //   Factory.create() in a file that also imports the outer class).
+    //   Additionally apply a naming-convention heuristic: if there is an explicit
+    //   dot-qualifier before the name (e.g. `overviewMapperFactory.create`) and
+    //   that qualifier does not contain the outer class name, the call is almost
+    //   certainly to a different factory.
     rg_word_in_files(&safe_name, &candidate_files)
         .into_iter()
         .filter_map(|(loc, content)| {
@@ -827,9 +831,50 @@ fn owner_scoped_reference_locations(
             if is_declaration_of(&content, request.name) {
                 return None;
             }
+            if !qualifier_hints_owner(&content, loc.range.start.character as usize, owner_class) {
+                return None;
+            }
             Some(loc)
         })
         .collect()
+}
+
+/// Naming-convention heuristic: returns `false` when the dot-qualifier before
+/// `name_byte_col` in `content` is a non-empty identifier that does NOT contain
+/// `owner_class` as a substring (case-insensitive).
+///
+/// Example: for `overviewMapperFactory.create(...)` with owner `DashboardProductsReducer`,
+/// the qualifier is `overviewMapperFactory` which does NOT contain `dashboardproductsreducer`
+/// → returns `false` (skip — different factory).
+///
+/// Returns `true` (keep) for: bare names (no qualifier), or when the qualifier
+/// contains the owner name (e.g. `dashboardProductsReducerFactory`).
+fn qualifier_hints_owner(content: &str, name_byte_col: usize, owner_class: &str) -> bool {
+    let col = name_byte_col;
+    if col == 0 || content.as_bytes().get(col - 1) != Some(&b'.') {
+        return true; // bare name — no qualifier to check
+    }
+    // Walk back over alphanumeric/underscore to extract the immediate qualifier token.
+    let qualifier: String = content[..col - 1]
+        .chars()
+        .rev()
+        .take_while(|&c| c.is_alphanumeric() || c == '_')
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    if qualifier.is_empty() {
+        return true; // can't determine — allow
+    }
+    // Only apply the heuristic for long qualifiers (≥10 chars) that look like they
+    // are derived from a class name.  Short names (e.g. `f`, `it`, `factory`) could
+    // be generic variables for ANY factory — keep them to avoid false negatives.
+    if qualifier.len() < 10 {
+        return true;
+    }
+    qualifier
+        .to_lowercase()
+        .contains(&owner_class.to_lowercase())
 }
 
 /// Returns `true` if `content` declares `name` specifically (e.g. `fun create()`),
