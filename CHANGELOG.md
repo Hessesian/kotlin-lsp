@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.15.0
+
+### Features
+
+- **`textDocument/implementation`** — `go to implementation` now works for interface methods and abstract functions. Finds all concrete override sites across the workspace, handling Kotlin `override fun`, Java `@Override`, and abstract class methods. Scoped by declaring class to avoid false positives from same-name methods in unrelated classes.
+- **Field and property reference scoping** — `find references` for `val`/`var`/Java fields is now scoped to files that reference the declaring class, eliminating false positives from same-named fields in unrelated classes. Declaration lines in other files are filtered out; override declarations in subtypes are kept.
+- **`ThisContext` enum** — `this` type inference in receiver lambdas now returns a tri-state (`Resolved`, `InsideReceiver`, `NotFound`) instead of `Option<String>`. Callers can distinguish "inside an `apply`/`run`/`with` lambda with unknown receiver type" from "not in any receiver lambda", preventing incorrect fallback to `enclosing_class_at`.
+- **Generic type substitution in lambda `it`** — `it` now resolves to the concrete element type when the receiver is a generic container (e.g. `result.getOrNull()?.also { it.field }` → `it: FamilyAccount` when `result: Result<FamilyAccount>`). Works for extension functions and multi-hop chains.
+- **CST-first lambda parameter resolution** — lambda parameter type inference uses the live tree-sitter CST as the primary path. Falls back to text-scan only when no live document is available.
+- **`fill_when` diagnostics and code action** — detects missing branches in `when` expressions over sealed classes and enums, and offers a "Fill missing branches" code action. Handles `is` branches, object branches, Boolean exhaustion, and smart-cast type narrowing in `when`/`is` branches.
+- **Missing argument diagnostics** — call expressions with too few or mismatched arguments are flagged. Handles default parameters, varargs, `@JvmOverloads`, and Java constructor overloads.
+- **Synthetic enum members** — `.entries`, `.values()`, `.valueOf()`, `.name`, `.ordinal` resolve correctly in go-to-definition, hover, and completion.
+- **`infer_expr_type` extended** — expression type inference now covers boolean operations, if-expressions, range literals, and single-expression function return types. Powers inlay hints for return types.
+- **Async rg enrichment with debounced inlay hint refresh** — inlay hints trigger a background `rg` pass to enrich unresolved types; results are pushed to the client via debounced refresh rather than blocking the initial response.
+- **Panic-safe LSP handlers** — every LSP request handler is wrapped in a `catch_unwind` boundary. Panics produce a structured crash report (file, line, backtrace fragment) logged via `RUST_LOG` instead of crashing the server.
+- **`params` field on `SymbolEntry`** — function/method symbols now carry their parameter list (extracted from CST at index time), enabling accurate call-site arity checks without an rg round-trip.
+- **`container` field on `SymbolEntry`** — every symbol now records its enclosing class/object name, enabling tighter scoping in cross-file resolution.
+
+### Performance
+
+- **Chunked library cache** — library index (`~/.kotlin-lsp/sources`, Android SDK) is saved as 20 MB chunks instead of one large file, eliminating the end-of-indexing memory spike and enabling streaming load on startup.
+- **Streaming library cache load** — chunks are deserialised and applied incrementally; peak RSS during warm start is now proportional to one chunk rather than the full library index.
+- **jemalloc allocator** — switched to `tikv-jemallocator` on Linux/macOS for lower fragmentation on the DashMap-heavy workload; ~15–20% RSS reduction on large Android projects.
+- **Signature lookup cache** — repeated `rg` calls to resolve the same function signature are deduplicated via an in-memory cache; measurable speedup on files with many call expressions.
+- **Worker thread scaling** — Tokio worker threads now scale to available CPU cores.
+- **fill_when subtype scan dedup** — sealed-class subtype discovery is cached for the duration of a single diagnostics pass.
+
+### Bug fixes
+
+- **CLI warm-start only seeing 56 files** — `resolve_root` was returning a relative path (`"."`) when invoked from the workspace directory, causing all workspace source files to be misclassified as library URIs and omitted from the on-disk cache. Warm starts now correctly see all indexed files.
+- **Memory regression after cache fix** — after the root canonicalization fix, the 107 build-layout source roots (inside the workspace) were being re-indexed as library sources, doubling memory use. They are now correctly skipped when already covered by the workspace scan.
+- **Named lambda parameter with receiver on previous line** — resolved to `:T` when the receiver type and the lambda were on different lines. Fixed by threading the correct UTF-16 column to the CST lookup.
+- **CST lambda snapshot race** — stale live-doc snapshots could cause position mismatches in named-lambda-param CST lookup. Fixed by snapshotting `live_doc` once before position derivation.
+- **`collect_signature` panic** — panicked when `start_line >= lines.len()`. Now returns `None` gracefully.
+- **`forward_resolve_segments` dedup regression** — failed suffix incorrectly suppressed future resolution of the same suffix in a different chain context. Dedup gate now correctly keys on `(segment, resolved_prefix)`.
+- **CST chain root type stripping** — fully qualified dotted types (e.g. `androidx.fragment.app.Fragment`) were stripped to `Fragment` too aggressively. The CST root now preserves the full type until the final resolution step.
+- **Semantic diagnostics during scan** — diagnostics were published mid-scan, causing transient false positives. Diagnostics are now suppressed until the workspace reaches ready state, then republished.
+- **`enclosing_class_at` false positives in receiver lambdas** — `this` inside an `apply`/`run` lambda with an unresolvable receiver type was incorrectly resolved to the enclosing class. The new `ThisContext::InsideReceiver` variant prevents this fallback.
+- **Sibling-qualifier bleed in field references** — references with a dot-qualifier matching a sibling field (e.g. `account.value` picked up `value` from unrelated class) are now filtered by checking that the qualifier contains the declaring class name.
+
+### Architecture (internal)
+
+- **MVI workspace actor** (`src/workspace/`) — all mutable workspace state (index, live docs, workspace root, scan phase) is owned by a single `WorkspaceActor` driven by an event loop. Backend and CLI communicate via `WorkspaceHandle`. Eliminates a class of write-order races.
+- **Features module** (`src/features/`) — LSP feature implementations (references, hover, definition, completion, rename, go-to-implementation, fill_when, signature_help, …) extracted from the 2000-line `backend/mod.rs` into focused per-feature modules.
+- **Language abstraction** (`src/language/`) — per-language keyword sets and override-declaration detection extracted from scattered `if lang == Kotlin` blocks into a `Language` enum with per-variant impls.
+- **Infer module split** (`src/indexer/infer/`) — the 1900-line `it_this.rs` split into `chain.rs` (navigation chain resolution), `cst_lambda.rs` (CST-backed lambda context), `receiver.rs` (receiver type inference), and `type_subst.rs` (generic type substitution).
+
 ## 0.14.0
 
 - **`sourceRoots` scoping for rg searches** — `rg`-based references, definitions, and symbol searches are now scoped to the configured `sourceRoots` entries from `workspace.json` (IntelliJ/Android Studio module source roots). Searches no longer scan generated code or build output directories when source roots are configured. All callers (Backend, CLI fast mode, resolver step-5, infer) use a single central `Indexer::rg_scope_for_path` path so scoping is consistent across the board. Fixes [#78](https://github.com/Hessesian/kotlin-lsp/issues/78).

@@ -91,14 +91,15 @@ kotlin-lsp extract-sources   # one-time; restart editor after
 | **Go-to-definition** | Index → superclass hierarchy → `rg` fallback. Multi-hop chains, lambda params, `this`/`super` |
 | **Hover** | Declaration signature, lambda param types, Kotlin stdlib docs |
 | **Completion** | Dot-completion with type resolution, auto-import, scored ranking, stdlib entries |
-| **References** | Project-wide `rg --word-regexp` + open buffers |
+| **References** | Project-wide `rg --word-regexp` + open buffers; scoped to declaring class for fields/properties |
 | **Document/workspace symbol** | Outline view, fuzzy search, dot-qualified extension function queries |
 | **Rename** | Project-wide via `WorkspaceEdit` |
-| **Inlay hints** | Lambda `it`, named params, `this`, untyped `val`/`var` |
+| **Inlay hints** | Lambda `it`, named params, `this`, untyped `val`/`var`; enriched async via background `rg` pass |
 | **Semantic tokens** | Full syntax highlighting via tree-sitter CST + cross-file resolution |
-| **Diagnostics** | Syntax errors from tree-sitter (not type checking) |
-| **Go-to-implementation** | Transitive subtype lookup (BFS) |
+| **Diagnostics** | Syntax errors (tree-sitter), missing `when` branches (sealed/enum), missing call arguments |
+| **Go-to-implementation** | Interface methods and abstract functions; transitive subtype BFS; scoped by declaring class |
 | **Signature help** | Active parameter highlighting |
+| **Code actions** | Fill missing `when` branches for sealed classes and enums |
 | **Folding** | Brace regions + consecutive comment blocks |
 | **CLI mode** | `find`, `refs`, `hover`, `index`, `complete`, `tokens`, `tree`, `sources`, `extract-sources` — scriptable, no daemon |
 
