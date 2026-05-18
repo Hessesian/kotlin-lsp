@@ -262,14 +262,15 @@ pub(crate) struct RgSearchRequest<'a> {
     /// (`factory.create()`) are found, while sibling factories in the same
     /// package are excluded because they do not reference the outer class.
     owner_class: Option<&'a str>,
-    /// Declaring class for a field/property reference (e.g. `"FamilyAccount"` for
-    /// a `val value` declared inside `FamilyAccount`).
+    /// Declaring class for a class member (field, property, or method) reference
+    /// (e.g. `"FamilyAccount"` for a `val value` or `fun load()` declared inside
+    /// `FamilyAccount`).
     ///
     /// When set, file discovery finds files mentioning the declaring class, then
-    /// searches for the field name within those files.  Unlike `owner_class`, the
-    /// declaring file is NOT restricted to only the declaration — bare field access
+    /// searches for the member name within those files.  Unlike `owner_class`, the
+    /// declaring file is NOT restricted to only the declaration — bare member access
     /// inside the class body is valid.  Declaration lines in other files are
-    /// filtered out to avoid picking up same-named fields in other classes.
+    /// filtered out to avoid picking up same-named members in other classes.
     field_owner: Option<&'a str>,
     search_root: std::borrow::Cow<'a, Path>,
     /// Source-root directories from workspace config; when non-empty, rg is
@@ -1095,8 +1096,8 @@ pub(crate) fn rg_find_method_overrides(
     rg_word_in_files(&safe_method, &candidate_files)
         .into_iter()
         .filter_map(|(loc, content)| {
-            let line = content.trim();
-            if line.contains("override") && line.contains("fun ") {
+            let lang = crate::Language::from_path(loc.uri.path());
+            if lang.is_override_declaration(content.trim(), method_name) {
                 Some(loc)
             } else {
                 None

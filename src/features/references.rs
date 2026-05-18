@@ -49,9 +49,10 @@ pub(crate) async fn find_references_with_qualifier(
             None
         };
 
-    // For fields (val/var/Java field) at their declaration site: scope file discovery
-    // to files that mention the declaring class, instead of the whole package.
-    // Only fires when there is no doubly-nested owner_class already covering the site.
+    // For class members (fields, properties, methods) at their declaration site:
+    // scope file discovery to files that mention the declaring class, instead of
+    // the whole package. Only fires when there is no doubly-nested owner_class
+    // already covering the site.
     let field_owner = if !name.starts_with_uppercase()
         && owner_class.is_none()
         && qualifier.is_none()
@@ -384,7 +385,7 @@ fn field_owner_for_decl(
     index
         .file_symbols(uri)
         .iter()
-        .find(|s| s.name == name && s.range.start.line == line)
+        .find(|s| s.name == name && s.selection_range.start.line == line)
         .and_then(|s| s.container.clone())
 }
 

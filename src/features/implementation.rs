@@ -27,8 +27,9 @@ pub(crate) async fn find_implementation(
     word: &str,
     index: &(impl SymbolIndex + DocumentAccess + SearchAccess),
     uri: &Url,
+    line: u32,
 ) -> Option<GotoDefinitionResponse> {
-    if let Some(declaring_class) = declaring_class_of_method(index, uri, word) {
+    if let Some(declaring_class) = declaring_class_of_method(index, uri, word, line) {
         find_method_implementations(word, &declaring_class, index, uri).await
     } else {
         find_type_implementations(word, index, uri).await
@@ -105,7 +106,12 @@ async fn find_type_implementations(
 /// If `word` is a function/method declared inside a class or interface at `uri`,
 /// returns the name of the declaring class.  Returns `None` for top-level
 /// functions, constructors, and non-function symbols.
-fn declaring_class_of_method(index: &impl SymbolIndex, uri: &Url, word: &str) -> Option<String> {
+fn declaring_class_of_method(
+    index: &impl SymbolIndex,
+    uri: &Url,
+    word: &str,
+    line: u32,
+) -> Option<String> {
     index
         .file_symbols(uri)
         .into_iter()
@@ -113,16 +119,26 @@ fn declaring_class_of_method(index: &impl SymbolIndex, uri: &Url, word: &str) ->
             s.name == word
                 && matches!(s.kind, SymbolKind::FUNCTION | SymbolKind::METHOD)
                 && s.container.is_some()
+                && s.selection_range.start.line == line
         })
         .and_then(|s| s.container)
 }
 
-/// Collect all `override fun method_name` locations within `data`.
+/// Collect `override fun method_name` (Kotlin) or same-named method (Java)
+/// locations within `data` for a confirmed subtype.
+///
+/// For Kotlin, `detail` must contain `"override"` to exclude same-named
+/// non-overriding overloads. For Java, `@Override` lives on the preceding line
+/// and is not in the indexed detail, so all same-named methods in a confirmed
+/// subtype are included.
 fn method_overrides_in(method_name: &str, data: &Arc<FileData>, uri: &Url) -> Vec<Location> {
+    let lang = crate::Language::from_path(uri.path());
     data.symbols
         .iter()
         .filter(|s| {
-            s.name == method_name && matches!(s.kind, SymbolKind::FUNCTION | SymbolKind::METHOD)
+            s.name == method_name
+                && matches!(s.kind, SymbolKind::FUNCTION | SymbolKind::METHOD)
+                && lang.detail_is_override(&s.detail)
         })
         .map(|s| Location {
             uri: uri.clone(),

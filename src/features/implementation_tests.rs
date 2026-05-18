@@ -78,7 +78,7 @@ async fn goto_implementation_interface_method_returns_overrides() {
     idx.index_content(&irepo_uri, irepo_src);
 
     // "load" is the method name at cursor; declared inside IRepo
-    let resp = find_implementation("load", &*idx, &irepo_uri).await;
+    let resp = find_implementation("load", &*idx, &irepo_uri, 2).await;
     let files = response_files(resp);
 
     assert!(
@@ -119,7 +119,7 @@ async fn goto_implementation_abstract_method_returns_overrides() {
     idx.workspace_root.set(root.to_path_buf());
     idx.index_content(&base_uri, base_src);
 
-    let resp = find_implementation("compute", &*idx, &base_uri).await;
+    let resp = find_implementation("compute", &*idx, &base_uri, 2).await;
     let files = response_files(resp);
 
     assert!(
@@ -154,7 +154,8 @@ async fn goto_implementation_interface_type_unbroken() {
     let impl_uri = Url::from_file_path(root.join("Impl.kt")).unwrap();
     idx.index_content(&impl_uri, impl_src);
 
-    let resp = find_implementation("IService", &*idx, &iservice_uri).await;
+    // "IService" is a type (not a method); line is the interface declaration line.
+    let resp = find_implementation("IService", &*idx, &iservice_uri, 1).await;
     let files = response_files(resp);
 
     assert!(

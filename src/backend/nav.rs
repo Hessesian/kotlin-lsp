@@ -32,6 +32,6 @@ impl Backend {
             return Ok(None);
         };
 
-        Ok(imp::find_implementation(&word, &*self.indexer, uri).await)
+        Ok(imp::find_implementation(&word, &*self.indexer, uri, position.line).await)
     }
 }
