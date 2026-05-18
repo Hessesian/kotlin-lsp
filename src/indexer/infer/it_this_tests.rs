@@ -1084,6 +1084,50 @@ fn chain_inference_dotted_nested_class_type() {
 }
 
 #[test]
+fn resolve_member_type_on_fallback_when_class_params_unindexed() {
+    // Regression: when a class's type params are not in the index,
+    // `build_type_arg_subst` returns an empty map and `apply_type_subst` returns the
+    // raw generic placeholder ("T").  `resolve_member_type_on` must fall back to
+    // `first_concrete_type_arg_str` so the CST forward-resolve path returns the
+    // concrete type instead of leaking `:T` to the hover result.
+    //
+    // Reproduces: `resultState.value.getOrNull()?.also { familyAccount -> }`
+    // where `ResultState.Success` type params are NOT indexed.
+    let deps = super::super::TestDeps::new().with_field("Success", "value", "T");
+    // NO .with_class_params("Success", ...) — simulates unindexed class params
+
+    // Without the fallback: apply_type_subst("T", {}) → "T" → leaked
+    // With the fallback:    first_concrete_type_arg_str("ResultState.Success<Optional<FamilyAccount>>")
+    //                       → "Optional<FamilyAccount>"
+    let result = resolve_member_type_on(
+        "ResultState.Success<Optional<FamilyAccount>>",
+        "value",
+        &deps,
+    );
+    assert_eq!(
+        result.as_deref(),
+        Some("Optional<FamilyAccount>"),
+        "unindexed class params: field 'T' with empty subst must fall back to first type arg"
+    );
+}
+
+#[test]
+fn resolve_member_type_on_fallback_method_return_unindexed() {
+    // Same regression for method return type: Optional.getOrNull() returns T? but
+    // Optional class params are not indexed → must fall back to first concrete type arg.
+    let deps =
+        super::super::TestDeps::new().with_method_return_for_type("Optional", "getOrNull", "T?");
+    // NO .with_class_params("Optional", ...)
+
+    let result = resolve_member_type_on("Optional<FamilyAccount>", "getOrNull", &deps);
+    assert_eq!(
+        result.as_deref(),
+        Some("FamilyAccount"),
+        "unindexed Optional params: getOrNull returning T? must fall back to FamilyAccount"
+    );
+}
+
+#[test]
 fn inline_lambda_generic_ext_fn_no_var_type_capitalize_fallback() {
     // Reproduces the real-world `by lazy` case: `buildingSavingsReducer` has no
     // explicit type annotation, so `find_var_type` returns None. The fix should

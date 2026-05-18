@@ -610,6 +610,22 @@ fn first_concrete_type_arg_str(ty: &str) -> Option<String> {
     Some(base.to_owned())
 }
 
+/// Like `first_concrete_type_arg_str` but **preserves** the full generic type args on the
+/// result (e.g. `"Optional<FamilyAccount>"` instead of `"Optional"`).
+///
+/// Used as the fallback in `resolve_member_type_on` when type-param substitution fails
+/// because the class params are not in the index — in that case we must return the full
+/// type argument so that downstream resolution can continue walking the chain.
+fn first_type_arg_raw(ty: &str) -> Option<String> {
+    let inner = type_args_inner(ty)?;
+    let arg = first_type_arg(inner).trim().trim_matches('?');
+    let base = arg.ident_prefix();
+    if base.is_empty() || is_generic_param(&base) {
+        return None;
+    }
+    Some(arg.to_owned())
+}
+
 /// Kotlin stdlib scope functions whose `T` parameter IS the receiver type.
 const SCOPE_FUNCTIONS: &[&str] = &["let", "also", "run", "apply", "takeIf", "takeUnless"];
 
@@ -1648,6 +1664,14 @@ fn forward_resolve_segments(
 
 /// Given a current receiver type string, resolve a member access (field or method) and
 /// return the resulting type with type substitution applied.
+///
+/// When `build_type_arg_subst` returns an empty map because the class type params are
+/// not in the index, `apply_type_subst` leaves the generic placeholder (e.g. `T`) intact.
+/// In that case we fall back to `first_concrete_type_arg_str` — the same strategy used
+/// by the text path in `chain_with_type_subst` — to extract the first concrete type
+/// argument from `current_type`.  This prevents `:T` from leaking through as a hover
+/// result for chains like `resultState.value.getOrNull()?.also { param -> }` when
+/// `ResultState.Success` type params are not indexed.
 fn resolve_member_type_on(
     current_type: &str,
     member: &str,
@@ -1664,11 +1688,19 @@ fn resolve_member_type_on(
     };
     if let Some(field_ty) = deps.find_field_type(&effective_type, member) {
         let subst = build_type_arg_subst(deps, &effective_type, current_type);
-        return Some(crate::indexer::apply_type_subst(&field_ty, &subst));
+        let applied = crate::indexer::apply_type_subst(&field_ty, &subst);
+        if is_generic_param(applied.trim_end_matches('?')) {
+            return first_type_arg_raw(current_type);
+        }
+        return Some(applied);
     }
     if let Some(ret_ty) = deps.find_method_return_type_for_type(&effective_type, member) {
         let subst = build_type_arg_subst(deps, &effective_type, current_type);
-        return Some(crate::indexer::apply_type_subst(&ret_ty, &subst));
+        let applied = crate::indexer::apply_type_subst(&ret_ty, &subst);
+        if is_generic_param(applied.trim_end_matches('?')) {
+            return first_type_arg_raw(current_type);
+        }
+        return Some(applied);
     }
     None
 }
