@@ -52,6 +52,39 @@ impl Language {
         matches!(self, Language::Java)
     }
 
+    /// Returns true if `line` looks like an override declaration of `method_name`
+    /// in this language.
+    ///
+    /// - **Kotlin**: requires `override` and `fun` on the same line as the declaration.
+    /// - **Java**: accepts any declaration of `method_name` — `@Override` is placed
+    ///   on the *preceding* line and is not visible in a single-line rg result.
+    /// - **Swift**: always false (not supported).
+    pub(crate) fn is_override_declaration(self, line: &str, method_name: &str) -> bool {
+        use crate::rg::is_declaration_of;
+        match self {
+            Language::Kotlin => {
+                line.contains("override")
+                    && line.contains("fun ")
+                    && is_declaration_of(line, method_name)
+            }
+            Language::Java => is_declaration_of(line, method_name),
+            Language::Swift => false,
+        }
+    }
+
+    /// Returns true if `detail` (the indexed declaration signature) indicates
+    /// this symbol overrides a supertype member.
+    pub(crate) fn detail_is_override(self, detail: &str) -> bool {
+        match self {
+            Language::Kotlin => detail.contains("override"),
+            // Java @Override is an annotation on the preceding line; the indexed
+            // detail is just the method signature — accept any same-named method
+            // found via BFS subtypes (already scoped to confirmed implementors).
+            Language::Java => true,
+            Language::Swift => false,
+        }
+    }
+
     pub(crate) fn val_keyword(self) -> &'static str {
         match self {
             Language::Swift => "let",

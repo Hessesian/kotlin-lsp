@@ -21,51 +21,36 @@ mod infer;
 pub(crate) mod resolution;
 // Re-export pure helpers from submodules so existing callers within this file
 // and the inline test module (`use super::*`) continue to resolve them by name.
+#[cfg(test)]
+pub(crate) use self::infer::deps::TestDeps;
 #[allow(unused_imports)]
 pub(crate) use self::infer::{
-    collect_all_fun_params_texts,
-    collect_params_from_line,
-    collect_signature,
-    cst_call_info,
-    cst_cursor_is_local_var,
-    extract_first_arg,
-    extract_named_arg_name,
-    // args.rs
-    find_as_call_arg_type,
-    find_fun_signature_full,
-    find_fun_signature_with_receiver,
-    // it_this.rs
-    find_it_element_type,
-    find_it_element_type_in_lines,
-    find_last_dot_at_depth_zero,
-    find_named_lambda_param_type,
-    find_named_lambda_param_type_in_lines,
-    find_named_param_type_in_sig,
-    find_this_context_in_lines,
-    find_this_element_type_in_lines,
-    has_named_params_not_it,
-    // expr_type.rs
-    infer_expr_type,
-    is_import_reachable,
-    is_lambda_param,
-    lambda_brace_pos_for_param,
-    lambda_param_position_on_line,
-    lambda_receiver_type_from_context,
-    last_fun_param_type_str,
-    line_has_lambda_param,
-    nth_fun_param_type_str,
-    resolve_call_signature,
-    split_params_at_depth_zero,
-    strip_trailing_call_args,
-    // sig.rs
-    CallInfo,
-    CallSite,
-    // deps.rs
-    InferDeps,
-    ResolutionScope,
-    SignatureResult,
-    // it_this.rs enum
-    ThisContext,
+    args::{
+        extract_first_arg, extract_named_arg_name, find_as_call_arg_type,
+        find_named_param_type_in_sig, has_named_params_not_it,
+    },
+    cst_cursor::{cst_call_info, cst_cursor_is_local_var, CallInfo},
+    deps::{CallableInfo, InferDeps},
+    expr_type::infer_expr_type,
+    it_this::{
+        find_it_element_type, find_it_element_type_in_lines, find_named_lambda_param_type,
+        find_named_lambda_param_type_in_lines, find_this_context_in_lines,
+        find_this_element_type_in_lines, is_lambda_param, lambda_brace_pos_for_param,
+        lambda_param_position_on_line, line_has_lambda_param, ThisContext,
+    },
+    lambda::{
+        lambda_type_first_input, lambda_type_nth_input, lambda_type_receiver, RECEIVER_THIS_FNS,
+        SCOPE_FUNCTIONS,
+    },
+    receiver::lambda_receiver_type_from_context,
+    sig::{
+        collect_all_fun_params_texts, collect_params_from_line, collect_signature,
+        find_fun_signature_full, find_fun_signature_with_receiver, is_import_reachable,
+        last_fun_param_type_str, nth_fun_param_type_str, resolve_call_signature,
+        split_params_at_depth_zero, strip_trailing_call_args, CallSite, ResolutionScope,
+        SignatureResult,
+    },
+    type_subst::find_last_dot_at_depth_zero,
 };
 
 mod cache;
@@ -241,7 +226,7 @@ pub(crate) struct Indexer {
     pub(crate) enrichment: std::sync::RwLock<EnrichmentHandle>,
 }
 
-impl crate::indexer::infer::InferDeps for Indexer {
+impl InferDeps for Indexer {
     fn find_fun_params_text(&self, fn_name: &str, uri: &Url) -> Option<String> {
         find_fun_signature_full(fn_name, self, uri)
     }
@@ -301,11 +286,7 @@ impl crate::indexer::infer::InferDeps for Indexer {
     fn find_method_params_text(&self, class_name: &str, method_name: &str) -> Option<String> {
         crate::indexer::infer::sig::find_method_params_in_class(self, class_name, method_name)
     }
-    fn find_fun_callable_info(
-        &self,
-        fn_name: &str,
-        _uri: &Url,
-    ) -> Option<crate::indexer::infer::CallableInfo> {
+    fn find_fun_callable_info(&self, fn_name: &str, _uri: &Url) -> Option<CallableInfo> {
         let locations = self.definitions.get(fn_name)?;
         for loc in locations.iter() {
             if let Some(file_data) = self.files.get(loc.uri.as_str()) {
@@ -314,7 +295,7 @@ impl crate::indexer::infer::InferDeps for Indexer {
                     .iter()
                     .find(|s| s.name == fn_name && !s.type_params.is_empty())
                 {
-                    return Some(crate::indexer::infer::CallableInfo {
+                    return Some(CallableInfo {
                         type_params: sym.type_params.clone(),
                         extension_receiver_type: sym.extension_receiver_type.clone(),
                     });

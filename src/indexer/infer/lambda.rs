@@ -15,6 +15,10 @@ use crate::StrExt;
 /// Note: `let` and `also` are intentionally excluded — their lambda parameter is `it`, not `this`.
 pub(crate) const RECEIVER_THIS_FNS: &[&str] = &["run", "apply"];
 
+/// Kotlin stdlib scope functions whose `T` parameter IS the receiver type.
+pub(crate) const SCOPE_FUNCTIONS: &[&str] =
+    &["let", "also", "run", "apply", "takeIf", "takeUnless"];
+
 /// Return the Nth (0-based) input type from a functional type expression.
 ///
 /// `lambda_type_nth_input("(String, Boolean) -> Unit", 0)` → `Some("String")`

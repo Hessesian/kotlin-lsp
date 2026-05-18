@@ -678,8 +678,11 @@ fn test_uri() -> Url {
 fn test_deps_case_b_trailing_lambda_it_type() {
     // `loadData { it }` — trailing lambda, function registered in TestDeps.
     let u = test_uri();
-    let deps =
-        super::super::TestDeps::new().with_fun(u.as_str(), "loadData", "block: (Product) -> Unit");
+    let deps = super::super::deps::TestDeps::new().with_fun(
+        u.as_str(),
+        "loadData",
+        "block: (Product) -> Unit",
+    );
     let result = lambda_receiver_type_from_context("loadData", &deps, &u);
     assert_eq!(
         result.as_deref(),
@@ -692,7 +695,7 @@ fn test_deps_case_b_trailing_lambda_it_type() {
 fn test_deps_case_b_with_args() {
     // `loadData(key) { it }` — same, after `strip_trailing_call_args` strips `(key)`.
     let u = test_uri();
-    let deps = super::super::TestDeps::new().with_fun(
+    let deps = super::super::deps::TestDeps::new().with_fun(
         u.as_str(),
         "loadData",
         "key: String, block: (Product) -> Unit",
@@ -709,7 +712,7 @@ fn test_deps_case_b_with_args() {
 fn test_deps_case_a_receiver_dot_method() {
     // `items.map { it }` — receiver is `items: List<Item>`.
     let u = test_uri();
-    let deps = super::super::TestDeps::new().with_var(u.as_str(), "items", "List<Item>");
+    let deps = super::super::deps::TestDeps::new().with_var(u.as_str(), "items", "List<Item>");
     let result = lambda_receiver_type_from_context("items.map", &deps, &u);
     assert_eq!(
         result.as_deref(),
@@ -722,7 +725,7 @@ fn test_deps_case_a_receiver_dot_method() {
 fn test_deps_case_a_var_type_no_collection() {
     // `repo.run { it }` — receiver type returned directly when no collection elem.
     let u = test_uri();
-    let deps = super::super::TestDeps::new()
+    let deps = super::super::deps::TestDeps::new()
         .with_var(u.as_str(), "repo", "Repository")
         .with_fun(u.as_str(), "run", "block: (Repository) -> Unit");
     // `run` is found so the method's lambda-param type wins.
@@ -741,7 +744,7 @@ fn test_deps_case_a_multi_segment_field_collection() {
     //   outer_var = "result" (type "ResponseBody"), field = "availableBanks"
     //   field type = "MutableList<Bank>" → element "Bank"
     let u = test_uri();
-    let deps = super::super::TestDeps::new()
+    let deps = super::super::deps::TestDeps::new()
         .with_var(u.as_str(), "result", "ResponseBody")
         .with_field("ResponseBody", "availableBanks", "MutableList<Bank>");
     let result = lambda_receiver_type_from_context("result.availableBanks.firstOrNull", &deps, &u);
@@ -758,7 +761,7 @@ fn test_deps_case_a_multi_segment_field_collection_map() {
     //   outer_var = "result" (type "ResponseBody"), field = "connectedAccounts"
     //   field type = "MutableList<MbAccount>" → element "MbAccount"
     let u = test_uri();
-    let deps = super::super::TestDeps::new()
+    let deps = super::super::deps::TestDeps::new()
         .with_var(u.as_str(), "result", "ResponseBody")
         .with_field(
             "ResponseBody",
@@ -778,7 +781,7 @@ fn test_deps_case_a_multi_segment_with_assignment_prefix() {
     // `account.bankName = result.availableBanks.firstOrNull { it }` →
     //   callee contains assignment prefix; last_ident_in correctly finds "result"
     let u = test_uri();
-    let deps = super::super::TestDeps::new()
+    let deps = super::super::deps::TestDeps::new()
         .with_var(u.as_str(), "result", "ResponseBody")
         .with_field("ResponseBody", "availableBanks", "MutableList<Bank>");
     // The callee string as extracted from the source line (assignment prefix included).
@@ -799,7 +802,7 @@ fn test_deps_case_a_multi_segment_field_non_collection_method_lambda() {
     // `result.foo.customOp { it }` where field `foo: Repo` and `customOp(block: (Bar) -> Unit)`.
     // The method's lambda param type wins over the field base type.
     let u = test_uri();
-    let deps = super::super::TestDeps::new()
+    let deps = super::super::deps::TestDeps::new()
         .with_var(u.as_str(), "result", "ResponseBody")
         .with_field("ResponseBody", "foo", "Repo")
         .with_fun(u.as_str(), "customOp", "block: (Bar) -> Unit");
@@ -817,7 +820,7 @@ fn test_deps_case_a_method_chain_return_type() {
     //   receiver_var = "joinAllAccounts", method = "firstOrNull"
     //   joinAllAccounts() returns List<Account> → element "Account"
     let u = test_uri();
-    let deps = super::super::TestDeps::new().with_return("joinAllAccounts", "List<Account>");
+    let deps = super::super::deps::TestDeps::new().with_return("joinAllAccounts", "List<Account>");
     let result = lambda_receiver_type_from_context(
         "getAccountList(isRefresh).joinAllAccounts().firstOrNull",
         &deps,
@@ -834,12 +837,12 @@ fn test_deps_case_a_method_chain_return_type() {
 fn test_deps_unknown_fn_returns_none() {
     // Function not registered → None.
     let u = test_uri();
-    let deps = super::super::TestDeps::new();
+    let deps = super::super::deps::TestDeps::new();
     let result = lambda_receiver_type_from_context("unknownFn", &deps, &u);
     assert_eq!(result, None, "unknown function should return None");
 }
 
-// ── classify_this_lambda_context / find_this_context_in_lines ─────────────────
+// ── classify_this_lambda_context / is_inside_receiver_lambda ─────────────────
 
 #[test]
 fn apply_this_resolved_receiver() {
@@ -855,7 +858,7 @@ fn apply_this_resolved_receiver() {
 fn apply_this_unresolved_receiver_returns_receiver_ctx() {
     // `unknown.apply { this }` — type of `unknown` not in index → Receiver (NOT NotReceiver)
     let u = uri("/t.kt");
-    let deps = super::super::TestDeps::new();
+    let deps = super::super::deps::TestDeps::new();
     let ctx = super::classify_this_lambda_context("unknown.apply ", &deps, &u);
     assert!(
         matches!(ctx, super::ThisLambdaCtx::Receiver),
@@ -867,7 +870,7 @@ fn apply_this_unresolved_receiver_returns_receiver_ctx() {
 fn foreach_lambda_is_not_receiver_ctx() {
     // `list.forEach { this }` — forEach is NOT a scope function → NotReceiver
     let u = uri("/t.kt");
-    let deps = super::super::TestDeps::new();
+    let deps = super::super::deps::TestDeps::new();
     let ctx = super::classify_this_lambda_context("list.forEach ", &deps, &u);
     assert!(
         matches!(ctx, super::ThisLambdaCtx::NotReceiver),
@@ -879,7 +882,7 @@ fn foreach_lambda_is_not_receiver_ctx() {
 fn with_this_unresolved_receiver_returns_receiver_ctx() {
     // `with(expr) { this }` — type of expr not found → Receiver
     let u = uri("/t.kt");
-    let deps = super::super::TestDeps::new();
+    let deps = super::super::deps::TestDeps::new();
     let ctx = super::classify_this_lambda_context("with(someExpr) ", &deps, &u);
     assert!(
         matches!(ctx, super::ThisLambdaCtx::Receiver),
@@ -888,9 +891,9 @@ fn with_this_unresolved_receiver_returns_receiver_ctx() {
 }
 
 #[test]
-fn find_this_context_apply_unresolved_is_inside_receiver() {
+fn is_inside_receiver_lambda_apply() {
     // Cursor inside `obj.apply { <here> }` with unknown obj type.
-    // find_this_context_in_lines should return InsideReceiver (not NotFound).
+    // is_inside_receiver_lambda should return true (it IS inside a receiver lambda).
     let src = "val _x = unknown.apply {\n    this\n}";
     let u = uri("/t.kt");
     let idx = Indexer::new();
@@ -900,17 +903,16 @@ fn find_this_context_apply_unresolved_is_inside_receiver() {
         line: 1,
         utf16_col: 8,
     };
-    let result = super::find_this_context_in_lines(&lines, pos, &idx, &u);
+    let result = super::is_inside_receiver_lambda(&lines, pos, &idx, &u);
     assert!(
-        matches!(result, super::ThisContext::InsideReceiver),
-        "cursor inside unknown.apply{{}} should be InsideReceiver, got: {result:?}"
+        result,
+        "cursor inside unknown.apply{{}} should be inside receiver lambda"
     );
 }
 
 #[test]
-fn find_this_context_foreach_is_not_found() {
-    // Cursor inside `list.forEach { <here> }` — forEach is NOT a receiver lambda.
-    // find_this_context_in_lines should return NotFound (enclosing_class_at fallback allowed).
+fn is_inside_receiver_lambda_foreach_is_false() {
+    // Cursor inside `list.forEach { <here> }` — NOT a receiver lambda.
     let src = "val list = listOf(1)\nlist.forEach {\n    this\n}";
     let u = uri("/t.kt");
     let idx = Indexer::new();
@@ -920,50 +922,22 @@ fn find_this_context_foreach_is_not_found() {
         line: 2,
         utf16_col: 8,
     };
-    let result = super::find_this_context_in_lines(&lines, pos, &idx, &u);
+    let result = super::is_inside_receiver_lambda(&lines, pos, &idx, &u);
     assert!(
-        matches!(result, super::ThisContext::NotFound),
-        "cursor inside forEach{{}} should be NotFound, got: {result:?}"
+        !result,
+        "cursor inside forEach{{}} should NOT be inside receiver lambda"
     );
 }
 
 #[test]
-fn find_this_context_apply_resolved_with_live_tree() {
-    // Cursor inside `user.apply { <here> }` where user: User is indexed.
-    // find_this_context_in_lines should return Resolved("User").
+fn is_inside_receiver_lambda_apply_live_tree() {
     let src = "val user: User = User()\nuser.apply {\n    this\n}";
     let (u, idx, lines) = indexed_with_live("/t.kt", src, src);
     let pos = crate::types::CursorPos {
         line: 2,
         utf16_col: 8,
     };
-    let result = super::find_this_context_in_lines(&lines, pos, &idx, &u);
-    assert!(
-        matches!(result, super::ThisContext::Resolved(ref t) if t == "User"),
-        "cursor inside user.apply{{}} should be Resolved(User), got: {result:?}"
-    );
-}
-
-#[test]
-fn find_this_context_nested_foreach_outer_apply() {
-    // Cursor inside `outer.apply { list.forEach { <here> } }`.
-    // The innermost lambda is forEach (NotReceiver) — walk outward.
-    // The outer lambda is apply — should find InsideReceiver (type of `outer` unknown).
-    let src = "val outer = unknown\nval list = listOf(1)\nouter.apply {\n    list.forEach {\n        this\n    }\n}";
-    let u = uri("/t.kt");
-    let idx = Indexer::new();
-    idx.index_content(&u, src);
-    let lines: Vec<String> = src.lines().map(String::from).collect();
-    let pos = crate::types::CursorPos {
-        line: 4,
-        utf16_col: 12,
-    };
-    let result = super::find_this_context_in_lines(&lines, pos, &idx, &u);
-    // The text-scan path walks outward through forEach → finds apply → InsideReceiver.
-    assert!(
-        matches!(result, super::ThisContext::InsideReceiver),
-        "cursor inside forEach inside apply{{}} should be InsideReceiver, got: {result:?}"
-    );
+    assert!(super::is_inside_receiver_lambda(&lines, pos, &idx, &u));
 }
 
 // ── chain_concrete_type_arg / multi-hop chain inference ──────────────────────
@@ -973,7 +947,7 @@ fn chain_inference_single_hop_result_also() {
     // `resultWrapped.getOrNull()?.also { familyAccount -> }`
     // resultWrapped: Result<FamilyAccount> → getOrNull() returns FamilyAccount? → param: FamilyAccount
     let u = test_uri();
-    let deps = super::super::TestDeps::new().with_var(
+    let deps = super::super::deps::TestDeps::new().with_var(
         u.as_str(),
         "resultWrapped",
         "Result<FamilyAccount>",
@@ -991,7 +965,8 @@ fn chain_inference_single_hop_optional_let() {
     // `maybeUser.getOrNull()?.let { user -> }`
     // maybeUser: Optional<User> → getOrNull() → param: User
     let u = test_uri();
-    let deps = super::super::TestDeps::new().with_var(u.as_str(), "maybeUser", "Optional<User>");
+    let deps =
+        super::super::deps::TestDeps::new().with_var(u.as_str(), "maybeUser", "Optional<User>");
     let result = lambda_receiver_type_from_context("maybeUser.getOrNull().let", &deps, &u);
     assert_eq!(result.as_deref(), Some("User"));
 }
@@ -1003,7 +978,7 @@ fn stdlib_let_generic_param_not_leaked() {
     // We must NOT leak `T` as the inferred type — the receiver's concrete
     // type should win via the uppercase fallback.
     let u = test_uri();
-    let deps = super::super::TestDeps::new()
+    let deps = super::super::deps::TestDeps::new()
         .with_var(u.as_str(), "familyCreationDate", "Long?")
         .with_fun(u.as_str(), "let", "block: (T) -> R");
     let result = lambda_receiver_type_from_context("familyCreationDate.let", &deps, &u);
@@ -1021,7 +996,7 @@ fn chain_inference_two_hop_field_method_also() {
     // With class params for ResultState: T→Account applied to field type → Result<Account>
     // fallback extracts first concrete type arg "Account"
     let u = test_uri();
-    let deps = super::super::TestDeps::new()
+    let deps = super::super::deps::TestDeps::new()
         .with_var(u.as_str(), "resultState", "ResultState<Account>")
         .with_field("ResultState", "value", "Result<T>")
         .with_class_params("ResultState", &["T"]);
@@ -1038,7 +1013,7 @@ fn chain_inference_two_hop_concrete_field_type() {
     // `wrapper.result.getOrNull()?.let { p -> }`
     // wrapper: Wrapper<X>, result: Result<Order> (concrete field type) → Order
     let u = test_uri();
-    let deps = super::super::TestDeps::new()
+    let deps = super::super::deps::TestDeps::new()
         .with_var(u.as_str(), "wrapper", "Wrapper<X>")
         .with_field("Wrapper", "result", "Result<Order>");
     let result = lambda_receiver_type_from_context("wrapper.result.getOrNull().let", &deps, &u);
@@ -1056,7 +1031,7 @@ fn chain_inference_proper_subst_with_method_return() {
     // With class params "Result" → ["T"] and method return "T?":
     //   subst = {"T": "FamilyAccount"}, apply to "T?" → "FamilyAccount?" → "FamilyAccount"
     let u = test_uri();
-    let deps = super::super::TestDeps::new()
+    let deps = super::super::deps::TestDeps::new()
         .with_var(u.as_str(), "resultWrapped", "Result<FamilyAccount>")
         .with_class_params("Result", &["T"])
         .with_method_return_for_type("Result", "getOrNull", "T?");
@@ -1075,7 +1050,7 @@ fn chain_inference_map_second_type_param() {
     // With class params Map→["K","V"] and getValue() → "V":
     //   subst = {"K":"String","V":"Order"}, apply to "V" → "Order"
     let u = test_uri();
-    let deps = super::super::TestDeps::new()
+    let deps = super::super::deps::TestDeps::new()
         .with_var(u.as_str(), "entries", "Map<String, Order>")
         .with_class_params("Map", &["K", "V"])
         .with_method_return_for_type("Map", "getValue", "V");
@@ -1094,7 +1069,7 @@ fn chain_inference_dotted_nested_class_type() {
     // Success class has field `value: T` (with type param T)
     // We need dotted_ident_prefix().last_segment() to extract "Success" for field lookup.
     let u = test_uri();
-    let deps = super::super::TestDeps::new()
+    let deps = super::super::deps::TestDeps::new()
         .with_var(
             u.as_str(),
             "resultState",
@@ -1122,7 +1097,7 @@ fn resolve_member_type_on_fallback_when_class_params_unindexed() {
     //
     // Reproduces: `resultState.value.getOrNull()?.also { familyAccount -> }`
     // where `ResultState.Success` type params are NOT indexed.
-    let deps = super::super::TestDeps::new().with_field("Success", "value", "T");
+    let deps = super::super::deps::TestDeps::new().with_field("Success", "value", "T");
     // NO .with_class_params("Success", ...) — simulates unindexed class params
 
     // Without the fallback: apply_type_subst("T", {}) → "T" → leaked
@@ -1144,8 +1119,11 @@ fn resolve_member_type_on_fallback_when_class_params_unindexed() {
 fn resolve_member_type_on_fallback_method_return_unindexed() {
     // Same regression for method return type: Optional.getOrNull() returns T? but
     // Optional class params are not indexed → must fall back to first concrete type arg.
-    let deps =
-        super::super::TestDeps::new().with_method_return_for_type("Optional", "getOrNull", "T?");
+    let deps = super::super::deps::TestDeps::new().with_method_return_for_type(
+        "Optional",
+        "getOrNull",
+        "T?",
+    );
     // NO .with_class_params("Optional", ...)
 
     let result = resolve_member_type_on("Optional<FamilyAccount>", "getOrNull", &deps);
@@ -1163,7 +1141,7 @@ fn inline_lambda_generic_ext_fn_no_var_type_capitalize_fallback() {
     // capitalize `buildingSavingsReducer` → `BuildingSavingsReducer`, find
     // `reduce` on that class, and use its concrete return type for substitution.
     let u = test_uri();
-    let deps = super::super::TestDeps::new()
+    let deps = super::super::deps::TestDeps::new()
         // NO .with_var — simulates `by lazy` (no type annotation)
         .with_method_return_for_type(
             "BuildingSavingsReducer",
@@ -1196,7 +1174,7 @@ fn inline_lambda_generic_ext_fn_no_var_type_capitalize_fallback() {
 fn inline_lambda_generic_ext_fn_no_var_type_capitalize_second_param() {
     // Same as above but for the second lambda: EffectType → BuildingSavingsEffect
     let u = test_uri();
-    let deps = super::super::TestDeps::new()
+    let deps = super::super::deps::TestDeps::new()
         .with_method_return_for_type(
             "BuildingSavingsReducer",
             "reduce",
@@ -1233,7 +1211,7 @@ fn inline_lambda_generic_ext_fn_substitution_second_param() {
     //       setState: suspend (StateType) -> VMState,
     //       setEffect: suspend (EffectType) -> VMEffect)
     let u = test_uri();
-    let deps = super::super::TestDeps::new()
+    let deps = super::super::deps::TestDeps::new()
         .with_var(u.as_str(), "reducer", "BuildingSavingsReducer")
         .with_method_return_for_type(
             "BuildingSavingsReducer",
@@ -1264,7 +1242,7 @@ fn inline_lambda_generic_ext_fn_substitution_second_param() {
 fn inline_lambda_generic_ext_fn_substitution_first_param() {
     // Same as above but for the first lambda: it → StateType → SheetState
     let u = test_uri();
-    let deps = super::super::TestDeps::new()
+    let deps = super::super::deps::TestDeps::new()
         .with_var(u.as_str(), "reducer", "BuildingSavingsReducer")
         .with_method_return_for_type(
             "BuildingSavingsReducer",
@@ -1608,5 +1586,76 @@ fun oneYearOlder(resultState: ResultState.Success<Optional<FamilyAccount>>) {
         result.as_deref(),
         Some("FamilyAccount"),
         "named lambda param in dotted-type chain: familyAccount should resolve to FamilyAccount"
+    );
+}
+
+// ── classify_this_lambda_context / find_this_context_in_lines ─────────────────
+
+#[test]
+fn find_this_context_apply_unresolved_is_inside_receiver() {
+    let src = "val _x = unknown.apply {\n    this\n}";
+    let u = uri("/t.kt");
+    let idx = Indexer::new();
+    idx.index_content(&u, src);
+    let lines: Vec<String> = src.lines().map(String::from).collect();
+    let pos = crate::types::CursorPos {
+        line: 1,
+        utf16_col: 8,
+    };
+    let result = super::find_this_context_in_lines(&lines, pos, &idx, &u);
+    assert!(
+        matches!(result, super::ThisContext::InsideReceiver),
+        "cursor inside unknown.apply{{}} should be InsideReceiver, got: {result:?}"
+    );
+}
+
+#[test]
+fn find_this_context_foreach_is_not_found() {
+    let src = "val list = listOf(1)\nlist.forEach {\n    this\n}";
+    let u = uri("/t.kt");
+    let idx = Indexer::new();
+    idx.index_content(&u, src);
+    let lines: Vec<String> = src.lines().map(String::from).collect();
+    let pos = crate::types::CursorPos {
+        line: 2,
+        utf16_col: 8,
+    };
+    let result = super::find_this_context_in_lines(&lines, pos, &idx, &u);
+    assert!(
+        matches!(result, super::ThisContext::NotFound),
+        "cursor inside forEach{{}} should be NotFound, got: {result:?}"
+    );
+}
+
+#[test]
+fn find_this_context_apply_resolved_with_live_tree() {
+    let src = "val user: User = User()\nuser.apply {\n    this\n}";
+    let (u, idx, lines) = indexed_with_live("/t.kt", src, src);
+    let pos = crate::types::CursorPos {
+        line: 2,
+        utf16_col: 8,
+    };
+    let result = super::find_this_context_in_lines(&lines, pos, &idx, &u);
+    assert!(
+        matches!(result, super::ThisContext::Resolved(ref t) if t == "User"),
+        "cursor inside user.apply{{}} should be Resolved(User), got: {result:?}"
+    );
+}
+
+#[test]
+fn find_this_context_nested_foreach_outer_apply() {
+    let src = "val outer = unknown\nval list = listOf(1)\nouter.apply {\n    list.forEach {\n        this\n    }\n}";
+    let u = uri("/t.kt");
+    let idx = Indexer::new();
+    idx.index_content(&u, src);
+    let lines: Vec<String> = src.lines().map(String::from).collect();
+    let pos = crate::types::CursorPos {
+        line: 4,
+        utf16_col: 12,
+    };
+    let result = super::find_this_context_in_lines(&lines, pos, &idx, &u);
+    assert!(
+        matches!(result, super::ThisContext::InsideReceiver),
+        "cursor inside forEach inside apply{{}} should be InsideReceiver, got: {result:?}"
     );
 }

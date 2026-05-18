@@ -3,13 +3,19 @@
 //!
 //! ## What goes in the trait
 //!
-//! Only the two operations that the pure leaf helpers in `it_this.rs` need:
+//! Only the operations that the pure leaf helpers need:
 //! - looking up a function's parameter signature
 //! - inferring a variable's declared type
+//! - resolving generic type parameters and method signatures
 //!
-//! The trait intentionally excludes `mem_lines_for`; higher-level orchestrators
-//! already take the caller-provided lines directly.  Pure leaf helpers should keep
-//! working against the narrower lookup methods below.
+//! The trait intentionally excludes `live_doc`; functions that need the live
+//! CST tree take `&Indexer` (or `&LiveDoc`) directly.
+//!
+//! ## `fun_params_text` is not cheap
+//!
+//! The `Indexer` implementation of `find_fun_params_text` delegates to
+//! `find_fun_signature_full`, which may perform on-demand rg indexing.
+//! Callers should not assume this is a pure in-memory lookup.
 
 use tower_lsp::lsp_types::Url;
 
