@@ -8,21 +8,10 @@
 //! - inferring a variable's declared type
 //!
 //! The trait intentionally excludes `mem_lines_for`; higher-level orchestrators
-//! already take the caller-provided lines directly. `live_doc` is included only as
-//! an optional CST hook for orchestration helpers; pure leaf helpers should keep
+//! already take the caller-provided lines directly.  Pure leaf helpers should keep
 //! working against the narrower lookup methods below.
-//!
-//! ## `fun_params_text` is not cheap
-//!
-//! The `Indexer` implementation of `find_fun_params_text` delegates to
-//! `find_fun_signature_full`, which may perform on-demand rg indexing.
-//! Callers should not assume this is a pure in-memory lookup.
-
-use std::sync::Arc;
 
 use tower_lsp::lsp_types::Url;
-
-use crate::indexer::LiveDoc;
 
 /// Metadata about a resolved callable (function or method) used for generic
 /// type substitution in lambda parameter inference.
@@ -74,13 +63,6 @@ pub(crate) trait InferDeps {
     /// Returns `None` when the class or field is not found.
     /// Default implementation returns `None`; overridden by `Indexer`.
     fn find_field_type(&self, _class_name: &str, _field_name: &str) -> Option<String> {
-        None
-    }
-
-    /// Return the live CST document for `uri` when the file is currently open.
-    /// Higher-level orchestration helpers may use this to walk the tree and then
-    /// feed extracted context into the pure string helpers.
-    fn live_doc(&self, _uri: &Url) -> Option<Arc<LiveDoc>> {
         None
     }
 

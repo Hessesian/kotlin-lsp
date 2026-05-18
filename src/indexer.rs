@@ -41,12 +41,12 @@ pub(crate) use self::infer::{
     find_named_lambda_param_type,
     find_named_lambda_param_type_in_lines,
     find_named_param_type_in_sig,
+    find_this_context_in_lines,
     find_this_element_type_in_lines,
     has_named_params_not_it,
     // expr_type.rs
     infer_expr_type,
     is_import_reachable,
-    is_inside_receiver_lambda,
     is_lambda_param,
     lambda_brace_pos_for_param,
     lambda_param_position_on_line,
@@ -64,6 +64,8 @@ pub(crate) use self::infer::{
     InferDeps,
     ResolutionScope,
     SignatureResult,
+    // it_this.rs enum
+    ThisContext,
 };
 
 mod cache;
@@ -298,9 +300,6 @@ impl crate::indexer::infer::InferDeps for Indexer {
     }
     fn find_method_params_text(&self, class_name: &str, method_name: &str) -> Option<String> {
         crate::indexer::infer::sig::find_method_params_in_class(self, class_name, method_name)
-    }
-    fn live_doc(&self, uri: &Url) -> Option<Arc<LiveDoc>> {
-        self.live_doc(uri)
     }
     fn find_fun_callable_info(
         &self,

@@ -7,8 +7,8 @@ use tree_sitter::Point;
 
 use super::{
     find_as_call_arg_type, find_it_element_type_in_lines, find_named_lambda_param_type_in_lines,
-    find_this_element_type_in_lines, is_inside_receiver_lambda, lambda_brace_pos_for_param,
-    line_has_lambda_param, Indexer,
+    find_this_context_in_lines, lambda_brace_pos_for_param, line_has_lambda_param, Indexer,
+    ThisContext,
 };
 use crate::indexer::live_tree::utf16_col_to_byte;
 use crate::indexer::NodeExt;
@@ -228,7 +228,15 @@ impl Indexer {
                 utf16_col: position.character as usize,
             };
             let lambda_type = if name == "this" {
-                find_this_element_type_in_lines(&lines, pos, self, uri)
+                match find_this_context_in_lines(&lines, pos, self, uri) {
+                    ThisContext::Resolved(ty) => return Some(ty),
+                    // Inside a receiver lambda but type unknown: `this` is the lambda
+                    // receiver, not the enclosing class.  Do not fall back.
+                    ThisContext::InsideReceiver => return None,
+                    // Not in any receiver lambda: fall through to `find_as_call_arg_type`
+                    // and the `enclosing_class_at` fallback below.
+                    ThisContext::NotFound => None,
+                }
             } else {
                 find_it_element_type_in_lines(&lines, pos, self, uri)
             };
@@ -243,18 +251,7 @@ impl Indexer {
             }
             // Fallback for `this` in a regular class method body (not a lambda):
             // scan backward for the enclosing class/object declaration.
-            // Guard: if cursor is inside a receiver-lambda (apply/run/with) that just
-            // failed to resolve its receiver type, `this` refers to that lambda's
-            // receiver — not the enclosing class.  Returning enclosing_class_at here
-            // would silently return the wrong type.
             if name == "this" {
-                let pos2 = CursorPos {
-                    line: line_no,
-                    utf16_col: position.character as usize,
-                };
-                if is_inside_receiver_lambda(&lines, pos2, self, uri) {
-                    return None;
-                }
                 return self.enclosing_class_at(uri, position.line);
             }
             None

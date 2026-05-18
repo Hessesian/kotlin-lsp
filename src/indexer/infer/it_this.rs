@@ -60,15 +60,6 @@ const LAMBDA_PARAM_SCAN_BACK: usize = 20;
 /// Selects which implicit lambda parameter is being inferred.
 ///
 /// Replaces the `for_this: bool` flag in `find_it_element_type_in_lines_impl`
-/// and `cst_it_or_this_type` with an explicit, self-documenting variant.
-#[derive(Copy, Clone, Eq, PartialEq)]
-enum LambdaParamKind {
-    /// Infer the type of `it` (the implicit element parameter).
-    It,
-    /// Infer the type of `this` (the receiver in a receiver lambda).
-    This,
-}
-
 /// Lines to scan backward when searching for the enclosing lambda opener
 /// in the text-fallback path of `find_it_element_type_in_lines_impl`.
 const IT_SCAN_BACK_LINES: usize = 15;
@@ -107,7 +98,139 @@ pub(crate) fn find_it_element_type_in_lines(
     idx: &Indexer,
     uri: &Url,
 ) -> Option<String> {
-    find_it_element_type_in_lines_impl(lines, pos, idx, uri, LambdaParamKind::It)
+    find_it_element_type_in_lines_impl(lines, pos, idx, uri)
+}
+
+/// Outcome of resolving a `this` reference inside a lambda.
+///
+/// Returned by [`find_this_context_in_lines`] so callers can distinguish the
+/// three semantically distinct cases without a second scan.
+#[derive(Debug, PartialEq)]
+pub(crate) enum ThisContext {
+    /// Type resolved — use this string directly.
+    Resolved(String),
+    /// Cursor is inside a receiver-`this` lambda (`apply`, `run`, `with`, …)
+    /// but the receiver object's type could not be determined.
+    /// Callers **must not** fall back to `enclosing_class_at`.
+    InsideReceiver,
+    /// Cursor is not inside any receiver-`this` lambda.
+    /// Callers may fall back to `enclosing_class_at`.
+    NotFound,
+}
+
+/// Resolve the type of a `this` expression at `pos` in `lines`.
+///
+/// Returns a [`ThisContext`] that lets the caller distinguish between a
+/// resolved type, an unresolvable receiver lambda, and "not in a lambda at
+/// all" — without requiring a second scan via `is_inside_receiver_lambda`.
+pub(crate) fn find_this_context_in_lines(
+    lines: &[String],
+    pos: CursorPos,
+    idx: &Indexer,
+    uri: &Url,
+) -> ThisContext {
+    if let Some(doc) = idx.live_doc(uri) {
+        if let Some(node) = cursor_node_at(&doc, pos) {
+            return cst_this_context(node, &doc, idx, uri);
+        }
+    }
+    find_this_context_text(lines, pos, idx, uri)
+}
+
+/// Walk CST ancestors to resolve the `this` receiver context in one pass.
+fn cst_this_context(
+    start_node: tree_sitter::Node<'_>,
+    doc: &crate::indexer::live_tree::LiveDoc,
+    idx: &Indexer,
+    uri: &Url,
+) -> ThisContext {
+    let mut cur = start_node;
+    loop {
+        if cur.kind() == KIND_LAMBDA_LIT && !cur.has_lambda_named_params(&doc.bytes) {
+            let Some((before_brace, _)) = lambda_before_brace_context(cur, doc) else {
+                let Some(p) = cur.parent() else { break };
+                cur = p;
+                continue;
+            };
+
+            let ctx = cur
+                .enclosing_call_expression()
+                .and_then(|call_expr| {
+                    (call_expr.call_fn_name(&doc.bytes).as_deref() == Some("with"))
+                        .then(|| cst_with_receiver_ctx(call_expr, &doc.bytes, idx, uri))
+                        .flatten()
+                })
+                .unwrap_or_else(|| classify_this_lambda_context(&before_brace, idx, uri));
+
+            match ctx {
+                ThisLambdaCtx::Resolved(t) => return ThisContext::Resolved(t),
+                ThisLambdaCtx::Receiver => return ThisContext::InsideReceiver,
+                // Non-receiver lambda (forEach, map…): keep walking outward.
+                ThisLambdaCtx::NotReceiver => {}
+            }
+        }
+        let Some(p) = cur.parent() else { break };
+        cur = p;
+    }
+    ThisContext::NotFound
+}
+
+/// Text-scan fallback for `find_this_context_in_lines` when no live CST is
+/// available.  Walks outward through enclosing `{…}` pairs, classifying each
+/// lambda via [`classify_this_lambda_context`], until a receiver context is
+/// found or the scan window is exhausted.
+fn find_this_context_text(
+    lines: &[String],
+    pos: CursorPos,
+    idx: &Indexer,
+    uri: &Url,
+) -> ThisContext {
+    let mut depth: i32 = 0;
+    let scan_start = pos.line.saturating_sub(IT_SCAN_BACK_LINES);
+
+    for ln in (scan_start..=pos.line).rev() {
+        let line = match lines.get(ln) {
+            Some(l) => l,
+            None => continue,
+        };
+        let scan_slice: &str = if ln == pos.line {
+            let byte_end = crate::indexer::live_tree::utf16_col_to_byte(line, pos.utf16_col);
+            &line[..byte_end]
+        } else {
+            line.as_str()
+        };
+
+        for (bi, ch) in scan_slice.char_indices().rev() {
+            match ch {
+                '}' => depth += 1,
+                '{' => {
+                    depth -= 1;
+                    if depth < 0 {
+                        let before_brace = &scan_slice[..bi];
+                        if before_brace.ends_with('$') {
+                            depth = 0;
+                            continue;
+                        }
+                        if has_named_params_not_it(scan_slice[bi + 1..].trim_start()) {
+                            depth = 0;
+                            continue;
+                        }
+                        match classify_this_lambda_context(before_brace, idx, uri) {
+                            ThisLambdaCtx::Resolved(ty) => return ThisContext::Resolved(ty),
+                            ThisLambdaCtx::Receiver => return ThisContext::InsideReceiver,
+                            // Non-receiver lambda: walk outward to find enclosing receiver.
+                            ThisLambdaCtx::NotReceiver => {
+                                depth = 0;
+                                continue;
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    ThisContext::NotFound
 }
 
 pub(crate) fn find_this_element_type_in_lines(
@@ -116,7 +239,10 @@ pub(crate) fn find_this_element_type_in_lines(
     idx: &Indexer,
     uri: &Url,
 ) -> Option<String> {
-    find_it_element_type_in_lines_impl(lines, pos, idx, uri, LambdaParamKind::This)
+    match find_this_context_in_lines(lines, pos, idx, uri) {
+        ThisContext::Resolved(ty) => Some(ty),
+        ThisContext::InsideReceiver | ThisContext::NotFound => None,
+    }
 }
 
 /// Multi-line version of `find_named_lambda_param_type` for hover/inlay-hint paths.
@@ -786,21 +912,19 @@ fn cst_with_receiver_ctx(
 }
 
 /// Walk ancestors from `start_node` looking for a `lambda_literal` without
-/// named params, then infer the `it`/`this` type for that lambda.
+/// named params, then infer the `it` element type for that lambda.
 ///
-/// This is the extracted body of the CST fast-path in
-/// `find_it_element_type_in_lines_impl`.
-fn cst_it_or_this_type(
+/// This is the CST fast-path for `find_it_element_type_in_lines_impl`.
+fn cst_it_type(
     start_node: tree_sitter::Node<'_>,
     doc: &crate::indexer::live_tree::LiveDoc,
     lines: &[String],
-    kind: LambdaParamKind,
     idx: &Indexer,
     uri: &Url,
 ) -> Option<String> {
     let mut cur = start_node;
     log::debug!(
-        "cst_it_or_this_type: start_node kind={}, text={:?}",
+        "cst_it_type: start_node kind={}, text={:?}",
         start_node.kind(),
         start_node
             .utf8_text(&doc.bytes)
@@ -809,14 +933,14 @@ fn cst_it_or_this_type(
     );
     loop {
         log::debug!(
-            "cst_it_or_this_type: cur kind={} at {:?}",
+            "cst_it_type: cur kind={} at {:?}",
             cur.kind(),
             cur.start_position()
         );
         if cur.kind() == KIND_LAMBDA_LIT && !cur.has_lambda_named_params(&doc.bytes) {
             let Some((before_brace, ln)) = lambda_before_brace_context(cur, doc) else {
                 log::debug!(
-                    "cst_it_or_this_type: no before_brace context for lambda at {:?}",
+                    "cst_it_type: no before_brace context for lambda at {:?}",
                     cur.start_position()
                 );
                 let p = cur.parent()?;
@@ -824,50 +948,30 @@ fn cst_it_or_this_type(
                 continue;
             };
 
-            if kind == LambdaParamKind::This {
-                let ctx = cur
-                    .enclosing_call_expression()
-                    .and_then(|call_expr| {
-                        (call_expr.call_fn_name(&doc.bytes).as_deref() == Some("with"))
-                            .then(|| cst_with_receiver_ctx(call_expr, &doc.bytes, idx, uri))
-                            .flatten()
-                    })
-                    .unwrap_or_else(|| classify_this_lambda_context(&before_brace, idx, uri));
-                match ctx {
-                    ThisLambdaCtx::Resolved(t) => return Some(t),
-                    // Receiver-lambda context but type not found: stop walking up.
-                    // `this` here is the receiver, not an outer lambda's receiver.
-                    ThisLambdaCtx::Receiver => return None,
-                    // Non-receiver lambda (forEach, map…): keep walking outward.
-                    // `this` inside these lambdas is the enclosing class / outer receiver.
-                    ThisLambdaCtx::NotReceiver => {}
-                }
-            } else {
-                // CST-first: use the unified resolver (no rg spawns, HashMap only).
-                log::trace!("cst_it_or_this_type: trying resolve_lambda_param_type_cst");
-                if let Some(resolved) = resolve_lambda_param_type_cst(doc, &cur, idx, uri, 0) {
-                    log::trace!("cst_it_or_this_type: CST resolved to {resolved}");
-                    return Some(resolved);
-                }
-                log::trace!("cst_it_or_this_type: CST resolver returned None, trying text fallback with before_brace={before_brace:?}");
-                // Text fallback for cases the CST resolver can't handle yet
-                // (function not indexed, no call_expression parent).
-                let result = lambda_receiver_type_from_context(&before_brace, idx, uri)
-                    .or_else(|| {
-                        lambda_receiver_type_named_arg_ml(&before_brace, 0, lines, ln, idx, uri)
-                    })
-                    .or_else(|| cst_lambda_param_type_via_call(doc, &cur, idx, uri, 0));
-                match result.as_deref() {
-                    Some(t) if is_generic_param(t) => {
-                        if let Some(concrete) =
-                            cst_forward_resolve_receiver_type(&cur, &doc.bytes, idx, uri)
-                        {
-                            return Some(concrete);
-                        }
+            // CST-first: use the unified resolver (no rg spawns, HashMap only).
+            log::trace!("cst_it_type: trying resolve_lambda_param_type_cst");
+            if let Some(resolved) = resolve_lambda_param_type_cst(doc, &cur, idx, uri, 0) {
+                log::trace!("cst_it_type: CST resolved to {resolved}");
+                return Some(resolved);
+            }
+            log::trace!("cst_it_type: CST resolver returned None, trying text fallback with before_brace={before_brace:?}");
+            // Text fallback for cases the CST resolver can't handle yet
+            // (function not indexed, no call_expression parent).
+            let result = lambda_receiver_type_from_context(&before_brace, idx, uri)
+                .or_else(|| {
+                    lambda_receiver_type_named_arg_ml(&before_brace, 0, lines, ln, idx, uri)
+                })
+                .or_else(|| cst_lambda_param_type_via_call(doc, &cur, idx, uri, 0));
+            match result.as_deref() {
+                Some(t) if is_generic_param(t) => {
+                    if let Some(concrete) =
+                        cst_forward_resolve_receiver_type(&cur, &doc.bytes, idx, uri)
+                    {
+                        return Some(concrete);
                     }
-                    Some(_) => return result,
-                    None => {}
                 }
+                Some(_) => return result,
+                None => {}
             }
         }
         let p = cur.parent()?;
@@ -880,11 +984,10 @@ fn find_it_element_type_in_lines_impl(
     pos: CursorPos,
     idx: &Indexer,
     uri: &Url,
-    kind: LambdaParamKind,
 ) -> Option<String> {
     if let Some(doc) = idx.live_doc(uri) {
         if let Some(node) = cursor_node_at(&doc, pos) {
-            return cst_it_or_this_type(node, &doc, lines, kind, idx, uri);
+            return cst_it_type(node, &doc, lines, idx, uri);
         }
     }
 
@@ -920,9 +1023,6 @@ fn find_it_element_type_in_lines_impl(
                         if has_named_params_not_it(after_brace) {
                             depth = 0;
                             continue;
-                        }
-                        if kind == LambdaParamKind::This {
-                            return lambda_receiver_this_type_from_context(before_brace, idx, uri);
                         }
                         return lambda_receiver_type_from_context(before_brace, idx, uri).or_else(
                             || {
@@ -1112,96 +1212,6 @@ pub(crate) fn classify_this_lambda_context(
     }
 
     ThisLambdaCtx::NotReceiver
-}
-
-/// Thin wrapper kept for callers that only need `Option<String>`.
-fn lambda_receiver_this_type_from_context(
-    before_brace: &str,
-    deps: &impl InferDeps,
-    uri: &Url,
-) -> Option<String> {
-    match classify_this_lambda_context(before_brace, deps, uri) {
-        ThisLambdaCtx::Resolved(ty) => Some(ty),
-        _ => None,
-    }
-}
-
-/// Return `true` when the text-scan of `lines` around `pos` determines that
-/// the cursor is inside a **receiver-`this` lambda** whose receiver type is
-/// either resolved or simply not found — either way `this` refers to the
-/// lambda receiver, NOT the enclosing class.
-///
-/// Used in `infer_lambda_param_type_at` to suppress the `enclosing_class_at`
-/// fallback when `find_this_element_type_in_lines` returned `None` only
-/// because the receiver variable's type couldn't be resolved.
-pub(crate) fn is_inside_receiver_lambda(
-    lines: &[String],
-    pos: CursorPos,
-    deps: &impl InferDeps,
-    uri: &Url,
-) -> bool {
-    if let Some(doc) = deps.live_doc(uri) {
-        if let Some(mut cur) = cursor_node_at(&doc, pos) {
-            while let Some(lambda) = cur.enclosing_lambda_literal() {
-                if !lambda.has_lambda_named_params(&doc.bytes) {
-                    if let Some((before_brace, _)) = lambda_before_brace_context(lambda, &doc) {
-                        if !matches!(
-                            classify_this_lambda_context(&before_brace, deps, uri),
-                            ThisLambdaCtx::NotReceiver
-                        ) {
-                            return true;
-                        }
-                    }
-                }
-                let Some(parent) = lambda.parent() else {
-                    break;
-                };
-                cur = parent;
-            }
-        }
-    }
-
-    let mut depth: i32 = 0;
-    let scan_start = pos.line.saturating_sub(IT_SCAN_BACK_LINES);
-
-    for ln in (scan_start..=pos.line).rev() {
-        let line = match lines.get(ln) {
-            Some(l) => l,
-            None => continue,
-        };
-        let scan_slice: &str = if ln == pos.line {
-            let byte_end = crate::indexer::live_tree::utf16_col_to_byte(line, pos.utf16_col);
-            &line[..byte_end]
-        } else {
-            line.as_str()
-        };
-
-        for (bi, ch) in scan_slice.char_indices().rev() {
-            match ch {
-                '}' => depth += 1,
-                '{' => {
-                    depth -= 1;
-                    if depth < 0 {
-                        let before_brace = &scan_slice[..bi];
-                        if before_brace.ends_with('$') {
-                            depth = 0;
-                            continue;
-                        }
-                        if has_named_params_not_it(scan_slice[bi + 1..].trim_start()) {
-                            depth = 0;
-                            continue;
-                        }
-                        return !matches!(
-                            classify_this_lambda_context(before_brace, deps, uri),
-                            ThisLambdaCtx::NotReceiver
-                        );
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    false
 }
 
 /// Handles named-arg lambdas spread across multiple lines:

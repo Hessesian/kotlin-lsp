@@ -42,7 +42,7 @@ pub(crate) use args::{
 pub(crate) use it_this::{
     find_it_element_type, find_it_element_type_in_lines, find_last_dot_at_depth_zero,
     find_named_lambda_param_type, find_named_lambda_param_type_in_lines,
-    find_this_element_type_in_lines, is_inside_receiver_lambda, is_lambda_param,
+    find_this_context_in_lines, find_this_element_type_in_lines, is_lambda_param,
     lambda_brace_pos_for_param, lambda_param_position_on_line, lambda_receiver_type_from_context,
-    line_has_lambda_param,
+    line_has_lambda_param, ThisContext,
 };
