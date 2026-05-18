@@ -859,7 +859,7 @@ fn owner_scoped_reference_locations(
 /// Scopes file discovery to files that mention the declaring class (by name),
 /// then searches those files for the field name.
 ///
-/// Differs from [`owner_scoped_reference_locations`] in two ways:
+/// Differs from [`owner_scoped_reference_locations`] in three ways:
 /// 1. The declaring file is **not** restricted to the declaration line — bare
 ///    field access inside the class body (`value`, `this.value`) is valid.
 /// 2. The `qualifier_hints_owner` heuristic is **not** applied — any occurrence
