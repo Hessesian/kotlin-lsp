@@ -49,8 +49,9 @@ pub(crate) async fn find_references_with_qualifier(
             None
         };
 
-    // For fields (val/var/Java field) at their declaration site: scope file discovery
-    // to files that mention the declaring class, instead of the whole package.
+    // For class members (fields, properties, methods) at their declaration site:
+    // scope file discovery to files that mention the declaring class, instead of
+    // the whole package.
     let field_owner = if qualifier.is_none() && declared_pkg.is_some() {
         field_owner_for_decl(index, uri, name, line)
     } else {
@@ -368,16 +369,19 @@ struct ReferenceSearch {
     field_decl_line: Option<u32>,
 }
 
-// ─── Field owner resolution ───────────────────────────────────────────────────
+// ─── Field/member owner resolution ───────────────────────────────────────────
 
-/// Returns the declaring class of a field/property at `(uri, line)` if the
-/// symbol is a property/variable/Java field — `None` if it is a method or class.
+/// Returns the declaring class of any class member (field or method) at `(uri, line)`.
 ///
-/// Uses the `SymbolEntry::container` field (set by range-based nesting at parse
-/// time) rather than `enclosing_class_at` (which has a `row < row` guard that
-/// fails for single-line `data class Foo(val field: T)` declarations).
+/// Unlike `outer_class_for_decl_site` (which only fires for doubly-nested methods),
+/// this fires for **any** lowercase symbol declared directly inside a class or
+/// interface — single-level nesting is sufficient.
 ///
-/// Used only at the declaration site (`declared_pkg.is_some()` is the proxy).
+/// Uses `SymbolEntry::container` (set by range-based nesting at parse time),
+/// which correctly handles single-line `data class Foo(val field: T)` declarations
+/// where `enclosing_class_at`'s row-guard would return `None`.
+///
+/// Returns `None` for top-level declarations (no enclosing class).
 fn field_owner_for_decl(
     index: &impl SymbolIndex,
     uri: &Url,

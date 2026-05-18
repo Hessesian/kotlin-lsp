@@ -262,14 +262,15 @@ pub(crate) struct RgSearchRequest<'a> {
     /// (`factory.create()`) are found, while sibling factories in the same
     /// package are excluded because they do not reference the outer class.
     owner_class: Option<&'a str>,
-    /// Declaring class for a field/property reference (e.g. `"FamilyAccount"` for
-    /// a `val value` declared inside `FamilyAccount`).
+    /// Declaring class for a class member (field, property, or method) reference
+    /// (e.g. `"FamilyAccount"` for a `val value` or `fun load()` declared inside
+    /// `FamilyAccount`).
     ///
     /// When set, file discovery finds files mentioning the declaring class, then
-    /// searches for the field name within those files.  Unlike `owner_class`, the
-    /// declaring file is NOT restricted to only the declaration — bare field access
+    /// searches for the member name within those files.  Unlike `owner_class`, the
+    /// declaring file is NOT restricted to only the declaration — bare member access
     /// inside the class body is valid.  Declaration lines in other files are
-    /// filtered out to avoid picking up same-named fields in other classes.
+    /// filtered out to avoid picking up same-named members in other classes.
     field_owner: Option<&'a str>,
     /// 0-based line of the actual field declaration in `from_uri`.
     ///
@@ -866,20 +867,19 @@ fn owner_scoped_reference_locations(
         .collect()
 }
 
-/// Find references to a field/property declared inside a class.
+/// Find references to a class member (field, property, or method) declared inside
+/// a class or interface.
 ///
 /// Scopes file discovery to files that mention the declaring class (by name),
-/// then searches those files for the field name.
+/// then searches those files for the member name.
 ///
-/// Differs from [`owner_scoped_reference_locations`] in two ways:
+/// Differs from [`owner_scoped_reference_locations`] (for doubly-nested methods):
 /// 1. The declaring file is **not** restricted to the declaration line — bare
-///    field access inside the class body (`value`, `this.value`) is valid.
+///    member access inside the class body is valid.
 /// 2. The `qualifier_hints_owner` heuristic is **not** applied — any occurrence
-///    of `fieldName` in a candidate file is kept, because instance variable names
-///    don't carry the declaring class name (e.g. `account.value` has no
-///    `FamilyAccount` substring).
-/// 3. Declaration lines in **other** files are filtered out to avoid picking up
-///    same-named fields in unrelated classes.
+///    is kept, because instance variable names don't carry the declaring class name.
+/// 3. Method implementations (`override fun someMethod()`) in other files are
+///    **kept** — they are valid references, not false positives.
 fn field_scoped_reference_locations(
     request: &RgSearchRequest<'_>,
     matcher: Option<&IgnoreMatcher>,
@@ -888,7 +888,7 @@ fn field_scoped_reference_locations(
     let safe_owner = regex_escape(field_owner);
     let safe_name = regex_escape(request.name);
 
-    // Candidate files: any file that mentions the declaring class name.
+    // Candidate files: any file that mentions the declaring class/interface name.
     let owner_pattern = format!(r"\b{safe_owner}\b");
     let mut candidate_files = filter_candidate_files(
         rg_files_with_matches_scoped(
@@ -898,7 +898,7 @@ fn field_scoped_reference_locations(
         ),
         matcher,
     );
-    // Always include the declaring file(s) — the class body can access the field
+    // Always include the declaring file(s) — the class body can access the member
     // without the class name appearing elsewhere in the file.
     merge_decl_files(
         &mut candidate_files,
@@ -1086,6 +1086,47 @@ pub(crate) fn rg_find_implementors(
         Some(m) => m.filter_locs(locs),
         None => locs,
     }
+}
+
+/// Find `override fun method_name` locations across files that mention `declaring_class`.
+///
+/// Cold-start fallback for [`find_method_implementations`] when implementors are
+/// not yet indexed.  Scopes candidate files to those that reference the declaring
+/// class by name, then keeps only lines that look like an override declaration.
+pub(crate) fn rg_find_method_overrides(
+    method_name: &str,
+    declaring_class: &str,
+    root: Option<&Path>,
+    source_paths: &[String],
+    matcher: Option<&IgnoreMatcher>,
+) -> Vec<Location> {
+    let Some(root) = root else {
+        return vec![];
+    };
+
+    // Candidate files: files that mention the declaring class.
+    let safe_class = regex_escape(declaring_class);
+    let candidate_files = filter_candidate_files(
+        rg_files_with_matches_scoped(&format!(r"\b{safe_class}\b"), source_paths, root),
+        matcher,
+    );
+    if candidate_files.is_empty() {
+        return vec![];
+    }
+
+    // Keep only override declaration lines for the method name.
+    let safe_method = regex_escape(method_name);
+    rg_word_in_files(&safe_method, &candidate_files)
+        .into_iter()
+        .filter_map(|(loc, content)| {
+            let lang = crate::Language::from_path(loc.uri.path());
+            if lang.is_override_declaration(content.trim(), method_name) {
+                Some(loc)
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 /// Parse one line of `rg --no-heading --with-filename --line-number --column`
