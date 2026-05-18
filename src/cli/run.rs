@@ -25,11 +25,13 @@ const SEVERITY_DIAG: &str = "diag";
 
 /// Resolve the workspace root: explicit --root, then nearest .git ancestor, then cwd.
 fn resolve_root(explicit: Option<&Path>) -> PathBuf {
-    if let Some(r) = explicit {
-        return r.to_path_buf();
-    }
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    find_git_root(&cwd).unwrap_or(cwd)
+    let raw = if let Some(r) = explicit {
+        r.to_path_buf()
+    } else {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        find_git_root(&cwd).unwrap_or(cwd)
+    };
+    raw.canonicalize().unwrap_or(raw)
 }
 
 /// Walk up from `start` looking for a `.git` directory.
@@ -46,16 +48,18 @@ fn find_git_root(start: &Path) -> Option<PathBuf> {
 /// Resolve workspace root for file-centric commands: tries explicit root first,
 /// then walks up from the file's directory, then falls back to CWD-based detection.
 fn resolve_root_for_file(explicit: Option<&Path>, file: &Path) -> PathBuf {
-    if let Some(r) = explicit {
-        return r.to_path_buf();
-    }
-    let file_dir = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
-    let file_dir = file_dir.parent().unwrap_or(&file_dir);
-    if let Some(root) = find_git_root(file_dir) {
-        return root;
-    }
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    find_git_root(&cwd).unwrap_or(cwd)
+    let raw = if let Some(r) = explicit {
+        r.to_path_buf()
+    } else {
+        let file_dir = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
+        let file_dir = file_dir.parent().unwrap_or(&file_dir);
+        let fallback = || {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            find_git_root(&cwd).unwrap_or(cwd)
+        };
+        find_git_root(file_dir).unwrap_or_else(fallback)
+    };
+    raw.canonicalize().unwrap_or(raw)
 }
 
 // ── Column resolution helpers ─────────────────────────────────────────────────
@@ -146,9 +150,10 @@ async fn build_index(root: &Path, no_stdlib: bool) -> Arc<Indexer> {
 
 async fn build_index_inner(root: &Path, source_paths: Vec<String>) -> Arc<Indexer> {
     let idx = Arc::new(Indexer::new());
-    // Set workspace root so save_cache_to_disk can persist the index.
+    // Canonicalize so relative roots (e.g. ".") don't confuse path.starts_with checks
+    // in index_source_paths when comparing absolute fd output against workspace_root.
     let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    idx.workspace_root.set(canonical);
+    idx.workspace_root.set(canonical.clone());
     if !source_paths.is_empty() {
         *idx.source_paths_raw.write().unwrap() = source_paths;
     }
@@ -162,7 +167,7 @@ async fn build_index_inner(root: &Path, source_paths: Vec<String>) -> Arc<Indexe
         *idx.workspace_source_roots.write().unwrap() = workspace_roots;
     }
     Arc::clone(&idx)
-        .index_workspace_full(root, Arc::new(NoopReporter))
+        .index_workspace_full(&canonical, Arc::new(NoopReporter))
         .await;
     idx
 }
@@ -211,12 +216,16 @@ fn collect_cli_source_paths(root: &Path, no_stdlib: bool) -> Vec<String> {
 
     // When workspace files declare no source roots, try Gradle/Maven build
     // layout detection so `complete` behaves like the LSP path.
-    // These paths are under the workspace root so `is_external` does not apply.
+    // Only include paths outside the workspace root — internal paths are already
+    // discovered and fully indexed by the workspace scan. Re-indexing them via
+    // index_source_paths would double-parse ~11k files, doubling memory usage.
     if json_paths.is_empty() {
         for p in crate::workspace_json::detect_build_layout_source_paths(root) {
-            let s = p.to_string_lossy().into_owned();
-            if !paths.contains(&s) {
-                paths.push(s);
+            if is_external(&p) {
+                let s = p.to_string_lossy().into_owned();
+                if !paths.contains(&s) {
+                    paths.push(s);
+                }
             }
         }
     }

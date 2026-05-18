@@ -510,6 +510,9 @@ impl Indexer {
         }
 
         let gen = self.workspace_root.generation();
+        // Canonicalize so path.starts_with comparisons against absolute fd output work
+        // even when workspace_root was passed as a relative path (e.g. ".").
+        let workspace_root = workspace_root.canonicalize().unwrap_or(workspace_root);
         let source_paths = resolve_source_paths(&raw_paths, &workspace_root);
 
         // Load manifest only — cheap (just version + chunk_count, no file data).
