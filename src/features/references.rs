@@ -51,12 +51,7 @@ pub(crate) async fn find_references_with_qualifier(
 
     // For fields (val/var/Java field) at their declaration site: scope file discovery
     // to files that mention the declaring class, instead of the whole package.
-    // Only fires when there is no doubly-nested owner_class already covering the site.
-    let field_owner = if !name.starts_with_uppercase()
-        && owner_class.is_none()
-        && qualifier.is_none()
-        && declared_pkg.is_some()
-    {
+    let field_owner = if qualifier.is_none() && declared_pkg.is_some() {
         field_owner_for_decl(index, uri, name, line)
     } else {
         None
@@ -72,6 +67,7 @@ pub(crate) async fn find_references_with_qualifier(
         declared_pkg,
         decl_files,
         owner_class,
+        field_decl_line: field_owner.is_some().then_some(line),
         field_owner,
     };
 
@@ -241,7 +237,13 @@ async fn rg_locations(
             None => rg_req,
         };
         let rg_req = match request.field_owner.as_deref() {
-            Some(owner) => rg_req.with_field_owner(owner),
+            Some(owner) => {
+                let rg_req = rg_req.with_field_owner(owner);
+                match request.field_decl_line {
+                    Some(dl) => rg_req.with_field_decl_line(dl),
+                    None => rg_req,
+                }
+            }
             None => rg_req,
         };
         crate::rg::rg_find_references(&rg_req, matcher.as_deref())
@@ -360,6 +362,10 @@ struct ReferenceSearch {
     owner_class: Option<String>,
     /// Declaring class for field-scoped reference search; see [`field_owner_for_decl`].
     field_owner: Option<String>,
+    /// 0-based declaration line in `uri`; set when `field_owner` is present so that
+    /// the rg path can distinguish the actual declaration from same-named fields in
+    /// other classes inside the same file.
+    field_decl_line: Option<u32>,
 }
 
 // ─── Field owner resolution ───────────────────────────────────────────────────
@@ -383,7 +389,7 @@ fn field_owner_for_decl(
         .iter()
         .find(|s| {
             s.name == name
-                && s.range.start.line == line
+                && s.selection_range.start.line == line
                 && matches!(
                     s.kind,
                     SymbolKind::PROPERTY | SymbolKind::VARIABLE | SymbolKind::FIELD

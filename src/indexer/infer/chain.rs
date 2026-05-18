@@ -14,6 +14,7 @@ use super::lambda::SCOPE_FUNCTIONS;
 use super::receiver::uppercase_ident_prefix;
 use super::type_subst::{
     build_type_arg_subst, capitalize_first_char, first_type_arg_raw, is_generic_param,
+    split_top_level_commas, type_args_inner,
 };
 
 /// A segment in a navigation chain: either a root identifier or a suffix member.
@@ -177,12 +178,21 @@ pub(super) fn forward_resolve_segments(
                         }
                     }
                     // Method not indexed (or returns generic): use first concrete type arg
-                    // of the receiver as a best-effort return type.  This handles
-                    // extension functions like `Optional<T>.getOrNull(): T?` when
-                    // they haven't been indexed yet (e.g., workspace scan in progress).
-                    if let Some(first_arg) = current_type.as_deref().and_then(first_type_arg_raw) {
-                        if first_arg.starts_with_uppercase() && !is_generic_param(&first_arg) {
-                            current_type = Some(first_arg);
+                    // of the receiver as a best-effort return type.  Only applies when the
+                    // receiver has exactly one type parameter (e.g. `Optional<T>`) — for
+                    // multi-param types like `Map<String, Order>` the first arg would be
+                    // wrong (it would infer `String` instead of `Order`).
+                    let is_single_param = current_type
+                        .as_deref()
+                        .and_then(type_args_inner)
+                        .is_some_and(|inner| split_top_level_commas(inner).len() == 1);
+                    if is_single_param {
+                        if let Some(first_arg) =
+                            current_type.as_deref().and_then(first_type_arg_raw)
+                        {
+                            if first_arg.starts_with_uppercase() && !is_generic_param(&first_arg) {
+                                current_type = Some(first_arg);
+                            }
                         }
                     }
                 }
