@@ -21,7 +21,7 @@ const GREP_BASH_RE = /\b(rg|grep|fd|find)\b.*(-e\s+(?:kt|kts|java)|\.(kt|kts|jav
 const GLOB_KT_RE = /\.(kt|java|kts)\b/;
 
 // Tools that count as proper LSP usage (reset the streak)
-const LSP_TOOLS = new Set(["lsp", "kotlin_lsp_complete"]);
+const LSP_TOOLS = new Set(["lsp", "kotlin_lsp_complete", "kotlin_find_dead_code", "kotlin_find_implementors", "kotlin_extract_interface", "kotlin_rename"]);
 
 const STREAK_THRESHOLD = 3;  // consecutive grep calls before reinforcing
 
@@ -85,6 +85,34 @@ function runCommand(cmd, args, timeout = 8000) {
 
 const WORKSPACE_CONFIG = path.join(os.homedir(), ".config", "kotlin-lsp", "workspace");
 const STATUS_PATH = path.join(os.homedir(), ".cache", "kotlin-lsp", "status.json");
+const KOTLIN_CLI_CONFIG = path.join(os.homedir(), ".config", "kotlin-lsp", "cli-script");
+
+/**
+ * Resolve the path to kotlin-cli.py.
+ * Priority: KOTLIN_CLI_PATH env var > ~/.config/kotlin-lsp/cli-script file
+ * Returns the path string, or throws an informative error string if not configured.
+ */
+async function resolveCliScript() {
+  if (process.env.KOTLIN_CLI_PATH) return process.env.KOTLIN_CLI_PATH;
+  try {
+    const p = (await fs.readFile(KOTLIN_CLI_CONFIG, "utf8")).trim();
+    if (p) return p;
+  } catch { /* not configured */ }
+  throw [
+    "kotlin-cli.py path not configured.",
+    `Set it with: echo '/path/to/kotlin-lsp/contrib/kotlin-cli.py' > ${KOTLIN_CLI_CONFIG}`,
+    "Or set KOTLIN_CLI_PATH environment variable.",
+  ].join("\n");
+}
+
+/** Run kotlin-cli.py with the given subcommand args. workspace is passed as --workspace. */
+async function runKotlinCli(workspace, cliArgs, timeout = 120000) {
+  let script;
+  try { script = await resolveCliScript(); }
+  catch (msg) { return { code: 1, stdout: "", stderr: msg }; }
+  const args = ["--workspace", workspace, ...cliArgs];
+  return runCommand("python3", [script, ...args], timeout);
+}
 
 /**
  * Kill only the kotlin-lsp process(es) managed by Copilot CLI.
@@ -293,6 +321,240 @@ const session = await joinSession({
       },
     },
     {
+      name: "kotlin_find_dead_code",
+      description: [
+        "Find unreferenced (potentially dead) Kotlin/Java symbols in the workspace.",
+        "Walks every source file with documentSymbol, then calls findReferences for each",
+        "class/fun/property/interface — skipping entry points (Activity, Fragment, ViewModel,",
+        "Composable, @Provides/@Binds etc.) that are invoked by framework, not source code.",
+        "Use this before a cleanup sprint or when doing a dead-code audit.",
+        "Returns: list of symbols with zero references (name, kind, file, line).",
+        "Note: needs a fully indexed workspace; call kotlin_lsp_status first if unsure.",
+      ].join(" "),
+      parameters: {
+        type: "object",
+        properties: {
+          workspace: {
+            type: "string",
+            description: "Absolute path to the workspace root. Defaults to cwd.",
+          },
+          kind: {
+            type: "string",
+            enum: ["class", "fun", "property", "interface", "all"],
+            description: "Symbol kind to check. Defaults to 'all'.",
+          },
+          limit: {
+            type: "integer",
+            description: "Max results to return (default: unlimited).",
+          },
+          exclude_tests: {
+            type: "boolean",
+            description: "Skip symbols in files under test/ or *Test.kt / *Spec.kt paths.",
+          },
+        },
+        required: [],
+      },
+      handler: async (args) => {
+        const workspace = path.resolve(args.workspace || process.cwd());
+        const cliArgs = ["find-dead-code", "--json"];
+        if (args.kind && args.kind !== "all") { cliArgs.push("--kind"); cliArgs.push(args.kind); }
+        if (args.limit) { cliArgs.push("--limit"); cliArgs.push(String(args.limit)); }
+        if (args.exclude_tests) cliArgs.push("--exclude-tests");
+        const { code, stdout, stderr } = await runKotlinCli(workspace, cliArgs, 300000);
+        if (code !== 0 && !stdout.trim()) return `Error running find-dead-code:\n${stderr}`;
+        return stdout.trim() || "No unreferenced symbols found.";
+      },
+    },
+    {
+      name: "kotlin_find_implementors",
+      description: [
+        "Find all classes/objects that implement a given interface or extend a class.",
+        "Wraps kotlin-cli.py find-implementors — uses lsp goToImplementation under the hood.",
+        "Returns: list of implementing symbols with file and line.",
+        "Use this instead of grep for reliable, index-based results.",
+      ].join(" "),
+      parameters: {
+        type: "object",
+        properties: {
+          name: {
+            type: "string",
+            description: "Interface or class name to find implementors for (e.g. 'NewsRepository')",
+          },
+          workspace: {
+            type: "string",
+            description: "Absolute path to the workspace root. Defaults to cwd.",
+          },
+        },
+        required: ["name"],
+      },
+      handler: async (args) => {
+        const workspace = path.resolve(args.workspace || process.cwd());
+        const { code, stdout, stderr } = await runKotlinCli(workspace, ["find-implementors", "--json", args.name]);
+        if (code !== 0 && !stdout.trim()) return `Error: ${stderr}`;
+        return stdout.trim() || `No implementors found for '${args.name}'.`;
+      },
+    },
+    {
+      name: "kotlin_extract_interface",
+      description: [
+        "Generate an interface stub from a class's public non-private members.",
+        "Reads the class's documentSymbol, filters out private/internal/local members,",
+        "and emits a ready-to-paste Kotlin interface with the public API surface.",
+        "Use this when extracting an interface for dependency inversion without reading the whole file.",
+        "Returns: Kotlin source for the interface (or JSON with --json).",
+      ].join(" "),
+      parameters: {
+        type: "object",
+        properties: {
+          class_name: {
+            type: "string",
+            description: "Name of the class to extract an interface from (e.g. 'OfflineFirstNewsRepository')",
+          },
+          workspace: {
+            type: "string",
+            description: "Absolute path to the workspace root. Defaults to cwd.",
+          },
+        },
+        required: ["class_name"],
+      },
+      handler: async (args) => {
+        const workspace = path.resolve(args.workspace || process.cwd());
+        const { code, stdout, stderr } = await runKotlinCli(workspace, ["extract-interface", "--json", args.class_name]);
+        if (code !== 0 && !stdout.trim()) return `Error: ${stderr}`;
+        return stdout.trim() || `Could not extract interface from '${args.class_name}'.`;
+      },
+    },
+    {
+      name: "kotlin_rename",
+      description: [
+        "Rename a symbol across the entire workspace using LSP workspace/rename.",
+        "Resolves the symbol by name, applies TextEdits to all files, and reports a summary.",
+        "Use --dry-run to preview changes without writing files.",
+        "Fails with a candidate list if the name is ambiguous (multiple matches).",
+        "Known limitation: TextEdit positions are UTF-16; files with non-BMP characters may misalign.",
+      ].join(" "),
+      parameters: {
+        type: "object",
+        properties: {
+          old_name: {
+            type: "string",
+            description: "Current symbol name to rename (e.g. 'AnalyticsHelper')",
+          },
+          new_name: {
+            type: "string",
+            description: "New name for the symbol",
+          },
+          dry_run: {
+            type: "boolean",
+            description: "Preview changes without writing files.",
+          },
+          workspace: {
+            type: "string",
+            description: "Absolute path to the workspace root. Defaults to cwd.",
+          },
+        },
+        required: ["old_name", "new_name"],
+      },
+      handler: async (args) => {
+        const workspace = path.resolve(args.workspace || process.cwd());
+        const cliArgs = ["rename", "--json", args.old_name, args.new_name];
+        if (args.dry_run) cliArgs.push("--dry-run");
+        const { code, stdout, stderr } = await runKotlinCli(workspace, cliArgs, 60000);
+        if (code !== 0 && !stdout.trim()) return `Error: ${stderr}`;
+        return stdout.trim() || "Rename returned no output.";
+      },
+    },
+    {
+      name: "kotlin_list_templates",
+      description: [
+        "List IDEA file templates available in the current project's .idea/fileTemplates/ directory.",
+        "Templates are families of files (e.g. 'New Contract' generates Contract, Mapper, Screen, ViewModel, Interactor).",
+        "Use this to discover available scaffolding before calling kotlin_scaffold_feature.",
+        "Does NOT require the LSP server — reads the .idea directory directly.",
+      ].join(" "),
+      parameters: {
+        type: "object",
+        properties: {
+          workspace: {
+            type: "string",
+            description: "Absolute path to the project root containing .idea/. Defaults to cwd.",
+          },
+        },
+        required: [],
+      },
+      handler: async (args) => {
+        const workspace = path.resolve(args.workspace || process.cwd());
+        const { code, stdout, stderr } = await runKotlinCli(workspace, ["list-templates"]);
+        if (code !== 0 && !stdout.trim()) return `Error: ${stderr}`;
+        return stdout.trim() || "No IDEA file templates found in this project.";
+      },
+    },
+    {
+      name: "kotlin_scaffold_feature",
+      description: [
+        "Generate a complete MVI feature scaffold from an IDEA file template family.",
+        "Reads templates from .idea/fileTemplates/, substitutes ${VAR} placeholders, and",
+        "writes the generated files under src-root/package-path/.",
+        "Use --json to get [{path, content}] output for AI inspection before writing.",
+        "Use --dry-run to preview file paths without writing.",
+        "Call kotlin_list_templates first to discover available template families and variable requirements.",
+        "Example: scaffold-feature GoldConversion --package com.example.gold --src-root src/main/kotlin",
+      ].join(" "),
+      parameters: {
+        type: "object",
+        properties: {
+          feature_name: {
+            type: "string",
+            description: "PascalCase feature name (e.g. 'GoldConversion'). Lowercase/snake_case is auto-derived.",
+          },
+          package: {
+            type: "string",
+            description: "Kotlin package for the generated files (e.g. 'com.example.gold.conversion')",
+          },
+          template: {
+            type: "string",
+            description: "Template family name (default: 'New Contract'). Use kotlin_list_templates to discover.",
+          },
+          src_root: {
+            type: "string",
+            description: "Absolute or relative path to the source root where files will be written.",
+          },
+          vars: {
+            type: "array",
+            items: { type: "string" },
+            description: "Extra KEY=VALUE substitutions for template variables (e.g. ['MODULE_NAME=gold'])",
+          },
+          dry_run: {
+            type: "boolean",
+            description: "Print file paths without writing them.",
+          },
+          json: {
+            type: "boolean",
+            description: "Output [{path, content}] JSON for AI review before writing.",
+          },
+          workspace: {
+            type: "string",
+            description: "Absolute path to the project root. Defaults to cwd.",
+          },
+        },
+        required: ["feature_name", "package"],
+      },
+      handler: async (args) => {
+        const workspace = path.resolve(args.workspace || process.cwd());
+        const cliArgs = ["scaffold-feature", args.feature_name, "--package", args.package];
+        if (args.template) { cliArgs.push("--template"); cliArgs.push(args.template); }
+        if (args.src_root) { cliArgs.push("--src-root"); cliArgs.push(path.resolve(args.src_root)); }
+        if (args.vars?.length) {
+          for (const v of args.vars) { cliArgs.push("--var"); cliArgs.push(v); }
+        }
+        if (args.dry_run) cliArgs.push("--dry-run");
+        if (args.json) cliArgs.push("--json");
+        const { code, stdout, stderr } = await runKotlinCli(workspace, cliArgs, 30000);
+        if (code !== 0 && !stdout.trim()) return `Error: ${stderr}`;
+        return stdout.trim() || "No files generated.";
+      },
+    },
+    {
       name: "kotlin_lsp_status",
       description: [
         "Check kotlin-lsp server status: active workspace, indexing phase, symbol count.",
@@ -394,6 +656,10 @@ const session = await joinSession({
           "Use grep/rg only for free-text, generated code, extension functions, or Java interop fallback.",
           "Use `lsp goToImplementation` for interface implementors (transitive). Only use `kotlin_find_subtypes` if LSP returns empty.",
           "For extension functions, use `lsp workspaceSymbol` with dot-qualified query (e.g. 'StoreState.isReady').",
+          "For refactoring tasks, prefer kotlin-cli tools over raw LSP: `kotlin_find_dead_code` (dead-code audit),",
+          "`kotlin_find_implementors` (find all implementors), `kotlin_extract_interface` (generate interface stub),",
+          "`kotlin_rename` (safe workspace-wide rename). Set up path once: echo '/path/to/kotlin-cli.py' > ~/.config/kotlin-lsp/cli-script.",
+          "For feature scaffolding from IDEA templates: call `kotlin_list_templates` then `kotlin_scaffold_feature` with --json to preview before writing.",
           SKILL_NUDGE,
         ].join(" "),
       };
