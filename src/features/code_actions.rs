@@ -55,6 +55,146 @@ pub(crate) fn compute_code_actions(
     actions
 }
 
+// ─── package declaration action ───────────────────────────────────────────────
+
+/// Known source-set root markers, longest-specific first so the best match
+/// wins when multiple markers appear in the same path.
+const SOURCE_SET_ROOTS: &[&str] = &[
+    "src/commonMain/kotlin/",
+    "src/androidMain/kotlin/",
+    "src/iosMain/kotlin/",
+    "src/jvmMain/kotlin/",
+    "src/jsMain/kotlin/",
+    "src/nativeMain/kotlin/",
+    "src/commonTest/kotlin/",
+    "src/androidTest/kotlin/",
+    "src/iosTest/kotlin/",
+    "src/jvmTest/kotlin/",
+    "src/main/kotlin/",
+    "src/main/java/",
+    "src/test/kotlin/",
+    "src/test/java/",
+    "src/androidTest/java/",
+];
+
+/// Derive the Kotlin/Java package string from an absolute file path.
+///
+/// Searches for the rightmost (most specific) source-set root marker using
+/// path-segment boundary matching (`/{marker}`), then converts the sub-path
+/// between the marker and the filename into a dot-separated package identifier.
+///
+/// Returns `None` when:
+/// - no recognised marker is found in the path
+/// - the file lives directly at the source root (no sub-directory → top-level package)
+/// - any path segment is not a valid Java/Kotlin identifier (e.g. starts with a digit)
+pub(crate) fn resolve_package_from_path(path: &str) -> Option<String> {
+    // For each marker, find the rightmost occurrence after a path separator so
+    // that `…/src/main/kotlin/com/example/src/main/kotlin/Foo.kt` resolves the
+    // inner occurrence and gives `com.example.src.main.kotlin` — the intended one.
+    let (_, after_root) = SOURCE_SET_ROOTS
+        .iter()
+        .filter_map(|root| {
+            let needle = format!("/{root}");
+            // rfind gives the rightmost (deepest) match
+            path.rfind(&needle)
+                .map(|pos| (*root, &path[pos + needle.len()..]))
+                // also allow the path to start directly with the marker
+                .or_else(|| path.strip_prefix(root).map(|rest| (*root, rest)))
+        })
+        // prefer the longest matching root (most specific)
+        .max_by_key(|(root, _)| root.len())?;
+
+    let pkg_path = after_root.rsplit_once('/')?.0;
+    if pkg_path.is_empty() {
+        return None; // file directly at source root — no package
+    }
+
+    let pkg = pkg_path.replace('/', ".");
+    if pkg.split('.').all(is_valid_identifier) {
+        Some(pkg)
+    } else {
+        None
+    }
+}
+
+/// A valid Java/Kotlin identifier segment must start with a letter or `_` and
+/// contain only letters, digits, or `_`.  Hyphens are **not** silently rewritten —
+/// if a directory uses them the package would be wrong, so we return `None`.
+fn is_valid_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_alphabetic() || first == '_') && chars.all(|c| c.is_alphanumeric() || c == '_')
+}
+
+/// Find the line number where `package <pkg>` should be inserted.
+///
+/// In Kotlin, `@file:` annotations **must** precede the package declaration.
+/// This function scans the leading block (blank lines, comments, `@file:` lines)
+/// and returns the index of the line just after the last `@file:` annotation, or
+/// `0` when none are present.
+fn find_package_insert_line(all_lines: &[String]) -> u32 {
+    let mut last_file_anno: Option<usize> = None;
+    for (i, line) in all_lines.iter().enumerate() {
+        let t = line.trim();
+        if t.starts_with("@file:") {
+            last_file_anno = Some(i);
+        } else if !t.is_empty()
+            && !t.starts_with("//")
+            && !t.starts_with("/*")
+            && !t.starts_with('*')
+        {
+            break; // reached real code — stop scanning
+        }
+    }
+    last_file_anno.map(|i| (i + 1) as u32).unwrap_or(0)
+}
+
+/// Build an "Add missing package declaration" code action.
+///
+/// Fires when the file has no `package` declaration and the path can be resolved
+/// to a valid package identifier via [`resolve_package_from_path`].
+pub(crate) fn build_add_package_action(
+    all_lines: &[String],
+    uri: &Url,
+) -> Option<CodeActionOrCommand> {
+    // Skip if file already declares a package
+    if all_lines.iter().any(|l| l.trim().starts_with("package ")) {
+        return None;
+    }
+
+    let pkg = resolve_package_from_path(uri.path())?;
+    let insert_line = find_package_insert_line(all_lines);
+
+    let mut changes = HashMap::new();
+    changes.insert(
+        uri.clone(),
+        vec![TextEdit {
+            range: Range {
+                start: Position {
+                    line: insert_line,
+                    character: 0,
+                },
+                end: Position {
+                    line: insert_line,
+                    character: 0,
+                },
+            },
+            new_text: format!("package {pkg}\n\n"),
+        }],
+    );
+    Some(CodeActionOrCommand::CodeAction(CodeAction {
+        title: format!("Add missing package declaration `{pkg}`"),
+        kind: Some(CodeActionKind::QUICKFIX),
+        edit: Some(WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }))
+}
+
 // ─── action builders ─────────────────────────────────────────────────────────
 
 fn build_introduce_variable(
@@ -354,6 +494,10 @@ fn byte_col_to_utf16(line_text: &str, byte_col: usize) -> u32 {
         .map(|c| c.len_utf16() as u32)
         .sum()
 }
+
+#[cfg(test)]
+#[path = "code_actions_tests.rs"]
+mod tests;
 
 /// Derive a short local variable name from an expression.
 ///

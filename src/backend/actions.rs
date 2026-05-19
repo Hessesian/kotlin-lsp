@@ -55,6 +55,14 @@ impl Backend {
             }
         }
 
+        let lang = crate::Language::from_path(uri.path());
+        if matches!(lang, crate::Language::Kotlin | crate::Language::Java) {
+            if let Some(action) = features::code_actions::build_add_package_action(&all_lines, uri)
+            {
+                actions.push(action);
+            }
+        }
+
         Ok(if actions.is_empty() {
             None
         } else {
