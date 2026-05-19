@@ -645,13 +645,15 @@ def cmd_generate_template(
         parameterized = _parameterize(content, feature_id, base_package)
         file_suffix = _file_suffix(pathlib.Path(filepath).stem, feature_id)
 
-        # Derive file_name_pattern relative to the base-package dir
-        # e.g. com.example.goldconversion.contract / GoldConversionContract
-        #   → contract/${FEATURE_NAME}Contract
+        # Derive file_name_pattern relative to the base-package dir.
+        # File stems only need identifier substitution — no dollar-sign escaping.
         file_name_pattern = ""
         if pkg and base_package and pkg.startswith(base_package):
             sub_pkg = pkg.removeprefix(base_package).lstrip(".")
-            stem_param = _parameterize(pathlib.Path(filepath).stem, feature_id, "")
+            stem = pathlib.Path(filepath).stem
+            stem_param = (stem
+                          .replace(feature_id, "${FEATURE_NAME}")
+                          .replace(feature_id[0].lower() + feature_id[1:], "${featureName}"))
             if sub_pkg:
                 file_name_pattern = sub_pkg.replace(".", "/") + "/" + stem_param
             else:
@@ -659,6 +661,7 @@ def cmd_generate_template(
 
         entries.append({
             "filepath":          filepath,
+            "orig_content":      content,
             "file_suffix":       file_suffix,
             "file_name_pattern": file_name_pattern,
             "content":           parameterized,
@@ -681,8 +684,8 @@ def cmd_generate_template(
         for e in entries:
             print(f"── {pathlib.Path(e['filepath']).name}  [{e['file_suffix']}]")
             print(f"   file-name: {e['file_name_pattern'] or '(auto-derived by scaffold-feature)'}")
-            # Show changed lines
-            orig = pathlib.Path(e["filepath"]).read_text().splitlines()
+            # Show changed lines (use in-memory original — no disk re-read needed)
+            orig = e["orig_content"].splitlines()
             new  = e["content"].splitlines()
             shown = 0
             for i, (o, n) in enumerate(zip(orig, new)):

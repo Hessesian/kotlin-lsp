@@ -32,9 +32,9 @@ DRAFT_FLAG=""
 TITLE=""
 
 # Branch-name → base detection (extend as needed)
+# Default base-branch detection: override with --base if your project uses other long-lived branches
 case "$BRANCH" in
-  feature/mvi-*) BASE="feature/mvi-architecture" ;;
-  feature/mvi*)  BASE="feature/mvi-architecture" ;;
+  feature/mvi-*|feature/mvi*) BASE="feature/mvi-architecture" ;;
   *) BASE="main" ;;
 esac
 

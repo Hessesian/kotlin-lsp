@@ -79,7 +79,8 @@ if [[ "$DRY_RUN" == true ]]; then
 fi
 
 # Update Cargo.toml (first occurrence of version = "...")
-sed -i "0,/version = \"$CURRENT\"/s//version = \"$NEW\"/" Cargo.toml
+# Use perl for portability — GNU sed's 0,/pat/ address range is not supported by BSD sed (macOS)
+perl -i -0pe "s/version = \"$CURRENT\"/version = \"$NEW\"/" Cargo.toml
 # Regenerate Cargo.lock
 cargo generate-lockfile 2>/dev/null || cargo check -q
 

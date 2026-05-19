@@ -17,4 +17,5 @@ mkdir -p "$(dirname "$DEST")"
 cp "$SRC" "$DEST"
 
 echo "✓ Synced skill extension to $DEST"
-echo "  $(wc -l < "$DEST") lines, $(stat -c%s "$DEST") bytes"
+SIZE=$(wc -c < "$DEST")
+echo "  $(wc -l < "$DEST") lines, ${SIZE} bytes"
