@@ -14,6 +14,8 @@ Usage:
     kotlin-cli.py find-implementors <Name>                       [--workspace DIR]
     kotlin-cli.py extract-interface <ClassName>                  [--workspace DIR]
     kotlin-cli.py rename            <OldName> <NewName> [--dry-run] [--workspace DIR]
+    kotlin-cli.py list-templates                                 [--workspace DIR]
+    kotlin-cli.py scaffold-feature  <FeatureName> --package PKG  [--workspace DIR]
 
 Examples:
     python contrib/kotlin-cli.py find-declaration MainViewModel
@@ -23,6 +25,10 @@ Examples:
     python contrib/kotlin-cli.py find-implementors IUserRepository
     python contrib/kotlin-cli.py extract-interface UserRepositoryImpl
     python contrib/kotlin-cli.py rename OldName NewName --dry-run
+    python contrib/kotlin-cli.py list-templates
+    python contrib/kotlin-cli.py scaffold-feature GoldConversion \\
+        --package cz.moneta.smartbanka.feature \\
+        --src-root feature/gold_conversion/src/main/kotlin --dry-run
 
 Options:
     --workspace DIR   Root of the Kotlin/Android project.
@@ -43,10 +49,12 @@ import json
 import os
 import pathlib
 import queue
+import re
 import subprocess
 import sys
 import threading
 import time
+import xml.etree.ElementTree as ET
 
 
 # ── LSP SymbolKind constants (LSP 3.x) ───────────────────────────────────────
@@ -195,6 +203,229 @@ class LspClient:
             pass
         finally:
             self._proc.terminate()
+
+
+# ── IDEA file-template helpers ────────────────────────────────────────────────
+
+def _pascal_to_snake(name: str) -> str:
+    """GoldConversion → gold_conversion"""
+    s1 = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", name)
+    return re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", s1).lower()
+
+
+def _expand_vars(text: str, variables: dict[str, str]) -> str:
+    """Substitute ${VAR_NAME} placeholders using variables dict.
+
+    Unknown placeholders are left as-is so the caller can see what's missing.
+    """
+    return re.sub(r"\$\{(\w+)\}", lambda m: variables.get(m.group(1), m.group(0)), text)
+
+
+def _find_templates_dir(workspace: str) -> pathlib.Path | None:
+    """Locate .idea/fileTemplates starting at workspace, searching up two levels."""
+    for base in [pathlib.Path(workspace),
+                 pathlib.Path(workspace).parent,
+                 pathlib.Path(workspace).parent.parent]:
+        d = base / ".idea" / "fileTemplates"
+        if d.is_dir():
+            return d
+    return None
+
+
+def _parse_template_settings(templates_dir: pathlib.Path) -> dict[str, str]:
+    """Parse file.template.settings.xml → {template_filename: file-name_pattern}.
+
+    The file-name pattern is the IDEA-style relative path (without .kt extension)
+    that may contain ${VAR} placeholders, e.g.
+    'contract/${feature_name}/${FEATURE_NAME}Contract'.
+    """
+    settings_file = templates_dir.parent / "file.template.settings.xml"
+    if not settings_file.exists():
+        return {}
+    mapping: dict[str, str] = {}
+    for tmpl in ET.parse(settings_file).getroot().iter("template"):
+        name = tmpl.get("name", "")
+        file_name = tmpl.get("file-name", "")
+        if name and file_name:
+            mapping[name] = file_name
+    return mapping
+
+
+def _load_template_family(
+    templates_dir: pathlib.Path, base_name: str
+) -> list[tuple[str, str]]:
+    """Return [(template_filename, content)] for parent + all children."""
+    parent = templates_dir / base_name
+    if not parent.exists():
+        return []
+    family = [(base_name, parent.read_text(encoding="utf-8"))]
+    for i in range(20):
+        child = templates_dir / f"{base_name}.child.{i}.kt"
+        if not child.exists():
+            break
+        family.append((child.name, child.read_text(encoding="utf-8")))
+    return family
+
+
+def _detect_src_root(workspace: str) -> pathlib.Path:
+    """Heuristic: return the shallowest src/main/kotlin dir under workspace."""
+    candidates = [
+        c for c in pathlib.Path(workspace).rglob("src/main/kotlin")
+        if "build" not in c.parts
+    ]
+    return sorted(candidates, key=lambda p: len(p.parts))[0] if candidates \
+        else pathlib.Path(workspace)
+
+
+# ── IDEA template commands ────────────────────────────────────────────────────
+
+def cmd_list_templates(workspace: str, as_json: bool) -> None:
+    """List IDEA file templates available in the project's .idea/fileTemplates."""
+    templates_dir = _find_templates_dir(workspace)
+    if not templates_dir:
+        print(f"No .idea/fileTemplates found under '{workspace}'.", file=sys.stderr)
+        sys.exit(1)
+
+    settings = _parse_template_settings(templates_dir)
+    parents = sorted(
+        [f for f in templates_dir.iterdir() if f.is_file() and ".child." not in f.name],
+        key=lambda f: f.name,
+    )
+    if not parents:
+        print("No templates found.", file=sys.stderr)
+        sys.exit(1)
+
+    result = []
+    for p in parents:
+        children = sorted(templates_dir.glob(f"{p.name}.child.*"), key=lambda f: f.name)
+        all_content = p.read_text(encoding="utf-8")
+        for c in children:
+            all_content += c.read_text(encoding="utf-8")
+
+        variables = sorted(set(re.findall(r"\$\{(\w+)\}", all_content)))
+        generates = []
+        for tpl_name in [p.name] + [c.name for c in children]:
+            pat = settings.get(tpl_name)
+            if pat:
+                generates.append(pat + ".kt")
+
+        result.append({
+            "name": p.stem,
+            "variables": variables,
+            "generates": generates,
+        })
+
+    if as_json:
+        print(json.dumps(result, indent=2))
+        return
+
+    for entry in result:
+        print(f"\n{entry['name']}")
+        print(f"  variables : {', '.join(entry['variables'])}")
+        print("  generates :")
+        for g in entry["generates"]:
+            print(f"    {g}")
+
+
+def cmd_scaffold_feature(
+    workspace: str,
+    feature_name: str,
+    template_base: str,
+    package_name: str,
+    extra_vars: dict[str, str],
+    src_root: str | None,
+    dry_run: bool,
+    as_json: bool,
+) -> None:
+    """Expand an IDEA file template family and write the resulting Kotlin files.
+
+    File paths are derived from the file-name patterns in
+    .idea/file.template.settings.xml combined with --package (PACKAGE_NAME).
+
+    With --json the command outputs [{path, content}] so an AI agent can inspect
+    and modify the scaffold before writing.  Without --json files are written
+    immediately (skipping any that already exist).
+    """
+    templates_dir = _find_templates_dir(workspace)
+    if not templates_dir:
+        print(f"No .idea/fileTemplates found under '{workspace}'.", file=sys.stderr)
+        sys.exit(1)
+
+    settings = _parse_template_settings(templates_dir)
+
+    # Resolve template file name (accept stem with or without .kt)
+    parent_file = next(
+        (f for f in templates_dir.iterdir()
+         if f.is_file() and ".child." not in f.name
+         and (f.name == template_base or f.stem == template_base)),
+        None,
+    )
+    if parent_file is None:
+        available = ", ".join(
+            f.stem for f in templates_dir.iterdir() if ".child." not in f.name
+        )
+        print(f"Template '{template_base}' not found. Available: {available}",
+              file=sys.stderr)
+        sys.exit(1)
+
+    family = _load_template_family(templates_dir, parent_file.name)
+
+    # Build variable map; FEATURE_NAME and feature_name are auto-derived
+    variables: dict[str, str] = {
+        "FEATURE_NAME": feature_name,
+        "feature_name": _pascal_to_snake(feature_name),
+        "PACKAGE_NAME": package_name,
+    }
+    variables.update(extra_vars)
+
+    # Remaining unknown placeholders in the template content
+    all_raw = "".join(c for _, c in family)
+    unknown = set(re.findall(r"\$\{(\w+)\}", all_raw)) - set(variables)
+    if unknown:
+        print(f"WARNING: unresolved variables: {', '.join(sorted(unknown))}. "
+              f"Pass them with --var KEY=VALUE.", file=sys.stderr)
+
+    pkg_path = package_name.replace(".", "/")
+    base_src = pathlib.Path(src_root) if src_root else _detect_src_root(workspace)
+
+    results: list[dict[str, str]] = []
+    for tpl_name, raw_content in family:
+        content = _expand_vars(raw_content, variables)
+
+        file_name_pat = settings.get(tpl_name)
+        if file_name_pat:
+            rel = _expand_vars(file_name_pat, variables) + ".kt"
+        else:
+            # Fallback: derive from package + primary type declaration
+            pkg_m = re.search(r"^\s*package\s+([\w.]+)", content, re.MULTILINE)
+            cls_m = re.search(
+                r"(?m)^\s*(?:(?:private|internal|public|protected|abstract"
+                r"|open|data|sealed)\s+)*(?:class|interface|object)\s+(\w+)",
+                content,
+            )
+            if pkg_m and cls_m:
+                sub_pkg = pkg_m.group(1).removeprefix(package_name).lstrip(".")
+                rel = sub_pkg.replace(".", "/") + f"/{cls_m.group(1)}.kt"
+            else:
+                rel = f"unknown_{tpl_name}"
+
+        out_path = base_src / pkg_path / rel
+        results.append({"path": str(out_path), "content": content})
+
+    if as_json:
+        print(json.dumps(results, indent=2))
+        return
+
+    for r in results:
+        path = pathlib.Path(r["path"])
+        if dry_run:
+            print(f"  would create: {r['path']}")
+        elif path.exists():
+            print(f"  SKIP (exists): {r['path']}", file=sys.stderr)
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(r["content"], encoding="utf-8")
+            print(f"  created: {r['path']}")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -704,7 +935,52 @@ def main():
     p_ren.add_argument("--dry-run", action="store_true",
                        help="Print changes without writing files")
 
+    sub.add_parser("list-templates",
+                   help="List IDEA file templates available in the project")
+
+    p_scaffold = sub.add_parser("scaffold-feature",
+                                help="Generate files from an IDEA file template")
+    p_scaffold.add_argument("feature_name", metavar="FeatureName",
+                            help="PascalCase feature name (e.g. GoldConversion)")
+    p_scaffold.add_argument("--template", default="New Contract",
+                            help="Template base name (default: 'New Contract')")
+    p_scaffold.add_argument("--package", dest="package", required=True,
+                            metavar="PKG",
+                            help="Base package name assigned to PACKAGE_NAME")
+    p_scaffold.add_argument("--var", nargs="+", metavar="KEY=VALUE",
+                            dest="extra_vars", default=[],
+                            help="Additional template variables (KEY=VALUE)")
+    p_scaffold.add_argument("--src-root", metavar="DIR",
+                            help="Module src/main/kotlin root (auto-detected if omitted)")
+    p_scaffold.add_argument("--dry-run", action="store_true",
+                            help="Print paths without writing files")
+
     args = parser.parse_args()
+
+    # Template commands don't need an LSP server — run them immediately and exit.
+    if args.cmd == "list-templates":
+        cmd_list_templates(args.workspace, args.json)
+        return
+    if args.cmd == "scaffold-feature":
+        extra: dict[str, str] = {}
+        for kv in (args.extra_vars or []):
+            if "=" in kv:
+                k, _, v = kv.partition("=")
+                extra[k.strip()] = v.strip()
+            else:
+                print(f"Ignoring malformed --var entry (expected KEY=VALUE): {kv!r}",
+                      file=sys.stderr)
+        cmd_scaffold_feature(
+            workspace=args.workspace,
+            feature_name=args.feature_name,
+            template_base=args.template,
+            package_name=args.package,
+            extra_vars=extra,
+            src_root=args.src_root,
+            dry_run=args.dry_run,
+            as_json=args.json,
+        )
+        return
 
     client = LspClient(args.binary, args.workspace, args.timeout)
     client.initialize()
