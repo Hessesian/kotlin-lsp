@@ -171,10 +171,13 @@ pub(crate) fn missing_package_diagnostic(all_lines: &[String], uri: &Url) -> Opt
         .get(insert_line as usize)
         .map(|l| l.chars().map(|c| c.len_utf16() as u32).sum::<u32>())
         .unwrap_or(0);
+    // Ensure the range is at least as wide as the word "package" so the hint
+    // is visible even on empty lines.
+    let end_col = line_len.max("package".len() as u32);
     Some(Diagnostic {
         range: Range::new(
             Position::new(insert_line, 0),
-            Position::new(insert_line, line_len),
+            Position::new(insert_line, end_col),
         ),
         severity: Some(DiagnosticSeverity::HINT),
         source: Some("kotlin-lsp".into()),

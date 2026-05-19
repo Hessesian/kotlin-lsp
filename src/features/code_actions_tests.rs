@@ -32,6 +32,16 @@ fn test_diagnostic_absent_for_unknown_path() {
 }
 
 #[test]
+fn test_diagnostic_range_minimum_width_on_empty_file() {
+    use super::missing_package_diagnostic;
+    let lines: Vec<String> = vec![];
+    let u = uri("/home/dev/MyApp/app/src/main/kotlin/com/example/app/Foo.kt");
+    let diag = missing_package_diagnostic(&lines, &u).unwrap();
+    // Even for an empty file the range must be at least "package".len() wide
+    assert!(diag.range.end.character >= "package".len() as u32);
+}
+
+#[test]
 fn test_diagnostic_range_after_file_annotation() {
     use super::missing_package_diagnostic;
     use tower_lsp::lsp_types::DiagnosticSeverity;
