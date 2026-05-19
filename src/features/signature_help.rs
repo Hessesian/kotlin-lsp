@@ -24,10 +24,7 @@ pub(crate) fn compute_signature_help(
     let ci = index.call_info_at(pos, uri)?;
 
     let params_text =
-        index.find_fun_signature_with_receiver(uri, &ci.fn_name, ci.qualifier.as_deref());
-    if params_text.is_empty() {
-        return None;
-    }
+        index.find_fun_signature_with_receiver(uri, &ci.fn_name, ci.qualifier.as_deref())?;
 
     build_signature_help(&ci.fn_name, &params_text, ci.active_param)
 }

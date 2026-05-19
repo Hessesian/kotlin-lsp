@@ -147,7 +147,7 @@ impl SignatureIndex for Indexer {
         uri: &Url,
         name: &str,
         receiver: Option<&str>,
-    ) -> String {
+    ) -> Option<String> {
         find_fun_signature_with_receiver(self, uri, name, receiver)
     }
 }

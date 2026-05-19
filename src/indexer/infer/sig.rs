@@ -349,49 +349,69 @@ pub(crate) fn extract_params_from_detail(detail: &str) -> Option<String> {
 /// Skips annotation lines (`@Foo(...)`) before the `fun`/`class` keyword to avoid
 /// parsing annotation arguments as function parameters.
 pub(crate) fn collect_params_from_line(lines: &[String], start_line: usize) -> Option<String> {
-    let mut paren_depth: i32 = 0;
-    let mut found_open = false;
-    let mut params = String::new();
-    let mut found_keyword = false;
+    let end_line = start_line + FUN_PARAMS_SCAN_LINES;
+    let decl_start = skip_annotation_lines(lines, start_line, end_line)?;
+    extract_balanced_parens(lines, decl_start, end_line)
+}
 
-    'outer: for ln in start_line..start_line + FUN_PARAMS_SCAN_LINES {
+/// Returns the first line index in `[start, end)` that is NOT a pure annotation
+/// (starts with `@` but contains none of `fun`/`class`/`constructor`).
+/// Returns `None` when all lines in the window are pure annotations — avoids
+/// `extract_balanced_parens` re-scanning them and misreading `@Anno(arg)` as params.
+fn skip_annotation_lines(lines: &[String], start: usize, end: usize) -> Option<usize> {
+    for ln in start..end {
+        let trimmed = lines.get(ln)?.trim();
+        if !is_pure_annotation_line(trimmed) {
+            return Some(ln);
+        }
+    }
+    None
+}
+
+fn is_pure_annotation_line(trimmed: &str) -> bool {
+    trimmed.starts_with('@')
+        && !trimmed.contains(" fun ")
+        && !trimmed.contains(" fun<")
+        && !trimmed.contains(" class ")
+        && !trimmed.contains(" constructor")
+}
+
+fn has_declaration_keyword(trimmed: &str) -> bool {
+    trimmed.starts_with("fun ")
+        || trimmed.starts_with("fun<")
+        || trimmed.contains(" fun ")
+        || trimmed.contains(" fun<")
+        || trimmed.starts_with("class ")
+        || trimmed.starts_with("constructor")
+        || trimmed.contains(" class ")
+        || trimmed.contains(" constructor")
+}
+
+/// Scan `lines[start..end]`, collecting the content between the outermost `(…)`.
+///
+/// `{` encountered before any `(` on a keyword line signals a zero-arg class or
+/// object declaration → `Some("")`.  The `end` bound preserves the original
+/// `FUN_PARAMS_SCAN_LINES` window even when `start` was advanced by annotation skipping.
+fn extract_balanced_parens(lines: &[String], start: usize, end: usize) -> Option<String> {
+    let mut depth: i32 = 0;
+    let mut found_open = false;
+    let mut found_keyword = false;
+    let mut params = String::new();
+
+    'outer: for ln in start..end {
         let line = match lines.get(ln) {
             Some(l) => l,
             None => break,
         };
-        let trimmed = line.trim();
-        // Skip annotation-only lines before encountering fun/class/constructor keyword
-        if !found_keyword {
-            if trimmed.starts_with('@')
-                && !trimmed.contains(" fun ")
-                && !trimmed.contains(" fun<")
-                && !trimmed.contains(" class ")
-                && !trimmed.contains(" constructor")
-            {
-                continue;
-            }
-            if trimmed.starts_with("fun ")
-                || trimmed.starts_with("fun<")
-                || trimmed.contains(" fun ")
-                || trimmed.contains(" fun<")
-                || trimmed.starts_with("class ")
-                || trimmed.starts_with("constructor")
-                || trimmed.contains(" class ")
-                || trimmed.contains(" constructor")
-            {
-                found_keyword = true;
-            }
+        if !found_keyword && has_declaration_keyword(line.trim()) {
+            found_keyword = true;
         }
-        let chars = line.char_indices().peekable();
-        for (_, ch) in chars {
+        for ch in line.chars() {
             match ch {
-                // If we hit '{' before finding any '(', the class has no constructor params
-                '{' if !found_open && found_keyword => {
-                    return Some(String::new());
-                }
+                '{' if !found_open && found_keyword => return Some(String::new()),
                 '(' => {
-                    paren_depth += 1;
-                    if paren_depth == 1 {
+                    depth += 1;
+                    if depth == 1 {
                         found_open = true;
                         continue;
                     }
@@ -400,8 +420,8 @@ pub(crate) fn collect_params_from_line(lines: &[String], start_line: usize) -> O
                     }
                 }
                 ')' => {
-                    paren_depth -= 1;
-                    if found_open && paren_depth == 0 {
+                    depth -= 1;
+                    if found_open && depth == 0 {
                         break 'outer;
                     }
                     if found_open {
@@ -530,18 +550,18 @@ pub(crate) fn find_fun_signature_with_receiver(
     uri: &Url,
     name: &str,
     receiver: Option<&str>,
-) -> String {
+) -> Option<String> {
     if let Some(recv) = receiver {
         let Some(rt) = infer_receiver_type(idx, ReceiverKind::Variable(recv), uri) else {
             // Receiver present but type could not be resolved — avoid a global
             // name-only scan that may return a completely unrelated function.
-            return String::new();
+            return None;
         };
         let locs = idx.resolve_symbol(&rt.outer, None, uri);
         for loc in &locs {
             if let Some(data) = idx.files.get(loc.uri.as_str()) {
                 if let Some(sig) = collect_fun_params_text(name, loc.uri.as_str(), idx) {
-                    return sig;
+                    return Some(sig);
                 }
                 // Also search by line range within the type's body.
                 let type_end = data
@@ -556,17 +576,17 @@ pub(crate) fn find_fun_signature_with_receiver(
                     .filter(|s| s.name == name && s.range.start.line <= type_end)
                 {
                     if !sym.params.is_empty() {
-                        return sym.params.clone();
+                        return Some(sym.params.clone());
                     }
                     if let Some(params) = extract_params_from_detail(&sym.detail) {
-                        return params;
+                        return Some(params);
                     }
                 }
             }
         }
-        return String::new();
+        return None;
     }
-    find_fun_signature_full(name, idx, uri).unwrap_or_default()
+    find_fun_signature_full(name, idx, uri)
 }
 
 /// Receiver-aware params lookup: find `method_name`'s parameter text inside

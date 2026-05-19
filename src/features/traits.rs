@@ -146,12 +146,13 @@ pub(crate) trait CompletionIndex {
 /// Function signature lookup with optional receiver type matching.
 pub(crate) trait SignatureIndex {
     /// Signature text for `name`, optionally narrowed to `receiver`'s type.
+    /// Returns `None` when lookup fails; `Some("")` for a zero-parameter function.
     fn find_fun_signature_with_receiver(
         &self,
         uri: &Url,
         name: &str,
         receiver: Option<&str>,
-    ) -> String;
+    ) -> Option<String>;
 }
 
 // ─── LiveTreeAccess ──────────────────────────────────────────────────────────
