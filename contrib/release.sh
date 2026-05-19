@@ -45,6 +45,9 @@ case "$BUMP" in
 esac
 
 NEW="${MAJOR}.${MINOR}.${PATCH}"
+
+# Conventional-commit section labels
+declare -A SECTIONS=( [feat]="Features" [fix]="Bug fixes" [perf]="Performance" [refactor]="Refactoring" [docs]="Docs" )
 echo "Bumping ${CURRENT} → ${NEW} (${BUMP})"
 
 if [[ "$DRY_RUN" == true ]]; then
@@ -87,9 +90,6 @@ cargo clippy -- -D warnings -W clippy::cognitive_complexity -W clippy::too_many_
 LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
 RANGE="${LAST_TAG:+${LAST_TAG}..HEAD}"
 
-# Group commits by conventional-commit prefix
-declare -A SECTIONS
-SECTIONS=( [feat]="Features" [fix]="Bug fixes" [perf]="Performance" [refactor]="Refactoring" [docs]="Docs" [chore]="" )
 ENTRY="## ${NEW}\n"
 
 for prefix in feat fix perf refactor docs; do
