@@ -7,6 +7,7 @@ use tower_lsp::Client;
 
 use crate::backend::helpers::syntax_diagnostics;
 use crate::features::call_arg_diagnostics::call_arg_diagnostics;
+use crate::features::code_actions::missing_package_diagnostic;
 use crate::features::fill_when::when_diagnostics;
 use crate::indexer::live_tree::{lang_for_path, parse_live};
 use crate::indexer::{Indexer, ProgressReporter};
@@ -165,6 +166,14 @@ impl DocumentHandler {
                     diagnostics.extend(call_arg_diagnostics(&diag_indexer, &diagnostics_uri, doc));
                 }
             }
+            let diag_lines = diag_indexer.mem_lines_for(diagnostics_uri.as_str());
+            let diag_lines: Vec<String> = diag_lines
+                .as_ref()
+                .map(|l| l.as_ref().clone())
+                .unwrap_or_default();
+            if let Some(pkg_diag) = missing_package_diagnostic(&diag_lines, &diagnostics_uri) {
+                diagnostics.push(pkg_diag);
+            }
             if let Some(client) = client {
                 client
                     .publish_diagnostics(diagnostics_uri, diagnostics, None)
@@ -194,6 +203,14 @@ impl DocumentHandler {
                 diagnostics.extend(when_diagnostics(&indexer, &uri));
                 if let Some(doc) = indexer.live_doc(&uri) {
                     diagnostics.extend(call_arg_diagnostics(&indexer, &uri, &doc));
+                }
+                let lines = indexer.mem_lines_for(uri.as_str());
+                let lines: Vec<String> = lines
+                    .as_ref()
+                    .map(|l| l.as_ref().clone())
+                    .unwrap_or_default();
+                if let Some(pkg_diag) = missing_package_diagnostic(&lines, &uri) {
+                    diagnostics.push(pkg_diag);
                 }
                 if let Some(client) = client {
                     client.publish_diagnostics(uri, diagnostics, None).await;

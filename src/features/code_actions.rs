@@ -151,6 +151,38 @@ fn find_package_insert_line(all_lines: &[String]) -> u32 {
     last_file_anno.map(|i| (i + 1) as u32).unwrap_or(0)
 }
 
+/// Return a `HINT` diagnostic when a Kotlin/Java file is missing a package
+/// declaration that can be derived from its path.
+///
+/// The range covers the line where the package should be inserted so editors
+/// surface the hint—and the associated code action lightbulb—when the cursor
+/// is near the top of the file.
+pub(crate) fn missing_package_diagnostic(all_lines: &[String], uri: &Url) -> Option<Diagnostic> {
+    let lang = crate::Language::from_path(uri.path());
+    if !matches!(lang, crate::Language::Kotlin | crate::Language::Java) {
+        return None;
+    }
+    if all_lines.iter().any(|l| l.trim().starts_with("package ")) {
+        return None;
+    }
+    let pkg = resolve_package_from_path(uri.path())?;
+    let insert_line = find_package_insert_line(all_lines);
+    let line_len = all_lines
+        .get(insert_line as usize)
+        .map(|l| l.chars().map(|c| c.len_utf16() as u32).sum::<u32>())
+        .unwrap_or(0);
+    Some(Diagnostic {
+        range: Range::new(
+            Position::new(insert_line, 0),
+            Position::new(insert_line, line_len),
+        ),
+        severity: Some(DiagnosticSeverity::HINT),
+        source: Some("kotlin-lsp".into()),
+        message: format!("Missing package declaration (`{pkg}`)"),
+        ..Default::default()
+    })
+}
+
 /// Build an "Add missing package declaration" code action.
 ///
 /// Fires when the file has no `package` declaration and the path can be resolved

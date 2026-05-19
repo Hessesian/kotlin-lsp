@@ -2,7 +2,50 @@ use tower_lsp::lsp_types::Url;
 
 use super::{build_add_package_action, find_package_insert_line, resolve_package_from_path};
 
-// ─── resolve_package_from_path ────────────────────────────────────────────────
+// ─── missing_package_diagnostic ──────────────────────────────────────────────
+
+#[test]
+fn test_diagnostic_fires_for_missing_package() {
+    use super::missing_package_diagnostic;
+    let lines: Vec<String> = vec!["class Foo".into()];
+    let u = uri("/home/dev/MyApp/app/src/main/kotlin/com/example/app/Foo.kt");
+    let diag = missing_package_diagnostic(&lines, &u);
+    assert!(diag.is_some());
+    let d = diag.unwrap();
+    assert!(d.message.contains("com.example.app"));
+}
+
+#[test]
+fn test_diagnostic_absent_when_package_present() {
+    use super::missing_package_diagnostic;
+    let lines = vec!["package com.example.app".into(), "class Foo".into()];
+    let u = uri("/home/dev/MyApp/app/src/main/kotlin/com/example/app/Foo.kt");
+    assert!(missing_package_diagnostic(&lines, &u).is_none());
+}
+
+#[test]
+fn test_diagnostic_absent_for_unknown_path() {
+    use super::missing_package_diagnostic;
+    let lines: Vec<String> = vec![];
+    let u = uri("/some/random/Foo.kt");
+    assert!(missing_package_diagnostic(&lines, &u).is_none());
+}
+
+#[test]
+fn test_diagnostic_range_after_file_annotation() {
+    use super::missing_package_diagnostic;
+    use tower_lsp::lsp_types::DiagnosticSeverity;
+    let lines = vec![
+        "@file:Suppress(\"unused\")".into(),
+        "".into(),
+        "class Foo".into(),
+    ];
+    let u = uri("/home/dev/MyApp/app/src/main/kotlin/com/example/app/Foo.kt");
+    let diag = missing_package_diagnostic(&lines, &u).unwrap();
+    // Should point to line 1 (just after the @file: annotation)
+    assert_eq!(diag.range.start.line, 1);
+    assert_eq!(diag.severity, Some(DiagnosticSeverity::HINT));
+}
 
 #[test]
 fn test_resolve_package_android_kotlin() {
