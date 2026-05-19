@@ -16,6 +16,7 @@ Usage:
     kotlin-cli.py rename            <OldName> <NewName> [--dry-run] [--workspace DIR]
     kotlin-cli.py list-templates                                 [--workspace DIR]
     kotlin-cli.py scaffold-feature  <FeatureName> --package PKG  [--workspace DIR]
+    kotlin-cli.py generate-template <ClassName> --family NAME    [--workspace DIR]
 
 Examples:
     python contrib/kotlin-cli.py find-declaration MainViewModel
@@ -277,6 +278,139 @@ def _detect_src_root(workspace: str) -> pathlib.Path:
         else pathlib.Path(workspace)
 
 
+_KNOWN_CLASS_SUFFIXES = [
+    "Interactor", "Screen", "ViewModel", "Contract", "Mapper",
+    "Repository", "Fragment", "Activity", "Reducer", "Effect",
+    "Factory", "UseCase", "Handler", "Presenter", "Coordinator", "Navigator",
+]
+
+_ROLE_PACKAGES = {
+    "contract", "interactor", "screen", "viewmodel", "mapper",
+    "repository", "reducer", "factory", "handler", "usecase",
+    "presenter", "coordinator", "navigator", "effect",
+}
+
+# Variables auto-provided by scaffold-feature (used to un-escape after dollar-sign pass)
+_SCAFFOLD_VARS = {"FEATURE_NAME", "featureName", "feature_name", "PACKAGE_NAME"}
+
+
+def _extract_feature_id(class_name: str) -> str:
+    """GoldConversionInteractor → GoldConversion (strips first known suffix found)."""
+    for suffix in _KNOWN_CLASS_SUFFIXES:
+        if class_name.endswith(suffix) and len(class_name) > len(suffix):
+            return class_name[:-len(suffix)]
+    return class_name
+
+
+def _file_suffix(stem: str, feature_id: str) -> str:
+    """GoldConversionInteractor → Interactor (part after feature_id)."""
+    if stem.startswith(feature_id):
+        tail = stem[len(feature_id):]
+        if tail:
+            return tail
+    for s in _KNOWN_CLASS_SUFFIXES:
+        if stem.endswith(s):
+            return s
+    return stem
+
+
+def _infer_base_package(pkg: str) -> str:
+    """com.example.goldconversion.contract → com.example.goldconversion (strip role parts)."""
+    parts = pkg.split(".")
+    while parts and parts[-1].lower() in _ROLE_PACKAGES:
+        parts.pop()
+    return ".".join(parts)
+
+
+def _parameterize(content: str, feature_pascal: str, base_package: str) -> str:
+    """Replace feature-identifier variants with ${VAR} placeholders.
+
+    Uses sentinels so we can safely escape Kotlin/Velocity dollar signs without
+    accidentally clobbering the placeholders we just inserted.
+    """
+    feature_camel = feature_pascal[0].lower() + feature_pascal[1:]
+    feature_snake = _pascal_to_snake(feature_pascal)
+
+    result = content
+
+    # 1. Package path (most specific — replace before individual word parts)
+    if base_package:
+        result = result.replace(base_package, "__PACKAGE_NAME__")
+
+    # 2. Class-name variants → sentinels (Pascal first to avoid partial matches)
+    result = result.replace(feature_pascal, "__FEATURE_NAME__")
+    result = result.replace(feature_camel,  "__featureName__")
+    result = result.replace(feature_snake,  "__feature_name__")
+
+    # 3. Escape remaining ${...} (Kotlin string templates Velocity would interpret)
+    result = re.sub(
+        r'\$\{(\w+)\}',
+        lambda m: f'${{{m.group(1)}}}' if m.group(1).startswith("__") else f'\\${{{m.group(1)}}}',
+        result,
+    )
+
+    # 4. Escape bare $ident (Velocity reference syntax) — skip our sentinels
+    result = re.sub(
+        r'\$([A-Za-z_]\w*)',
+        lambda m: m.group(0) if m.group(1).startswith("__") else f'\\${m.group(1)}',
+        result,
+    )
+
+    # 5. Restore sentinels → ${VAR} placeholders
+    result = result.replace("__PACKAGE_NAME__", "${PACKAGE_NAME}")
+    result = result.replace("__FEATURE_NAME__", "${FEATURE_NAME}")
+    result = result.replace("__featureName__",  "${featureName}")
+    result = result.replace("__feature_name__", "${feature_name}")
+
+    # 6. Un-escape any of our vars that step 3 may have caught before sentinels were set
+    for var in _SCAFFOLD_VARS:
+        result = result.replace(f"\\${{{var}}}", f"${{{var}}}")
+
+    return result
+
+
+def _upsert_template_settings(
+    templates_dir: pathlib.Path,
+    family_name: str,
+    entries: list[dict],
+) -> None:
+    """Add or replace the family's entries in file.template.settings.xml."""
+    settings_file = templates_dir.parent / "file.template.settings.xml"
+    if settings_file.exists():
+        try:
+            tree = ET.parse(settings_file)
+            root = tree.getroot()
+        except ET.ParseError:
+            root = ET.Element("component", name="ExportableFileTemplateSettings")
+            tree = ET.ElementTree(root)
+    else:
+        root = ET.Element("component", name="ExportableFileTemplateSettings")
+        tree = ET.ElementTree(root)
+
+    # Remove stale entries for this family
+    parent_name = f"{family_name}.kt"
+    for tmpl in root.findall("template"):
+        tname = tmpl.get("name", "")
+        if tname == family_name or tname.startswith(parent_name):
+            root.remove(tmpl)
+
+    # Insert new entries
+    for entry in entries:
+        el = ET.SubElement(root, "template")
+        el.set("name", entry["tpl_name"])
+        el.set("file-name", entry["file_name_pattern"])
+        el.set("reformat", "true")
+        el.set("live-template-enabled", "false")
+
+    try:
+        ET.indent(tree, space="  ")
+    except AttributeError:
+        pass  # Python < 3.9
+
+    settings_file.parent.mkdir(parents=True, exist_ok=True)
+    tree.write(str(settings_file), encoding="unicode", xml_declaration=False)
+
+
 # ── IDEA template commands ────────────────────────────────────────────────────
 
 def cmd_list_templates(workspace: str, as_json: bool) -> None:
@@ -370,10 +504,11 @@ def cmd_scaffold_feature(
 
     family = _load_template_family(templates_dir, parent_file.name)
 
-    # Build variable map; FEATURE_NAME and feature_name are auto-derived
+    # Build variable map; FEATURE_NAME, feature_name, featureName are auto-derived
     variables: dict[str, str] = {
         "FEATURE_NAME": feature_name,
         "feature_name": _pascal_to_snake(feature_name),
+        "featureName": feature_name[0].lower() + feature_name[1:],
         "PACKAGE_NAME": package_name,
     }
     variables.update(extra_vars)
@@ -429,6 +564,169 @@ def cmd_scaffold_feature(
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+
+def cmd_generate_template(
+    client: LspClient,
+    source_class: str,
+    family_name: str,
+    workspace: str,
+    dry_run: bool,
+    as_json: bool,
+) -> None:
+    """Generate IDEA file templates from an existing class and its feature siblings.
+
+    Finds all workspace symbols that share the feature identifier prefix (e.g.
+    all GoldConversion* classes), parameterizes their source files by replacing
+    every case-variant of the feature identifier with ${FEATURE_NAME} /
+    ${featureName} / ${feature_name} / ${PACKAGE_NAME}, and writes the results
+    as a reusable IDEA file template family.
+
+    The generated templates are immediately usable with scaffold-feature:
+        scaffold-feature NewFeature --template 'My Family' --package com.example
+    """
+    # 1. Resolve the source class to a file
+    sym = _resolve_unique_symbol(client, source_class, kind_filter=_KOTLIN_CLASS_KINDS)
+    source_file = pathlib.Path(sym["location"]["uri"].removeprefix("file://"))
+
+    # 2. Derive feature identifier (strip known role suffix: GoldConversionInteractor → GoldConversion)
+    feature_id = _extract_feature_id(source_class)
+    print(f"Feature identifier: {feature_id!r}", file=sys.stderr)
+
+    # 3. Discover all files that belong to this feature via workspaceSymbol
+    #    (reliable across subdirectories — contract/, screen/, viewmodel/, etc.)
+    resp = client.request("workspace/symbol", {"query": feature_id})
+    all_syms = resp.get("result") or []
+    feature_files: dict[str, str] = {}  # filepath → package
+    for s in all_syms:
+        if not s["name"].startswith(feature_id):
+            continue
+        if _KIND_NAMES.get(s.get("kind", 0)) not in _KOTLIN_CLASS_KINDS:
+            continue
+        fpath = s["location"]["uri"].removeprefix("file://")
+        if fpath not in feature_files:
+            # Read the package declaration from the file
+            try:
+                for line in pathlib.Path(fpath).read_text(encoding="utf-8").splitlines()[:8]:
+                    if line.startswith("package "):
+                        feature_files[fpath] = line.split()[1]
+                        break
+                else:
+                    feature_files[fpath] = ""
+            except OSError:
+                feature_files[fpath] = ""
+
+    if not feature_files:
+        # Fallback: just the source file
+        feature_files[str(source_file)] = ""
+
+    # Sort: source class file first, rest alphabetically by basename
+    sorted_files = sorted(
+        feature_files.items(),
+        key=lambda kv: (0 if kv[0] == str(source_file) else 1, pathlib.Path(kv[0]).name),
+    )
+
+    # 4. Infer base package from source file (strips role sub-packages)
+    src_package = feature_files.get(str(source_file), "")
+    base_package = _infer_base_package(src_package) if src_package else ""
+
+    print(f"Base package:       {base_package!r}", file=sys.stderr)
+    print(f"Files ({len(sorted_files)}):", file=sys.stderr)
+    for fp, _ in sorted_files:
+        print(f"  {fp}", file=sys.stderr)
+
+    # 5. Parameterize each file and derive file_name_pattern
+    entries = []
+    for filepath, pkg in sorted_files:
+        try:
+            content = pathlib.Path(filepath).read_text(encoding="utf-8")
+        except OSError as e:
+            print(f"Warning: could not read {filepath}: {e}", file=sys.stderr)
+            continue
+
+        parameterized = _parameterize(content, feature_id, base_package)
+        file_suffix = _file_suffix(pathlib.Path(filepath).stem, feature_id)
+
+        # Derive file_name_pattern relative to the base-package dir
+        # e.g. com.example.goldconversion.contract / GoldConversionContract
+        #   → contract/${FEATURE_NAME}Contract
+        file_name_pattern = ""
+        if pkg and base_package and pkg.startswith(base_package):
+            sub_pkg = pkg.removeprefix(base_package).lstrip(".")
+            stem_param = _parameterize(pathlib.Path(filepath).stem, feature_id, "")
+            if sub_pkg:
+                file_name_pattern = sub_pkg.replace(".", "/") + "/" + stem_param
+            else:
+                file_name_pattern = stem_param
+
+        entries.append({
+            "filepath":          filepath,
+            "file_suffix":       file_suffix,
+            "file_name_pattern": file_name_pattern,
+            "content":           parameterized,
+        })
+
+    if not entries:
+        print("No files to templatize.", file=sys.stderr)
+        sys.exit(1)
+
+    if as_json:
+        print(json.dumps(
+            [{"suffix": e["file_suffix"], "source": e["filepath"],
+              "file_name": e["file_name_pattern"]} for e in entries],
+            indent=2,
+        ))
+        return
+
+    if dry_run:
+        print()
+        for e in entries:
+            print(f"── {pathlib.Path(e['filepath']).name}  [{e['file_suffix']}]")
+            print(f"   file-name: {e['file_name_pattern'] or '(auto-derived by scaffold-feature)'}")
+            # Show changed lines
+            orig = pathlib.Path(e["filepath"]).read_text().splitlines()
+            new  = e["content"].splitlines()
+            shown = 0
+            for i, (o, n) in enumerate(zip(orig, new)):
+                if o != n:
+                    print(f"   L{i+1:3d}  - {o.strip()[:80]}")
+                    print(f"        + {n.strip()[:80]}")
+                    shown += 1
+                    if shown >= 6:
+                        remaining = sum(1 for a, b in zip(orig[i+1:], new[i+1:]) if a != b)
+                        if remaining:
+                            print(f"        … ({remaining} more changes)")
+                        break
+            print()
+        return
+
+    # 6. Write template files
+    templates_dir = _find_templates_dir(workspace)
+    if templates_dir is None:
+        templates_dir = pathlib.Path(workspace) / ".idea" / "fileTemplates"
+    templates_dir.mkdir(parents=True, exist_ok=True)
+
+    parent_filename = f"{family_name}.kt"
+    settings_entries = []
+    for i, entry in enumerate(entries):
+        tpl_name = parent_filename if i == 0 else f"{parent_filename}.child.{i - 1}.kt"
+        out_path = templates_dir / tpl_name
+        out_path.write_text(entry["content"], encoding="utf-8")
+        print(f"✓ {tpl_name}  [{entry['file_suffix']}]")
+        if entry["file_name_pattern"]:
+            settings_entries.append({
+                "tpl_name":         tpl_name,
+                "file_name_pattern": entry["file_name_pattern"],
+            })
+
+    if settings_entries:
+        _upsert_template_settings(templates_dir, family_name, settings_entries)
+        print(f"\nUpdated file.template.settings.xml ({len(settings_entries)} entries)")
+
+    print(f"\nGenerated {len(entries)} template(s) for family '{family_name}'")
+    print(f"Use: scaffold-feature NewFeature --template '{family_name}' --package <base-pkg>")
+
+
 
 def _loc(loc: dict) -> str:
     uri = loc["uri"].removeprefix("file://")
@@ -955,6 +1253,15 @@ def main():
     p_scaffold.add_argument("--dry-run", action="store_true",
                             help="Print paths without writing files")
 
+    p_gen = sub.add_parser("generate-template",
+                           help="Generate reusable IDEA file templates from an existing class")
+    p_gen.add_argument("source_class", metavar="ClassName",
+                       help="Existing class to use as pattern source (e.g. GoldConversionInteractor)")
+    p_gen.add_argument("--family", default=None, metavar="NAME",
+                       help="Template family name (default: derived from source class suffix)")
+    p_gen.add_argument("--dry-run", action="store_true",
+                       help="Preview parameterization without writing files")
+
     args = parser.parse_args()
 
     # Template commands don't need an LSP server — run them immediately and exit.
@@ -981,6 +1288,7 @@ def main():
             as_json=args.json,
         )
         return
+
 
     client = LspClient(args.binary, args.workspace, args.timeout)
     client.initialize()
@@ -1009,6 +1317,17 @@ def main():
         elif args.cmd == "rename":
             cmd_rename(client, args.old_name, args.new_name,
                        args.dry_run, args.json)
+        elif args.cmd == "generate-template":
+            family = args.family or _file_suffix(args.source_class,
+                                                  _extract_feature_id(args.source_class)) or args.source_class
+            cmd_generate_template(
+                client,
+                source_class=args.source_class,
+                family_name=family,
+                workspace=args.workspace,
+                dry_run=args.dry_run,
+                as_json=args.json,
+            )
     finally:
         client.shutdown()
 
