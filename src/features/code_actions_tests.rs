@@ -58,6 +58,24 @@ fn test_diagnostic_range_after_file_annotation() {
 }
 
 #[test]
+fn test_resolve_package_js_test() {
+    let path = "/home/dev/shared/src/jsTest/kotlin/com/example/app/JsTest.kt";
+    assert_eq!(
+        resolve_package_from_path(path),
+        Some("com.example.app".into())
+    );
+}
+
+#[test]
+fn test_resolve_package_native_test() {
+    let path = "/home/dev/shared/src/nativeTest/kotlin/com/example/app/NativeTest.kt";
+    assert_eq!(
+        resolve_package_from_path(path),
+        Some("com.example.app".into())
+    );
+}
+
+#[test]
 fn test_resolve_package_android_kotlin() {
     let path = "/home/dev/MyApp/app/src/main/kotlin/com/example/app/ui/home/HomeViewModel.kt";
     assert_eq!(
@@ -255,7 +273,17 @@ fn test_action_inserts_after_file_annotation() {
 
 #[test]
 fn test_action_fires_for_java_file() {
+    use tower_lsp::lsp_types::{CodeActionOrCommand, WorkspaceEdit};
+
     let lines: Vec<String> = vec![];
     let u = uri("/home/dev/MyApp/app/src/main/java/com/example/app/Repo.java");
-    assert!(build_add_package_action(&lines, &u).is_some());
+    let action = build_add_package_action(&lines, &u).unwrap();
+    let CodeActionOrCommand::CodeAction(ca) = action else {
+        panic!("expected CodeAction");
+    };
+    let edit: &WorkspaceEdit = ca.edit.as_ref().unwrap();
+    let changes = edit.changes.as_ref().unwrap();
+    let edits = changes.get(&u).unwrap();
+    // Java requires a trailing semicolon
+    assert_eq!(edits[0].new_text, "package com.example.app;\n\n");
 }

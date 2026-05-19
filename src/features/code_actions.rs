@@ -70,6 +70,8 @@ const SOURCE_SET_ROOTS: &[&str] = &[
     "src/androidTest/kotlin/",
     "src/iosTest/kotlin/",
     "src/jvmTest/kotlin/",
+    "src/jsTest/kotlin/",
+    "src/nativeTest/kotlin/",
     "src/main/kotlin/",
     "src/main/java/",
     "src/test/kotlin/",
@@ -88,21 +90,21 @@ const SOURCE_SET_ROOTS: &[&str] = &[
 /// - the file lives directly at the source root (no sub-directory → top-level package)
 /// - any path segment is not a valid Java/Kotlin identifier (e.g. starts with a digit)
 pub(crate) fn resolve_package_from_path(path: &str) -> Option<String> {
-    // For each marker, find the rightmost occurrence after a path separator so
-    // that `…/src/main/kotlin/com/example/src/main/kotlin/Foo.kt` resolves the
-    // inner occurrence and gives `com.example.src.main.kotlin` — the intended one.
+    // Find all matching markers with their rightmost byte position in the path,
+    // then pick the rightmost match (largest pos). Use marker length as a
+    // tie-breaker so that a longer (more specific) marker wins when two markers
+    // start at the same position.
     let (_, after_root) = SOURCE_SET_ROOTS
         .iter()
         .filter_map(|root| {
             let needle = format!("/{root}");
-            // rfind gives the rightmost (deepest) match
             path.rfind(&needle)
-                .map(|pos| (*root, &path[pos + needle.len()..]))
-                // also allow the path to start directly with the marker
-                .or_else(|| path.strip_prefix(root).map(|rest| (*root, rest)))
+                .map(|pos| (pos, *root, &path[pos + needle.len()..]))
+                .or_else(|| path.strip_prefix(root).map(|rest| (0, *root, rest)))
         })
-        // prefer the longest matching root (most specific)
-        .max_by_key(|(root, _)| root.len())?;
+        // prefer rightmost occurrence; break ties by longest marker
+        .max_by_key(|(pos, root, _)| (*pos, root.len()))
+        .map(|(_, root, after)| (root, after))?;
 
     let pkg_path = after_root.rsplit_once('/')?.0;
     if pkg_path.is_empty() {
@@ -114,6 +116,16 @@ pub(crate) fn resolve_package_from_path(path: &str) -> Option<String> {
         Some(pkg)
     } else {
         None
+    }
+}
+
+/// Format the package statement for the given language.
+/// Java requires a trailing semicolon; Kotlin does not.
+fn package_stmt(pkg: &str, lang: crate::Language) -> String {
+    if lang == crate::Language::Java {
+        format!("package {pkg};")
+    } else {
+        format!("package {pkg}")
     }
 }
 
@@ -201,6 +213,8 @@ pub(crate) fn build_add_package_action(
 
     let pkg = resolve_package_from_path(uri.path())?;
     let insert_line = find_package_insert_line(all_lines);
+    let lang = crate::Language::from_path(uri.path());
+    let pkg_stmt = package_stmt(&pkg, lang);
 
     let mut changes = HashMap::new();
     changes.insert(
@@ -216,7 +230,7 @@ pub(crate) fn build_add_package_action(
                     character: 0,
                 },
             },
-            new_text: format!("package {pkg}\n\n"),
+            new_text: format!("{pkg_stmt}\n\n"),
         }],
     );
     Some(CodeActionOrCommand::CodeAction(CodeAction {
