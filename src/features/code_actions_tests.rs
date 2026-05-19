@@ -54,7 +54,7 @@ fn test_diagnostic_range_after_file_annotation() {
     let diag = missing_package_diagnostic(&lines, &u).unwrap();
     // Should point to line 1 (just after the @file: annotation)
     assert_eq!(diag.range.start.line, 1);
-    assert_eq!(diag.severity, Some(DiagnosticSeverity::HINT));
+    assert_eq!(diag.severity, Some(DiagnosticSeverity::WARNING));
 }
 
 #[test]
