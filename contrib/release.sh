@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Requires: bash 4+, git, cargo, sed, gh (GitHub CLI)
 # release.sh — bump version, generate CHANGELOG entry, test, tag, push
 #
 # Usage: ./contrib/release.sh [patch|minor|major] [--dry-run]
@@ -47,6 +48,10 @@ esac
 NEW="${MAJOR}.${MINOR}.${PATCH}"
 
 # Conventional-commit section labels
+# bash 4+ required for associative arrays (macOS ships bash 3.2 — use homebrew bash or run on Linux)
+if (( BASH_VERSINFO[0] < 4 )); then
+  echo "error: bash 4+ required (found $BASH_VERSION)" >&2; exit 1
+fi
 declare -A SECTIONS=( [feat]="Features" [fix]="Bug fixes" [perf]="Performance" [refactor]="Refactoring" [docs]="Docs" )
 echo "Bumping ${CURRENT} → ${NEW} (${BUMP})"
 
@@ -74,7 +79,7 @@ if [[ "$DRY_RUN" == true ]]; then
 fi
 
 # Update Cargo.toml (first occurrence of version = "...")
-sd 'version = "'"$CURRENT"'"' 'version = "'"$NEW"'"' Cargo.toml
+sed -i "0,/version = \"$CURRENT\"/s//version = \"$NEW\"/" Cargo.toml
 # Regenerate Cargo.lock
 cargo generate-lockfile 2>/dev/null || cargo check -q
 
@@ -83,7 +88,7 @@ cargo generate-lockfile 2>/dev/null || cargo check -q
 echo "Running tests…"
 cargo test -q
 echo "Running clippy…"
-cargo clippy -- -D warnings -W clippy::cognitive_complexity -W clippy::too_many_lines 2>&1 | tail -5
+cargo clippy -- -D warnings -W clippy::cognitive_complexity -W clippy::too_many_lines
 
 # ── 4. CHANGELOG ─────────────────────────────────────────────────────────────
 

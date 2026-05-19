@@ -342,12 +342,10 @@ def _parameterize(content: str, feature_pascal: str, base_package: str) -> str:
     result = result.replace(feature_camel,  "__featureName__")
     result = result.replace(feature_snake,  "__feature_name__")
 
-    # 3. Escape remaining ${...} (Kotlin string templates Velocity would interpret)
-    result = re.sub(
-        r'\$\{(\w+)\}',
-        lambda m: f'${{{m.group(1)}}}' if m.group(1).startswith("__") else f'\\${{{m.group(1)}}}',
-        result,
-    )
+    # 3. Escape remaining ${...} (Kotlin string templates that Velocity would interpret)
+    #    At this point sentinels are bare __WORD__ — not inside ${}, so no sentinel
+    #    can match here; every match is a Kotlin ${ } that needs escaping.
+    result = re.sub(r'\$\{(\w+)\}', r'\\${\1}', result)
 
     # 4. Escape bare $ident (Velocity reference syntax) — skip our sentinels
     result = re.sub(
@@ -1318,8 +1316,7 @@ def main():
             cmd_rename(client, args.old_name, args.new_name,
                        args.dry_run, args.json)
         elif args.cmd == "generate-template":
-            family = args.family or _file_suffix(args.source_class,
-                                                  _extract_feature_id(args.source_class)) or args.source_class
+            family = args.family or args.source_class
             cmd_generate_template(
                 client,
                 source_class=args.source_class,
