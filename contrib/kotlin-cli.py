@@ -6,17 +6,23 @@ Uses the LSP binary over stdio (JSON-RPC) so no separate server process needs
 to be running.  If a cache exists the first query returns in ~100 ms.
 
 Usage:
-    kotlin-cli.py find-declaration <Name>           [--workspace DIR]
-    kotlin-cli.py find-references  <Name>           [--workspace DIR]
-    kotlin-cli.py list-symbols     [<query>]        [--workspace DIR]
-    kotlin-cli.py hover            <file> <line> <col> [--workspace DIR]
+    kotlin-cli.py find-declaration  <Name>                       [--workspace DIR]
+    kotlin-cli.py find-references   <Name>                       [--workspace DIR]
+    kotlin-cli.py list-symbols      [<query>]                    [--workspace DIR]
+    kotlin-cli.py hover             <file> <line> <col>          [--workspace DIR]
+    kotlin-cli.py find-dead-code    [--kind class|fun|val|var]   [--workspace DIR]
+    kotlin-cli.py find-implementors <Name>                       [--workspace DIR]
+    kotlin-cli.py extract-interface <ClassName>                  [--workspace DIR]
+    kotlin-cli.py rename            <OldName> <NewName> [--dry-run] [--workspace DIR]
 
 Examples:
     python contrib/kotlin-cli.py find-declaration MainViewModel
     python contrib/kotlin-cli.py list-symbols "ChildDashboardViewModel"
     python contrib/kotlin-cli.py hover src/main/kotlin/App.kt 12 5
-    python contrib/kotlin-cli.py find-declaration UserRepository \\
-        --workspace /home/user/myproject/android
+    python contrib/kotlin-cli.py find-dead-code --kind class --exclude-tests
+    python contrib/kotlin-cli.py find-implementors IUserRepository
+    python contrib/kotlin-cli.py extract-interface UserRepositoryImpl
+    python contrib/kotlin-cli.py rename OldName NewName --dry-run
 
 Options:
     --workspace DIR   Root of the Kotlin/Android project.
@@ -32,6 +38,7 @@ TCP mode (for Sora Editor / remote clients):
 """
 
 import argparse
+import concurrent.futures
 import json
 import os
 import pathlib
@@ -40,6 +47,24 @@ import subprocess
 import sys
 import threading
 import time
+
+
+# ── LSP SymbolKind constants (LSP 3.x) ───────────────────────────────────────
+
+_KIND_NAMES: dict[int, str] = {
+    1: "file", 2: "module", 3: "namespace", 4: "package",
+    5: "class", 6: "method", 7: "property", 8: "field",
+    9: "constructor", 10: "enum", 11: "interface", 12: "function",
+    13: "variable", 14: "constant", 15: "string", 16: "number",
+    17: "boolean", 18: "array", 19: "object", 20: "key",
+    21: "null", 22: "enum_member", 23: "struct", 24: "event",
+    25: "operator", 26: "type_parameter",
+}
+
+# Kinds produced by kotlin-lsp for Kotlin symbols
+_KOTLIN_CLASS_KINDS = {"class", "interface", "object", "struct"}
+_KOTLIN_CALLABLE_KINDS = {"method", "function", "constructor"}
+_KOTLIN_MEMBER_KINDS = {"method", "function", "constructor", "property", "field"}
 
 
 # ── JSON-RPC framing ──────────────────────────────────────────────────────────
@@ -86,6 +111,9 @@ class LspClient:
         self._id = 0
         self._q: queue.Queue = queue.Queue()
         self._pending: dict[int, queue.Queue] = {}
+        # Serialises id allocation + pending registration + stdin write so the
+        # client is safe to use from multiple threads (e.g. find-dead-code).
+        self._send_lock = threading.Lock()
         self._proc = subprocess.Popen(
             [binary],
             stdin=subprocess.PIPE,
@@ -105,7 +133,8 @@ class LspClient:
                 continue
             rid = msg.get("id")
             if rid is not None:
-                q = self._pending.get(rid)
+                with self._send_lock:
+                    q = self._pending.get(rid)
                 if q is not None:
                     q.put(msg)
 
@@ -114,20 +143,23 @@ class LspClient:
         self._proc.stdin.flush()
 
     def request(self, method: str, params: dict) -> dict:
-        self._id += 1
-        rid = self._id
-        q: queue.Queue = queue.Queue()
-        self._pending[rid] = q
-        self._send({"jsonrpc": "2.0", "id": rid, "method": method, "params": params})
+        with self._send_lock:
+            self._id += 1
+            rid = self._id
+            q: queue.Queue = queue.Queue()
+            self._pending[rid] = q
+            self._send({"jsonrpc": "2.0", "id": rid, "method": method, "params": params})
         try:
             return q.get(timeout=self.timeout)
         except queue.Empty:
             raise TimeoutError(f"No response for {method!r} within {self.timeout}s")
         finally:
-            self._pending.pop(rid, None)
+            with self._send_lock:
+                self._pending.pop(rid, None)
 
     def notify(self, method: str, params: dict):
-        self._send({"jsonrpc": "2.0", "method": method, "params": params})
+        with self._send_lock:
+            self._send({"jsonrpc": "2.0", "method": method, "params": params})
 
     def initialize(self):
         root_uri = pathlib.Path(self.workspace).as_uri()
@@ -149,13 +181,86 @@ class LspClient:
             self._proc.terminate()
 
 
-# ── Commands ──────────────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _loc(loc: dict) -> str:
     uri = loc["uri"].removeprefix("file://")
     r = loc["range"]["start"]
     return f"{uri}:{r['line'] + 1}:{r['character'] + 1}"
 
+
+def _loc_from_sym(sym: dict) -> str:
+    """Format location from a DocumentSymbol (has range, not location.range)."""
+    uri = sym["_uri"].removeprefix("file://")
+    r = sym["selectionRange"]["start"]
+    return f"{uri}:{r['line'] + 1}:{r['character'] + 1}"
+
+
+def _range_contains(outer: dict, inner: dict) -> bool:
+    """Return True if outer LSP range fully contains inner."""
+    os_, oe = outer["start"], outer["end"]
+    is_, ie = inner["start"], inner["end"]
+    start_ok = (os_["line"] < is_["line"] or
+                (os_["line"] == is_["line"] and os_["character"] <= is_["character"]))
+    end_ok = (oe["line"] > ie["line"] or
+              (oe["line"] == ie["line"] and oe["character"] >= ie["character"]))
+    return start_ok and end_ok
+
+
+def _walk_kotlin_files(workspace: str, exclude_tests: bool) -> list[str]:
+    """Enumerate .kt and .java files in workspace, skipping build dirs."""
+    _SKIP_DIRS = {"build", ".gradle", ".idea", ".git", "target", "node_modules"}
+    _TEST_DIRS = {"test", "androidTest", "testFixtures", "commonTest", "jvmTest"}
+    files = []
+    for root, dirs, filenames in os.walk(workspace):
+        dirs[:] = [d for d in dirs
+                   if d not in _SKIP_DIRS
+                   and not d.startswith(".")
+                   and (not exclude_tests or d not in _TEST_DIRS)]
+        for f in filenames:
+            if f.endswith(".kt") or f.endswith(".java"):
+                files.append(os.path.join(root, f))
+    return files
+
+
+def _document_symbols(client: LspClient, filepath: str) -> list[dict]:
+    """Return DocumentSymbol list for a file, with _uri injected for tracking."""
+    uri = pathlib.Path(filepath).as_uri()
+    resp = client.request("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
+    result = resp.get("result") or []
+    for sym in result:
+        sym["_uri"] = uri
+    return result
+
+
+def _resolve_unique_symbol(client: LspClient, name: str,
+                            kind_filter: set[str] | None = None) -> dict:
+    """Find exactly one workspace symbol matching name (and optional kind).
+
+    Prints candidates and exits if 0 or >1 match is found.
+    """
+    resp = client.request("workspace/symbol", {"query": name})
+    symbols = resp.get("result") or []
+    matches = [s for s in symbols if s["name"] == name]
+    if kind_filter:
+        matches = [s for s in matches
+                   if _KIND_NAMES.get(s.get("kind", 0)) in kind_filter]
+    if not matches:
+        print(f"No declaration found for '{name}'.", file=sys.stderr)
+        sys.exit(1)
+    if len(matches) > 1:
+        print(f"Ambiguous: {len(matches)} symbols named '{name}'. "
+              f"Specify one with --file or use a more qualified name.", file=sys.stderr)
+        for s in matches:
+            kind = _KIND_NAMES.get(s.get("kind", 0), "?")
+            container = f" [{s['containerName']}]" if s.get("containerName") else ""
+            print(f"  {_loc(s['location'])}  {kind}  {s['name']}{container}",
+                  file=sys.stderr)
+        sys.exit(1)
+    return matches[0]
+
+
+# ── Commands ──────────────────────────────────────────────────────────────────
 
 def cmd_find_declaration(client: LspClient, name: str, as_json: bool):
     resp = client.request("workspace/symbol", {"query": name})
@@ -168,9 +273,7 @@ def cmd_find_declaration(client: LspClient, name: str, as_json: bool):
         print(f"No declaration found for '{name}'", file=sys.stderr)
         sys.exit(1)
     for s in matches:
-        kind_map = {5: "class", 6: "method", 13: "enum", 9: "constructor",
-                    12: "function", 8: "field", 14: "string"}
-        kind = kind_map.get(s.get("kind", 0), "symbol")
+        kind = _KIND_NAMES.get(s.get("kind", 0), "symbol")
         container = f" [{s['containerName']}]" if s.get("containerName") else ""
         print(f"{_loc(s['location'])}  {kind}  {s['name']}{container}")
 
@@ -235,6 +338,274 @@ def cmd_hover(client: LspClient, file: str, line: int, col: int, as_json: bool):
         print(contents)
 
 
+def cmd_find_dead_code(client: LspClient, workspace: str,
+                       kinds: list[str], exclude_tests: bool,
+                       limit: int | None, as_json: bool):
+    """Find symbols with zero external references.
+
+    NOTE: results are candidates — reflection, XML manifests, DI wiring, and
+    framework entry-points may appear unreferenced. Review before deleting.
+    """
+    files = _walk_kotlin_files(workspace, exclude_tests)
+    print(f"  scanning {len(files)} file(s)…", file=sys.stderr)
+
+    all_symbols: list[dict] = []
+    for filepath in files:
+        syms = _document_symbols(client, filepath)
+        if kinds:
+            syms = [s for s in syms if _KIND_NAMES.get(s.get("kind", 0)) in set(kinds)]
+        all_symbols.extend(syms)
+
+    if limit:
+        all_symbols = all_symbols[:limit]
+
+    total = len(all_symbols)
+    print(f"  checking {total} symbol(s) for references…", file=sys.stderr)
+
+    dead: list[dict] = []
+    completed = 0
+
+    def check_sym(sym: dict) -> dict | None:
+        resp = client.request("textDocument/references", {
+            "textDocument": {"uri": sym["_uri"]},
+            "position": sym["selectionRange"]["start"],
+            "context": {"includeDeclaration": False},
+        })
+        refs = resp.get("result") or []
+        return sym if not refs else None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        futures = {pool.submit(check_sym, sym): sym for sym in all_symbols}
+        for future in concurrent.futures.as_completed(futures):
+            completed += 1
+            if completed % 20 == 0 or completed == total:
+                print(f"\r  {completed}/{total}…", end="", flush=True, file=sys.stderr)
+            result = future.result()
+            if result is not None:
+                dead.append(result)
+
+    print(f"\r  {total} checked — {len(dead)} unreferenced.      ", file=sys.stderr)
+
+    if as_json:
+        # Strip internal _uri key before serialising
+        print(json.dumps([{k: v for k, v in s.items() if k != "_uri"} for s in dead],
+                         indent=2))
+        return
+    for sym in dead:
+        kind = _KIND_NAMES.get(sym.get("kind", 0), "?")
+        print(f"{_loc_from_sym(sym)}  {kind}  {sym['name']}")
+
+
+def cmd_find_implementors(client: LspClient, name: str, as_json: bool):
+    """List all classes/objects that implement an interface or extend a class."""
+    sym = _resolve_unique_symbol(client, name, kind_filter=_KOTLIN_CLASS_KINDS)
+    loc = sym["location"]
+    resp = client.request("textDocument/implementation", {
+        "textDocument": {"uri": loc["uri"]},
+        "position": loc["range"]["start"],
+    })
+    result = resp.get("result") or []
+    if isinstance(result, dict):
+        result = [result]
+    if as_json:
+        print(json.dumps(result, indent=2))
+        return
+    if not result:
+        print("No implementations found.", file=sys.stderr)
+        sys.exit(1)
+    for r in result:
+        # Location vs LocationLink
+        if "targetUri" in r:
+            uri = r["targetUri"].removeprefix("file://")
+            s = r["targetSelectionRange"]["start"]
+            print(f"{uri}:{s['line']+1}:{s['character']+1}")
+        else:
+            print(_loc(r))
+
+
+def cmd_extract_interface(client: LspClient, class_name: str, as_json: bool):
+    """Generate a Kotlin interface skeleton from a class's public members.
+
+    Signatures come from DocumentSymbol.detail (the truncated declaration stored
+    in the index).  Abstract/interface method bodies are excluded automatically.
+    Output is printed to stdout — pipe to a .kt file or paste into your editor.
+    """
+    # 1. Locate the class file
+    sym = _resolve_unique_symbol(client, class_name, kind_filter=_KOTLIN_CLASS_KINDS)
+    file_uri = sym["location"]["uri"]
+    filepath = file_uri.removeprefix("file://")
+
+    # 2. Get all symbols in that file
+    all_syms = _document_symbols(client, filepath)
+
+    # 3. Find the class symbol by name to get its range
+    class_sym = next(
+        (s for s in all_syms
+         if s["name"] == class_name
+         and _KIND_NAMES.get(s.get("kind", 0)) in _KOTLIN_CLASS_KINDS),
+        None,
+    )
+    if class_sym is None:
+        print(f"Could not locate '{class_name}' in documentSymbol results.",
+              file=sys.stderr)
+        sys.exit(1)
+
+    class_range = class_sym["range"]
+
+    # 4. Collect members inside the class range (excludes nested classes/objects)
+    members = []
+    nested_class_ranges: list[dict] = []
+    for s in all_syms:
+        if s is class_sym:
+            continue
+        kind = _KIND_NAMES.get(s.get("kind", 0))
+        sym_range = s["range"]
+        if not _range_contains(class_range, sym_range):
+            continue
+        if kind in _KOTLIN_CLASS_KINDS:
+            # Track nested class/object ranges so we can exclude their children
+            nested_class_ranges.append(sym_range)
+            continue
+        if kind not in _KOTLIN_MEMBER_KINDS:
+            continue
+        # Skip members that belong to a nested class
+        if any(_range_contains(nr, sym_range) for nr in nested_class_ranges):
+            continue
+        members.append(s)
+
+    if not members:
+        print(f"No members found inside '{class_name}'.", file=sys.stderr)
+        sys.exit(1)
+
+    if as_json:
+        print(json.dumps(
+            [{"name": m["name"],
+              "kind": _KIND_NAMES.get(m.get("kind", 0), "?"),
+              "detail": m.get("detail", "")}
+             for m in members],
+            indent=2,
+        ))
+        return
+
+    iface_name = f"I{class_name}"
+    lines = [f"interface {iface_name} {{"]
+    for m in members:
+        detail: str = m.get("detail") or ""
+        if detail:
+            # detail is a truncated declaration like "fun foo(x: Int): String"
+            # Strip any trailing body or brace
+            decl = detail.split("{")[0].rstrip(" =").strip()
+            lines.append(f"    {decl}")
+        else:
+            # Fallback: emit a comment so nothing is silently lost
+            kind = _KIND_NAMES.get(m.get("kind", 0), "?")
+            lines.append(f"    // {kind} {m['name']}")
+    lines.append("}")
+    print("\n".join(lines))
+
+
+def _apply_text_edits(path: str, edits: list[dict]) -> None:
+    """Apply LSP TextEdits to a file.
+
+    Edits are applied in reverse order (bottom-to-top) to preserve line/column
+    positions of earlier edits.  LSP positions are UTF-16 code units; for the
+    common case of ASCII-only identifiers this coincides with Python str indices.
+    Files with non-BMP characters may see incorrect offsets.
+    """
+    with open(path, encoding="utf-8") as fh:
+        lines = fh.readlines()
+
+    sorted_edits = sorted(
+        edits,
+        key=lambda e: (e["range"]["start"]["line"], e["range"]["start"]["character"]),
+        reverse=True,
+    )
+    for edit in sorted_edits:
+        sl = edit["range"]["start"]["line"]
+        sc = edit["range"]["start"]["character"]
+        el = edit["range"]["end"]["line"]
+        ec = edit["range"]["end"]["character"]
+        before = lines[sl][:sc]
+        after = lines[el][ec:]
+        lines[sl : el + 1] = [before + edit["newText"] + after]
+
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.writelines(lines)
+
+
+def _apply_workspace_edit(edit: dict, dry_run: bool) -> int:
+    """Apply (or preview) a WorkspaceEdit. Returns number of files affected."""
+    doc_changes = edit.get("documentChanges") or []
+    plain_changes: dict[str, list] = edit.get("changes") or {}
+
+    if doc_changes:
+        for dc in doc_changes:
+            path = dc["textDocument"]["uri"].removeprefix("file://")
+            file_edits = dc.get("edits", [])
+            if dry_run:
+                print(f"  {path}: {len(file_edits)} change(s)")
+                for e in file_edits:
+                    r = e["range"]
+                    print(f"    [{r['start']['line']+1}:{r['start']['character']+1}]"
+                          f" → {e['newText']!r}")
+            else:
+                _apply_text_edits(path, file_edits)
+        return len(doc_changes)
+
+    for uri_str, file_edits in plain_changes.items():
+        path = uri_str.removeprefix("file://")
+        if dry_run:
+            print(f"  {path}: {len(file_edits)} change(s)")
+            for e in file_edits:
+                r = e["range"]
+                print(f"    [{r['start']['line']+1}:{r['start']['character']+1}]"
+                      f" → {e['newText']!r}")
+        else:
+            _apply_text_edits(path, file_edits)
+    return len(plain_changes)
+
+
+def cmd_rename(client: LspClient, old_name: str, new_name: str,
+               dry_run: bool, as_json: bool):
+    """Rename a symbol across the entire workspace using LSP textDocument/rename."""
+    sym = _resolve_unique_symbol(client, old_name)
+    loc = sym["location"]
+
+    prep = client.request("textDocument/prepareRename", {
+        "textDocument": {"uri": loc["uri"]},
+        "position": loc["range"]["start"],
+    })
+    if prep.get("error") or not prep.get("result"):
+        msg = (prep.get("error") or {}).get("message", "server rejected rename")
+        print(f"Cannot rename '{old_name}': {msg}", file=sys.stderr)
+        sys.exit(1)
+
+    resp = client.request("textDocument/rename", {
+        "textDocument": {"uri": loc["uri"]},
+        "position": loc["range"]["start"],
+        "newName": new_name,
+    })
+    if resp.get("error"):
+        print(f"Rename failed: {resp['error'].get('message', 'unknown')}", file=sys.stderr)
+        sys.exit(1)
+
+    result = resp.get("result")
+    if as_json:
+        print(json.dumps(result, indent=2))
+        return
+    if not result:
+        print("No changes produced.", file=sys.stderr)
+        sys.exit(1)
+
+    if dry_run:
+        print(f"Dry run: '{old_name}' → '{new_name}'")
+        n = _apply_workspace_edit(result, dry_run=True)
+        print(f"  {n} file(s) would be modified.")
+    else:
+        n = _apply_workspace_edit(result, dry_run=False)
+        print(f"Renamed '{old_name}' → '{new_name}' across {n} file(s).")
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
@@ -269,6 +640,34 @@ def main():
     p_hover.add_argument("line", type=int)
     p_hover.add_argument("col", type=int)
 
+    p_dead = sub.add_parser("find-dead-code",
+                             help="Find symbols with zero external references")
+    p_dead.add_argument(
+        "--kind", nargs="+",
+        metavar="KIND",
+        choices=list(_KIND_NAMES.values()),
+        default=["class", "interface", "function"],
+        help="Symbol kinds to check (default: class interface function)",
+    )
+    p_dead.add_argument("--exclude-tests", action="store_true",
+                        help="Skip test source directories")
+    p_dead.add_argument("--limit", type=int, default=None,
+                        help="Max number of symbols to check (for quick sampling)")
+
+    p_impl = sub.add_parser("find-implementors",
+                             help="List all classes that implement an interface")
+    p_impl.add_argument("name")
+
+    p_iface = sub.add_parser("extract-interface",
+                              help="Generate an interface skeleton from a class")
+    p_iface.add_argument("class_name", metavar="ClassName")
+
+    p_ren = sub.add_parser("rename", help="Rename a symbol across the workspace")
+    p_ren.add_argument("old_name", metavar="OldName")
+    p_ren.add_argument("new_name", metavar="NewName")
+    p_ren.add_argument("--dry-run", action="store_true",
+                       help="Print changes without writing files")
+
     args = parser.parse_args()
 
     client = LspClient(args.binary, args.workspace, args.timeout)
@@ -286,6 +685,16 @@ def main():
             cmd_list_symbols(client, args.query, args.json)
         elif args.cmd == "hover":
             cmd_hover(client, args.file, args.line, args.col, args.json)
+        elif args.cmd == "find-dead-code":
+            cmd_find_dead_code(client, args.workspace, args.kind,
+                               args.exclude_tests, args.limit, args.json)
+        elif args.cmd == "find-implementors":
+            cmd_find_implementors(client, args.name, args.json)
+        elif args.cmd == "extract-interface":
+            cmd_extract_interface(client, args.class_name, args.json)
+        elif args.cmd == "rename":
+            cmd_rename(client, args.old_name, args.new_name,
+                       args.dry_run, args.json)
     finally:
         client.shutdown()
 
