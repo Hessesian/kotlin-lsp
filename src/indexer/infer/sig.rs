@@ -541,7 +541,8 @@ pub(crate) fn strip_trailing_call_args(s: &str) -> &str {
 ///
 /// When `receiver` is given (e.g. `"oneYearOlderInteractor"`), resolves its
 /// type, finds that type's file, and looks up `name` there specifically.
-/// Falls back to the plain name-based search if receiver resolution fails.
+/// Returns `None` if the receiver type cannot be resolved — no fallback to
+/// plain name-based search, to avoid returning a completely unrelated overload.
 ///
 /// This is the free-function form of the former `Indexer::find_fun_signature_with_receiver`
 /// method.  `backend.rs` calls this directly.

@@ -402,6 +402,61 @@ fn resolve_unqualified_test_definition_visible_only_to_test_callers() {
     );
 }
 
+// ─── extract_params_from_detail ──────────────────────────────────────────────
+
+#[test]
+fn extract_params_zero_param_returns_some_empty() {
+    // `None` used to mean "no signature found"; `Some("")` means
+    // "signature found, zero parameters". They must not be conflated.
+    assert_eq!(
+        extract_params_from_detail("fun onClick()"),
+        Some("".into()),
+        "zero-param function must return Some(\"\") not None"
+    );
+}
+
+#[test]
+fn extract_params_regular_function_returns_params() {
+    assert_eq!(
+        extract_params_from_detail("fun greet(name: String, age: Int)"),
+        Some("name: String, age: Int".into())
+    );
+}
+
+// ─── collect_params_from_line ─────────────────────────────────────────────────
+
+#[test]
+fn collect_params_skips_annotation_lines() {
+    // Annotation lines like `@Suppress("UNCHECKED_CAST")` must be skipped
+    // entirely; their argument text must not be treated as function parameters.
+    let lines: Vec<String> = vec![
+        "@Suppress(\"UNCHECKED_CAST\")".into(),
+        "@SomethingElse(value = 1)".into(),
+        "fun process(input: String, count: Int) {".into(),
+    ];
+    let result = collect_params_from_line(&lines, 0);
+    assert_eq!(
+        result,
+        Some("input: String, count: Int".into()),
+        "annotation arguments must not be treated as function parameters"
+    );
+}
+
+#[test]
+fn collect_params_pure_annotation_window_does_not_return_annotation_args() {
+    // If the only lines visible are annotations (no fun line in the window),
+    // the result should be None rather than the annotation's own args.
+    let lines: Vec<String> = vec![
+        "@Composable".into(),
+        "@Preview(showBackground = true)".into(),
+    ];
+    assert_eq!(
+        collect_params_from_line(&lines, 0),
+        None,
+        "window with only annotations must return None"
+    );
+}
+
 #[cfg(test)]
 mod import_reachable {
     use super::{collect_params_from_file, is_import_reachable, ResolutionScope};
