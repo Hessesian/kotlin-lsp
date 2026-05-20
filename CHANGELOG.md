@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.17.0
+
+### Features
+
+- **Missing package declaration diagnostic** — files with no `package` statement now show a Warning diagnostic on the first line. The warning spans at least the word `package` (7 chars) so it's visible in the gutter. A `Add missing package declaration` code action is available to insert the correct package derived from the file path.
+- **Java package statement** — the code action correctly emits `package foo.bar;` (with trailing semicolon) for Java files; Kotlin files get `package foo.bar` without.
+- **KMP source-set roots** — package inference now recognises `jsTest`, `nativeTest`, `jsMain`, and `nativeMain` alongside the standard `commonMain`/`androidMain`/etc. roots.
+
+### Bug fixes
+
+- **Autocomplete single-char prefix** — typing the first character of a class name (e.g. `E` for `EditText`) no longer returns an empty list. Previously the cross-package scan was gated behind a 2-char minimum, causing the editor to close the completion session before any symbols appeared. Single-char uppercase prefixes now trigger a score-0 (starts-with) match; camel-acronym matching still requires ≥2 chars to avoid noise. Fixes #117.
+
 ## 0.15.0
 
 ### Features

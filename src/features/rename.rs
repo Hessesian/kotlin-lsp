@@ -253,12 +253,19 @@ fn resolve_cursor_symbol(
     pos: Position,
 ) -> Option<RenameCursorSymbol> {
     let name = indexer.word_at(uri, pos)?;
+    if is_non_call_keyword(&name) {
+        return None;
+    }
     let (parent_class, declared_package, scope_limited_to_current_file) =
         if name.starts_with_uppercase() {
             let (parent_class, declared_package) = resolve_scope(indexer, uri, pos.line, &name);
             (parent_class, declared_package, false)
-        } else {
+        } else if cst_cursor_is_local_var(indexer, uri, pos) {
+            // Local variable inside a function/lambda — scope rename to the enclosing block.
             (None, None, true)
+        } else {
+            // Class-level property or top-level declaration — rename across files.
+            (None, None, false)
         };
 
     Some(RenameCursorSymbol {
