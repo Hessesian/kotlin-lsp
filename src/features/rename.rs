@@ -12,7 +12,7 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 
 use crate::features::references::resolve_scope;
-use crate::features::text_utils::is_kotlin_keyword;
+use crate::features::text_utils::is_keyword_for_file;
 #[cfg(test)]
 use crate::indexer::live_tree::utf16_col_to_byte;
 use crate::indexer::{cst_cursor_is_local_var, Indexer};
@@ -253,7 +253,8 @@ fn resolve_cursor_symbol(
     pos: Position,
 ) -> Option<RenameCursorSymbol> {
     let name = indexer.word_at(uri, pos)?;
-    if is_kotlin_keyword(&name) {
+    let file_path = uri.path();
+    if is_keyword_for_file(&name, file_path) {
         return None;
     }
     let (parent_class, declared_package, scope_limited_to_current_file) =
@@ -422,7 +423,7 @@ pub(crate) async fn prepare_rename_impl(
         None => return Ok(None),
     };
 
-    if word.len() <= 1 || is_kotlin_keyword(&word) {
+    if word.len() <= 1 || is_keyword_for_file(&word, uri.path()) {
         return Ok(None);
     }
 

@@ -29,9 +29,9 @@ pub(crate) fn utf16_column(text: &str) -> u32 {
     text.chars().map(|c| c.len_utf16() as u32).sum()
 }
 
-/// All Kotlin hard keywords and common soft keywords that are never valid rename targets.
+/// Kotlin hard keywords and soft keywords — never valid rename targets in `.kt` files.
 ///
-/// **Must remain sorted** — `is_kotlin_keyword` uses binary search.
+/// **Must remain sorted** — `is_keyword_for_file` uses binary search.
 pub(crate) const KOTLIN_KEYWORDS: &[&str] = &[
     "abstract",
     "actual",
@@ -111,9 +111,47 @@ pub(crate) const KOTLIN_KEYWORDS: &[&str] = &[
     "while",
 ];
 
-/// Returns `true` when `name` is a Kotlin keyword — not a valid rename target.
-pub(crate) fn is_kotlin_keyword(name: &str) -> bool {
-    KOTLIN_KEYWORDS.binary_search(&name).is_ok()
+/// Java-only reserved words that are NOT Kotlin keywords (valid Kotlin identifiers).
+/// Applied in addition to `KOTLIN_KEYWORDS` for `.java` files.
+///
+/// **Must remain sorted** — `is_keyword_for_file` uses binary search.
+pub(crate) const JAVA_EXTRA_KEYWORDS: &[&str] = &[
+    "assert",
+    "boolean",
+    "byte",
+    "case",
+    "char",
+    "default",
+    "double",
+    "extends",
+    "float",
+    "goto",
+    "implements",
+    "instanceof",
+    "int",
+    "long",
+    "native",
+    "new",
+    "short",
+    "static",
+    "strictfp",
+    "switch",
+    "synchronized",
+    "throws",
+    "transient",
+    "void",
+    "volatile",
+];
+
+/// Returns `true` when `name` is a reserved keyword for the given file path —
+/// i.e. not a valid rename target. Java files check both `KOTLIN_KEYWORDS` and
+/// `JAVA_EXTRA_KEYWORDS`; all other files check `KOTLIN_KEYWORDS` only.
+pub(crate) fn is_keyword_for_file(name: &str, file_path: &str) -> bool {
+    let in_kotlin = KOTLIN_KEYWORDS.binary_search(&name).is_ok();
+    if in_kotlin {
+        return true;
+    }
+    file_path.ends_with(".java") && JAVA_EXTRA_KEYWORDS.binary_search(&name).is_ok()
 }
 
 /// Replace all whole-word occurrences of `word` with `replacement` across
