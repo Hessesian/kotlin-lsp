@@ -1534,7 +1534,14 @@ fn resolve_qualified(
             // nothing (see `find_all_names_scoped_to_container`'s doc).
             let member_locs = find_all_names_scoped_to_container(indexer, name, &anchor);
             if !member_locs.is_empty() {
-                return member_locs;
+                return with_supertype_extension_fallback(
+                    indexer,
+                    member_locs,
+                    anchor_class_name,
+                    &anchor.uri,
+                    name,
+                    from_uri,
+                );
             }
 
             // `anchor`'s own body doesn't declare `name` — it may live on a
@@ -1669,7 +1676,17 @@ fn resolve_qualified(
     if let Some(ref resolved_uri) = current_file {
         let locs = find_name_in_uri(indexer, name, resolved_uri);
         if !locs.is_empty() {
-            return locs;
+            return match Url::parse(resolved_uri) {
+                Ok(parsed_uri) => with_supertype_extension_fallback(
+                    indexer,
+                    locs,
+                    &current_type_base,
+                    &parsed_uri,
+                    name,
+                    from_uri,
+                ),
+                Err(_) => locs,
+            };
         }
         if let Ok(parsed_uri) = Url::parse(resolved_uri) {
             let hierarchy_locs = resolve_from_class_hierarchy(indexer, name, &parsed_uri);
@@ -2267,6 +2284,36 @@ fn resolve_from_class_hierarchy_scoped(
             ))
         })
         .collect()
+}
+
+/// A same-named real member doesn't always satisfy the actual call's arity
+/// (e.g. `navController.navigate(route = ...)`: a wrong-arity JVM member
+/// `NavController.navigate(Uri)` vs. the wanted KTX extension
+/// `NavController.navigate(route: String, ...)`). Appends the supertype-walk
+/// extension after `member_locs` rather than replacing it — members still
+/// win when arity-compatible (Kotlin's own precedence), but a shape-aware
+/// caller now has the extension to fall back to instead of an empty result.
+fn with_supertype_extension_fallback(
+    indexer: &Indexer,
+    member_locs: Vec<Location>,
+    anchor_class_name: &str,
+    anchor_uri: &Url,
+    name: &str,
+    from_uri: &Url,
+) -> Vec<Location> {
+    let supertype_ext_locs = resolve_extension_via_supertype_hierarchy(
+        indexer,
+        anchor_class_name,
+        anchor_uri,
+        name,
+        from_uri,
+    );
+    if supertype_ext_locs.is_empty() {
+        return member_locs;
+    }
+    let mut combined = member_locs;
+    combined.extend(supertype_ext_locs);
+    combined
 }
 
 /// Extension-lookup counterpart to [`resolve_from_class_hierarchy_scoped`]:

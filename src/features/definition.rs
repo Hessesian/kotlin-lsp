@@ -324,7 +324,13 @@ pub(crate) async fn find_definition(
             return None;
         }
     }
-    let locs = index.find_definition_qualified(&ctx.word, ctx.qualifier.as_deref(), uri);
+    let mut locs = index.find_definition_qualified(&ctx.word, ctx.qualifier.as_deref(), uri);
+    // `resolve_qualified` can now return a wrong-arity member alongside its
+    // correct-arity extension fallback (`with_supertype_extension_fallback`)
+    // — shape-filter here too, same as the branches above.
+    if let Some(shape) = call_shape_at_callee(index, uri, position) {
+        locs = crate::indexer::shape_filter_locations(index, shape, locs).resolved();
+    }
     if !locs.is_empty() {
         return locs_to_opt_response(locs);
     }

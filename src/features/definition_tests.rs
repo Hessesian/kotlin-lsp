@@ -301,3 +301,49 @@ async fn goto_definition_resolves_explicit_receiver_call_to_jar_member_not_self(
          collect(scope, block) self-declaration, got: {loc:?}"
     );
 }
+
+/// Real Moneta bug (`navController.navigate(route = ...)`, `NavHostController`
+/// extends `NavController`): the receiver's CONCRETE type declares its own
+/// same-named member with a DIFFERENT, incompatible arity (`act()`, no args —
+/// standing in for `NavController.navigate(Uri)`/`navigate(NavDirections)`),
+/// while the call actually wants a same-named extension declared on an
+/// ancestor type (`Base.act(label: String)`, standing in for the Kotlin KTX
+/// `NavController.navigate(route: String, ...)` extension). Before the fix,
+/// `resolve_qualified` returned the wrong-arity member alone and never even
+/// looked at the supertype-walk extension fallback, so — once the caller's
+/// arity filter (correctly) rejected that member — resolution came up empty
+/// entirely instead of falling through to the extension. The receiver here is
+/// a plain lowercase local parameter (`d: Derived`), exercising both the
+/// CST-resolved path (`classify_cursor`/`resolve_identity`) AND `find_definition`'s
+/// own final string-qualifier fallback, since both now need the appended
+/// extension candidate to pick the right one via shape filtering.
+#[tokio::test]
+async fn goto_definition_prefers_supertype_extension_over_wrong_arity_concrete_member() {
+    let idx = Indexer::new();
+    let uri = Url::parse("file:///t/Nav.kt").unwrap();
+    let src = "open class Base\n\
+               fun Base.act(label: String): Unit = TODO()\n\
+               class Derived : Base() {\n\
+                   fun act(): Unit = TODO()\n\
+               }\n\
+               fun f(d: Derived) {\n\
+                   d.act(\"x\")\n\
+               }\n";
+    idx.index_content(&uri, src);
+    idx.store_live_tree(&uri, src);
+
+    let col = src.lines().nth(6).unwrap().find("act").unwrap() as u32;
+    let position = Position::new(6, col);
+    let ctx = CursorContext::build(&idx, &uri, position).unwrap();
+    let response = find_definition(&ctx, &idx, &uri, position).await;
+    let loc = match response {
+        Some(GotoDefinitionResponse::Scalar(loc)) => loc,
+        Some(GotoDefinitionResponse::Array(mut locs)) if locs.len() == 1 => locs.remove(0),
+        other => panic!("expected exactly one resolved location, got: {other:?}"),
+    };
+    assert_eq!(
+        loc.range.start.line, 1,
+        "d.act(\"x\") (1 arg) must resolve to Base's extension act(label: \
+         String) on line 1, not Derived's own 0-arg act() on line 3, got: {loc:?}"
+    );
+}

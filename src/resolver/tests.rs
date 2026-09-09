@@ -1662,6 +1662,61 @@ fn resolve_qualified_member_on_concrete_type_still_shadows_supertype_extension()
 }
 
 #[test]
+fn resolve_qualified_appends_supertype_extension_alongside_a_wrong_arity_concrete_member() {
+    // Real Moneta bug: `navController.navigate(route = ...)` where
+    // `NavHostController`/`NavController` (the concrete receiver type and its
+    // hierarchy) also declare a same-named member with a DIFFERENT arity
+    // (real JVM overloads like `navigate(Uri)`), and the call actually wants
+    // a same-named extension declared on an ancestor (the KTX
+    // `NavController.navigate(route: String, ...)` extension). Before this
+    // fix, `resolve_qualified` returned the wrong-arity member alone and
+    // never tried the supertype-walk extension fallback at all -- once a
+    // shape-aware caller correctly rejected that member, resolution came up
+    // completely empty instead of falling through to the extension. This
+    // test is the unshaped `resolve_symbol` layer: it must now return BOTH
+    // candidates (member first, extension appended after) so a shape-aware
+    // caller has something to pick from.
+    let host_uri = uri("/Host.kt");
+    let base_uri = uri("/Base.kt");
+    let derived_uri = uri("/Derived.kt");
+    let ext_uri = uri("/BaseExtensions.kt");
+    let idx = Indexer::new();
+    idx.index_content(&base_uri, "package com.pkg\nopen class Base\n");
+    idx.index_content(
+        &derived_uri,
+        "package com.pkg\nclass Derived : Base() {\n  fun act(): String = \"member\"\n}\n",
+    );
+    idx.index_content(
+        &ext_uri,
+        "package com.pkg\nfun Base.act(label: String): String = TODO()\n",
+    );
+    idx.index_content(
+        &host_uri,
+        "package com.pkg\nfun foo(receiver: Derived) { receiver.act(\"x\") }\n",
+    );
+
+    let locs = resolve_symbol(&idx, "act", Some("Derived"), &host_uri);
+    assert_eq!(
+        locs.len(),
+        2,
+        "expected both the wrong-arity concrete member and the supertype \
+         extension as candidates, got {locs:?}"
+    );
+    assert_eq!(
+        locs[0].uri, derived_uri,
+        "the concrete member must still come first (real Kotlin member-over-\
+         extension precedence when arity isn't in question), got {:?}",
+        locs[0].uri
+    );
+    assert_eq!(
+        locs[1].uri, ext_uri,
+        "the supertype extension must be appended as the second candidate, \
+         got {:?}",
+        locs[1].uri
+    );
+}
+
+#[test]
 fn resolve_qualified_supertype_extension_fallback_threads_the_real_origin_uri() {
     // Copilot review finding on PR #289: the new supertype-extension-fallback
     // `walk_hierarchy` call passed `CallerContext::default()`, so its
