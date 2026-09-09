@@ -110,7 +110,7 @@ Restricted ripgrep for Kotlin/Java/Swift files — **fallback only** when LSP ca
 3. **`lsp documentSymbol file.kt`** — enumerate all symbols in file
 4. **`lsp hover file.kt line col`** — type info, signature, doc comment
 5. **`lsp goToDefinition file.kt line col`** — jump to source
-6. **`lsp findReferences file.kt line col`** — all usages cross-project; for common names (`Event`, `Result`, `State`) use `kmp-lsp refs <Name> --exclude-imports` instead to strip import noise
+6. **`lsp findReferences file.kt line col`** — all usages cross-project; for common names (`Event`, `Result`, `State`) use `kmp-lsp refs <Name> --exclude-imports` instead to strip import noise. Add `-C <N>` (e.g. `-C 2`) to inline N lines of source around each hit — cuts the follow-up `view` calls otherwise needed to read every match site
 7. **`lsp goToImplementation file.kt line col`** — interface subtypes (transitive)
 8. **`kmp_lsp_complete file line col`** — discover available APIs / check what's in scope
 9. **`view` with line range** — read code at known location

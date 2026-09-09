@@ -11,6 +11,8 @@ pub(crate) enum Subcommand {
         name: String,
         /// Strip import-statement matches from results.
         exclude_imports: bool,
+        /// Lines of source context to print around each match (0 = matched line only).
+        context: Option<u32>,
     },
     Hover {
         file: PathBuf,
@@ -149,6 +151,7 @@ struct ParsedCliFlags {
     eol: bool,
     no_stdlib: bool,
     exclude_imports: bool,
+    context: Option<u32>,
     only: Option<Vec<String>>,
 }
 
@@ -198,6 +201,7 @@ fn parse_cli_flags(args: &mut lexopt::Parser) -> Result<ParsedCliFlags, String> 
         eol: false,
         no_stdlib: false,
         exclude_imports: false,
+        context: None,
         only: None,
     };
 
@@ -229,6 +233,14 @@ fn parse_cli_flags(args: &mut lexopt::Parser) -> Result<ParsedCliFlags, String> 
             Some(lexopt::Arg::Short('e') | lexopt::Arg::Long("eol")) => parsed.eol = true,
             Some(lexopt::Arg::Long("no-stdlib")) => parsed.no_stdlib = true,
             Some(lexopt::Arg::Long("exclude-imports")) => parsed.exclude_imports = true,
+            Some(lexopt::Arg::Short('C') | lexopt::Arg::Long("context")) => {
+                let value = args.value().map_err(|e| e.to_string())?;
+                let n = value
+                    .to_string_lossy()
+                    .parse::<u32>()
+                    .map_err(|_| "--context requires a non-negative integer".to_string())?;
+                parsed.context = Some(n);
+            }
             Some(lexopt::Arg::Long("only")) => {
                 let value = args.value().map_err(|e| e.to_string())?;
                 let names: Vec<String> = value
@@ -270,6 +282,7 @@ fn build_subcommand(subcommand: &str, parsed: ParsedCliFlags) -> Result<Subcomma
         eol,
         no_stdlib,
         exclude_imports,
+        context,
         only,
         ..
     } = parsed;
@@ -280,6 +293,7 @@ fn build_subcommand(subcommand: &str, parsed: ParsedCliFlags) -> Result<Subcomma
         "refs" => Ok(Subcommand::Refs {
             name: first_positional(positionals, "refs requires a NAME argument")?,
             exclude_imports,
+            context,
         }),
         "hover" => build_hover_subcommand(positionals),
         "complete" => build_complete_subcommand(positionals, dot, eol, no_stdlib),
@@ -495,6 +509,7 @@ OPTIONS:
     --json              Output results as JSON array
     --root <dir>        Workspace root (default: nearest .git dir or cwd)
     --exclude-imports   (refs) Strip import-statement matches from results
+    -C, --context <N>   (refs) Print N lines of source around each match (0 = matched line only)
     --only <names>      (diagnose) Comma-separated diagnostic names to run
                          (default: all). Valid names: {}
     --resolve           (tokens) Load index for Phase 2 cross-file resolution
@@ -515,6 +530,7 @@ EXAMPLES:
     kmp-lsp find MyViewModel
     kmp-lsp refs --fast MyViewModel --root ./android
     kmp-lsp refs Event --exclude-imports --root ./android
+    kmp-lsp refs Event -C 2 --json --root ./android
     kmp-lsp check src/Foo.kt
     kmp-lsp check src/ --json
     kmp-lsp diagnose src/Foo.kt --root ./android

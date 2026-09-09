@@ -11,7 +11,7 @@ use crate::rg::{rg_find_definition, rg_word_search, RgSearchRequest};
 use super::args::{CliArgs, Mode, OutputFmt, Subcommand};
 use super::complete::completions_at;
 use super::hover::hover_at;
-use super::output::{print_results, CliResult};
+use super::output::{attach_context, print_results, CliResult};
 use super::tokens::{dump_tree, print_token_rows, token_rows, token_rows_phases};
 
 /// Severity label strings used when printing diagnostics in text mode.
@@ -377,9 +377,19 @@ pub(crate) async fn run(args: CliArgs) {
         Subcommand::Refs {
             name,
             exclude_imports,
+            context,
         } => {
             let root = resolve_root(args.root.as_deref());
-            run_refs(&root, args.mode, json, verbose, &name, exclude_imports).await
+            run_refs(
+                &root,
+                args.mode,
+                json,
+                verbose,
+                &name,
+                exclude_imports,
+                context,
+            )
+            .await
         }
         Subcommand::Hover { file, line, col } => {
             let root = resolve_root_for_file(args.root.as_deref(), &file);
@@ -531,6 +541,7 @@ async fn run_refs(
     verbose: bool,
     name: &str,
     exclude_imports: bool,
+    context: Option<u32>,
 ) {
     let mut results = match effective_mode(mode, root, "refs", verbose) {
         Mode::Fast => fast_refs(name, root),
@@ -540,9 +551,12 @@ async fn run_refs(
         }
     };
 
+    // Shared across the --exclude-imports filter and --context attachment below,
+    // so a file matched by both passes is only read from disk once.
+    let mut file_lines_cache: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+
     if exclude_imports {
-        let mut file_lines_cache: std::collections::HashMap<String, Vec<String>> =
-            std::collections::HashMap::new();
         results.retain(|result| {
             // Smart-mode results may carry kind="import" directly.
             if result.kind == "import" {
@@ -567,6 +581,9 @@ async fn run_refs(
     }
 
     exit_if_empty(&results, json, &format!("No references found for '{name}'"));
+    if let Some(n) = context {
+        attach_context(&mut results, n, &mut file_lines_cache);
+    }
     print_results(&results, json);
 }
 

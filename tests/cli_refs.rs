@@ -66,3 +66,105 @@ fn exclude_imports_removes_import_lines() {
         "expected parameter usage (A.kt:3:...) to survive --exclude-imports:\n{excluded_output}"
     );
 }
+
+#[test]
+fn context_flag_prints_surrounding_source_lines() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_fixture(root, "workspace.json", r#"{"sourcePaths":[]}"#);
+    write_fixture(root, "src/B.kt", "// header\nclass Foo\nval x = 1\n");
+
+    let out_plain = Command::new(BIN)
+        .args(["refs", "Foo", "--fast", "--root"])
+        .arg(root)
+        .output()
+        .expect("spawn");
+    let plain_output = String::from_utf8_lossy(&out_plain.stdout);
+    // Without --context, no source text is printed at all.
+    assert!(
+        !plain_output.contains("// header"),
+        "expected no source context without --context:\n{plain_output}"
+    );
+
+    let out_context = Command::new(BIN)
+        .args(["refs", "Foo", "--fast", "--context", "1", "--root"])
+        .arg(root)
+        .output()
+        .expect("spawn");
+    let context_output = String::from_utf8_lossy(&out_context.stdout);
+    assert!(
+        context_output.contains("// header"),
+        "expected line before match with --context 1:\n{context_output}"
+    );
+    assert!(
+        context_output.contains("class Foo"),
+        "expected the matched line itself with --context 1:\n{context_output}"
+    );
+    assert!(
+        context_output.contains("val x = 1"),
+        "expected line after match with --context 1:\n{context_output}"
+    );
+}
+
+#[test]
+fn context_flag_adds_context_array_to_json_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_fixture(root, "workspace.json", r#"{"sourcePaths":[]}"#);
+    write_fixture(root, "src/B.kt", "// header\nclass Foo\nval x = 1\n");
+
+    let out = Command::new(BIN)
+        .args([
+            "refs",
+            "Foo",
+            "--fast",
+            "--context",
+            "1",
+            "--json",
+            "--root",
+        ])
+        .arg(root)
+        .output()
+        .expect("spawn");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let entries = parsed.as_array().expect("array of results");
+    let entry = entries
+        .iter()
+        .find(|e| e["file"].as_str().unwrap_or_default().contains("B.kt"))
+        .expect("B.kt entry present");
+    let context = entry["context"].as_array().expect("context array present");
+    assert_eq!(context.len(), 3, "expected 3 context lines: {context:?}");
+    assert_eq!(context[0]["line"], 1);
+    assert_eq!(context[0]["text"], "// header");
+    assert_eq!(context[1]["line"], 2);
+    assert_eq!(context[1]["text"], "class Foo");
+    assert_eq!(context[2]["line"], 3);
+    assert_eq!(context[2]["text"], "val x = 1");
+}
+
+#[test]
+fn context_flag_with_huge_n_does_not_overflow() {
+    // Regression test: `result.line + n` must not panic/overflow when N is
+    // near u32::MAX (previously used plain `+` instead of `saturating_add`).
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_fixture(root, "workspace.json", r#"{"sourcePaths":[]}"#);
+    write_fixture(root, "src/B.kt", "// header\nclass Foo\nval x = 1\n");
+
+    let out = Command::new(BIN)
+        .args(["refs", "Foo", "--fast", "--context", "4294967295", "--root"])
+        .arg(root)
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "expected clean exit with huge --context, got {:?}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // Context clamps to the whole (3-line) file rather than overflowing.
+    assert!(stdout.contains("// header"));
+    assert!(stdout.contains("val x = 1"));
+}
